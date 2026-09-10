@@ -7,14 +7,14 @@ use std::{
     path::{Component, Path},
 };
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
-    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot},
-    manifest::{CanonicalProject, ProjectManifestError, ProjectStoreError},
     ArtifactDependency, ArtifactId, ArtifactIdError, ArtifactRecord, ArtifactStatus, ContentHash,
     DependencyImpact, HashValueError, InputHash, LifecycleError, SelectionError, SelectionManifest,
+    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot},
+    manifest::{CanonicalProject, ProjectManifestError, ProjectStoreError},
 };
 
 const SHOT_SCHEMA_VERSION: u32 = 1;
@@ -282,13 +282,14 @@ impl ShotWorkflow {
         let artifacts_file = shot_path(shot_number, "artifacts.json")?;
         let selection_file = shot_path(shot_number, "selection.json")?;
 
-        let shot = read_json_optional(project, &shot_file)?.unwrap_or_else(|| ShotProductionManifest {
-            shot_id: shot_id.clone(),
-            schema_version: SHOT_SCHEMA_VERSION,
-            direction: ShotDirection::Reaction,
-            generation_revision: 0,
-            extra: BTreeMap::new(),
-        });
+        let shot =
+            read_json_optional(project, &shot_file)?.unwrap_or_else(|| ShotProductionManifest {
+                shot_id: shot_id.clone(),
+                schema_version: SHOT_SCHEMA_VERSION,
+                direction: ShotDirection::Reaction,
+                generation_revision: 0,
+                extra: BTreeMap::new(),
+            });
         if shot.shot_id != shot_id || shot.schema_version == 0 {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
@@ -552,8 +553,16 @@ impl ShotWorkflow {
         artifacts: &[StoredArtifactRecord],
         selection: &StoredSelectionManifest,
     ) -> Result<(), ShotWorkflowError> {
-        write_json(project, &shot_path(self.shot_number, "artifacts.json")?, artifacts)?;
-        write_json(project, &shot_path(self.shot_number, "selection.json")?, selection)?;
+        write_json(
+            project,
+            &shot_path(self.shot_number, "artifacts.json")?,
+            artifacts,
+        )?;
+        write_json(
+            project,
+            &shot_path(self.shot_number, "selection.json")?,
+            selection,
+        )?;
         write_json(project, &shot_path(self.shot_number, "shot.json")?, shot)
     }
 
@@ -755,7 +764,9 @@ impl fmt::Display for ShotWorkflowError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidShotNumber => formatter.write_str("shot number must be at least 1"),
-            Self::InvalidCanonicalState => formatter.write_str("invalid canonical shot approval state"),
+            Self::InvalidCanonicalState => {
+                formatter.write_str("invalid canonical shot approval state")
+            }
             Self::NotGenerated => formatter.write_str("generate candidates before selecting"),
             Self::InvalidCandidate => formatter.write_str("candidate index is out of range"),
             Self::Locked => formatter.write_str("locked shot cannot be changed"),
@@ -765,7 +776,9 @@ impl fmt::Display for ShotWorkflowError {
                 formatter.write_str("selected candidate is stale; regenerate before locking")
             }
             Self::GenerationOverflow => formatter.write_str("shot generation revision overflow"),
-            Self::InvalidTarget(path) => write!(formatter, "invalid shot state target: {}", path.display()),
+            Self::InvalidTarget(path) => {
+                write!(formatter, "invalid shot state target: {}", path.display())
+            }
             Self::Path(error) => error.fmt(formatter),
             Self::Fs(error) => error.fmt(formatter),
             Self::Store(error) => error.fmt(formatter),
@@ -809,7 +822,7 @@ impl From<SelectionError> for ShotWorkflowError {
 mod tests {
     use super::*;
     use crate::manifest::{
-        ProjectDefaults, ProjectManifest, ProjectSource, ProjectWorkflow, PROJECT_FORMAT_VERSION,
+        PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource, ProjectWorkflow,
     };
     use std::{
         fs,
@@ -825,10 +838,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "kineto-shot-store-{}-{nonce}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("kineto-shot-store-{}-{nonce}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -876,7 +887,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(artifacts.len(), 2);
-        assert_eq!(artifacts[0].domain().unwrap().status, ArtifactStatus::Locked);
+        assert_eq!(
+            artifacts[0].domain().unwrap().status,
+            ArtifactStatus::Locked
+        );
 
         let selection: StoredSelectionManifest = serde_json::from_str(include_str!(
             "../../../fixtures/projects/minimal/characters/alice/selection.json"
@@ -891,7 +905,8 @@ mod tests {
         let target = temp.0.join("film");
         let project = project(&target);
         let mut shot = ShotWorkflow::load(&project, 1).unwrap();
-        shot.set_direction(&project, ShotDirection::Tension).unwrap();
+        shot.set_direction(&project, ShotDirection::Tension)
+            .unwrap();
         shot.generate(&project).unwrap();
         shot.select(&project, 2).unwrap();
         shot.lock(&project).unwrap();
@@ -920,7 +935,8 @@ mod tests {
         shot.select(&project, 1).unwrap();
         let selected_before = shot.selection.selected_artifact_id.clone();
 
-        shot.set_direction(&project, ShotDirection::Intimacy).unwrap();
+        shot.set_direction(&project, ShotDirection::Intimacy)
+            .unwrap();
         let stale = shot.snapshot().unwrap();
         assert!(stale.generated);
         assert!(stale.stale);
@@ -948,7 +964,7 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         fs::write(
             base.join("shot.json"),
-            br#"{"shot_id":"shot_001","schema_version":1,"future_shot":"keep"}"#,
+            br#"{"shot_id":"shot_001","schema_version":1,"generation_revision":1,"future_shot":"keep"}"#,
         )
         .unwrap();
         fs::write(
@@ -963,7 +979,8 @@ mod tests {
         .unwrap();
 
         let mut shot = ShotWorkflow::load(&project, 1).unwrap();
-        shot.set_direction(&project, ShotDirection::SpatialClarity).unwrap();
+        shot.set_direction(&project, ShotDirection::SpatialClarity)
+            .unwrap();
         shot.generate(&project).unwrap();
 
         let shot_json: Value =

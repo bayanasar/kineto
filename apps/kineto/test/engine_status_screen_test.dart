@@ -172,7 +172,7 @@ void main() {
     expect(find.text('Regenerate before locking'), findsOneWidget);
     expect(find.text('Profile medium'), findsOneWidget);
 
-    await tester.tap(find.text('Regenerate before locking'));
+    await tester.tap(find.text('Regenerate before locking'), warnIfMissed: false);
     expect(lockCalls, 0);
   });
 }

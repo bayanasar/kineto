@@ -52,7 +52,8 @@ impl KinetoProjectSession {
         shot_index: u32,
         operation: impl FnOnce(&CanonicalProject, &mut ShotWorkflow) -> Result<R, ShotWorkflowError>,
     ) -> Result<R, ShotWorkflowError> {
-        let index = usize::try_from(shot_index).map_err(|_| ShotWorkflowError::InvalidShotNumber)?;
+        let index =
+            usize::try_from(shot_index).map_err(|_| ShotWorkflowError::InvalidShotNumber)?;
         if index >= PROJECT_SHOT_COUNT {
             return Err(ShotWorkflowError::InvalidShotNumber);
         }
@@ -237,9 +238,7 @@ pub unsafe extern "C" fn kineto_project_format_version(
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kineto_project_is_read_only(
-    session: *const KinetoProjectSession,
-) -> u8 {
+pub unsafe extern "C" fn kineto_project_is_read_only(session: *const KinetoProjectSession) -> u8 {
     guarded(1, || {
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 1;
@@ -353,7 +352,10 @@ pub unsafe extern "C" fn kineto_project_shot_set_direction(
         let Some(session) = (unsafe { session.as_mut() }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
-        let Some(direction) = u8::try_from(direction).ok().and_then(ShotDirection::from_code) else {
+        let Some(direction) = u8::try_from(direction)
+            .ok()
+            .and_then(ShotDirection::from_code)
+        else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
         shot_result_code(session.with_shot(shot_index, |project, shot| {
@@ -469,7 +471,9 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
             PROJECT_ERR_UNSUPPORTED_FORMAT
         }
         ShotWorkflowError::Manifest(_) => PROJECT_ERR_INVALID_MANIFEST,
-        ShotWorkflowError::Fs(ProjectFsError::Io(_)) | ShotWorkflowError::Store(_) => PROJECT_ERR_IO,
+        ShotWorkflowError::Fs(ProjectFsError::Io(_)) | ShotWorkflowError::Store(_) => {
+            PROJECT_ERR_IO
+        }
         ShotWorkflowError::Fs(_)
         | ShotWorkflowError::InvalidCanonicalState
         | ShotWorkflowError::InvalidTarget(_)
@@ -550,10 +554,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "kineto-project-ffi-{}-{nonce}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("kineto-project-ffi-{}-{nonce}", std::process::id()))
     }
 
     unsafe fn create_text(path: &str, out: *mut *mut KinetoProjectSession) -> i32 {
@@ -644,8 +645,14 @@ mod tests {
             unsafe { kineto_project_shot_set_direction(session, 0, 4) },
             PROJECT_OK
         );
-        assert_eq!(unsafe { kineto_project_shot_generate(session, 0) }, PROJECT_OK);
-        assert_eq!(unsafe { kineto_project_shot_select(session, 0, 2) }, PROJECT_OK);
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(session, 0) },
+            PROJECT_OK
+        );
+        assert_eq!(
+            unsafe { kineto_project_shot_select(session, 0, 2) },
+            PROJECT_OK
+        );
         assert_eq!(unsafe { kineto_project_shot_lock(session, 0) }, PROJECT_OK);
         let before = unsafe { snapshot(session, 0) };
         unsafe { kineto_project_destroy(session) };
@@ -670,8 +677,14 @@ mod tests {
         let path = target.to_string_lossy();
         let mut session = ptr::null_mut();
         assert_eq!(unsafe { create_text(&path, &raw mut session) }, PROJECT_OK);
-        assert_eq!(unsafe { kineto_project_shot_generate(session, 0) }, PROJECT_OK);
-        assert_eq!(unsafe { kineto_project_shot_select(session, 0, 1) }, PROJECT_OK);
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(session, 0) },
+            PROJECT_OK
+        );
+        assert_eq!(
+            unsafe { kineto_project_shot_select(session, 0, 1) },
+            PROJECT_OK
+        );
         assert_eq!(
             unsafe { kineto_project_shot_set_direction(session, 0, 3) },
             PROJECT_OK
@@ -685,7 +698,10 @@ mod tests {
             PROJECT_ERR_STALE_SELECTION
         );
 
-        assert_eq!(unsafe { kineto_project_shot_generate(session, 0) }, PROJECT_OK);
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(session, 0) },
+            PROJECT_OK
+        );
         let regenerated = unsafe { snapshot(session, 0) };
         assert_eq!((regenerated >> 2) & 1, 0);
         assert_eq!((regenerated >> 16) & 0xff, 0);

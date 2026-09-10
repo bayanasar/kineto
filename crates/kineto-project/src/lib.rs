@@ -322,7 +322,10 @@ mod tests {
         selection.select(&second).unwrap();
 
         assert_eq!(selection.selected_artifact_id, Some(second));
-        assert_eq!(selection.candidate_artifact_ids, vec![first, id("cand_01J7Y")]);
+        assert_eq!(
+            selection.candidate_artifact_ids,
+            vec![first, id("cand_01J7Y")]
+        );
     }
 
     #[test]
@@ -375,7 +378,10 @@ mod tests {
             }],
         };
         let index = ArtifactIndex::from_records([&scene_one_new, &scene_two]);
-        assert!(matches!(index.currentness(&shot_one), Currentness::Stale(_)));
+        assert!(matches!(
+            index.currentness(&shot_one),
+            Currentness::Stale(_)
+        ));
         assert_eq!(index.currentness(&shot_two), Currentness::Current);
     }
 

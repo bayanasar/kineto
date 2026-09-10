@@ -52,25 +52,25 @@ String _demoProjectPath() {
   if (Platform.isWindows) {
     final localAppData = environment['LOCALAPPDATA'];
     if (localAppData != null && localAppData.isNotEmpty) {
-      return '$localAppData${separator}Kineto${separator}demo-project';
+      return [localAppData, 'Kineto', 'demo-project'].join(separator);
     }
   } else if (Platform.isMacOS) {
     final home = environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      return '$home${separator}Library${separator}Application Support${separator}Kineto${separator}demo-project';
+      return [home, 'Library', 'Application Support', 'Kineto', 'demo-project'].join(separator);
     }
   } else {
     final stateHome = environment['XDG_STATE_HOME'];
     if (stateHome != null && stateHome.isNotEmpty) {
-      return '$stateHome${separator}kineto${separator}demo-project';
+      return [stateHome, 'kineto', 'demo-project'].join(separator);
     }
     final home = environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      return '$home${separator}.local${separator}state${separator}kineto${separator}demo-project';
+      return [home, '.local', 'state', 'kineto', 'demo-project'].join(separator);
     }
   }
 
-  return '${Directory.systemTemp.path}${separator}kineto-demo-project';
+  return [Directory.systemTemp.path, 'kineto-demo-project'].join(separator);
 }
 
 class KinetoApp extends StatefulWidget {

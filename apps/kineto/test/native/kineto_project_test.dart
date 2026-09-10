@@ -259,11 +259,11 @@ String _path(String first, [
 ]) {
   final parts = <String>[
     first,
-    if (second != null) second,
-    if (third != null) third,
-    if (fourth != null) fourth,
-    if (fifth != null) fifth,
-    if (sixth != null) sixth,
+    ?second,
+    ?third,
+    ?fourth,
+    ?fifth,
+    ?sixth,
   ];
   return parts.join(Platform.pathSeparator);
 }
