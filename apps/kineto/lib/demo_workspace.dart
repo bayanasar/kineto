@@ -79,9 +79,14 @@ const List<DemoShotContent> demoShots = <DemoShotContent>[
 ];
 
 class DemoWorkspaceScreen extends StatefulWidget {
-  const DemoWorkspaceScreen({required this.engine, super.key});
+  const DemoWorkspaceScreen({
+    required this.engine,
+    required this.project,
+    super.key,
+  });
 
   final KinetoEngine engine;
+  final KinetoProjectSession project;
 
   @override
   State<DemoWorkspaceScreen> createState() => _DemoWorkspaceScreenState();
@@ -89,7 +94,7 @@ class DemoWorkspaceScreen extends StatefulWidget {
 
 class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late final KinetoEngineSnapshot _engineSnapshot;
-  late List<KinetoDemoSnapshot> _shotSnapshots;
+  late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
   String? _error;
 
@@ -100,9 +105,10 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     _shotSnapshots = _readShotSnapshots();
   }
 
-  List<KinetoDemoSnapshot> _readShotSnapshots() => List<KinetoDemoSnapshot>.generate(
-        KinetoEngine.demoShotCount,
-        widget.engine.demoSnapshot,
+  List<KinetoShotSnapshot> _readShotSnapshots() =>
+      List<KinetoShotSnapshot>.generate(
+        KinetoProjectSession.shotCount,
+        widget.project.shotSnapshot,
         growable: false,
       );
 
@@ -130,28 +136,31 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final demoSnapshot = _shotSnapshots[_activeShotIndex];
+    final snapshot = _shotSnapshots[_activeShotIndex];
     return DemoWorkspaceView(
       engineSnapshot: _engineSnapshot,
-      demoSnapshot: demoSnapshot,
+      shotSnapshot: snapshot,
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
       error: _error,
       onShotChanged: _switchShot,
-      onIntentChanged: (intent) => _run(
-        () => widget.engine.setDemoIntent(_activeShotIndex, intent),
+      onDirectionChanged: (direction) => _run(
+        () => widget.project.setShotDirection(_activeShotIndex, direction),
       ),
       onGenerate: () => _run(
-        () => widget.engine.generateDemoCandidates(_activeShotIndex),
+        () => widget.project.generateShotCandidates(_activeShotIndex),
       ),
       onSelect: (candidateIndex) => _run(
-        () => widget.engine.selectDemoCandidate(_activeShotIndex, candidateIndex),
+        () => widget.project.selectShotCandidate(
+          _activeShotIndex,
+          candidateIndex,
+        ),
       ),
       onLock: () => _run(
-        () => widget.engine.lockDemoSelection(_activeShotIndex),
+        () => widget.project.lockShotSelection(_activeShotIndex),
       ),
       onReset: () => _run(
-        () => widget.engine.resetDemo(_activeShotIndex),
+        () => widget.project.resetShot(_activeShotIndex),
       ),
     );
   }
@@ -160,11 +169,11 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 class DemoWorkspaceView extends StatelessWidget {
   const DemoWorkspaceView({
     required this.engineSnapshot,
-    required this.demoSnapshot,
+    required this.shotSnapshot,
     required this.shotSnapshots,
     required this.activeShotIndex,
     required this.onShotChanged,
-    required this.onIntentChanged,
+    required this.onDirectionChanged,
     required this.onGenerate,
     required this.onSelect,
     required this.onLock,
@@ -174,11 +183,11 @@ class DemoWorkspaceView extends StatelessWidget {
   });
 
   final KinetoEngineSnapshot engineSnapshot;
-  final KinetoDemoSnapshot demoSnapshot;
-  final List<KinetoDemoSnapshot> shotSnapshots;
+  final KinetoShotSnapshot shotSnapshot;
+  final List<KinetoShotSnapshot> shotSnapshots;
   final int activeShotIndex;
   final ValueChanged<int> onShotChanged;
-  final ValueChanged<KinetoDemoIntent> onIntentChanged;
+  final ValueChanged<KinetoShotDirection> onDirectionChanged;
   final VoidCallback onGenerate;
   final ValueChanged<int> onSelect;
   final VoidCallback onLock;
@@ -187,8 +196,11 @@ class DemoWorkspaceView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selectedIndex = demoSnapshot.selectedIndex;
-    final canLock = demoSnapshot.generated && selectedIndex != null && !demoSnapshot.locked;
+    final selectedIndex = shotSnapshot.selectedIndex;
+    final canLock = shotSnapshot.generated &&
+        selectedIndex != null &&
+        !shotSnapshot.locked &&
+        !shotSnapshot.stale;
     final shot = demoShots[activeShotIndex];
     final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
 
@@ -203,11 +215,11 @@ class DemoWorkspaceView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 WabPanel(
-                  title: 'Local demo project',
+                  title: 'Canonical demo project',
                   trailing: Text('Native ABI ${engineSnapshot.abiVersion}'),
                   child: const Text(
                     'A deterministic local vertical slice. Work through two independent shots, choose direction, '
-                    'generate candidates, select and lock, then reopen Kineto to verify Rust-owned state.',
+                    'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -220,13 +232,17 @@ class DemoWorkspaceView extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      const Text('Two production beats share the scene but keep independent approval state.'),
+                      const Text(
+                        'Two production beats share the scene but keep independent approval state.',
+                      ),
                       const SizedBox(height: 12),
                       Wrap(
                         spacing: 16,
                         runSpacing: 12,
                         children: <Widget>[
-                          for (var index = 0; index < demoShots.length; index++)
+                          for (var index = 0;
+                              index < demoShots.length;
+                              index++)
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
@@ -256,24 +272,24 @@ class DemoWorkspaceView extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Text(
-                        demoSnapshot.locked
+                        shotSnapshot.locked
                             ? 'Direction is frozen with this shot\'s locked selection.'
-                            : 'Changing direction invalidates only this shot\'s unlocked candidates and selection.',
+                            : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
                       ),
                       const SizedBox(height: 12),
                       Wrap(
                         spacing: 12,
                         runSpacing: 12,
                         children: <Widget>[
-                          for (final intent in KinetoDemoIntent.values)
+                          for (final direction in KinetoShotDirection.values)
                             WabButton(
-                              kind: intent == demoSnapshot.intent
+                              kind: direction == shotSnapshot.direction
                                   ? WabMaterialKind.seal
                                   : WabMaterialKind.paper,
-                              onPressed: demoSnapshot.locked
+                              onPressed: shotSnapshot.locked
                                   ? null
-                                  : () => onIntentChanged(intent),
-                              child: Text(intent.label),
+                                  : () => onDirectionChanged(direction),
+                              child: Text(direction.label),
                             ),
                         ],
                       ),
@@ -283,7 +299,7 @@ class DemoWorkspaceView extends StatelessWidget {
                 const SizedBox(height: 20),
                 WabPanel(
                   title: 'Scene 001 · ${shot.label}',
-                  trailing: Text(demoSnapshot.intent.label),
+                  trailing: Text(shotSnapshot.direction.label),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
@@ -294,25 +310,22 @@ class DemoWorkspaceView extends StatelessWidget {
                       const SizedBox(height: 8),
                       Text(shot.description),
                       const SizedBox(height: 16),
-                      if (!demoSnapshot.generated)
+                      if (!shotSnapshot.generated)
                         WabElevatedButton(
-                          text: const Text('Generate 3 deterministic candidates'),
+                          text: const Text(
+                            'Generate 3 deterministic candidates',
+                          ),
                           callback: onGenerate,
                         )
                       else
                         Row(
                           children: <Widget>[
-                            Expanded(
-                              child: Text(
-                                demoSnapshot.locked
-                                    ? 'Generation ${demoSnapshot.generation} locked · reopen the app to verify persistence.'
-                                    : 'Generation ${demoSnapshot.generation} · ${demoSnapshot.supersededCount} superseded · choose the shot you want to keep.',
-                              ),
-                            ),
+                            Expanded(child: Text(_generationStatus(shotSnapshot))),
                             const SizedBox(width: 16),
                             WabButton(
                               kind: WabMaterialKind.paper,
-                              onPressed: demoSnapshot.locked ? null : onGenerate,
+                              onPressed:
+                                  shotSnapshot.locked ? null : onGenerate,
                               child: const Text('Regenerate'),
                             ),
                           ],
@@ -320,15 +333,16 @@ class DemoWorkspaceView extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (demoSnapshot.generated) ...<Widget>[
+                if (shotSnapshot.generated) ...<Widget>[
                   const SizedBox(height: 20),
                   WabPanel(
-                    title: 'Generation ${demoSnapshot.generation} · Candidates',
+                    title:
+                        'Generation ${shotSnapshot.generation} · Candidates',
                     child: Wrap(
                       spacing: 16,
                       runSpacing: 16,
                       children: List<Widget>.generate(
-                        demoSnapshot.candidateCount,
+                        shotSnapshot.candidateCount,
                         (index) {
                           final content = shot.candidates[index];
                           final selected = selectedIndex == index;
@@ -338,11 +352,13 @@ class DemoWorkspaceView extends StatelessWidget {
                               icon: Icon(content.icon, size: 34),
                               title: content.title,
                               description: content.description,
-                              buttonLabel: demoSnapshot.locked
+                              buttonLabel: shotSnapshot.locked
                                   ? (selected ? 'Locked' : 'Candidate')
                                   : (selected ? 'Selected' : 'Select'),
                               highlighted: selected,
-                              onPressed: demoSnapshot.locked ? null : () => onSelect(index),
+                              onPressed: shotSnapshot.locked
+                                  ? null
+                                  : () => onSelect(index),
                             ),
                           );
                         },
@@ -357,7 +373,13 @@ class DemoWorkspaceView extends StatelessWidget {
                           kind: WabMaterialKind.seal,
                           onPressed: canLock ? onLock : null,
                           expand: true,
-                          child: Text(demoSnapshot.locked ? 'Selection locked' : 'Lock selection'),
+                          child: Text(
+                            shotSnapshot.locked
+                                ? 'Selection locked'
+                                : shotSnapshot.stale
+                                    ? 'Regenerate before locking'
+                                    : 'Lock selection',
+                          ),
                         ),
                       ),
                       const SizedBox(width: 16),
@@ -387,14 +409,25 @@ class DemoWorkspaceView extends StatelessWidget {
     );
   }
 
-  static String _shotStatusLabel(KinetoDemoSnapshot snapshot) {
+  static String _generationStatus(KinetoShotSnapshot snapshot) {
+    if (snapshot.locked) {
+      return 'Generation ${snapshot.generation} locked · reopen the app to verify canonical persistence.';
+    }
+    if (snapshot.stale) {
+      return 'Generation ${snapshot.generation} is stale after the direction changed · regenerate before locking.';
+    }
+    return 'Generation ${snapshot.generation} · ${snapshot.supersededCount} superseded · choose the shot you want to keep.';
+  }
+
+  static String _shotStatusLabel(KinetoShotSnapshot snapshot) {
     if (snapshot.locked) return 'Locked';
+    if (snapshot.stale) return 'Stale';
     if (snapshot.selectedIndex != null) return 'Selected';
     if (snapshot.generated) return 'Candidates';
     return 'Empty';
   }
 
-  static WabBadgeKind _shotStatusKind(KinetoDemoSnapshot snapshot) {
+  static WabBadgeKind _shotStatusKind(KinetoShotSnapshot snapshot) {
     if (snapshot.locked) return WabBadgeKind.done;
     if (snapshot.generated) return WabBadgeKind.progress;
     return WabBadgeKind.neutral;
