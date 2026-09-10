@@ -6,6 +6,3 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
-
-[dependencies]
-kineto-project = { path = "../kineto-project" }
