@@ -1,5 +1,6 @@
 pub mod fs;
 pub mod manifest;
+pub mod shot;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -321,10 +322,7 @@ mod tests {
         selection.select(&second).unwrap();
 
         assert_eq!(selection.selected_artifact_id, Some(second));
-        assert_eq!(
-            selection.candidate_artifact_ids,
-            vec![first, id("cand_01J7Y")]
-        );
+        assert_eq!(selection.candidate_artifact_ids, vec![first, id("cand_01J7Y")]);
     }
 
     #[test]
@@ -352,7 +350,6 @@ mod tests {
         let scene_one_old = record("scene_001", "sha256:scene-1-old");
         let scene_one_new = record("scene_001", "sha256:scene-1-new");
         let scene_two = record("scene_002", "sha256:scene-2");
-
         let shot_one = ArtifactRecord {
             artifact_id: id("shot_001"),
             status: ArtifactStatus::Candidate,
@@ -377,13 +374,8 @@ mod tests {
                 field: Some("dialogue".to_owned()),
             }],
         };
-
         let index = ArtifactIndex::from_records([&scene_one_new, &scene_two]);
-
-        assert!(matches!(
-            index.currentness(&shot_one),
-            Currentness::Stale(_)
-        ));
+        assert!(matches!(index.currentness(&shot_one), Currentness::Stale(_)));
         assert_eq!(index.currentness(&shot_two), Currentness::Current);
     }
 
@@ -403,7 +395,6 @@ mod tests {
             }],
         };
         let index = ArtifactIndex::from_records([&title_new]);
-
         assert_eq!(index.currentness(&shot), Currentness::Current);
     }
 
@@ -411,7 +402,6 @@ mod tests {
     fn locked_artifact_cannot_be_mutated_backwards() {
         let mut artifact = record("character_alice_v2", "sha256:alice");
         artifact.status = ArtifactStatus::Locked;
-
         assert!(artifact.transition(ArtifactStatus::Selected).is_err());
         artifact.transition(ArtifactStatus::Superseded).unwrap();
         assert_eq!(artifact.status, ArtifactStatus::Superseded);

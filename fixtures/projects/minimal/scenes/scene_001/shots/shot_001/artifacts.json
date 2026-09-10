@@ -1,0 +1,11 @@
+[
+  {
+    "artifact_id": "shot_001_keyframe_001",
+    "schema_version": 1,
+    "type": "keyframe_candidate",
+    "status": "selected",
+    "content_hash": "sha256:golden-shot-001-keyframe-001",
+    "input_hash": "sha256:golden-shot-001-input",
+    "dependencies": []
+  }
+]
