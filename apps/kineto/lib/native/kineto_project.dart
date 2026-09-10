@@ -87,6 +87,48 @@ external int _kinetoProjectTitleCopy(
   Pointer<Uint64> outLength,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint64>)>(
+  symbol: 'kineto_project_shot_state',
+)
+external int _kinetoProjectShotState(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint64> outState,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint32)>(
+  symbol: 'kineto_project_shot_set_direction',
+)
+external int _kinetoProjectShotSetDirection(
+  Pointer<Void> session,
+  int shotIndex,
+  int direction,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32)>(
+  symbol: 'kineto_project_shot_generate',
+)
+external int _kinetoProjectShotGenerate(Pointer<Void> session, int shotIndex);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint32)>(
+  symbol: 'kineto_project_shot_select',
+)
+external int _kinetoProjectShotSelect(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32)>(
+  symbol: 'kineto_project_shot_lock',
+)
+external int _kinetoProjectShotLock(Pointer<Void> session, int shotIndex);
+
+@Native<Int32 Function(Pointer<Void>, Uint32)>(
+  symbol: 'kineto_project_shot_reset',
+)
+external int _kinetoProjectShotReset(Pointer<Void> session, int shotIndex);
+
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
@@ -99,14 +141,15 @@ final class KinetoProjectException implements Exception {
 
 /// Thin Dart owner for an opened canonical Kineto project.
 ///
-/// String arguments cross the native boundary only as borrowed UTF-8
-/// pointer/length pairs. Metadata comes back by copying into Dart-owned buffers;
-/// no pointer into a Rust `String` escapes the call. TOML, JSON, and serialized
-/// project models do not cross FFI.
+/// Strings cross the native boundary only as borrowed UTF-8 pointer/length
+/// pairs. Metadata and shot snapshots come back in caller-owned fixed-width
+/// storage; TOML, JSON, and serialized project models do not cross FFI.
 final class KinetoProjectSession implements Finalizable {
   KinetoProjectSession._(this._handle) {
     _finalizer.attach(this, _handle, detach: this);
   }
+
+  static const int shotCount = 2;
 
   static final NativeFinalizer _finalizer = NativeFinalizer(
     Native.addressOf<NativeFunction<_DestroyProjectNative>>(
@@ -204,11 +247,74 @@ final class KinetoProjectSession implements Finalizable {
     return _copyProjectUtf8(_handle, _kinetoProjectTitleCopy, 'project title');
   }
 
+  KinetoShotSnapshot shotSnapshot(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final arena = Arena();
+    try {
+      final outState = arena<Uint64>();
+      outState.value = 0;
+      _checkProjectResult(
+        _kinetoProjectShotState(_handle, shotIndex, outState),
+      );
+      return KinetoShotSnapshot.fromBits(outState.value);
+    } finally {
+      arena.releaseAll();
+    }
+  }
+
+  void setShotDirection(int shotIndex, KinetoShotDirection direction) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    _checkProjectResult(
+      _kinetoProjectShotSetDirection(_handle, shotIndex, direction.wireValue),
+    );
+  }
+
+  void generateShotCandidates(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    _checkProjectResult(_kinetoProjectShotGenerate(_handle, shotIndex));
+  }
+
+  void selectShotCandidate(int shotIndex, int candidateIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    if (candidateIndex < 0) {
+      throw RangeError.value(
+        candidateIndex,
+        'candidateIndex',
+        'Candidate index must be non-negative',
+      );
+    }
+    _checkProjectResult(
+      _kinetoProjectShotSelect(_handle, shotIndex, candidateIndex),
+    );
+  }
+
+  void lockShotSelection(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    _checkProjectResult(_kinetoProjectShotLock(_handle, shotIndex));
+  }
+
+  void resetShot(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    _checkProjectResult(_kinetoProjectShotReset(_handle, shotIndex));
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
     _finalizer.detach(this);
     _kinetoProjectDestroy(_handle);
+  }
+
+  void _checkShotIndex(int shotIndex) {
+    if (shotIndex < 0 || shotIndex >= shotCount) {
+      throw RangeError.range(shotIndex, 0, shotCount - 1, 'shotIndex');
+    }
   }
 
   void _ensureOpen() {
@@ -278,6 +384,16 @@ void _checkProjectResult(int code) {
     104 => 'Project manifest is invalid',
     105 => 'Project format is newer than this Kineto build supports',
     106 => 'Project metadata buffer is too small',
+    107 => 'Project is read-only until an explicit migration is performed',
+    108 => 'Shot index is invalid',
+    109 => 'Generate candidates before selecting',
+    110 => 'Candidate index is invalid',
+    111 => 'Shot selection is locked',
+    112 => 'Shot selection is already locked',
+    113 => 'Select a candidate before locking',
+    114 => 'Selection is stale; regenerate before locking',
+    115 => 'Canonical shot approval state is invalid',
+    116 => 'Shot generation revision overflow',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });
