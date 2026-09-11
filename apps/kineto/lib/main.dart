@@ -57,7 +57,13 @@ String _demoProjectPath() {
   } else if (Platform.isMacOS) {
     final home = environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      return [home, 'Library', 'Application Support', 'Kineto', 'demo-project'].join(separator);
+      return [
+        home,
+        'Library',
+        'Application Support',
+        'Kineto',
+        'demo-project',
+      ].join(separator);
     }
   } else {
     final stateHome = environment['XDG_STATE_HOME'];
@@ -84,6 +90,14 @@ class KinetoApp extends StatefulWidget {
 }
 
 class _KinetoAppState extends State<KinetoApp> {
+  bool _darkMode = true;
+
+  void _toggleTheme() {
+    setState(() {
+      _darkMode = !_darkMode;
+    });
+  }
+
   @override
   void dispose() {
     widget.project.close();
@@ -95,10 +109,12 @@ class _KinetoAppState extends State<KinetoApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Kineto',
-      theme: WabTheme.materialTheme(lightTheme: false),
+      theme: WabTheme.materialTheme(lightTheme: !_darkMode),
       home: DemoWorkspaceScreen(
         engine: widget.engine,
         project: widget.project,
+        isDarkMode: _darkMode,
+        onThemeToggle: _toggleTheme,
       ),
     );
   }
