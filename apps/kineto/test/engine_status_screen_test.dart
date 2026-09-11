@@ -8,6 +8,11 @@ void main() {
   testWidgets('demo workspace renders first shot generation and scene progress', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     var requestedShot = -1;
     const shotOne = KinetoShotSnapshot(
       direction: KinetoShotDirection.intimacy,
@@ -63,6 +68,7 @@ void main() {
     expect(find.textContaining('3 superseded'), findsOneWidget);
     expect(find.text('Native ABI 9'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Shot 002'));
     await tester.tap(find.text('Shot 002'));
     expect(requestedShot, 1);
   });
