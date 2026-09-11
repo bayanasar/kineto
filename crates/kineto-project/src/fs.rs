@@ -150,15 +150,8 @@ impl ProjectRoot {
 
         for _ in 0..32 {
             let nonce = WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
-            let temp = parent.join(format!(
-                ".kineto-write-{}-{nonce}.tmp",
-                std::process::id()
-            ));
-            let mut file = match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)
-            {
+            let temp = parent.join(format!(".kineto-write-{}-{nonce}.tmp", std::process::id()));
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(ProjectFsError::Io(error)),
@@ -494,11 +487,7 @@ mod tests {
     fn canonical_scan_ignores_interrupted_atomic_write_temp_files() {
         let temp = TempProject::new();
         fs::write(temp.path.join("project.toml"), b"canonical").unwrap();
-        fs::write(
-            temp.path.join(".kineto-write-999-1.tmp"),
-            b"unpublished",
-        )
-        .unwrap();
+        fs::write(temp.path.join(".kineto-write-999-1.tmp"), b"unpublished").unwrap();
 
         let snapshot = ProjectRoot::open(&temp.path)
             .unwrap()
