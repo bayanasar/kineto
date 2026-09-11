@@ -82,11 +82,15 @@ class DemoWorkspaceScreen extends StatefulWidget {
   const DemoWorkspaceScreen({
     required this.engine,
     required this.project,
+    this.isDarkMode = true,
+    this.onThemeToggle,
     super.key,
   });
 
   final KinetoEngine engine;
   final KinetoProjectSession project;
+  final bool isDarkMode;
+  final VoidCallback? onThemeToggle;
 
   @override
   State<DemoWorkspaceScreen> createState() => _DemoWorkspaceScreenState();
@@ -142,7 +146,9 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       shotSnapshot: snapshot,
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
+      isDarkMode: widget.isDarkMode,
       error: _error,
+      onThemeToggle: widget.onThemeToggle,
       onShotChanged: _switchShot,
       onDirectionChanged: (direction) => _run(
         () => widget.project.setShotDirection(_activeShotIndex, direction),
@@ -178,6 +184,8 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onSelect,
     required this.onLock,
     required this.onReset,
+    this.isDarkMode = true,
+    this.onThemeToggle,
     this.error,
     super.key,
   });
@@ -186,6 +194,8 @@ class DemoWorkspaceView extends StatelessWidget {
   final KinetoShotSnapshot shotSnapshot;
   final List<KinetoShotSnapshot> shotSnapshots;
   final int activeShotIndex;
+  final bool isDarkMode;
+  final VoidCallback? onThemeToggle;
   final ValueChanged<int> onShotChanged;
   final ValueChanged<KinetoShotDirection> onDirectionChanged;
   final VoidCallback onGenerate;
@@ -205,7 +215,17 @@ class DemoWorkspaceView extends StatelessWidget {
     final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
 
     return WabScaffold(
-      title: const Text('Kineto'),
+      appBar: WabAppBar(
+        title: const Text('Kineto'),
+        action: onThemeToggle == null
+            ? null
+            : WabToggleButton(
+                text: const Text('Dark mode'),
+                isOn: isDarkMode,
+                pair: WabTogglePair.sealZhuwen,
+                callback: onThemeToggle,
+              ),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Center(
@@ -240,16 +260,14 @@ class DemoWorkspaceView extends StatelessWidget {
                         spacing: 16,
                         runSpacing: 12,
                         children: <Widget>[
-                          for (var index = 0;
-                              index < demoShots.length;
-                              index++)
+                          for (var index = 0; index < demoShots.length; index++)
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
                                 WabButton(
                                   kind: index == activeShotIndex
                                       ? WabMaterialKind.seal
-                                      : WabMaterialKind.paper,
+                                      : WabMaterialKind.zhuwen,
                                   onPressed: () => onShotChanged(index),
                                   child: Text(demoShots[index].label),
                                 ),
@@ -273,7 +291,7 @@ class DemoWorkspaceView extends StatelessWidget {
                     children: <Widget>[
                       Text(
                         shotSnapshot.locked
-                            ? 'Direction is frozen with this shot\'s locked selection.'
+                            ? "Direction is frozen with this shot's locked selection."
                             : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
                       ),
                       const SizedBox(height: 12),
@@ -285,7 +303,7 @@ class DemoWorkspaceView extends StatelessWidget {
                             WabButton(
                               kind: direction == shotSnapshot.direction
                                   ? WabMaterialKind.seal
-                                  : WabMaterialKind.paper,
+                                  : WabMaterialKind.zhuwen,
                               onPressed: shotSnapshot.locked
                                   ? null
                                   : () => onDirectionChanged(direction),
@@ -312,9 +330,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       const SizedBox(height: 16),
                       if (!shotSnapshot.generated)
                         WabElevatedButton(
-                          text: const Text(
-                            'Generate 3 deterministic candidates',
-                          ),
+                          text: const Text('Generate 3 deterministic candidates'),
                           callback: onGenerate,
                         )
                       else
@@ -323,9 +339,8 @@ class DemoWorkspaceView extends StatelessWidget {
                             Expanded(child: Text(_generationStatus(shotSnapshot))),
                             const SizedBox(width: 16),
                             WabButton(
-                              kind: WabMaterialKind.paper,
-                              onPressed:
-                                  shotSnapshot.locked ? null : onGenerate,
+                              kind: WabMaterialKind.zhuwen,
+                              onPressed: shotSnapshot.locked ? null : onGenerate,
                               child: const Text('Regenerate'),
                             ),
                           ],
@@ -336,8 +351,7 @@ class DemoWorkspaceView extends StatelessWidget {
                 if (shotSnapshot.generated) ...<Widget>[
                   const SizedBox(height: 20),
                   WabPanel(
-                    title:
-                        'Generation ${shotSnapshot.generation} · Candidates',
+                    title: 'Generation ${shotSnapshot.generation} · Candidates',
                     child: Wrap(
                       spacing: 16,
                       runSpacing: 16,
@@ -385,7 +399,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       const SizedBox(width: 16),
                       Expanded(
                         child: WabButton(
-                          kind: WabMaterialKind.paper,
+                          kind: WabMaterialKind.zhuwen,
                           onPressed: onReset,
                           expand: true,
                           child: const Text('Reset shot'),
