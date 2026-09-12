@@ -1,10 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    fmt, fs,
-    fs::OpenOptions,
-    io::Write,
-    path::{Component, Path},
+    fmt,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -13,7 +10,7 @@ use serde_json::Value;
 use crate::{
     ArtifactDependency, ArtifactId, ArtifactIdError, ArtifactRecord, ArtifactStatus, ContentHash,
     DependencyImpact, HashValueError, InputHash, LifecycleError, SelectionError, SelectionManifest,
-    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot},
+    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
     manifest::{CanonicalProject, ProjectManifestError, ProjectStoreError},
 };
 
@@ -553,6 +550,8 @@ impl ShotWorkflow {
         artifacts: &[StoredArtifactRecord],
         selection: &StoredSelectionManifest,
     ) -> Result<(), ShotWorkflowError> {
+        // Each file is published with an atomic same-directory replacement. This
+        // intentionally does not claim cross-file transaction semantics.
         write_json(
             project,
             &shot_path(self.shot_number, "artifacts.json")?,
@@ -665,76 +664,10 @@ fn write_json<T: Serialize + ?Sized>(
         .map_err(ShotWorkflowError::Manifest)?;
     let mut bytes = serde_json::to_vec_pretty(value).map_err(ShotWorkflowError::Json)?;
     bytes.push(b'\n');
-    write_canonical(project.root(), path, &bytes)
-}
-
-fn write_canonical(
-    root: &ProjectRoot,
-    path: &ProjectRelativePath,
-    bytes: &[u8],
-) -> Result<(), ShotWorkflowError> {
-    let resolved = root.resolve(path);
-    let parent = resolved
-        .parent()
-        .ok_or_else(|| ShotWorkflowError::InvalidTarget(resolved.clone()))?;
-    ensure_directory(root, parent)?;
-
-    match fs::symlink_metadata(&resolved) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(ShotWorkflowError::Fs(ProjectFsError::Symlink(resolved)));
-            }
-            if !metadata.is_file() {
-                return Err(ShotWorkflowError::Fs(ProjectFsError::NotFile(resolved)));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(ShotWorkflowError::Fs(ProjectFsError::Io(error))),
-    }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&resolved)
-        .map_err(|error| ShotWorkflowError::Fs(ProjectFsError::Io(error)))?;
-    file.write_all(bytes)
-        .map_err(|error| ShotWorkflowError::Fs(ProjectFsError::Io(error)))?;
-    file.sync_all()
-        .map_err(|error| ShotWorkflowError::Fs(ProjectFsError::Io(error)))?;
-    ProjectRoot::sync_directory(parent).map_err(ShotWorkflowError::Fs)
-}
-
-fn ensure_directory(root: &ProjectRoot, directory: &Path) -> Result<(), ShotWorkflowError> {
-    let relative = directory
-        .strip_prefix(root.root())
-        .map_err(|_| ShotWorkflowError::Fs(ProjectFsError::EscapedRoot(directory.to_path_buf())))?;
-    let mut current = root.root().to_path_buf();
-
-    for component in relative.components() {
-        let Component::Normal(segment) = component else {
-            return Err(ShotWorkflowError::Fs(ProjectFsError::EscapedRoot(
-                directory.to_path_buf(),
-            )));
-        };
-        current.push(segment);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(ShotWorkflowError::Fs(ProjectFsError::Symlink(current)));
-                }
-                if !metadata.is_dir() {
-                    return Err(ShotWorkflowError::Fs(ProjectFsError::NotDirectory(current)));
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current)
-                    .map_err(|error| ShotWorkflowError::Fs(ProjectFsError::Io(error)))?;
-            }
-            Err(error) => return Err(ShotWorkflowError::Fs(ProjectFsError::Io(error))),
-        }
-    }
-    Ok(())
+    project
+        .root()
+        .write_atomic(path, &bytes)
+        .map_err(ShotWorkflowError::Fs)
 }
 
 #[derive(Debug)]
@@ -826,7 +759,7 @@ mod tests {
     };
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -992,5 +925,34 @@ mod tests {
         assert_eq!(shot_json["future_shot"], Value::String("keep".to_owned()));
         assert_eq!(artifacts_json[0]["future_artifact"], Value::from(7));
         assert_eq!(selection_json["future_selection"], Value::Bool(true));
+    }
+
+    #[test]
+    fn canonical_shot_update_replaces_the_published_file() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.set_direction(&project, ShotDirection::Tension)
+            .unwrap();
+
+        let base = target.join("scenes/scene_001/shots/shot_001");
+        let published = base.join("shot.json");
+        let previous = base.join("shot.previous.json");
+        fs::hard_link(&published, &previous).unwrap();
+
+        shot.set_direction(&project, ShotDirection::Intimacy)
+            .unwrap();
+
+        let previous_json: Value = serde_json::from_slice(&fs::read(previous).unwrap()).unwrap();
+        let current_json: Value = serde_json::from_slice(&fs::read(published).unwrap()).unwrap();
+        assert_eq!(
+            previous_json["direction"],
+            Value::String("tension".to_owned())
+        );
+        assert_eq!(
+            current_json["direction"],
+            Value::String("intimacy".to_owned())
+        );
     }
 }
