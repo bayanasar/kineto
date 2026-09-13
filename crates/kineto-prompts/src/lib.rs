@@ -151,10 +151,7 @@ impl GenerationPolicy {
     #[must_use]
     pub fn allows(self, prompt: &CompiledPrompt) -> bool {
         !(self.block_identity_affecting_degradation
-            && matches!(
-                prompt.degradation(),
-                DegradationLevel::IdentityAffecting
-            ))
+            && matches!(prompt.degradation(), DegradationLevel::IdentityAffecting))
     }
 }
 

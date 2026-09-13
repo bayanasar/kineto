@@ -382,7 +382,12 @@ mod tests {
         assert_eq!(intent.operation(), "video.generate");
         assert_eq!(intent.job_id().as_str(), "job_01J");
         assert!(intent.artifact_id().is_none());
-        assert!(intent.idempotency_key().as_str().starts_with("video.generate:"));
+        assert!(
+            intent
+                .idempotency_key()
+                .as_str()
+                .starts_with("video.generate:")
+        );
         assert!(intent.input_hash().as_str().starts_with("sha256:"));
     }
 

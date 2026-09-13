@@ -589,12 +589,19 @@ impl ShotWorkflow {
         if self.selection.candidate_artifact_ids.is_empty() {
             return Ok(());
         }
-        let all_superseded = self.selection.candidate_artifact_ids.iter().all(|candidate| {
-            ArtifactId::new(candidate.clone()).ok().is_some_and(|candidate| {
-                self.artifact(&candidate)
-                    .is_some_and(|artifact| artifact.status == StoredArtifactStatus::Superseded)
-            })
-        });
+        let all_superseded = self
+            .selection
+            .candidate_artifact_ids
+            .iter()
+            .all(|candidate| {
+                ArtifactId::new(candidate.clone())
+                    .ok()
+                    .is_some_and(|candidate| {
+                        self.artifact(&candidate).is_some_and(|artifact| {
+                            artifact.status == StoredArtifactStatus::Superseded
+                        })
+                    })
+            });
         if all_superseded {
             self.selection.candidate_artifact_ids.clear();
             self.selection.selected_artifact_id = None;
@@ -737,8 +744,8 @@ fn supersede_active_shot_candidates(
 fn input_hash(shot: &ShotProductionManifest) -> Result<InputHash, ShotWorkflowError> {
     let mut hasher = Sha256::new();
     hasher.update(b"kineto:shot-intent:v1\0");
-    let shot_id_len = u64::try_from(shot.shot_id.len())
-        .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
+    let shot_id_len =
+        u64::try_from(shot.shot_id.len()).map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
     hasher.update(shot_id_len.to_le_bytes());
     hasher.update(shot.shot_id.as_bytes());
     hasher.update([shot.direction.code()]);
@@ -755,8 +762,7 @@ fn demo_content_hash(artifact_id: &ArtifactId) -> Result<ContentHash, ShotWorkfl
 fn candidate_ids(shot_id: &str, revision: u16) -> Result<Vec<ArtifactId>, ShotWorkflowError> {
     (0..GENERATED_CANDIDATE_COUNT)
         .map(|index| {
-            let label =
-                char::from(b'a' + u8::try_from(index).expect("candidate count fits in u8"));
+            let label = char::from(b'a' + u8::try_from(index).expect("candidate count fits in u8"));
             ArtifactId::new(format!("{shot_id}_g{revision:04}_candidate_{label}"))
                 .map_err(ShotWorkflowError::ArtifactId)
         })
@@ -1238,7 +1244,11 @@ mod tests {
 
         fs::write(shot_dir(&target).join("selection.json"), selection_before).unwrap();
         fs::write(shot_dir(&target).join("shot.json"), reset_state.shot).unwrap();
-        fs::write(shot_dir(&target).join("artifacts.json"), reset_state.artifacts).unwrap();
+        fs::write(
+            shot_dir(&target).join("artifacts.json"),
+            reset_state.artifacts,
+        )
+        .unwrap();
 
         let reopened = CanonicalProject::open(&target).unwrap();
         let mut recovered = ShotWorkflow::load(&reopened, 1).unwrap();
