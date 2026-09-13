@@ -18,6 +18,7 @@ use crate::{
 const SHOT_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 const GENERATED_CANDIDATE_COUNT: usize = 3;
+const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
@@ -85,6 +86,29 @@ pub struct ShotApprovalSnapshot {
     pub direction: ShotDirection,
     pub generation_revision: u16,
     pub superseded_count: u16,
+    pub migration_pending: bool,
+    pub invalid_hash_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShotHashIssue {
+    pub artifact_id: String,
+    pub field: &'static str,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShotHashMigrationRecord {
+    pub artifact_id: String,
+    pub field: &'static str,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShotMigrationReport {
+    pub backup_path: Option<String>,
+    pub rewritten: Vec<ShotHashMigrationRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,10 +197,19 @@ struct StoredArtifactRecord {
 }
 
 impl StoredArtifactRecord {
-    fn domain(&self) -> Result<ArtifactRecord, ShotWorkflowError> {
+    fn validate_structure(&self) -> Result<(), ShotWorkflowError> {
         if self.schema_version == 0 || self.artifact_type.trim().is_empty() {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
+        ArtifactId::new(self.artifact_id.clone())?;
+        for dependency in &self.dependencies {
+            dependency.validate_structure()?;
+        }
+        Ok(())
+    }
+
+    fn domain(&self) -> Result<ArtifactRecord, ShotWorkflowError> {
+        self.validate_structure()?;
         Ok(ArtifactRecord {
             artifact_id: ArtifactId::new(self.artifact_id.clone())?,
             status: self.status.into(),
@@ -203,7 +236,13 @@ impl StoredArtifactRecord {
 }
 
 impl StoredArtifactDependency {
+    fn validate_structure(&self) -> Result<(), ShotWorkflowError> {
+        ArtifactId::new(self.artifact_id.clone())?;
+        Ok(())
+    }
+
     fn domain(&self) -> Result<ArtifactDependency, ShotWorkflowError> {
+        self.validate_structure()?;
         Ok(ArtifactDependency {
             artifact_id: ArtifactId::new(self.artifact_id.clone())?,
             content_hash: ContentHash::new(self.content_hash.clone())?,
@@ -269,6 +308,9 @@ pub struct ShotWorkflow {
     shot: ShotProductionManifest,
     artifacts: Vec<StoredArtifactRecord>,
     selection: StoredSelectionManifest,
+    hash_issues: Vec<ShotHashIssue>,
+    hash_migration_records: Vec<ShotHashMigrationRecord>,
+    legacy_artifacts_bytes: Option<Vec<u8>>,
 }
 
 impl ShotWorkflow {
@@ -293,18 +335,30 @@ impl ShotWorkflow {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
 
-        let artifacts = read_json_optional(project, &artifacts_file)?.unwrap_or_default();
+        let artifacts_bytes = read_bytes_optional(project, &artifacts_file)?;
+        let artifacts = artifacts_bytes
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(ShotWorkflowError::Json)?
+            .unwrap_or_default();
         let selection = read_json_optional(project, &selection_file)?.unwrap_or_default();
         let mut workflow = Self {
             shot_number,
             shot,
             artifacts,
             selection,
+            hash_issues: Vec::new(),
+            hash_migration_records: Vec::new(),
+            legacy_artifacts_bytes: artifacts_bytes,
         };
-        if workflow.migrate_legacy_demo_hashes()? {
-            write_json(project, &artifacts_file, &workflow.artifacts)?;
+        workflow.normalize_legacy_demo_hashes()?;
+        if workflow.hash_migration_records.is_empty() {
+            workflow.legacy_artifacts_bytes = None;
         }
-        workflow.recover_partial_publication()?;
+        if workflow.hash_issues.is_empty() && workflow.hash_migration_records.is_empty() {
+            workflow.recover_partial_publication()?;
+        }
         workflow.validate()?;
         Ok(workflow)
     }
@@ -338,6 +392,8 @@ impl ShotWorkflow {
                 .count(),
         )
         .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
+        let invalid_hash_count = u16::try_from(self.hash_issues.len())
+            .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
 
         Ok(ShotApprovalSnapshot {
             generated: candidate_count != 0,
@@ -348,7 +404,60 @@ impl ShotWorkflow {
             direction: self.shot.direction,
             generation_revision: self.shot.generation_revision,
             superseded_count,
+            migration_pending: !self.hash_migration_records.is_empty(),
+            invalid_hash_count,
         })
+    }
+
+    #[must_use]
+    pub fn hash_issues(&self) -> &[ShotHashIssue] {
+        &self.hash_issues
+    }
+
+    pub fn migrate_legacy_hashes(
+        &mut self,
+        project: &CanonicalProject,
+    ) -> Result<ShotMigrationReport, ShotWorkflowError> {
+        if let Some(issue) = self.hash_issues.first() {
+            return Err(invalid_stored_hash(issue));
+        }
+        if self.hash_migration_records.is_empty() {
+            return Ok(ShotMigrationReport::default());
+        }
+        project
+            .manifest()
+            .validate_for_write()
+            .map_err(ShotWorkflowError::Manifest)?;
+
+        let original = self
+            .legacy_artifacts_bytes
+            .as_ref()
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        let backup_path = shot_path(self.shot_number, LEGACY_HASH_BACKUP_FILE)?;
+        match read_bytes_optional(project, &backup_path)? {
+            Some(existing) if existing != *original => {
+                return Err(ShotWorkflowError::MigrationBackupConflict(
+                    backup_path.as_path().to_string_lossy().into_owned(),
+                ));
+            }
+            Some(_) => {}
+            None => project
+                .root()
+                .write_atomic(&backup_path, original)
+                .map_err(ShotWorkflowError::Fs)?,
+        }
+
+        let artifacts_path = shot_path(self.shot_number, "artifacts.json")?;
+        write_json(project, &artifacts_path, &self.artifacts)?;
+        let report = ShotMigrationReport {
+            backup_path: Some(backup_path.as_path().to_string_lossy().into_owned()),
+            rewritten: self.hash_migration_records.clone(),
+        };
+        self.hash_migration_records.clear();
+        self.legacy_artifacts_bytes = None;
+        self.recover_partial_publication()?;
+        self.validate()?;
+        Ok(report)
     }
 
     pub fn set_direction(
@@ -356,6 +465,7 @@ impl ShotWorkflow {
         project: &CanonicalProject,
         direction: ShotDirection,
     ) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
         if self.snapshot()?.locked {
             return Err(ShotWorkflowError::Locked);
         }
@@ -375,6 +485,7 @@ impl ShotWorkflow {
     }
 
     pub fn generate(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
         if self.snapshot()?.locked {
             return Err(ShotWorkflowError::Locked);
         }
@@ -431,6 +542,7 @@ impl ShotWorkflow {
         project: &CanonicalProject,
         candidate_index: usize,
     ) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
         let snapshot = self.snapshot()?;
         if snapshot.locked {
             return Err(ShotWorkflowError::Locked);
@@ -484,6 +596,7 @@ impl ShotWorkflow {
     }
 
     pub fn lock(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
         let snapshot = self.snapshot()?;
         if snapshot.locked {
             return Err(ShotWorkflowError::AlreadyLocked);
@@ -515,6 +628,7 @@ impl ShotWorkflow {
     }
 
     pub fn reset(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
         project
             .manifest()
             .validate_for_write()
@@ -561,39 +675,85 @@ impl ShotWorkflow {
         )
     }
 
-    fn migrate_legacy_demo_hashes(&mut self) -> Result<bool, ShotWorkflowError> {
+    fn normalize_legacy_demo_hashes(&mut self) -> Result<(), ShotWorkflowError> {
         let shot_id = self.shot.shot_id.clone();
-        let mut changed = false;
+        let mut issues = Vec::new();
+        let mut migration_records = Vec::new();
 
         for artifact in &mut self.artifacts {
+            artifact.validate_structure()?;
             if ContentHash::new(artifact.content_hash.clone()).is_err() {
                 let artifact_id = ArtifactId::new(artifact.artifact_id.clone())?;
                 let legacy_content_hash = format!("demo:{}", artifact_id.as_str());
-                if artifact.artifact_type != "shot_candidate"
-                    || artifact.content_hash != legacy_content_hash
+                if artifact.artifact_type == "shot_candidate"
+                    && artifact.content_hash == legacy_content_hash
                 {
-                    return Err(ShotWorkflowError::Hash(HashValueError));
+                    let from = artifact.content_hash.clone();
+                    let to = demo_content_hash(&artifact_id)?.as_str().to_owned();
+                    artifact.content_hash.clone_from(&to);
+                    migration_records.push(ShotHashMigrationRecord {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field: "content_hash",
+                        from,
+                        to,
+                    });
+                } else {
+                    issues.push(ShotHashIssue {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field: "content_hash",
+                        value: artifact.content_hash.clone(),
+                    });
                 }
-                artifact.content_hash = demo_content_hash(&artifact_id)?.as_str().to_owned();
-                changed = true;
             }
 
-            let Some(stored_input_hash) = artifact.input_hash.as_mut() else {
-                continue;
-            };
-            if InputHash::new(stored_input_hash.clone()).is_ok() {
-                continue;
+            if let Some(stored_input_hash) = artifact.input_hash.as_mut()
+                && InputHash::new(stored_input_hash.clone()).is_err()
+            {
+                if artifact.artifact_type == "shot_candidate"
+                    && let Some(direction) = legacy_input_hash_direction(&shot_id, stored_input_hash)
+                {
+                    let from = stored_input_hash.clone();
+                    let to = input_hash_for(&shot_id, direction)?.as_str().to_owned();
+                    stored_input_hash.clone_from(&to);
+                    migration_records.push(ShotHashMigrationRecord {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field: "input_hash",
+                        from,
+                        to,
+                    });
+                } else {
+                    issues.push(ShotHashIssue {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field: "input_hash",
+                        value: stored_input_hash.clone(),
+                    });
+                }
             }
-            if artifact.artifact_type != "shot_candidate" {
-                return Err(ShotWorkflowError::Hash(HashValueError));
+
+            for dependency in &artifact.dependencies {
+                if ContentHash::new(dependency.content_hash.clone()).is_err() {
+                    issues.push(ShotHashIssue {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field: "dependencies[].content_hash",
+                        value: dependency.content_hash.clone(),
+                    });
+                }
             }
-            let direction = legacy_input_hash_direction(&shot_id, stored_input_hash)
-                .ok_or(ShotWorkflowError::Hash(HashValueError))?;
-            *stored_input_hash = input_hash_for(&shot_id, direction)?.as_str().to_owned();
-            changed = true;
         }
 
-        Ok(changed)
+        self.hash_issues = issues;
+        self.hash_migration_records = migration_records;
+        Ok(())
+    }
+
+    fn ensure_mutation_allowed(&self) -> Result<(), ShotWorkflowError> {
+        if let Some(issue) = self.hash_issues.first() {
+            return Err(invalid_stored_hash(issue));
+        }
+        if !self.hash_migration_records.is_empty() {
+            return Err(ShotWorkflowError::MigrationRequired);
+        }
+        Ok(())
     }
 
     fn recover_partial_publication(&mut self) -> Result<(), ShotWorkflowError> {
@@ -704,9 +864,13 @@ impl ShotWorkflow {
         let selection = self.selection.domain()?;
         let mut artifact_ids = BTreeSet::new();
         for artifact in &self.artifacts {
-            let domain = artifact.domain()?;
-            if !artifact_ids.insert(domain.artifact_id.clone()) {
+            artifact.validate_structure()?;
+            let artifact_id = ArtifactId::new(artifact.artifact_id.clone())?;
+            if !artifact_ids.insert(artifact_id) {
                 return Err(ShotWorkflowError::InvalidCanonicalState);
+            }
+            if self.hash_issues.is_empty() {
+                artifact.domain()?;
             }
         }
         for candidate in &selection.candidate_artifact_ids {
@@ -766,6 +930,14 @@ impl ShotWorkflow {
                 artifact.input_hash.as_deref() != Some(current_input_hash.as_str())
             })
         }))
+    }
+}
+
+fn invalid_stored_hash(issue: &ShotHashIssue) -> ShotWorkflowError {
+    ShotWorkflowError::InvalidStoredHash {
+        artifact_id: issue.artifact_id.clone(),
+        field: issue.field,
+        value: issue.value.clone(),
     }
 }
 
@@ -842,17 +1014,24 @@ fn shot_path(shot_number: u32, file: &str) -> Result<ProjectRelativePath, ShotWo
     .map_err(ShotWorkflowError::Path)
 }
 
+fn read_bytes_optional(
+    project: &CanonicalProject,
+    path: &ProjectRelativePath,
+) -> Result<Option<Vec<u8>>, ShotWorkflowError> {
+    match project.root().read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(ProjectFsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ShotWorkflowError::Fs(error)),
+    }
+}
+
 fn read_json_optional<T: DeserializeOwned>(
     project: &CanonicalProject,
     path: &ProjectRelativePath,
 ) -> Result<Option<T>, ShotWorkflowError> {
-    match project.root().read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(ShotWorkflowError::Json),
-        Err(ProjectFsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(ShotWorkflowError::Fs(error)),
-    }
+    read_bytes_optional(project, path)?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(ShotWorkflowError::Json))
+        .transpose()
 }
 
 fn write_json<T: Serialize + ?Sized>(
@@ -883,6 +1062,13 @@ pub enum ShotWorkflowError {
     NoSelection,
     StaleSelection,
     GenerationOverflow,
+    MigrationRequired,
+    InvalidStoredHash {
+        artifact_id: String,
+        field: &'static str,
+        value: String,
+    },
+    MigrationBackupConflict(String),
     InvalidTarget(std::path::PathBuf),
     Path(ProjectPathError),
     Fs(ProjectFsError),
@@ -911,6 +1097,20 @@ impl fmt::Display for ShotWorkflowError {
                 formatter.write_str("selected candidate is stale; regenerate before locking")
             }
             Self::GenerationOverflow => formatter.write_str("shot generation revision overflow"),
+            Self::MigrationRequired => {
+                formatter.write_str("legacy shot hashes require explicit migration before writing")
+            }
+            Self::InvalidStoredHash {
+                artifact_id,
+                field,
+                value,
+            } => write!(
+                formatter,
+                "artifact {artifact_id} has invalid {field}: {value}"
+            ),
+            Self::MigrationBackupConflict(path) => {
+                write!(formatter, "legacy hash migration backup conflicts at {path}")
+            }
             Self::InvalidTarget(path) => {
                 write!(formatter, "invalid shot state target: {}", path.display())
             }
@@ -948,6 +1148,9 @@ impl Error for ShotWorkflowError {
             | Self::NoSelection
             | Self::StaleSelection
             | Self::GenerationOverflow
+            | Self::MigrationRequired
+            | Self::InvalidStoredHash { .. }
+            | Self::MigrationBackupConflict(_)
             | Self::InvalidTarget(_) => None,
         }
     }
@@ -1361,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_demo_hashes_are_migrated_without_losing_locked_selection() {
+    fn legacy_demo_hashes_load_without_rewrite_and_migrate_with_backup() {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
@@ -1380,6 +1583,49 @@ mod tests {
             artifact.content_hash = format!("demo:{}", artifact.artifact_id);
             artifact.input_hash = Some("kineto:shot-intent:v1:shot_001:tension".to_owned());
         }
+        let legacy_bytes = serde_json::to_vec_pretty(&artifacts).unwrap();
+        fs::write(&artifacts_path, &legacy_bytes).unwrap();
+        drop(project);
+
+        let reopened = CanonicalProject::open(&target).unwrap();
+        let mut normalized = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut expected_pending = before;
+        expected_pending.migration_pending = true;
+        assert_eq!(normalized.snapshot().unwrap(), expected_pending);
+        assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
+        assert_eq!(normalized.hash_issues(), &[]);
+        assert!(matches!(
+            normalized.reset(&reopened),
+            Err(ShotWorkflowError::MigrationRequired)
+        ));
+
+        let report = normalized.migrate_legacy_hashes(&reopened).unwrap();
+        assert_eq!(report.rewritten.len(), 6);
+        let backup = report.backup_path.expect("migration creates backup");
+        assert_eq!(fs::read(target.join(backup)).unwrap(), legacy_bytes);
+        assert_eq!(normalized.snapshot().unwrap(), before);
+
+        let rewritten: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(artifacts_path).unwrap()).unwrap();
+        for artifact in rewritten {
+            assert!(ContentHash::new(artifact.content_hash).is_ok());
+            assert!(InputHash::new(artifact.input_hash.unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn unknown_noncanonical_hash_opens_degraded_and_reports_record() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+
+        let artifacts_path = shot_dir(&target).join("artifacts.json");
+        let mut artifacts: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(&artifacts_path).unwrap()).unwrap();
+        let artifact_id = artifacts[0].artifact_id.clone();
+        artifacts[0].content_hash = "banana".to_owned();
         fs::write(
             &artifacts_path,
             serde_json::to_vec_pretty(&artifacts).unwrap(),
@@ -1388,16 +1634,33 @@ mod tests {
         drop(project);
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let migrated = ShotWorkflow::load(&reopened, 1).unwrap();
-        assert_eq!(migrated.snapshot().unwrap(), before);
-        assert!(before.locked);
-        assert_eq!(before.selected_index, Some(2));
-
-        let rewritten: Vec<StoredArtifactRecord> =
-            serde_json::from_slice(&fs::read(artifacts_path).unwrap()).unwrap();
-        for artifact in rewritten {
-            assert!(ContentHash::new(artifact.content_hash).is_ok());
-            assert!(InputHash::new(artifact.input_hash.unwrap()).is_ok());
-        }
+        let mut degraded = ShotWorkflow::load(&reopened, 1).unwrap();
+        let snapshot = degraded.snapshot().unwrap();
+        assert_eq!(snapshot.invalid_hash_count, 1);
+        assert!(!snapshot.migration_pending);
+        assert_eq!(
+            degraded.hash_issues(),
+            &[ShotHashIssue {
+                artifact_id: artifact_id.clone(),
+                field: "content_hash",
+                value: "banana".to_owned(),
+            }]
+        );
+        assert!(matches!(
+            degraded.reset(&reopened),
+            Err(ShotWorkflowError::InvalidStoredHash {
+                artifact_id: actual_id,
+                field: "content_hash",
+                value,
+            }) if actual_id == artifact_id && value == "banana"
+        ));
+        assert!(matches!(
+            degraded.migrate_legacy_hashes(&reopened),
+            Err(ShotWorkflowError::InvalidStoredHash {
+                artifact_id: actual_id,
+                field: "content_hash",
+                value,
+            }) if actual_id == artifact_id && value == "banana"
+        ));
     }
 }
