@@ -2,8 +2,13 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt, fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRelativePath(PathBuf);
@@ -108,6 +113,69 @@ impl ProjectRoot {
     pub fn read(&self, path: &ProjectRelativePath) -> Result<Vec<u8>, ProjectFsError> {
         let resolved = self.resolve_existing(path)?;
         fs::read(resolved).map_err(ProjectFsError::Io)
+    }
+
+    /// Replace one canonical project file without truncating its published path.
+    ///
+    /// Bytes are written to a reserved sibling temp file, fsynced, published with
+    /// a same-directory rename, then the parent directory is flushed. A crash can
+    /// leave an unpublished temp file, but never a partially truncated canonical
+    /// file. Reserved temp files are excluded from canonical snapshots.
+    pub fn write_atomic(
+        &self,
+        path: &ProjectRelativePath,
+        bytes: &[u8],
+    ) -> Result<(), ProjectFsError> {
+        let resolved = self.resolve(path);
+        let parent = resolved.parent().ok_or_else(|| {
+            ProjectFsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "canonical file has no parent directory",
+            ))
+        })?;
+        ensure_directory(self, parent)?;
+
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(ProjectFsError::Symlink(resolved));
+                }
+                if !metadata.is_file() {
+                    return Err(ProjectFsError::NotFile(resolved));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProjectFsError::Io(error)),
+        }
+
+        for _ in 0..32 {
+            let nonce = WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+            let temp = parent.join(format!(".kineto-write-{}-{nonce}.tmp", std::process::id()));
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(ProjectFsError::Io(error)),
+            };
+
+            let result = (|| -> std::io::Result<()> {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                drop(file);
+                fs::rename(&temp, &resolved)?;
+                sync_directory_impl(parent)
+            })();
+
+            if let Err(error) = result {
+                let _ = fs::remove_file(&temp);
+                return Err(ProjectFsError::Io(error));
+            }
+            return Ok(());
+        }
+
+        Err(ProjectFsError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a canonical write temp file",
+        )))
     }
 
     /// Prove that a project-relative path resolves to a regular file inside the
@@ -231,6 +299,35 @@ fn sync_directory_impl(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn ensure_directory(root: &ProjectRoot, directory: &Path) -> Result<(), ProjectFsError> {
+    let relative = directory
+        .strip_prefix(root.root())
+        .map_err(|_| ProjectFsError::EscapedRoot(directory.to_path_buf()))?;
+    let mut current = root.root().to_path_buf();
+
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return Err(ProjectFsError::EscapedRoot(directory.to_path_buf()));
+        };
+        current.push(segment);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(ProjectFsError::Symlink(current));
+                }
+                if !metadata.is_dir() {
+                    return Err(ProjectFsError::NotDirectory(current));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(ProjectFsError::Io)?;
+            }
+            Err(error) => return Err(ProjectFsError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
 fn scan_directory(
     root: &Path,
     directory: &Path,
@@ -241,7 +338,12 @@ fn scan_directory(
         let path = entry.path();
         let file_type = entry.file_type().map_err(ProjectFsError::Io)?;
 
-        if entry.file_name() == ".kineto" {
+        if entry.file_name() == ".kineto"
+            || entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".kineto-write-"))
+        {
             continue;
         }
         if file_type.is_symlink() {
@@ -366,5 +468,32 @@ mod tests {
         let read_path = ProjectRelativePath::new("escape/secret.txt").unwrap();
         let read_error = root.read(&read_path).unwrap_err();
         assert!(matches!(read_error, ProjectFsError::Symlink(_)));
+    }
+
+    #[test]
+    fn atomic_write_replaces_published_bytes_and_creates_parents() {
+        let temp = TempProject::new();
+        let root = ProjectRoot::open(&temp.path).unwrap();
+        let path = ProjectRelativePath::new("scenes/scene_001/shot.json").unwrap();
+
+        root.write_atomic(&path, b"old\n").unwrap();
+        assert_eq!(root.read(&path).unwrap(), b"old\n");
+
+        root.write_atomic(&path, b"new canonical bytes\n").unwrap();
+        assert_eq!(root.read(&path).unwrap(), b"new canonical bytes\n");
+    }
+
+    #[test]
+    fn canonical_scan_ignores_interrupted_atomic_write_temp_files() {
+        let temp = TempProject::new();
+        fs::write(temp.path.join("project.toml"), b"canonical").unwrap();
+        fs::write(temp.path.join(".kineto-write-999-1.tmp"), b"unpublished").unwrap();
+
+        let snapshot = ProjectRoot::open(&temp.path)
+            .unwrap()
+            .canonical_snapshot()
+            .unwrap();
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[Path::new("project.toml")], b"canonical");
     }
 }

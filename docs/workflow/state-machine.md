@@ -36,6 +36,22 @@ Selection stores a pointer to a stable artifact ID. It never renames candidate m
 
 Locking means downstream artifacts may rely on the selected artifact as stable production truth. Changing a locked artifact creates a new revision and a new dependency/invalidation result; accepted media is never silently overwritten.
 
+`reset` is the explicit destructive exception. It is a direct user action that may supersede the active locked selection and clear the shot's active approval state without a separate unlock step. The locked artifact remains in canonical lineage as `superseded`; it is not overwritten or deleted. The typed shot snapshot exposes whether the active selection is locked before reset. Kineto does not require a modal confirmation protocol for this operation; the destructive meaning belongs to the reset action itself rather than to an implicit upstream edit.
+
+## Canonical publication ordering
+
+Canonical shot state spans `shot.json`, `artifacts.json`, and `selection.json`. Each file is replaced atomically, but the three files are not a cross-file transaction. Writers therefore publish in an order where every completed file boundary is recoverable after a process or power failure:
+
+1. publish the monotonic shot `generation_revision` in `shot.json`
+2. publish artifact records in `artifacts.json`
+3. publish the human selection pointer in `selection.json`
+
+A crash may leave the revision ahead of the artifacts or the artifacts ahead of the selection pointer. The loader recognizes those intermediate states and reconciles them in memory. It never relies on reusing an already-published generation ID, so the next generation remains possible without hand-editing project files.
+
+For selection changes, artifact status is published before the selection pointer. `selection.json` remains the authority for the human choice; if a crash leaves an unmatched `Selected` status, loading reconciles active candidate statuses to the still-published selection pointer before validating the state.
+
+Recovery does not turn the files into an ACID transaction and does not silently rewrite them on open. A later explicit mutation republishes a coherent canonical state.
+
 ## Dependency graph
 
 Artifacts have explicit dependencies at the smallest meaningful production unit.
