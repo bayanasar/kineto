@@ -710,7 +710,8 @@ impl ShotWorkflow {
                 && InputHash::new(stored_input_hash.clone()).is_err()
             {
                 if artifact.artifact_type == "shot_candidate"
-                    && let Some(direction) = legacy_input_hash_direction(&shot_id, stored_input_hash)
+                    && let Some(direction) =
+                        legacy_input_hash_direction(&shot_id, stored_input_hash)
                 {
                     let from = stored_input_hash.clone();
                     let to = input_hash_for(&shot_id, direction)?.as_str().to_owned();
@@ -1109,7 +1110,10 @@ impl fmt::Display for ShotWorkflowError {
                 "artifact {artifact_id} has invalid {field}: {value}"
             ),
             Self::MigrationBackupConflict(path) => {
-                write!(formatter, "legacy hash migration backup conflicts at {path}")
+                write!(
+                    formatter,
+                    "legacy hash migration backup conflicts at {path}"
+                )
             }
             Self::InvalidTarget(path) => {
                 write!(formatter, "invalid shot state target: {}", path.display())
