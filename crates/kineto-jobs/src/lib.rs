@@ -33,18 +33,38 @@ impl IdempotencyKey {
     }
 }
 
+/// Opaque, untrusted handle returned by an external provider.
+///
+/// The constructor rejects traversal-shaped values. This remains an identifier,
+/// not a filesystem path; callers must not bypass project path validation when
+/// persisting data keyed by it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProviderJobId(String);
 
 impl ProviderJobId {
     pub fn new(value: impl Into<String>) -> Result<Self, JobValueError> {
-        portable_identifier(value.into(), MAX_EXTERNAL_ID_LEN, b":/").map(Self)
+        let value = portable_identifier(value.into(), MAX_EXTERNAL_ID_LEN, b":/")?;
+        if value.contains("..")
+            || value.starts_with('/')
+            || provider_job_id_has_drive_prefix(&value)
+        {
+            Err(JobValueError)
+        } else {
+            Ok(Self(value))
+        }
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn provider_job_id_has_drive_prefix(value: &str) -> bool {
+    matches!(
+        value.as_bytes(),
+        [drive, b':', b'/', ..] if drive.is_ascii_alphabetic()
+    )
 }
 
 fn portable_identifier(
@@ -452,6 +472,11 @@ mod tests {
         assert!(JobId::new("x".repeat(MAX_LOCAL_ID_LEN + 1)).is_err());
         assert!(IdempotencyKey::new("video.generate:sha256:abc").is_ok());
         assert!(ProviderJobId::new("provider/jobs:remote-42").is_ok());
+        assert!(ProviderJobId::new("../../etc/passwd").is_err());
+        assert!(ProviderJobId::new("/absolute/provider-id").is_err());
+        assert!(ProviderJobId::new("provider/../remote-42").is_err());
+        assert!(ProviderJobId::new("provider..remote-42").is_err());
+        assert!(ProviderJobId::new("C:/provider/remote-42").is_err());
         assert!(ProviderJobId::new("remote\n42").is_err());
     }
 }
