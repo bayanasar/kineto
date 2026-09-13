@@ -9,8 +9,8 @@
     "schema_version": {"type": "integer", "minimum": 1},
     "type": {"type": "string", "minLength": 1},
     "status": {"enum": ["draft", "candidate", "selected", "locked", "superseded"]},
-    "content_hash": {"type": "string", "minLength": 1},
-    "input_hash": {"type": ["string", "null"], "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "input_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
     "provider": {"type": ["string", "null"]},
     "model": {"type": ["string", "null"]},
     "compiler_version": {"type": ["string", "null"]},
@@ -22,7 +22,7 @@
         "type": "object",
         "required": ["constraint", "reason", "degradation"],
         "properties": {
-          "constraint": {"type": "string", "minLength": 1},
+          "constraint": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
           "reason": {"type": "string", "minLength": 1},
           "degradation": {"enum": ["cosmetic", "identity_affecting"]}
         },
@@ -35,8 +35,8 @@
         "type": "object",
         "required": ["artifact_id", "content_hash", "impact"],
         "properties": {
-          "artifact_id": {"type": "string", "minLength": 1},
-          "content_hash": {"type": "string", "minLength": 1},
+          "artifact_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
           "impact": {"enum": ["semantic", "cosmetic"]},
           "field": {"type": ["string", "null"]}
         },
