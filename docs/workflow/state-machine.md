@@ -36,6 +36,8 @@ Selection stores a pointer to a stable artifact ID. It never renames candidate m
 
 Locking means downstream artifacts may rely on the selected artifact as stable production truth. Changing a locked artifact creates a new revision and a new dependency/invalidation result; accepted media is never silently overwritten.
 
+`reset` is the explicit destructive exception. It is a direct user action that may supersede the active locked selection and clear the shot's active approval state without a separate unlock step. The locked artifact remains in canonical lineage as `superseded`; it is not overwritten or deleted. The typed shot snapshot exposes whether the active selection is locked before reset. Kineto does not require a modal confirmation protocol for this operation; the destructive meaning belongs to the reset action itself rather than to an implicit upstream edit.
+
 ## Canonical publication ordering
 
 Canonical shot state spans `shot.json`, `artifacts.json`, and `selection.json`. Each file is replaced atomically, but the three files are not a cross-file transaction. Writers therefore publish in an order where every completed file boundary is recoverable after a process or power failure:
