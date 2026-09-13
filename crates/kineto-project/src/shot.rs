@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     ArtifactDependency, ArtifactId, ArtifactIdError, ArtifactRecord, ArtifactStatus, ContentHash,
@@ -43,15 +44,6 @@ impl ShotDirection {
             3 => Some(Self::Intimacy),
             4 => Some(Self::Tension),
             _ => None,
-        }
-    }
-
-    const fn key(self) -> &'static str {
-        match self {
-            Self::Reaction => "reaction",
-            Self::SpatialClarity => "spatial_clarity",
-            Self::Intimacy => "intimacy",
-            Self::Tension => "tension",
         }
     }
 }
@@ -293,12 +285,13 @@ impl ShotWorkflow {
 
         let artifacts = read_json_optional(project, &artifacts_file)?.unwrap_or_default();
         let selection = read_json_optional(project, &selection_file)?.unwrap_or_default();
-        let workflow = Self {
+        let mut workflow = Self {
             shot_number,
             shot,
             artifacts,
             selection,
         };
+        workflow.recover_partial_publication()?;
         workflow.validate()?;
         Ok(workflow)
     }
@@ -383,22 +376,12 @@ impl ShotWorkflow {
             .checked_add(1)
             .ok_or(ShotWorkflowError::GenerationOverflow)?;
         let mut next_artifacts = self.artifacts.clone();
-        for artifact_id in &self.selection.domain()?.candidate_artifact_ids {
-            let artifact = find_artifact_mut(&mut next_artifacts, artifact_id)
-                .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
-            if artifact.status != StoredArtifactStatus::Superseded {
-                artifact.transition(ArtifactStatus::Superseded)?;
-            }
-        }
+        supersede_active_shot_candidates(&mut next_artifacts)?;
 
         let input_hash = input_hash(&next_shot)?;
-        let mut candidate_artifact_ids = Vec::with_capacity(GENERATED_CANDIDATE_COUNT);
-        for index in 0..GENERATED_CANDIDATE_COUNT {
-            let label = char::from(b'a' + u8::try_from(index).expect("candidate count fits in u8"));
-            let artifact_id = ArtifactId::new(format!(
-                "{}_g{:04}_candidate_{label}",
-                next_shot.shot_id, next_shot.generation_revision
-            ))?;
+        let candidate_ids = candidate_ids(&next_shot.shot_id, next_shot.generation_revision)?;
+        let mut candidate_artifact_ids = Vec::with_capacity(candidate_ids.len());
+        for artifact_id in candidate_ids {
             if next_artifacts
                 .iter()
                 .any(|record| record.artifact_id == artifact_id.as_str())
@@ -410,7 +393,7 @@ impl ShotWorkflow {
                 schema_version: ARTIFACT_SCHEMA_VERSION,
                 artifact_type: "shot_candidate".to_owned(),
                 status: StoredArtifactStatus::Candidate,
-                content_hash: format!("demo:{}", artifact_id.as_str()),
+                content_hash: demo_content_hash(&artifact_id)?.as_str().to_owned(),
                 input_hash: Some(input_hash.as_str().to_owned()),
                 dependencies: Vec::new(),
                 extra: BTreeMap::new(),
@@ -469,6 +452,9 @@ impl ShotWorkflow {
         let mut next_selection = self.selection.clone();
         next_selection.select(&selected)?;
 
+        // Artifact status is published before the selection pointer. If the process
+        // stops between the two atomic writes, load() reconciles status back to
+        // selection.json, which is the authority for the human selection.
         write_json(
             project,
             &shot_path(self.shot_number, "artifacts.json")?,
@@ -523,13 +509,7 @@ impl ShotWorkflow {
         let mut next_shot = self.shot.clone();
         next_shot.direction = ShotDirection::Reaction;
         let mut next_artifacts = self.artifacts.clone();
-        for artifact_id in &self.selection.domain()?.candidate_artifact_ids {
-            let artifact = find_artifact_mut(&mut next_artifacts, artifact_id)
-                .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
-            if artifact.status != StoredArtifactStatus::Superseded {
-                artifact.transition(ArtifactStatus::Superseded)?;
-            }
-        }
+        supersede_active_shot_candidates(&mut next_artifacts)?;
         let next_selection = StoredSelectionManifest {
             selected_artifact_id: None,
             candidate_artifact_ids: Vec::new(),
@@ -550,8 +530,12 @@ impl ShotWorkflow {
         artifacts: &[StoredArtifactRecord],
         selection: &StoredSelectionManifest,
     ) -> Result<(), ShotWorkflowError> {
-        // Each file is published with an atomic same-directory replacement. This
-        // intentionally does not claim cross-file transaction semantics.
+        // Every file is replaced atomically, but the three files are not an ACID
+        // transaction. Publish the monotonic generation revision first, artifact
+        // records second, and the selection pointer last. load() recognizes the
+        // intermediate states and reconciles them so every completed file boundary
+        // is forward-recoverable after a process or power failure.
+        write_json(project, &shot_path(self.shot_number, "shot.json")?, shot)?;
         write_json(
             project,
             &shot_path(self.shot_number, "artifacts.json")?,
@@ -561,8 +545,104 @@ impl ShotWorkflow {
             project,
             &shot_path(self.shot_number, "selection.json")?,
             selection,
-        )?;
-        write_json(project, &shot_path(self.shot_number, "shot.json")?, shot)
+        )
+    }
+
+    fn recover_partial_publication(&mut self) -> Result<(), ShotWorkflowError> {
+        self.recover_generation_selection()?;
+        self.recover_cleared_selection()?;
+        self.reconcile_selection_statuses()
+    }
+
+    fn recover_generation_selection(&mut self) -> Result<(), ShotWorkflowError> {
+        if self.shot.generation_revision == 0 {
+            return Ok(());
+        }
+        let expected = candidate_ids(&self.shot.shot_id, self.shot.generation_revision)?;
+        let expected_strings = expected
+            .iter()
+            .map(|artifact_id| artifact_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if self.selection.candidate_artifact_ids == expected_strings {
+            return Ok(());
+        }
+
+        let generation_is_fully_published = expected.iter().all(|artifact_id| {
+            self.artifact(artifact_id).is_some_and(|artifact| {
+                artifact.artifact_type == "shot_candidate"
+                    && matches!(
+                        artifact.status,
+                        StoredArtifactStatus::Candidate
+                            | StoredArtifactStatus::Selected
+                            | StoredArtifactStatus::Locked
+                    )
+            })
+        });
+        if generation_is_fully_published {
+            self.selection.candidate_artifact_ids = expected_strings;
+            self.selection.selected_artifact_id = None;
+        }
+        Ok(())
+    }
+
+    fn recover_cleared_selection(&mut self) -> Result<(), ShotWorkflowError> {
+        if self.selection.candidate_artifact_ids.is_empty() {
+            return Ok(());
+        }
+        let all_superseded = self.selection.candidate_artifact_ids.iter().all(|candidate| {
+            ArtifactId::new(candidate.clone()).ok().is_some_and(|candidate| {
+                self.artifact(&candidate)
+                    .is_some_and(|artifact| artifact.status == StoredArtifactStatus::Superseded)
+            })
+        });
+        if all_superseded {
+            self.selection.candidate_artifact_ids.clear();
+            self.selection.selected_artifact_id = None;
+        }
+        Ok(())
+    }
+
+    fn reconcile_selection_statuses(&mut self) -> Result<(), ShotWorkflowError> {
+        let selection = self.selection.domain()?;
+        let candidate_ids = selection
+            .candidate_artifact_ids
+            .iter()
+            .map(|artifact_id| artifact_id.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        let selected_id = selection
+            .selected_artifact_id
+            .as_ref()
+            .map(|artifact_id| artifact_id.as_str().to_owned());
+
+        for artifact in &mut self.artifacts {
+            let is_candidate = candidate_ids.contains(&artifact.artifact_id);
+            let is_selected = selected_id.as_deref() == Some(artifact.artifact_id.as_str());
+            match (is_candidate, is_selected, artifact.status) {
+                (true, true, StoredArtifactStatus::Candidate) => {
+                    artifact.transition(ArtifactStatus::Selected)?;
+                }
+                (true, true, StoredArtifactStatus::Selected | StoredArtifactStatus::Locked) => {}
+                (true, true, StoredArtifactStatus::Draft | StoredArtifactStatus::Superseded) => {
+                    return Err(ShotWorkflowError::InvalidCanonicalState);
+                }
+                (true, false, StoredArtifactStatus::Selected) => {
+                    artifact.transition(ArtifactStatus::Candidate)?;
+                }
+                (true, false, StoredArtifactStatus::Candidate) => {}
+                (
+                    true,
+                    false,
+                    StoredArtifactStatus::Draft
+                    | StoredArtifactStatus::Locked
+                    | StoredArtifactStatus::Superseded,
+                ) => return Err(ShotWorkflowError::InvalidCanonicalState),
+                (false, _, StoredArtifactStatus::Selected | StoredArtifactStatus::Locked) => {
+                    return Err(ShotWorkflowError::InvalidCanonicalState);
+                }
+                (false, _, _) => {}
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), ShotWorkflowError> {
@@ -578,7 +658,12 @@ impl ShotWorkflow {
             let artifact = self
                 .artifact(candidate)
                 .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
-            if artifact.status == StoredArtifactStatus::Superseded {
+            if !matches!(
+                artifact.status,
+                StoredArtifactStatus::Candidate
+                    | StoredArtifactStatus::Selected
+                    | StoredArtifactStatus::Locked
+            ) {
                 return Err(ShotWorkflowError::InvalidCanonicalState);
             }
         }
@@ -590,6 +675,19 @@ impl ShotWorkflow {
                 artifact.status,
                 StoredArtifactStatus::Selected | StoredArtifactStatus::Locked
             ) {
+                return Err(ShotWorkflowError::InvalidCanonicalState);
+            }
+        }
+        let selected_id = selection
+            .selected_artifact_id
+            .as_ref()
+            .map(|artifact_id| artifact_id.as_str());
+        for artifact in &self.artifacts {
+            if matches!(
+                artifact.status,
+                StoredArtifactStatus::Selected | StoredArtifactStatus::Locked
+            ) && selected_id != Some(artifact.artifact_id.as_str())
+            {
                 return Err(ShotWorkflowError::InvalidCanonicalState);
             }
         }
@@ -616,12 +714,53 @@ impl ShotWorkflow {
     }
 }
 
+fn supersede_active_shot_candidates(
+    artifacts: &mut [StoredArtifactRecord],
+) -> Result<(), ShotWorkflowError> {
+    for artifact in artifacts {
+        if artifact.artifact_type != "shot_candidate" {
+            continue;
+        }
+        match artifact.status {
+            StoredArtifactStatus::Candidate | StoredArtifactStatus::Selected => {
+                artifact.transition(ArtifactStatus::Superseded)?;
+            }
+            StoredArtifactStatus::Locked => {
+                artifact.transition(ArtifactStatus::Superseded)?;
+            }
+            StoredArtifactStatus::Draft | StoredArtifactStatus::Superseded => {}
+        }
+    }
+    Ok(())
+}
+
 fn input_hash(shot: &ShotProductionManifest) -> Result<InputHash, ShotWorkflowError> {
-    Ok(InputHash::new(format!(
-        "kineto:shot-intent:v1:{}:{}",
-        shot.shot_id,
-        shot.direction.key()
-    ))?)
+    let mut hasher = Sha256::new();
+    hasher.update(b"kineto:shot-intent:v1\0");
+    let shot_id_len = u64::try_from(shot.shot_id.len())
+        .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
+    hasher.update(shot_id_len.to_le_bytes());
+    hasher.update(shot.shot_id.as_bytes());
+    hasher.update([shot.direction.code()]);
+    InputHash::new(format!("sha256:{:x}", hasher.finalize())).map_err(ShotWorkflowError::Hash)
+}
+
+fn demo_content_hash(artifact_id: &ArtifactId) -> Result<ContentHash, ShotWorkflowError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"kineto:demo-shot-candidate:v1\0");
+    hasher.update(artifact_id.as_str().as_bytes());
+    ContentHash::new(format!("sha256:{:x}", hasher.finalize())).map_err(ShotWorkflowError::Hash)
+}
+
+fn candidate_ids(shot_id: &str, revision: u16) -> Result<Vec<ArtifactId>, ShotWorkflowError> {
+    (0..GENERATED_CANDIDATE_COUNT)
+        .map(|index| {
+            let label =
+                char::from(b'a' + u8::try_from(index).expect("candidate count fits in u8"));
+            ArtifactId::new(format!("{shot_id}_g{revision:04}_candidate_{label}"))
+                .map_err(ShotWorkflowError::ArtifactId)
+        })
+        .collect()
 }
 
 fn find_artifact_mut<'a>(
@@ -725,7 +864,31 @@ impl fmt::Display for ShotWorkflowError {
     }
 }
 
-impl Error for ShotWorkflowError {}
+impl Error for ShotWorkflowError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Path(error) => Some(error),
+            Self::Fs(error) => Some(error),
+            Self::Store(error) => Some(error),
+            Self::Manifest(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::ArtifactId(error) => Some(error),
+            Self::Hash(error) => Some(error),
+            Self::Lifecycle(error) => Some(error),
+            Self::Selection(error) => Some(error),
+            Self::InvalidShotNumber
+            | Self::InvalidCanonicalState
+            | Self::NotGenerated
+            | Self::InvalidCandidate
+            | Self::Locked
+            | Self::AlreadyLocked
+            | Self::NoSelection
+            | Self::StaleSelection
+            | Self::GenerationOverflow
+            | Self::InvalidTarget(_) => None,
+        }
+    }
+}
 
 impl From<ArtifactIdError> for ShotWorkflowError {
     fn from(value: ArtifactIdError) -> Self {
@@ -813,6 +976,34 @@ mod tests {
         .unwrap()
     }
 
+    fn shot_dir(target: &Path) -> PathBuf {
+        target.join("scenes/scene_001/shots/shot_001")
+    }
+
+    #[derive(Clone)]
+    struct StoredStateFiles {
+        shot: Vec<u8>,
+        artifacts: Vec<u8>,
+        selection: Vec<u8>,
+    }
+
+    fn read_state_files(target: &Path) -> StoredStateFiles {
+        let base = shot_dir(target);
+        StoredStateFiles {
+            shot: fs::read(base.join("shot.json")).unwrap(),
+            artifacts: fs::read(base.join("artifacts.json")).unwrap(),
+            selection: fs::read(base.join("selection.json")).unwrap(),
+        }
+    }
+
+    fn write_state_files(target: &Path, state: &StoredStateFiles) {
+        let base = shot_dir(target);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("shot.json"), &state.shot).unwrap();
+        fs::write(base.join("artifacts.json"), &state.artifacts).unwrap();
+        fs::write(base.join("selection.json"), &state.selection).unwrap();
+    }
+
     #[test]
     fn committed_artifact_and_selection_fixtures_decode() {
         let artifacts: Vec<StoredArtifactRecord> = serde_json::from_str(include_str!(
@@ -893,7 +1084,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let base = target.join("scenes/scene_001/shots/shot_001");
+        let base = shot_dir(&target);
         fs::create_dir_all(&base).unwrap();
         fs::write(
             base.join("shot.json"),
@@ -902,7 +1093,7 @@ mod tests {
         .unwrap();
         fs::write(
             base.join("artifacts.json"),
-            br#"[{"artifact_id":"shot_001_g0001_candidate_a","schema_version":1,"type":"shot_candidate","status":"candidate","content_hash":"demo:a","input_hash":"kineto:shot-intent:v1:shot_001:reaction","dependencies":[],"future_artifact":7}]"#,
+            br#"[{"artifact_id":"shot_001_g0001_candidate_a","schema_version":1,"type":"shot_candidate","status":"candidate","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","dependencies":[],"future_artifact":7}]"#,
         )
         .unwrap();
         fs::write(
@@ -936,7 +1127,7 @@ mod tests {
         shot.set_direction(&project, ShotDirection::Tension)
             .unwrap();
 
-        let base = target.join("scenes/scene_001/shots/shot_001");
+        let base = shot_dir(&target);
         let published = base.join("shot.json");
         let previous = base.join("shot.previous.json");
         fs::hard_link(&published, &previous).unwrap();
@@ -954,5 +1145,151 @@ mod tests {
             current_json["direction"],
             Value::String("intimacy".to_owned())
         );
+    }
+
+    #[test]
+    fn generation_crash_points_are_forward_recoverable() {
+        let temp = TempDir::new();
+        let source_target = temp.0.join("source-film");
+        let source_project = project(&source_target);
+        let mut source_shot = ShotWorkflow::load(&source_project, 1).unwrap();
+        source_shot.generate(&source_project).unwrap();
+        let generation_one = read_state_files(&source_target);
+        source_shot.generate(&source_project).unwrap();
+        let generation_two = read_state_files(&source_target);
+        drop(source_project);
+
+        let cases = [
+            (
+                "after-shot",
+                StoredStateFiles {
+                    shot: generation_two.shot.clone(),
+                    artifacts: generation_one.artifacts.clone(),
+                    selection: generation_one.selection.clone(),
+                },
+            ),
+            (
+                "after-artifacts",
+                StoredStateFiles {
+                    shot: generation_two.shot.clone(),
+                    artifacts: generation_two.artifacts.clone(),
+                    selection: generation_one.selection.clone(),
+                },
+            ),
+            ("after-selection", generation_two.clone()),
+        ];
+
+        for (name, state) in cases {
+            let target = temp.0.join(name);
+            let project = project(&target);
+            write_state_files(&target, &state);
+            let mut recovered = ShotWorkflow::load(&project, 1).unwrap();
+            recovered.generate(&project).unwrap();
+            let snapshot = recovered.snapshot().unwrap();
+            assert_eq!(snapshot.generation_revision, 3, "case {name}");
+            assert_eq!(snapshot.candidate_count, 3, "case {name}");
+            assert_eq!(snapshot.selected_index, None, "case {name}");
+        }
+    }
+
+    #[test]
+    fn select_crash_reconciles_artifact_status_to_selection_pointer() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+        shot.select(&project, 0).unwrap();
+        let selection_before = fs::read(shot_dir(&target).join("selection.json")).unwrap();
+        shot.select(&project, 1).unwrap();
+        let artifacts_after = fs::read(shot_dir(&target).join("artifacts.json")).unwrap();
+        drop(project);
+
+        fs::write(shot_dir(&target).join("selection.json"), selection_before).unwrap();
+        fs::write(shot_dir(&target).join("artifacts.json"), artifacts_after).unwrap();
+
+        let reopened = CanonicalProject::open(&target).unwrap();
+        let mut recovered = ShotWorkflow::load(&reopened, 1).unwrap();
+        assert_eq!(recovered.snapshot().unwrap().selected_index, Some(0));
+        assert_eq!(
+            recovered
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.status == StoredArtifactStatus::Selected)
+                .count(),
+            1
+        );
+        recovered.select(&reopened, 1).unwrap();
+        assert_eq!(recovered.snapshot().unwrap().selected_index, Some(1));
+    }
+
+    #[test]
+    fn reset_crash_after_artifact_publish_recovers_cleared_selection() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+        shot.select(&project, 1).unwrap();
+        let selection_before = fs::read(shot_dir(&target).join("selection.json")).unwrap();
+        shot.reset(&project).unwrap();
+        let reset_state = read_state_files(&target);
+        drop(project);
+
+        fs::write(shot_dir(&target).join("selection.json"), selection_before).unwrap();
+        fs::write(shot_dir(&target).join("shot.json"), reset_state.shot).unwrap();
+        fs::write(shot_dir(&target).join("artifacts.json"), reset_state.artifacts).unwrap();
+
+        let reopened = CanonicalProject::open(&target).unwrap();
+        let mut recovered = ShotWorkflow::load(&reopened, 1).unwrap();
+        let snapshot = recovered.snapshot().unwrap();
+        assert_eq!(snapshot.candidate_count, 0);
+        assert_eq!(snapshot.selected_index, None);
+        recovered.generate(&reopened).unwrap();
+        assert_eq!(recovered.snapshot().unwrap().candidate_count, 3);
+    }
+
+    #[test]
+    fn validate_rejects_orphaned_selected_and_locked_artifacts() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+        shot.select(&project, 0).unwrap();
+
+        let mut orphaned_selected = shot.clone();
+        orphaned_selected.selection.selected_artifact_id = None;
+        assert!(matches!(
+            orphaned_selected.validate(),
+            Err(ShotWorkflowError::InvalidCanonicalState)
+        ));
+
+        shot.lock(&project).unwrap();
+        let mut orphaned_locked = shot.clone();
+        orphaned_locked.selection.selected_artifact_id = None;
+        assert!(matches!(
+            orphaned_locked.validate(),
+            Err(ShotWorkflowError::InvalidCanonicalState)
+        ));
+    }
+
+    #[test]
+    fn generated_hashes_are_sha256_digests() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+
+        for artifact in &shot.artifacts {
+            if artifact.status == StoredArtifactStatus::Candidate {
+                assert!(artifact.content_hash.starts_with("sha256:"));
+                assert_eq!(artifact.content_hash.len(), 71);
+                let input_hash = artifact.input_hash.as_ref().unwrap();
+                assert!(input_hash.starts_with("sha256:"));
+                assert_eq!(input_hash.len(), 71);
+            }
+        }
     }
 }
