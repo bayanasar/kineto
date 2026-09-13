@@ -91,7 +91,10 @@ fn reset_is_an_explicit_destructive_action_that_supersedes_a_lock() {
     drop(project);
     let reopened = CanonicalProject::open(&target).unwrap();
     assert_eq!(
-        ShotWorkflow::load(&reopened, 1).unwrap().snapshot().unwrap(),
+        ShotWorkflow::load(&reopened, 1)
+            .unwrap()
+            .snapshot()
+            .unwrap(),
         discarded
     );
 }

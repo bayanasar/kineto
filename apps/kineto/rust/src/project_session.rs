@@ -308,6 +308,8 @@ pub unsafe extern "C" fn kineto_project_title_copy(
 /// - bit 0: candidates generated
 /// - bit 1: selection locked
 /// - bit 2: current candidates are stale against current shot intent
+/// - bit 3: a known legacy hash migration is pending explicit approval
+/// - bit 4: one or more invalid/noncanonical stored hashes were diagnosed
 /// - bits 8..15: candidate count
 /// - bits 16..23: selected index + 1 (0 means none)
 /// - bits 24..31: shot direction
@@ -440,6 +442,8 @@ fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
     u64::from(snapshot.generated)
         | (u64::from(snapshot.locked) << 1)
         | (u64::from(snapshot.stale) << 2)
+        | (u64::from(snapshot.migration_pending) << 3)
+        | (u64::from(snapshot.invalid_hash_count != 0) << 4)
         | (u64::from(snapshot.candidate_count) << 8)
         | (selected_code << 16)
         | (u64::from(snapshot.direction.code()) << 24)
@@ -476,6 +480,9 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         }
         ShotWorkflowError::Fs(_)
         | ShotWorkflowError::InvalidCanonicalState
+        | ShotWorkflowError::MigrationRequired
+        | ShotWorkflowError::InvalidStoredHash { .. }
+        | ShotWorkflowError::MigrationBackupConflict(_)
         | ShotWorkflowError::InvalidTarget(_)
         | ShotWorkflowError::Path(_)
         | ShotWorkflowError::Json(_)
@@ -736,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_packing_includes_stale_and_lineage_fields() {
+    fn snapshot_packing_includes_stale_lineage_and_migration_fields() {
         let bits = encode_shot_snapshot(ShotApprovalSnapshot {
             generated: true,
             stale: true,
@@ -746,10 +753,14 @@ mod tests {
             direction: ShotDirection::Tension,
             generation_revision: 7,
             superseded_count: 18,
+            migration_pending: true,
+            invalid_hash_count: 2,
         });
         assert_eq!(bits & 1, 1);
         assert_eq!((bits >> 1) & 1, 0);
         assert_eq!((bits >> 2) & 1, 1);
+        assert_eq!((bits >> 3) & 1, 1);
+        assert_eq!((bits >> 4) & 1, 1);
         assert_eq!((bits >> 8) & 0xff, 3);
         assert_eq!((bits >> 16) & 0xff, 3);
         assert_eq!((bits >> 24) & 0xff, 4);
