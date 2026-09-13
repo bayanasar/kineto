@@ -61,11 +61,7 @@ pub struct ContentHash(String);
 
 impl ContentHash {
     pub fn new(value: impl Into<String>) -> Result<Self, HashValueError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(HashValueError);
-        }
-        Ok(Self(value))
+        canonical_sha256(value.into()).map(Self)
     }
 
     #[must_use]
@@ -79,11 +75,7 @@ pub struct InputHash(String);
 
 impl InputHash {
     pub fn new(value: impl Into<String>) -> Result<Self, HashValueError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(HashValueError);
-        }
-        Ok(Self(value))
+        canonical_sha256(value.into()).map(Self)
     }
 
     #[must_use]
@@ -92,12 +84,26 @@ impl InputHash {
     }
 }
 
+fn canonical_sha256(value: String) -> Result<String, HashValueError> {
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        return Err(HashValueError);
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(HashValueError);
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashValueError;
 
 impl fmt::Display for HashValueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("hash value must not be empty")
+        formatter.write_str("hash value must be canonical sha256:<64 lowercase hex digits>")
     }
 }
 
@@ -291,13 +297,22 @@ impl ArtifactIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn id(value: &str) -> ArtifactId {
         ArtifactId::new(value).unwrap()
     }
 
+    fn digest(value: &str) -> String {
+        format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    }
+
     fn hash(value: &str) -> ContentHash {
-        ContentHash::new(value).unwrap()
+        ContentHash::new(digest(value)).unwrap()
+    }
+
+    fn input_hash(value: &str) -> InputHash {
+        InputHash::new(digest(value)).unwrap()
     }
 
     fn record(id_value: &str, content_hash: &str) -> ArtifactRecord {
@@ -307,6 +322,24 @@ mod tests {
             content_hash: hash(content_hash),
             input_hash: None,
             dependencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hashes_require_canonical_sha256_representation() {
+        let valid = format!("sha256:{}", "ab".repeat(32));
+        assert!(ContentHash::new(valid.clone()).is_ok());
+        assert!(InputHash::new(valid).is_ok());
+
+        for invalid in [
+            "banana".to_owned(),
+            "sha1:0000000000000000000000000000000000000000".to_owned(),
+            "sha256:abc".to_owned(),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}g", "a".repeat(63)),
+        ] {
+            assert!(ContentHash::new(invalid.clone()).is_err(), "{invalid}");
+            assert!(InputHash::new(invalid).is_err());
         }
     }
 
@@ -330,7 +363,7 @@ mod tests {
 
     #[test]
     fn selected_candidate_can_return_to_candidate_before_lock() {
-        let mut artifact = record("cand_a", "sha256:a");
+        let mut artifact = record("cand_a", "a");
         artifact.transition(ArtifactStatus::Selected).unwrap();
         artifact.transition(ArtifactStatus::Candidate).unwrap();
         assert_eq!(artifact.status, ArtifactStatus::Candidate);
@@ -338,11 +371,11 @@ mod tests {
 
     #[test]
     fn unlocked_generated_artifacts_can_be_superseded() {
-        let mut candidate = record("cand_a", "sha256:a");
+        let mut candidate = record("cand_a", "a");
         candidate.transition(ArtifactStatus::Superseded).unwrap();
         assert_eq!(candidate.status, ArtifactStatus::Superseded);
 
-        let mut selected = record("cand_b", "sha256:b");
+        let mut selected = record("cand_b", "b");
         selected.transition(ArtifactStatus::Selected).unwrap();
         selected.transition(ArtifactStatus::Superseded).unwrap();
         assert_eq!(selected.status, ArtifactStatus::Superseded);
@@ -350,14 +383,14 @@ mod tests {
 
     #[test]
     fn changing_one_scene_only_stales_artifacts_with_that_semantic_edge() {
-        let scene_one_old = record("scene_001", "sha256:scene-1-old");
-        let scene_one_new = record("scene_001", "sha256:scene-1-new");
-        let scene_two = record("scene_002", "sha256:scene-2");
+        let scene_one_old = record("scene_001", "scene-1-old");
+        let scene_one_new = record("scene_001", "scene-1-new");
+        let scene_two = record("scene_002", "scene-2");
         let shot_one = ArtifactRecord {
             artifact_id: id("shot_001"),
             status: ArtifactStatus::Candidate,
-            content_hash: hash("sha256:shot-1"),
-            input_hash: InputHash::new("sha256:input-1").ok(),
+            content_hash: hash("shot-1"),
+            input_hash: Some(input_hash("input-1")),
             dependencies: vec![ArtifactDependency {
                 artifact_id: scene_one_old.artifact_id.clone(),
                 content_hash: scene_one_old.content_hash.clone(),
@@ -368,8 +401,8 @@ mod tests {
         let shot_two = ArtifactRecord {
             artifact_id: id("shot_002"),
             status: ArtifactStatus::Candidate,
-            content_hash: hash("sha256:shot-2"),
-            input_hash: InputHash::new("sha256:input-2").ok(),
+            content_hash: hash("shot-2"),
+            input_hash: Some(input_hash("input-2")),
             dependencies: vec![ArtifactDependency {
                 artifact_id: scene_two.artifact_id.clone(),
                 content_hash: scene_two.content_hash.clone(),
@@ -387,15 +420,15 @@ mod tests {
 
     #[test]
     fn cosmetic_dependency_changes_do_not_propagate_staleness() {
-        let title_new = record("screenplay_title", "sha256:new-title");
+        let title_new = record("screenplay_title", "new-title");
         let shot = ArtifactRecord {
             artifact_id: id("shot_003"),
             status: ArtifactStatus::Candidate,
-            content_hash: hash("sha256:shot-3"),
+            content_hash: hash("shot-3"),
             input_hash: None,
             dependencies: vec![ArtifactDependency {
                 artifact_id: title_new.artifact_id.clone(),
-                content_hash: hash("sha256:old-title"),
+                content_hash: hash("old-title"),
                 impact: DependencyImpact::Cosmetic,
                 field: Some("display_title".to_owned()),
             }],
@@ -406,7 +439,7 @@ mod tests {
 
     #[test]
     fn locked_artifact_cannot_be_mutated_backwards() {
-        let mut artifact = record("character_alice_v2", "sha256:alice");
+        let mut artifact = record("character_alice_v2", "alice");
         artifact.status = ArtifactStatus::Locked;
         assert!(artifact.transition(ArtifactStatus::Selected).is_err());
         artifact.transition(ArtifactStatus::Superseded).unwrap();
