@@ -46,6 +46,16 @@ impl ShotDirection {
             _ => None,
         }
     }
+
+    fn from_legacy_key(value: &str) -> Option<Self> {
+        match value {
+            "reaction" => Some(Self::Reaction),
+            "spatial_clarity" => Some(Self::SpatialClarity),
+            "intimacy" => Some(Self::Intimacy),
+            "tension" => Some(Self::Tension),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +301,9 @@ impl ShotWorkflow {
             artifacts,
             selection,
         };
+        if workflow.migrate_legacy_demo_hashes()? {
+            write_json(project, &artifacts_file, &workflow.artifacts)?;
+        }
         workflow.recover_partial_publication()?;
         workflow.validate()?;
         Ok(workflow)
@@ -548,6 +561,41 @@ impl ShotWorkflow {
         )
     }
 
+    fn migrate_legacy_demo_hashes(&mut self) -> Result<bool, ShotWorkflowError> {
+        let shot_id = self.shot.shot_id.clone();
+        let mut changed = false;
+
+        for artifact in &mut self.artifacts {
+            if ContentHash::new(artifact.content_hash.clone()).is_err() {
+                let artifact_id = ArtifactId::new(artifact.artifact_id.clone())?;
+                let legacy_content_hash = format!("demo:{}", artifact_id.as_str());
+                if artifact.artifact_type != "shot_candidate"
+                    || artifact.content_hash != legacy_content_hash
+                {
+                    return Err(ShotWorkflowError::Hash(HashValueError));
+                }
+                artifact.content_hash = demo_content_hash(&artifact_id)?.as_str().to_owned();
+                changed = true;
+            }
+
+            let Some(stored_input_hash) = artifact.input_hash.as_mut() else {
+                continue;
+            };
+            if InputHash::new(stored_input_hash.clone()).is_ok() {
+                continue;
+            }
+            if artifact.artifact_type != "shot_candidate" {
+                return Err(ShotWorkflowError::Hash(HashValueError));
+            }
+            let direction = legacy_input_hash_direction(&shot_id, stored_input_hash)
+                .ok_or(ShotWorkflowError::Hash(HashValueError))?;
+            *stored_input_hash = input_hash_for(&shot_id, direction)?.as_str().to_owned();
+            changed = true;
+        }
+
+        Ok(changed)
+    }
+
     fn recover_partial_publication(&mut self) -> Result<(), ShotWorkflowError> {
         self.recover_generation_selection()?;
         self.recover_cleared_selection()?;
@@ -742,14 +790,23 @@ fn supersede_active_shot_candidates(
 }
 
 fn input_hash(shot: &ShotProductionManifest) -> Result<InputHash, ShotWorkflowError> {
+    input_hash_for(&shot.shot_id, shot.direction)
+}
+
+fn input_hash_for(shot_id: &str, direction: ShotDirection) -> Result<InputHash, ShotWorkflowError> {
     let mut hasher = Sha256::new();
     hasher.update(b"kineto:shot-intent:v1\0");
     let shot_id_len =
-        u64::try_from(shot.shot_id.len()).map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
+        u64::try_from(shot_id.len()).map_err(|_| ShotWorkflowError::InvalidCanonicalState)?;
     hasher.update(shot_id_len.to_le_bytes());
-    hasher.update(shot.shot_id.as_bytes());
-    hasher.update([shot.direction.code()]);
+    hasher.update(shot_id.as_bytes());
+    hasher.update([direction.code()]);
     InputHash::new(format!("sha256:{:x}", hasher.finalize())).map_err(ShotWorkflowError::Hash)
+}
+
+fn legacy_input_hash_direction(shot_id: &str, value: &str) -> Option<ShotDirection> {
+    let prefix = format!("kineto:shot-intent:v1:{shot_id}:");
+    ShotDirection::from_legacy_key(value.strip_prefix(&prefix)?)
 }
 
 fn demo_content_hash(artifact_id: &ArtifactId) -> Result<ContentHash, ShotWorkflowError> {
@@ -1300,6 +1357,47 @@ mod tests {
                 assert!(input_hash.starts_with("sha256:"));
                 assert_eq!(input_hash.len(), 71);
             }
+        }
+    }
+
+    #[test]
+    fn legacy_demo_hashes_are_migrated_without_losing_locked_selection() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.set_direction(&project, ShotDirection::Tension)
+            .unwrap();
+        shot.generate(&project).unwrap();
+        shot.select(&project, 2).unwrap();
+        shot.lock(&project).unwrap();
+        let before = shot.snapshot().unwrap();
+
+        let artifacts_path = shot_dir(&target).join("artifacts.json");
+        let mut artifacts: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(&artifacts_path).unwrap()).unwrap();
+        for artifact in &mut artifacts {
+            artifact.content_hash = format!("demo:{}", artifact.artifact_id);
+            artifact.input_hash = Some("kineto:shot-intent:v1:shot_001:tension".to_owned());
+        }
+        fs::write(
+            &artifacts_path,
+            serde_json::to_vec_pretty(&artifacts).unwrap(),
+        )
+        .unwrap();
+        drop(project);
+
+        let reopened = CanonicalProject::open(&target).unwrap();
+        let migrated = ShotWorkflow::load(&reopened, 1).unwrap();
+        assert_eq!(migrated.snapshot().unwrap(), before);
+        assert!(before.locked);
+        assert_eq!(before.selected_index, Some(2));
+
+        let rewritten: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(artifacts_path).unwrap()).unwrap();
+        for artifact in rewritten {
+            assert!(ContentHash::new(artifact.content_hash).is_ok());
+            assert!(InputHash::new(artifact.input_hash.unwrap()).is_ok());
         }
     }
 }
