@@ -5,6 +5,7 @@ use std::{
     num::NonZeroU16,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+    time::UNIX_EPOCH,
 };
 
 use kineto_jobs::{
@@ -14,13 +15,17 @@ use kineto_jobs::{
 };
 use kineto_project::{
     ArtifactId, ArtifactIdError, HashValueError, InputHash,
-    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
+    fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot},
     manifest::CanonicalProject,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const RUNTIME_INTENT_DIR: &str = ".kineto/jobs/intents";
+const RUNTIME_IDEMPOTENCY_DIR: &str = ".kineto/jobs/idempotency";
 const RUNTIME_INTENT_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_RESERVATION_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_RECONCILED_INTENT_RETENTION: usize = 256;
 const MAX_PROVIDER_KEY_LEN: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,6 +69,7 @@ pub struct RuntimeIntent {
     intent: JobIntent,
     attempts: u16,
     last_error_class: Option<ErrorClass>,
+    extra: BTreeMap<String, Value>,
 }
 
 impl RuntimeIntent {
@@ -145,6 +151,29 @@ pub struct JobRuntimePolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntentRetentionPolicy {
+    max_reconciled: usize,
+}
+
+impl IntentRetentionPolicy {
+    #[must_use]
+    pub const fn new(max_reconciled: usize) -> Self {
+        Self { max_reconciled }
+    }
+
+    #[must_use]
+    pub const fn max_reconciled(self) -> usize {
+        self.max_reconciled
+    }
+}
+
+impl Default for IntentRetentionPolicy {
+    fn default() -> Self {
+        Self::new(DEFAULT_RECONCILED_INTENT_RETENTION)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDisposition {
     AfterMs(u64),
     Exhausted,
@@ -163,10 +192,7 @@ pub enum InvokePreparedError<E> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchOutcome<T> {
-    Completed {
-        job_id: JobId,
-        output: T,
-    },
+    Completed { job_id: JobId, output: T },
     Pending {
         job_id: JobId,
         provider_job_id: ProviderJobId,
@@ -175,20 +201,13 @@ pub enum DispatchOutcome<T> {
 
 #[derive(Debug)]
 pub enum StartupOutcome<T, E> {
-    ResultReady {
-        job_id: JobId,
-        output: T,
-    },
-    StillPending {
-        job_id: JobId,
-    },
+    ResultReady { job_id: JobId, output: T },
+    StillPending { job_id: JobId },
     RetryPrepared {
         job_id: JobId,
         retry: RetryDisposition,
     },
-    NeedsAttention {
-        job_id: JobId,
-    },
+    NeedsAttention { job_id: JobId },
     ProviderError {
         job_id: JobId,
         source: E,
@@ -208,6 +227,8 @@ pub struct DryRunSummary {
     pub call_count: u32,
     pub amount_micros: u64,
     pub currency: Option<CurrencyCode>,
+    /// Conservative serial-sum upper bound. It intentionally does not model
+    /// provider `max_concurrency`, so callers must not render it as a precise ETA.
     pub estimated_duration_ms: Option<u64>,
 }
 
@@ -218,10 +239,16 @@ pub enum DryRunError<E> {
     Overflow,
 }
 
+/// Runtime for durable paid-provider work.
+///
+/// Construction registers this provider's concurrency ceiling in a process-wide
+/// registry. The strictest ceiling across all live runtimes for the same
+/// `ProviderKey` is enforced until those runtimes are dropped.
 pub struct JobRuntime<'project> {
     project: &'project CanonicalProject,
     provider: ProviderKey,
     policy: JobRuntimePolicy,
+    retention: IntentRetentionPolicy,
     limiter: ProviderLimiter,
 }
 
@@ -237,8 +264,15 @@ impl<'project> JobRuntime<'project> {
             project,
             provider,
             policy,
+            retention: IntentRetentionPolicy::default(),
             limiter,
         }
+    }
+
+    #[must_use]
+    pub fn with_intent_retention(mut self, retention: IntentRetentionPolicy) -> Self {
+        self.retention = retention;
+        self
     }
 
     #[must_use]
@@ -263,25 +297,37 @@ impl<'project> JobRuntime<'project> {
         job_id: JobId,
         operation: impl Into<String>,
         input_hash: InputHash,
-        artifact_id: Option<ArtifactId>,
+        artifact_id: ArtifactId,
     ) -> Result<PrepareOutcome, JobRuntimeError> {
         self.ensure_writable()?;
         let operation = operation.into();
-        let idempotency_key = derive_idempotency_key(&operation, &input_hash)?;
+        let idempotency_key = derive_idempotency_key(&operation, &artifact_id, &input_hash)?;
         let store = IntentStore::new(self.project);
+        let _guard = lock_unpoisoned(intent_store_lock());
 
         if let Some(existing) = store.find_by_idempotency(&self.provider, &idempotency_key)? {
             return Ok(PrepareOutcome::Existing(existing));
         }
 
-        let intent = JobIntent::new(job_id, operation, idempotency_key, input_hash, artifact_id)?;
+        if store.load_optional(&job_id)?.is_some() {
+            return Err(JobRuntimeError::JobIdAlreadyExists);
+        }
+
+        let intent = JobIntent::new(
+            job_id,
+            operation,
+            idempotency_key,
+            input_hash,
+            Some(artifact_id),
+        )?;
         let record = RuntimeIntent {
             provider: self.provider.clone(),
             intent,
             attempts: 0,
             last_error_class: None,
+            extra: BTreeMap::new(),
         };
-        store.save(&record)?;
+        store.create_with_reservation(&record)?;
         Ok(PrepareOutcome::Created(record))
     }
 
@@ -327,14 +373,18 @@ impl<'project> JobRuntime<'project> {
             .checked_add(1)
             .ok_or(InvokePreparedError::Runtime(JobRuntimeError::Overflow))?;
         record.last_error_class = None;
-        store.save(&record).map_err(InvokePreparedError::Runtime)?;
+        store
+            .save(&record)
+            .map_err(InvokePreparedError::Runtime)?;
 
         let invocation = match adapter.invoke(request, record.intent.idempotency_key()) {
             Ok(invocation) => invocation,
             Err(source) => {
                 let class = adapter.classify_error(&source);
                 record.last_error_class = Some(class);
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                store
+                    .save(&record)
+                    .map_err(InvokePreparedError::Runtime)?;
                 let retry =
                     retry_disposition(class, record.attempts, self.policy.execution.backoff());
                 return Err(InvokePreparedError::Provider {
@@ -349,7 +399,9 @@ impl<'project> JobRuntime<'project> {
         match invocation {
             Invocation::Completed(output) => {
                 record.intent.mark_invoked(None)?;
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                store
+                    .save(&record)
+                    .map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Completed {
                     job_id: record.intent.job_id().clone(),
                     output,
@@ -357,7 +409,9 @@ impl<'project> JobRuntime<'project> {
             }
             Invocation::Pending(provider_job_id) => {
                 record.intent.mark_invoked(Some(provider_job_id.clone()))?;
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                store
+                    .save(&record)
+                    .map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Pending {
                     job_id: record.intent.job_id().clone(),
                     provider_job_id,
@@ -367,14 +421,24 @@ impl<'project> JobRuntime<'project> {
     }
 
     /// Mark an invoked intent reconciled only after the caller has durably
-    /// attached the provider result to canonical project state.
+    /// attached the provider result to canonical project state. Reconciled
+    /// records are then pruned according to the configured bounded retention;
+    /// Prepared and Invoked records are never retention-eligible.
     pub fn acknowledge_result(&self, job_id: &JobId) -> Result<RuntimeIntent, JobRuntimeError> {
         self.ensure_writable()?;
         let store = IntentStore::new(self.project);
+        let _guard = lock_unpoisoned(intent_store_lock());
         let mut record = store.load(job_id)?;
         self.ensure_provider(&record)?;
-        record.intent.mark_reconciled()?;
-        store.save(&record)?;
+        match record.intent.state() {
+            IntentState::Invoked => {
+                record.intent.mark_reconciled()?;
+                store.save(&record)?;
+            }
+            IntentState::Reconciled => {}
+            IntentState::Prepared => return Err(JobRuntimeError::IntentNotPrepared),
+        }
+        store.prune_reconciled(&self.provider, self.retention.max_reconciled())?;
         Ok(record)
     }
 
@@ -530,13 +594,22 @@ impl<'project> JobRuntime<'project> {
 
 fn derive_idempotency_key(
     operation: &str,
+    artifact_id: &ArtifactId,
     input_hash: &InputHash,
 ) -> Result<IdempotencyKey, JobRuntimeError> {
-    IdempotencyKey::new(format!("{operation}:{}", input_hash.as_str()))
-        .map_err(JobRuntimeError::JobValue)
+    IdempotencyKey::new(format!(
+        "{operation}:{}:{}",
+        artifact_id.as_str(),
+        input_hash.as_str()
+    ))
+    .map_err(JobRuntimeError::JobValue)
 }
 
-fn retry_disposition(class: ErrorClass, attempts: u16, policy: BackoffPolicy) -> RetryDisposition {
+fn retry_disposition(
+    class: ErrorClass,
+    attempts: u16,
+    policy: BackoffPolicy,
+) -> RetryDisposition {
     if class == ErrorClass::Terminal {
         return RetryDisposition::Never;
     }
@@ -556,10 +629,15 @@ fn retry_disposition(class: ErrorClass, attempts: u16, policy: BackoffPolicy) ->
 
 static PROVIDER_LIMITERS: OnceLock<Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>> =
     OnceLock::new();
+static INTENT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>
-{
+fn provider_limiter_registry()
+-> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>> {
     PROVIDER_LIMITERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn intent_store_lock() -> &'static Mutex<()> {
+    INTENT_STORE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -596,11 +674,11 @@ impl ProviderLimiter {
     }
 
     fn effective_max(&self) -> NonZeroU16 {
-        self.state.effective_max()
+        self.state.effective_max().unwrap_or(self.registered_max)
     }
 
     fn try_acquire(&self) -> Option<ProviderPermit> {
-        self.state.try_acquire()
+        self.state.try_acquire(self.registered_max)
     }
 }
 
@@ -645,23 +723,21 @@ impl ProviderLimiterState {
         }
     }
 
-    fn effective_max(&self) -> NonZeroU16 {
+    fn effective_max(&self) -> Option<NonZeroU16> {
         let inner = lock_unpoisoned(&self.inner);
         // A wider runtime policy must never bypass a stricter live policy.
         inner
             .registrations
             .first_key_value()
             .map(|(max, _)| *max)
-            .expect("live provider limiter must have a registered ceiling")
     }
 
-    fn try_acquire(self: &Arc<Self>) -> Option<ProviderPermit> {
+    fn try_acquire(self: &Arc<Self>, fallback: NonZeroU16) -> Option<ProviderPermit> {
         let mut inner = lock_unpoisoned(&self.inner);
         let max = inner
             .registrations
             .first_key_value()
-            .map(|(max, _)| max.get())
-            .expect("live provider limiter must have a registered ceiling");
+            .map_or(fallback.get(), |(max, _)| max.get());
         if inner.in_flight >= max {
             return None;
         }
@@ -705,8 +781,19 @@ impl<'project> IntentStore<'project> {
     }
 
     fn load(&self, job_id: &JobId) -> Result<RuntimeIntent, JobRuntimeError> {
+        self.load_optional(job_id)?.ok_or_else(|| {
+            JobRuntimeError::Fs(ProjectFsError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "runtime intent not found",
+            )))
+        })
+    }
+
+    fn load_optional(&self, job_id: &JobId) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
         let path = intent_path(job_id)?;
-        let bytes = self.project.root().read(&path)?;
+        let Some(bytes) = self.read_optional(&path)? else {
+            return Ok(None);
+        };
         let stored: StoredIntent = serde_json::from_slice(&bytes)?;
         let record = RuntimeIntent::try_from(stored)?;
         if record.intent.job_id() != job_id {
@@ -714,7 +801,25 @@ impl<'project> IntentStore<'project> {
                 "intent path does not match stored job_id",
             ));
         }
-        Ok(record)
+        Ok(Some(record))
+    }
+
+    fn create_with_reservation(&self, record: &RuntimeIntent) -> Result<(), JobRuntimeError> {
+        if self
+            .load_reservation(&record.provider, record.intent.idempotency_key())?
+            .is_some()
+        {
+            return Err(JobRuntimeError::InvalidRecord(
+                "idempotency reservation already exists",
+            ));
+        }
+
+        let mut reservation = StoredReservation::from_runtime(record, StoredReservationState::Reserved);
+        self.save_reservation(&reservation)?;
+        self.save(record)?;
+        reservation.state = StoredReservationState::Active;
+        self.save_reservation(&reservation)?;
+        Ok(())
     }
 
     fn find_by_idempotency(
@@ -722,10 +827,180 @@ impl<'project> IntentStore<'project> {
         provider: &ProviderKey,
         key: &IdempotencyKey,
     ) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
-        Ok(self
-            .load_all()?
-            .into_iter()
-            .find(|record| record.provider == *provider && record.intent.idempotency_key() == key))
+        let Some(mut reservation) = self.load_reservation(provider, key)? else {
+            return Ok(None);
+        };
+        let job_id = reservation.validated_job_id(provider, key)?;
+
+        match reservation.state {
+            StoredReservationState::Reserved => match self.load_optional(&job_id)? {
+                Some(record) => {
+                    validate_reservation_record(&reservation, &record)?;
+                    reservation.state = StoredReservationState::Active;
+                    self.save_reservation(&reservation)?;
+                    Ok(Some(record))
+                }
+                None => {
+                    // A Reserved mapping is written before its intent. If the intent
+                    // never appeared, provider invocation was impossible, so clearing
+                    // the incomplete reservation is safe.
+                    self.remove_reservation(provider, key)?;
+                    Ok(None)
+                }
+            },
+            StoredReservationState::Active => {
+                let record = self.load_optional(&job_id)?.ok_or(JobRuntimeError::InvalidRecord(
+                    "active idempotency reservation is missing its intent",
+                ))?;
+                validate_reservation_record(&reservation, &record)?;
+                Ok(Some(record))
+            }
+            StoredReservationState::Pruning => {
+                if let Some(record) = self.load_optional(&job_id)? {
+                    validate_reservation_record(&reservation, &record)?;
+                    if record.intent.state() != IntentState::Reconciled {
+                        return Err(JobRuntimeError::InvalidRecord(
+                            "pruning reservation points to an unfinished intent",
+                        ));
+                    }
+                    self.remove_intent(record.intent.job_id())?;
+                }
+                reservation.state = StoredReservationState::Pruned;
+                self.save_reservation(&reservation)?;
+                Err(JobRuntimeError::ReconciledIntentPruned)
+            }
+            StoredReservationState::Pruned => Err(JobRuntimeError::ReconciledIntentPruned),
+        }
+    }
+
+    fn save_reservation(&self, reservation: &StoredReservation) -> Result<(), JobRuntimeError> {
+        let provider = ProviderKey::new(reservation.provider.clone())?;
+        let key = IdempotencyKey::new(reservation.idempotency_key.clone())?;
+        let path = reservation_path(&provider, &key)?;
+        let bytes = serde_json::to_vec_pretty(reservation)?;
+        self.project.root().write_atomic(&path, &bytes)?;
+        Ok(())
+    }
+
+    fn load_reservation(
+        &self,
+        provider: &ProviderKey,
+        key: &IdempotencyKey,
+    ) -> Result<Option<StoredReservation>, JobRuntimeError> {
+        let path = reservation_path(provider, key)?;
+        let Some(bytes) = self.read_optional(&path)? else {
+            return Ok(None);
+        };
+        let reservation: StoredReservation = serde_json::from_slice(&bytes)?;
+        reservation.validated_job_id(provider, key)?;
+        Ok(Some(reservation))
+    }
+
+    fn read_optional(
+        &self,
+        path: &ProjectRelativePath,
+    ) -> Result<Option<Vec<u8>>, JobRuntimeError> {
+        match self.project.root().read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(ProjectFsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(JobRuntimeError::Fs(error)),
+        }
+    }
+
+    fn remove_intent(&self, job_id: &JobId) -> Result<(), JobRuntimeError> {
+        let path = intent_path(job_id)?;
+        self.remove_relative_file(&path)
+    }
+
+    fn remove_reservation(
+        &self,
+        provider: &ProviderKey,
+        key: &IdempotencyKey,
+    ) -> Result<(), JobRuntimeError> {
+        let path = reservation_path(provider, key)?;
+        self.remove_relative_file(&path)
+    }
+
+    fn remove_relative_file(&self, path: &ProjectRelativePath) -> Result<(), JobRuntimeError> {
+        let resolved = self.project.root().resolve(path);
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(JobRuntimeError::Fs(ProjectFsError::Symlink(resolved)));
+                }
+                if !metadata.is_file() {
+                    return Err(JobRuntimeError::Fs(ProjectFsError::NotFile(resolved)));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(JobRuntimeError::Fs(ProjectFsError::Io(error))),
+        }
+        fs::remove_file(&resolved).map_err(ProjectFsError::Io)?;
+        if let Some(parent) = resolved.parent() {
+            ProjectRoot::sync_directory(parent)?;
+        }
+        Ok(())
+    }
+
+    fn prune_reconciled(
+        &self,
+        provider: &ProviderKey,
+        max_reconciled: usize,
+    ) -> Result<(), JobRuntimeError> {
+        let mut reconciled = Vec::new();
+        for record in self.load_all()? {
+            if record.provider != *provider || record.intent.state() != IntentState::Reconciled {
+                continue;
+            }
+            let path = intent_path(record.intent.job_id())?;
+            let resolved = self.project.root().resolve(&path);
+            let modified = fs::metadata(&resolved)
+                .and_then(|metadata| metadata.modified())
+                .map_err(ProjectFsError::Io)?
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            reconciled.push((modified, record));
+        }
+
+        if reconciled.len() <= max_reconciled {
+            return Ok(());
+        }
+
+        reconciled.sort_by(|(left_time, left), (right_time, right)| {
+            right_time
+                .cmp(left_time)
+                .then_with(|| right.intent.job_id().cmp(left.intent.job_id()))
+        });
+        for (_, record) in reconciled.into_iter().skip(max_reconciled) {
+            self.prune_reconciled_record(&record)?;
+        }
+        Ok(())
+    }
+
+    fn prune_reconciled_record(&self, record: &RuntimeIntent) -> Result<(), JobRuntimeError> {
+        if record.intent.state() != IntentState::Reconciled {
+            return Err(JobRuntimeError::InvalidRecord(
+                "unfinished intent is not retention-eligible",
+            ));
+        }
+
+        let provider = &record.provider;
+        let key = record.intent.idempotency_key();
+        if let Some(mut reservation) = self.load_reservation(provider, key)? {
+            validate_reservation_record(&reservation, record)?;
+            reservation.state = StoredReservationState::Pruning;
+            self.save_reservation(&reservation)?;
+            self.remove_intent(record.intent.job_id())?;
+            reservation.state = StoredReservationState::Pruned;
+            self.save_reservation(&reservation)?;
+        } else {
+            // Pre-index records from an unmerged development build can still be
+            // safely retired once they are Reconciled.
+            self.remove_intent(record.intent.job_id())?;
+        }
+        Ok(())
     }
 
     fn load_all(&self) -> Result<Vec<RuntimeIntent>, JobRuntimeError> {
@@ -769,8 +1044,53 @@ impl<'project> IntentStore<'project> {
     }
 }
 
+fn validate_reservation_record(
+    reservation: &StoredReservation,
+    record: &RuntimeIntent,
+) -> Result<(), JobRuntimeError> {
+    if reservation.provider != record.provider.as_str()
+        || reservation.job_id != record.intent.job_id().as_str()
+        || reservation.idempotency_key != record.intent.idempotency_key().as_str()
+    {
+        Err(JobRuntimeError::InvalidRecord(
+            "idempotency reservation does not match its intent",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn intent_path(job_id: &JobId) -> Result<ProjectRelativePath, ProjectPathError> {
     ProjectRelativePath::new(format!("{RUNTIME_INTENT_DIR}/{}.json", job_id.as_str()))
+}
+
+fn reservation_path(
+    provider: &ProviderKey,
+    key: &IdempotencyKey,
+) -> Result<ProjectRelativePath, ProjectPathError> {
+    // The locator is not an authority: the sidecar stores and re-validates the
+    // full provider/key pair, so even a deliberate hash collision fails closed.
+    let first = stable_locator_hash(0xcbf29ce484222325, provider, key);
+    let second = stable_locator_hash(0x84222325cbf29ce4, provider, key);
+    ProjectRelativePath::new(format!(
+        "{RUNTIME_IDEMPOTENCY_DIR}/provider-{}/{first:016x}{second:016x}.json",
+        provider.as_str()
+    ))
+}
+
+fn stable_locator_hash(seed: u64, provider: &ProviderKey, key: &IdempotencyKey) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = seed;
+    for byte in provider
+        .as_str()
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(key.as_str().bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn checked_runtime_directory(
@@ -843,6 +1163,8 @@ struct StoredIntent {
     attempts: u16,
     #[serde(default)]
     last_error_class: Option<StoredErrorClass>,
+    #[serde(default, flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 impl StoredIntent {
@@ -869,6 +1191,7 @@ impl StoredIntent {
             },
             attempts: record.attempts,
             last_error_class: record.last_error_class.map(StoredErrorClass::from),
+            extra: record.extra.clone(),
         }
     }
 }
@@ -890,7 +1213,8 @@ impl TryFrom<StoredIntent> for RuntimeIntent {
                 "prepared intent cannot contain provider_job_id",
             ));
         }
-        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some()
+        if !matches!(stored.state, StoredIntentState::Prepared)
+            && stored.last_error_class.is_some()
         {
             return Err(JobRuntimeError::InvalidRecord(
                 "only prepared intent may contain last_error_class",
@@ -919,7 +1243,59 @@ impl TryFrom<StoredIntent> for RuntimeIntent {
             intent,
             attempts: stored.attempts,
             last_error_class: stored.last_error_class.map(ErrorClass::from),
+            extra: stored.extra,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredReservationState {
+    Reserved,
+    Active,
+    Pruning,
+    Pruned,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredReservation {
+    schema_version: u32,
+    provider: String,
+    idempotency_key: String,
+    job_id: String,
+    state: StoredReservationState,
+    #[serde(default, flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+impl StoredReservation {
+    fn from_runtime(record: &RuntimeIntent, state: StoredReservationState) -> Self {
+        Self {
+            schema_version: RUNTIME_RESERVATION_SCHEMA_VERSION,
+            provider: record.provider.as_str().to_owned(),
+            idempotency_key: record.intent.idempotency_key().as_str().to_owned(),
+            job_id: record.intent.job_id().as_str().to_owned(),
+            state,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn validated_job_id(
+        &self,
+        provider: &ProviderKey,
+        key: &IdempotencyKey,
+    ) -> Result<JobId, JobRuntimeError> {
+        if self.schema_version != RUNTIME_RESERVATION_SCHEMA_VERSION {
+            return Err(JobRuntimeError::UnsupportedReservationSchema(
+                self.schema_version,
+            ));
+        }
+        if self.provider != provider.as_str() || self.idempotency_key != key.as_str() {
+            return Err(JobRuntimeError::InvalidRecord(
+                "idempotency reservation hash collision or key mismatch",
+            ));
+        }
+        JobId::new(self.job_id.clone()).map_err(JobRuntimeError::JobValue)
     }
 }
 
@@ -931,8 +1307,11 @@ pub enum JobRuntimeError {
     PreviousTerminalFailure,
     IntentNotPrepared,
     ProviderMismatch,
+    JobIdAlreadyExists,
+    ReconciledIntentPruned,
     Overflow,
     UnsupportedIntentSchema(u32),
+    UnsupportedReservationSchema(u32),
     InvalidRecord(&'static str),
     ProviderKey(ProviderKeyError),
     JobValue(JobValueError),
@@ -963,11 +1342,23 @@ impl fmt::Display for JobRuntimeError {
             Self::ProviderMismatch => {
                 formatter.write_str("job intent belongs to a different provider")
             }
+            Self::JobIdAlreadyExists => {
+                formatter.write_str("job id already has a persisted runtime intent")
+            }
+            Self::ReconciledIntentPruned => {
+                formatter.write_str("paid intent already reconciled and its diagnostic record was pruned")
+            }
             Self::Overflow => formatter.write_str("job runtime counter overflow"),
             Self::UnsupportedIntentSchema(version) => {
                 write!(
                     formatter,
                     "unsupported runtime intent schema version {version}"
+                )
+            }
+            Self::UnsupportedReservationSchema(version) => {
+                write!(
+                    formatter,
+                    "unsupported runtime idempotency reservation schema version {version}"
                 )
             }
             Self::InvalidRecord(message) => {
@@ -1002,8 +1393,11 @@ impl Error for JobRuntimeError {
             | Self::PreviousTerminalFailure
             | Self::IntentNotPrepared
             | Self::ProviderMismatch
+            | Self::JobIdAlreadyExists
+            | Self::ReconciledIntentPruned
             | Self::Overflow
             | Self::UnsupportedIntentSchema(_)
+            | Self::UnsupportedReservationSchema(_)
             | Self::InvalidRecord(_) => None,
         }
     }
@@ -1145,6 +1539,10 @@ mod tests {
         InputHash::new(format!("sha256:{}", fill.to_string().repeat(64))).unwrap()
     }
 
+    fn artifact(value: &str) -> ArtifactId {
+        ArtifactId::new(value).unwrap()
+    }
+
     fn created(outcome: PrepareOutcome) -> RuntimeIntent {
         match outcome {
             PrepareOutcome::Created(record) => record,
@@ -1246,6 +1644,32 @@ mod tests {
         }
     }
 
+    fn complete_and_ack(
+        runtime: &JobRuntime<'_>,
+        temp: &TempDir,
+        job: &str,
+        candidate: &str,
+        hash_fill: char,
+    ) -> JobId {
+        let job_id = JobId::new(job).unwrap();
+        created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash(hash_fill),
+                    artifact(candidate),
+                )
+                .unwrap(),
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime
+            .invoke_prepared(&job_id, &mut adapter, &1)
+            .unwrap();
+        runtime.acknowledge_result(&job_id).unwrap();
+        job_id
+    }
+
     #[test]
     fn prepared_intent_is_persisted_before_provider_invocation() {
         let temp = TempDir::new();
@@ -1258,7 +1682,12 @@ mod tests {
         let job_id = JobId::new("job_001").unwrap();
         let record = created(
             runtime
-                .prepare(job_id.clone(), "video.generate", input_hash('a'), None)
+                .prepare(
+                    job_id.clone(),
+                    "video.generate",
+                    input_hash('a'),
+                    artifact("video_candidate_001"),
+                )
                 .unwrap(),
         );
         assert_eq!(record.intent().state(), IntentState::Prepared);
@@ -1287,7 +1716,12 @@ mod tests {
         let job_id = JobId::new("job_002").unwrap();
         created(
             runtime
-                .prepare(job_id.clone(), "video.generate", input_hash('b'), None)
+                .prepare(
+                    job_id.clone(),
+                    "video.generate",
+                    input_hash('b'),
+                    artifact("video_candidate_002"),
+                )
                 .unwrap(),
         );
         let remote = ProviderJobId::new("provider/jobs:42").unwrap();
@@ -1296,6 +1730,8 @@ mod tests {
         runtime
             .invoke_prepared(&job_id, &mut adapter, &1_000_000)
             .unwrap();
+        drop(runtime);
+        drop(project);
 
         let reopened = CanonicalProject::open(&temp.0).unwrap();
         let runtime = JobRuntime::new(
@@ -1333,7 +1769,12 @@ mod tests {
         let job_id = JobId::new("job_003").unwrap();
         created(
             runtime
-                .prepare(job_id.clone(), "image.generate", input_hash('c'), None)
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('c'),
+                    artifact("image_candidate_003"),
+                )
                 .unwrap(),
         );
 
@@ -1369,7 +1810,12 @@ mod tests {
         let job_id = JobId::new("job_004").unwrap();
         created(
             runtime
-                .prepare(job_id.clone(), "image.generate", input_hash('d'), None)
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('d'),
+                    artifact("image_candidate_004"),
+                )
                 .unwrap(),
         );
         let mut adapter = FakeAdapter::completed(temp.0.clone());
@@ -1407,6 +1853,7 @@ mod tests {
         assert_eq!(summary.currency.unwrap().bytes(), *b"USD");
         assert_eq!(summary.estimated_duration_ms, Some(2_000));
         assert!(!temp.0.join(RUNTIME_INTENT_DIR).exists());
+        assert!(!temp.0.join(RUNTIME_IDEMPOTENCY_DIR).exists());
         assert_eq!(adapter.invoke_count, 0);
     }
 
@@ -1422,7 +1869,12 @@ mod tests {
         let retry_job = JobId::new("job_005").unwrap();
         created(
             runtime
-                .prepare(retry_job.clone(), "image.generate", input_hash('e'), None)
+                .prepare(
+                    retry_job.clone(),
+                    "image.generate",
+                    input_hash('e'),
+                    artifact("image_candidate_005"),
+                )
                 .unwrap(),
         );
         let mut retryable = FakeAdapter::completed(temp.0.clone());
@@ -1450,7 +1902,7 @@ mod tests {
                     terminal_job.clone(),
                     "image.generate",
                     input_hash('f'),
-                    None,
+                    artifact("image_candidate_006"),
                 )
                 .unwrap(),
         );
@@ -1491,7 +1943,12 @@ mod tests {
         let job_id = JobId::new("job_terminal_restart").unwrap();
         created(
             runtime
-                .prepare(job_id.clone(), "image.generate", input_hash('9'), None)
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('9'),
+                    artifact("image_candidate_terminal_restart"),
+                )
                 .unwrap(),
         );
         let mut adapter = FakeAdapter::completed(temp.0.clone());
@@ -1518,7 +1975,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_semantic_work_reuses_existing_intent() {
+    fn crashed_retry_of_same_candidate_reuses_existing_intent() {
         let temp = TempDir::new();
         let project = project(&temp);
         let runtime = JobRuntime::new(
@@ -1532,16 +1989,25 @@ mod tests {
                     JobId::new("job_007").unwrap(),
                     "video.generate",
                     input_hash('7'),
-                    None,
+                    artifact("video_candidate_retry"),
                 )
                 .unwrap(),
+        );
+        drop(runtime);
+        drop(project);
+
+        let reopened = CanonicalProject::open(&temp.0).unwrap();
+        let runtime = JobRuntime::new(
+            &reopened,
+            ProviderKey::new("fake-video-duplicate").unwrap(),
+            policy(1, 3),
         );
         let second = runtime
             .prepare(
                 JobId::new("job_008").unwrap(),
                 "video.generate",
                 input_hash('7'),
-                None,
+                artifact("video_candidate_retry"),
             )
             .unwrap();
 
@@ -1553,8 +2019,267 @@ mod tests {
                     first.intent().idempotency_key()
                 );
             }
-            PrepareOutcome::Created(_) => panic!("duplicate work must not create another intent"),
+            PrepareOutcome::Created(_) => panic!("crashed retry must reuse the original intent"),
         }
+    }
+
+    #[test]
+    fn two_candidates_with_same_semantic_input_get_distinct_idempotency_keys() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-candidates").unwrap(),
+            policy(1, 3),
+        );
+        let first = created(
+            runtime
+                .prepare(
+                    JobId::new("job_candidate_a").unwrap(),
+                    "image.generate",
+                    input_hash('8'),
+                    artifact("shot_001_candidate_a"),
+                )
+                .unwrap(),
+        );
+        let second = created(
+            runtime
+                .prepare(
+                    JobId::new("job_candidate_b").unwrap(),
+                    "image.generate",
+                    input_hash('8'),
+                    artifact("shot_001_candidate_b"),
+                )
+                .unwrap(),
+        );
+
+        assert_ne!(
+            first.intent().idempotency_key(),
+            second.intent().idempotency_key()
+        );
+        assert_eq!(
+            first.intent().idempotency_key().as_str(),
+            format!(
+                "image.generate:shot_001_candidate_a:{}",
+                input_hash('8').as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn regeneration_after_reconcile_creates_fresh_candidate_intent() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-regenerate").unwrap(),
+            policy(1, 3),
+        );
+        let first_job = JobId::new("job_regeneration_first").unwrap();
+        let first = created(
+            runtime
+                .prepare(
+                    first_job.clone(),
+                    "image.generate",
+                    input_hash('4'),
+                    artifact("shot_002_candidate_revision_1"),
+                )
+                .unwrap(),
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime
+            .invoke_prepared(&first_job, &mut adapter, &1)
+            .unwrap();
+        runtime.acknowledge_result(&first_job).unwrap();
+
+        let second = created(
+            runtime
+                .prepare(
+                    JobId::new("job_regeneration_second").unwrap(),
+                    "image.generate",
+                    input_hash('4'),
+                    artifact("shot_002_candidate_revision_2"),
+                )
+                .unwrap(),
+        );
+        assert_ne!(
+            first.intent().idempotency_key(),
+            second.intent().idempotency_key()
+        );
+    }
+
+    #[test]
+    fn stored_intent_unknown_fields_survive_runtime_resave() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-extra-fields").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_extra_fields").unwrap();
+        created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('5'),
+                    artifact("extra_fields_candidate"),
+                )
+                .unwrap(),
+        );
+        let path = temp
+            .0
+            .join(format!("{RUNTIME_INTENT_DIR}/{}.json", job_id.as_str()));
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "future_provider_metadata".to_owned(),
+            serde_json::json!({"opaque": [1, 2, 3]}),
+        );
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime
+            .invoke_prepared(&job_id, &mut adapter, &1)
+            .unwrap();
+
+        let after: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            after.get("future_provider_metadata"),
+            Some(&serde_json::json!({"opaque": [1, 2, 3]}))
+        );
+    }
+
+    #[test]
+    fn prepare_lookup_does_not_parse_unrelated_reconciled_intents() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-direct-index").unwrap(),
+            policy(1, 3),
+        );
+        let old_jobs = [
+            complete_and_ack(&runtime, &temp, "job_old_1", "old_candidate_1", 'a'),
+            complete_and_ack(&runtime, &temp, "job_old_2", "old_candidate_2", 'b'),
+            complete_and_ack(&runtime, &temp, "job_old_3", "old_candidate_3", 'c'),
+        ];
+        for job_id in &old_jobs {
+            fs::write(
+                temp.0
+                    .join(format!("{RUNTIME_INTENT_DIR}/{}.json", job_id.as_str())),
+                b"not-json",
+            )
+            .unwrap();
+        }
+
+        let fresh = runtime
+            .prepare(
+                JobId::new("job_after_many_reconciled").unwrap(),
+                "image.generate",
+                input_hash('d'),
+                artifact("fresh_candidate_after_history"),
+            )
+            .unwrap();
+        assert!(matches!(fresh, PrepareOutcome::Created(_)));
+    }
+
+    #[test]
+    fn retention_prunes_only_reconciled_intents_to_configured_bound() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-retention").unwrap(),
+            policy(1, 3),
+        )
+        .with_intent_retention(IntentRetentionPolicy::new(1));
+
+        let prepared_job = JobId::new("job_keep_prepared").unwrap();
+        created(
+            runtime
+                .prepare(
+                    prepared_job.clone(),
+                    "image.generate",
+                    input_hash('e'),
+                    artifact("keep_prepared_candidate"),
+                )
+                .unwrap(),
+        );
+
+        let invoked_job = JobId::new("job_keep_invoked").unwrap();
+        created(
+            runtime
+                .prepare(
+                    invoked_job.clone(),
+                    "image.generate",
+                    input_hash('f'),
+                    artifact("keep_invoked_candidate"),
+                )
+                .unwrap(),
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime
+            .invoke_prepared(&invoked_job, &mut adapter, &1)
+            .unwrap();
+
+        complete_and_ack(&runtime, &temp, "job_gc_1", "gc_candidate_1", '1');
+        complete_and_ack(&runtime, &temp, "job_gc_2", "gc_candidate_2", '2');
+        complete_and_ack(&runtime, &temp, "job_gc_3", "gc_candidate_3", '3');
+
+        let records = IntentStore::new(&project).load_all().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.intent().state() == IntentState::Reconciled)
+                .count(),
+            1
+        );
+        assert_eq!(
+            IntentStore::new(&project)
+                .load(&prepared_job)
+                .unwrap()
+                .intent()
+                .state(),
+            IntentState::Prepared
+        );
+        assert_eq!(
+            IntentStore::new(&project)
+                .load(&invoked_job)
+                .unwrap()
+                .intent()
+                .state(),
+            IntentState::Invoked
+        );
+    }
+
+    #[test]
+    fn pruned_reconciled_candidate_keeps_a_deduplication_tombstone() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-pruned-dedupe").unwrap(),
+            policy(1, 3),
+        )
+        .with_intent_retention(IntentRetentionPolicy::new(0));
+
+        let job_id = complete_and_ack(
+            &runtime,
+            &temp,
+            "job_pruned_dedupe",
+            "candidate_pruned_dedupe",
+            '6',
+        );
+        assert!(IntentStore::new(&project).load_optional(&job_id).unwrap().is_none());
+
+        let retry = runtime.prepare(
+            JobId::new("job_pruned_dedupe_retry").unwrap(),
+            "image.generate",
+            input_hash('6'),
+            artifact("candidate_pruned_dedupe"),
+        );
+        assert!(matches!(retry, Err(JobRuntimeError::ReconciledIntentPruned)));
     }
 
     #[test]
@@ -1630,7 +2355,12 @@ mod tests {
         let success_job = JobId::new("job_permit_success").unwrap();
         created(
             first
-                .prepare(success_job.clone(), "image.generate", input_hash('1'), None)
+                .prepare(
+                    success_job.clone(),
+                    "image.generate",
+                    input_hash('6'),
+                    artifact("permit_success_candidate"),
+                )
                 .unwrap(),
         );
         let mut success = FakeAdapter::completed(temp.0.clone());
@@ -1643,7 +2373,12 @@ mod tests {
         let error_job = JobId::new("job_permit_error").unwrap();
         created(
             first
-                .prepare(error_job.clone(), "image.generate", input_hash('2'), None)
+                .prepare(
+                    error_job.clone(),
+                    "image.generate",
+                    input_hash('7'),
+                    artifact("permit_error_candidate"),
+                )
                 .unwrap(),
         );
         let mut error = FakeAdapter::completed(temp.0.clone());

@@ -91,7 +91,9 @@ Voice approval may be independent per character. A declarative workflow recipe m
 
 ## Paid job intent and reconciliation
 
-Paid/asynchronous provider work uses a durable write-ahead intent in `.kineto/jobs/intents/<job_id>.json`. The deterministic idempotency key is derived from operation identity plus the canonical semantic `input_hash`, and duplicate semantic work for the same provider reuses the existing intent instead of creating a second paid request.
+Paid/asynchronous provider work uses a durable write-ahead intent in `.kineto/jobs/intents/<job_id>.json`. Every paid intent targets a concrete `artifact_id`, and its deterministic idempotency key is `{operation}:{artifact_id}:{input_hash}`. The `input_hash` may deliberately remain stable across regenerations for staleness semantics; candidate identity is therefore the discriminator between a crash retry and a fresh paid generation. Retrying the same candidate reuses the same key, while another candidate or regeneration must use a new artifact ID and therefore receives a new key.
+
+The runtime keeps a small direct-lookup reservation sidecar under `.kineto/jobs/idempotency/` for each idempotency key. Reservation files contain and re-validate the complete provider/key pair; their filename locator is not authoritative. `prepare` reads only that reservation and, when present, its single referenced intent instead of parsing the entire intent directory. Reservation publication is write-ahead too: `Reserved` is written before the intent, then promoted to `Active`. An interrupted `Reserved` entry with no intent is safe to clear because provider invocation could not yet have happened.
 
 The runtime intent lifecycle is:
 
@@ -115,9 +117,11 @@ Startup reconciliation runs before unfinished paid work is rescheduled:
 6. if an already-`Invoked` remote handle is reported missing, surface `NeedsAttention`; do not silently convert it into another paid invocation
 7. when a completed result is returned, write canonical artifact/provenance state first, then acknowledge the runtime intent as `Reconciled`
 
-Provider adapters expose side-effect-free cost estimation, invocation with the deterministic idempotency key, remote-handle reconciliation, idempotency-key reconciliation, and retryable/terminal error classification. Batch dry-run aggregates call count, integer money micros, currency, and estimated duration without creating intent records or invoking a provider.
+Provider adapters expose side-effect-free cost estimation, invocation with the deterministic idempotency key, remote-handle reconciliation, idempotency-key reconciliation, and retryable/terminal error classification. Batch dry-run aggregates call count, integer money micros, currency, and a conservative serial-sum duration upper bound without creating intent records or invoking a provider. The duration intentionally does not model provider concurrency and must not be presented as an exact ETA.
 
 Per-provider execution policy supplies a concurrency ceiling and validated exponential-backoff policy. Paid fallback is configuration, not an implicit router behavior: both the spend ceiling and any explicit-user-approval requirement must pass before an expensive fallback is allowed.
+
+Reconciled intent files are diagnostic history, not recovery evidence. `IntentRetentionPolicy` bounds the number retained per provider (256 by default); pruning runs after canonical acknowledgement and never removes `Prepared` or `Invoked` records. Pruning leaves a compact idempotency tombstone so an exact already-paid candidate cannot become payable again merely because its diagnostic intent record aged out. Unknown JSON fields in stored intents are preserved across load/save cycles, matching the schema's `additionalProperties` contract.
 
 Runtime bookkeeping lives under `.kineto/`; durable artifact/provenance state lives in canonical project files. Deleting `.kineto/` intentionally discards in-flight recovery/idempotency bookkeeping, but it must not change what the user selected, locked, or otherwise accepted as canonical production truth.
 
