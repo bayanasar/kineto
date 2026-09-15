@@ -203,6 +203,29 @@ pub enum DispatchOutcome<T> {
 }
 
 #[derive(Debug)]
+pub struct AcknowledgeOutcome {
+    record: RuntimeIntent,
+    retention_warning: Option<JobRuntimeError>,
+}
+
+impl AcknowledgeOutcome {
+    #[must_use]
+    pub fn record(&self) -> &RuntimeIntent {
+        &self.record
+    }
+
+    #[must_use]
+    pub fn retention_warning(&self) -> Option<&JobRuntimeError> {
+        self.retention_warning.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_record(self) -> RuntimeIntent {
+        self.record
+    }
+}
+
+#[derive(Debug)]
 pub enum StartupOutcome<T, E> {
     ResultReady {
         job_id: JobId,
@@ -355,42 +378,56 @@ impl<'project> JobRuntime<'project> {
             .ok_or(InvokePreparedError::Runtime(
                 JobRuntimeError::ConcurrencyLimitReached,
             ))?;
+        let operation_lock = job_operation_lock(self.project, job_id);
+        let _operation_guard = lock_unpoisoned(&operation_lock);
         let store = IntentStore::new(self.project);
-        let mut record = store.load(job_id).map_err(InvokePreparedError::Runtime)?;
-        self.ensure_provider(&record)
-            .map_err(InvokePreparedError::Runtime)?;
 
-        if record.intent.state() != IntentState::Prepared {
-            return Err(InvokePreparedError::Runtime(
-                JobRuntimeError::IntentNotPrepared,
-            ));
-        }
-        if record.last_error_class == Some(ErrorClass::Terminal) {
-            return Err(InvokePreparedError::Runtime(
-                JobRuntimeError::PreviousTerminalFailure,
-            ));
-        }
+        let mut record = {
+            let _guard = lock_unpoisoned(intent_store_lock());
+            let mut record = store.load(job_id).map_err(InvokePreparedError::Runtime)?;
+            self.ensure_provider(&record)
+                .map_err(InvokePreparedError::Runtime)?;
 
-        let max_attempts = self.policy.execution.backoff().max_attempts();
-        if record.attempts >= max_attempts {
-            return Err(InvokePreparedError::Runtime(
-                JobRuntimeError::AttemptsExhausted,
-            ));
-        }
+            if record.intent.state() != IntentState::Prepared {
+                return Err(InvokePreparedError::Runtime(
+                    JobRuntimeError::IntentNotPrepared,
+                ));
+            }
+            if record.last_error_class == Some(ErrorClass::Terminal) {
+                return Err(InvokePreparedError::Runtime(
+                    JobRuntimeError::PreviousTerminalFailure,
+                ));
+            }
 
-        record.attempts = record
-            .attempts
-            .checked_add(1)
-            .ok_or(InvokePreparedError::Runtime(JobRuntimeError::Overflow))?;
-        record.last_error_class = None;
-        store.save(&record).map_err(InvokePreparedError::Runtime)?;
+            let max_attempts = self.policy.execution.backoff().max_attempts();
+            if record.attempts >= max_attempts {
+                return Err(InvokePreparedError::Runtime(
+                    JobRuntimeError::AttemptsExhausted,
+                ));
+            }
+
+            record.attempts = record
+                .attempts
+                .checked_add(1)
+                .ok_or(InvokePreparedError::Runtime(JobRuntimeError::Overflow))?;
+            record.last_error_class = None;
+            store
+                .save(&record)
+                .map_err(InvokePreparedError::Runtime)?;
+            record
+        };
 
         let invocation = match adapter.invoke(request, record.intent.idempotency_key()) {
             Ok(invocation) => invocation,
             Err(source) => {
                 let class = adapter.classify_error(&source);
                 record.last_error_class = Some(class);
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                {
+                    let _guard = lock_unpoisoned(intent_store_lock());
+                    store
+                        .save(&record)
+                        .map_err(InvokePreparedError::Runtime)?;
+                }
                 let retry =
                     retry_disposition(class, record.attempts, self.policy.execution.backoff());
                 return Err(InvokePreparedError::Provider {
@@ -402,10 +439,13 @@ impl<'project> JobRuntime<'project> {
         };
 
         record.last_error_class = None;
+        let _guard = lock_unpoisoned(intent_store_lock());
         match invocation {
             Invocation::Completed(output) => {
                 record.intent.mark_invoked(None)?;
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                store
+                    .save(&record)
+                    .map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Completed {
                     job_id: record.intent.job_id().clone(),
                     output,
@@ -413,7 +453,9 @@ impl<'project> JobRuntime<'project> {
             }
             Invocation::Pending(provider_job_id) => {
                 record.intent.mark_invoked(Some(provider_job_id.clone()))?;
-                store.save(&record).map_err(InvokePreparedError::Runtime)?;
+                store
+                    .save(&record)
+                    .map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Pending {
                     job_id: record.intent.job_id().clone(),
                     provider_job_id,
@@ -423,11 +465,19 @@ impl<'project> JobRuntime<'project> {
     }
 
     /// Mark an invoked intent reconciled only after the caller has durably
-    /// attached the provider result to canonical project state. Reconciled
-    /// records are then pruned according to the configured bounded retention;
-    /// Prepared and Invoked records are never retention-eligible.
-    pub fn acknowledge_result(&self, job_id: &JobId) -> Result<RuntimeIntent, JobRuntimeError> {
+    /// attached the provider result to canonical project state.
+    ///
+    /// Retention is post-acknowledgement housekeeping. Once `Reconciled` has
+    /// been durably saved, cleanup failure is returned as a warning on the
+    /// successful outcome rather than being misreported as acknowledgement
+    /// failure.
+    pub fn acknowledge_result(
+        &self,
+        job_id: &JobId,
+    ) -> Result<AcknowledgeOutcome, JobRuntimeError> {
         self.ensure_writable()?;
+        let operation_lock = job_operation_lock(self.project, job_id);
+        let _operation_guard = lock_unpoisoned(&operation_lock);
         let store = IntentStore::new(self.project);
         let _guard = lock_unpoisoned(intent_store_lock());
         let mut record = store.load(job_id)?;
@@ -440,20 +490,41 @@ impl<'project> JobRuntime<'project> {
             IntentState::Reconciled => {}
             IntentState::Prepared => return Err(JobRuntimeError::IntentNotPrepared),
         }
-        store.prune_reconciled(&self.provider, self.retention.max_reconciled())?;
-        Ok(record)
+        let retention_warning = store
+            .prune_reconciled(&self.provider, self.retention.max_reconciled())
+            .err();
+        Ok(AcknowledgeOutcome {
+            record,
+            retention_warning,
+        })
     }
 
     pub fn reconcile_startup<A: PaidJobAdapter>(&self, adapter: &mut A) -> StartupOutcomes<A> {
         self.ensure_writable()?;
         let store = IntentStore::new(self.project);
-        let records = store.load_all()?;
+        let records = {
+            let _guard = lock_unpoisoned(intent_store_lock());
+            store.load_all()?
+        };
         let mut outcomes = Vec::new();
 
-        for mut record in records.into_iter().filter(|record| {
+        for snapshot in records.into_iter().filter(|record| {
             record.provider == self.provider && record.intent.state() != IntentState::Reconciled
         }) {
-            let job_id = record.intent.job_id().clone();
+            let job_id = snapshot.intent.job_id().clone();
+            let operation_lock = job_operation_lock(self.project, &job_id);
+            let _operation_guard = lock_unpoisoned(&operation_lock);
+            let mut record = {
+                let _guard = lock_unpoisoned(intent_store_lock());
+                let record = store.load(&job_id)?;
+                self.ensure_provider(&record)?;
+                record
+            };
+
+            if record.intent.state() == IntentState::Reconciled {
+                continue;
+            }
+
             let reconciliation = match record.intent.state() {
                 IntentState::Prepared => {
                     adapter.reconcile_by_idempotency_key(record.intent.idempotency_key())
@@ -489,6 +560,7 @@ impl<'project> JobRuntime<'project> {
                     if record.intent.state() == IntentState::Prepared {
                         record.intent.mark_invoked(provider_job_id)?;
                         record.last_error_class = None;
+                        let _guard = lock_unpoisoned(intent_store_lock());
                         store.save(&record)?;
                     }
                     outcomes.push(StartupOutcome::ResultReady { job_id, output });
@@ -497,6 +569,7 @@ impl<'project> JobRuntime<'project> {
                     if record.intent.state() == IntentState::Prepared {
                         record.intent.mark_invoked(provider_job_id)?;
                         record.last_error_class = None;
+                        let _guard = lock_unpoisoned(intent_store_lock());
                         store.save(&record)?;
                     }
                     outcomes.push(StartupOutcome::StillPending { job_id });
@@ -627,15 +700,53 @@ fn retry_disposition(class: ErrorClass, attempts: u16, policy: BackoffPolicy) ->
 
 static PROVIDER_LIMITERS: OnceLock<Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>> =
     OnceLock::new();
+/// Serializes in-process snapshots and filesystem mutations under `.kineto/jobs`.
+///
+/// This lock is intentionally process-global today, so unrelated projects in the
+/// same process share it. Provider/network I/O must never run while it is held.
+/// It does not coordinate a second process opening the same project; cross-process
+/// multi-writer coordination requires a future per-project/on-disk locking layer.
 static INTENT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// Keeps state-changing operations for one project/job ordered while allowing
+/// provider I/O for different jobs to remain concurrent.
+static JOB_OPERATION_LOCKS: OnceLock<
+    Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>>,
+> = OnceLock::new();
 
-fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>
-{
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct JobOperationKey {
+    project_root: PathBuf,
+    job_id: String,
+}
+
+fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>> {
     PROVIDER_LIMITERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 fn intent_store_lock() -> &'static Mutex<()> {
     INTENT_STORE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn job_operation_registry(
+) -> &'static Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>> {
+    JOB_OPERATION_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn job_operation_lock(project: &CanonicalProject, job_id: &JobId) -> Arc<Mutex<()>> {
+    let root = fs::canonicalize(project.root().root())
+        .unwrap_or_else(|_| project.root().root().to_path_buf());
+    let key = JobOperationKey {
+        project_root: root,
+        job_id: job_id.as_str().to_owned(),
+    };
+    let mut registry = lock_unpoisoned(job_operation_registry());
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    registry.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1009,36 +1120,55 @@ impl<'project> IntentStore<'project> {
 
         for entry in fs::read_dir(directory).map_err(ProjectFsError::Io)? {
             let entry = entry.map_err(ProjectFsError::Io)?;
-            let file_type = entry.file_type().map_err(ProjectFsError::Io)?;
-            if file_type.is_symlink() {
-                return Err(JobRuntimeError::Fs(ProjectFsError::Symlink(entry.path())));
+            if let Some(record) = self.load_scanned_entry(entry)? {
+                records.push(record);
             }
-            if !file_type.is_file() {
-                continue;
-            }
-
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| JobRuntimeError::InvalidRecord("intent filename must be UTF-8"))?;
-            if name.starts_with(".kineto-write-") || !name.ends_with(".json") {
-                continue;
-            }
-
-            let path = ProjectRelativePath::new(format!("{RUNTIME_INTENT_DIR}/{name}"))?;
-            let bytes = self.project.root().read(&path)?;
-            let stored: StoredIntent = serde_json::from_slice(&bytes)?;
-            let record = RuntimeIntent::try_from(stored)?;
-            if name != format!("{}.json", record.intent.job_id().as_str()) {
-                return Err(JobRuntimeError::InvalidRecord(
-                    "intent filename does not match stored job_id",
-                ));
-            }
-            records.push(record);
         }
 
         records.sort_by(|left, right| left.intent.job_id().cmp(right.intent.job_id()));
         Ok(records)
+    }
+
+    fn load_scanned_entry(
+        &self,
+        entry: fs::DirEntry,
+    ) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(JobRuntimeError::Fs(ProjectFsError::Io(error))),
+        };
+        if file_type.is_symlink() {
+            return Err(JobRuntimeError::Fs(ProjectFsError::Symlink(entry.path())));
+        }
+        if !file_type.is_file() {
+            return Ok(None);
+        }
+
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| JobRuntimeError::InvalidRecord("intent filename must be UTF-8"))?;
+        if name.starts_with(".kineto-write-") || !name.ends_with(".json") {
+            return Ok(None);
+        }
+
+        let path = ProjectRelativePath::new(format!("{RUNTIME_INTENT_DIR}/{name}"))?;
+        let bytes = match self.project.root().read(&path) {
+            Ok(bytes) => bytes,
+            Err(ProjectFsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(JobRuntimeError::Fs(error)),
+        };
+        let stored: StoredIntent = serde_json::from_slice(&bytes)?;
+        let record = RuntimeIntent::try_from(stored)?;
+        if name != format!("{}.json", record.intent.job_id().as_str()) {
+            return Err(JobRuntimeError::InvalidRecord(
+                "intent filename does not match stored job_id",
+            ));
+        }
+        Ok(Some(record))
     }
 }
 
@@ -1211,8 +1341,7 @@ impl TryFrom<StoredIntent> for RuntimeIntent {
                 "prepared intent cannot contain provider_job_id",
             ));
         }
-        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some()
-        {
+        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some() {
             return Err(JobRuntimeError::InvalidRecord(
                 "only prepared intent may contain last_error_class",
             ));
@@ -1568,6 +1697,7 @@ mod tests {
         by_key: Reconciliation<&'static str>,
         invoke_count: usize,
         reconcile_count: usize,
+        assert_store_lock_available: bool,
     }
 
     impl FakeAdapter {
@@ -1580,6 +1710,16 @@ mod tests {
                 by_key: Reconciliation::NotFound,
                 invoke_count: 0,
                 reconcile_count: 0,
+                assert_store_lock_available: false,
+            }
+        }
+
+        fn assert_store_lock_is_available(&self) {
+            if self.assert_store_lock_available {
+                assert!(
+                    intent_store_lock().try_lock().is_ok(),
+                    "provider I/O must not run while the process-global intent-store lock is held"
+                );
             }
         }
     }
@@ -1603,6 +1743,7 @@ mod tests {
             _request: &Self::Request,
             _idempotency_key: &IdempotencyKey,
         ) -> Result<Invocation<Self::Output>, Self::Error> {
+            self.assert_store_lock_is_available();
             self.invoke_count += 1;
             if let Some(job_id) = &self.expected_job {
                 let path = self
@@ -1620,6 +1761,7 @@ mod tests {
             &mut self,
             _provider_job_id: &ProviderJobId,
         ) -> Result<Reconciliation<Self::Output>, Self::Error> {
+            self.assert_store_lock_is_available();
             self.reconcile_count += 1;
             Ok(self.by_handle.clone())
         }
@@ -1628,6 +1770,7 @@ mod tests {
             &mut self,
             _idempotency_key: &IdempotencyKey,
         ) -> Result<Reconciliation<Self::Output>, Self::Error> {
+            self.assert_store_lock_is_available();
             self.reconcile_count += 1;
             Ok(self.by_key.clone())
         }
@@ -1826,7 +1969,90 @@ mod tests {
         );
 
         let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
-        assert_eq!(acknowledged.intent().state(), IntentState::Reconciled);
+        assert_eq!(
+            acknowledged.record().intent().state(),
+            IntentState::Reconciled
+        );
+        assert!(acknowledged.retention_warning().is_none());
+    }
+
+    #[test]
+    fn retention_failure_is_reported_after_durable_acknowledgement() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-ack-warning").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_ack_warning").unwrap();
+        created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('0'),
+                    artifact("ack_warning_candidate"),
+                )
+                .unwrap(),
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime
+            .invoke_prepared(&job_id, &mut adapter, &1)
+            .unwrap();
+        let malformed = temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json");
+        fs::write(&malformed, b"{").unwrap();
+
+        let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
+        assert_eq!(
+            acknowledged.record().intent().state(),
+            IntentState::Reconciled
+        );
+        assert!(acknowledged.retention_warning().is_some());
+        assert_eq!(
+            IntentStore::new(&project)
+                .load(&job_id)
+                .unwrap()
+                .intent()
+                .state(),
+            IntentState::Reconciled
+        );
+    }
+
+    #[test]
+    fn provider_io_runs_without_holding_intent_store_lock() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-lock-scope").unwrap(),
+            policy(2, 3),
+        );
+        let job_id = JobId::new("job_lock_scope").unwrap();
+        created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('1'),
+                    artifact("lock_scope_candidate"),
+                )
+                .unwrap(),
+        );
+        let remote = ProviderJobId::new("remote-lock-scope").unwrap();
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.assert_store_lock_available = true;
+        adapter.invocation = Ok(Invocation::Pending(remote.clone()));
+        runtime
+            .invoke_prepared(&job_id, &mut adapter, &1)
+            .unwrap();
+
+        let mut recovery = FakeAdapter::completed(temp.0.clone());
+        recovery.assert_store_lock_available = true;
+        recovery.by_handle = Reconciliation::Pending {
+            provider_job_id: Some(remote),
+        };
+        runtime.reconcile_startup(&mut recovery).unwrap();
     }
 
     #[test]
@@ -2174,6 +2400,44 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(fresh, PrepareOutcome::Created(_)));
+    }
+
+    #[test]
+    fn load_all_skips_entry_removed_after_directory_scan() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-vanishing-entry").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_vanishing_entry").unwrap();
+        created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('2'),
+                    artifact("vanishing_candidate"),
+                )
+                .unwrap(),
+        );
+        let directory = checked_runtime_directory(&project, RUNTIME_INTENT_DIR)
+            .unwrap()
+            .unwrap();
+        let entry = fs::read_dir(directory)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.file_name() == format!("{}.json", job_id.as_str()))
+            .unwrap();
+        fs::remove_file(entry.path()).unwrap();
+
+        assert!(
+            IntentStore::new(&project)
+                .load_scanned_entry(entry)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
