@@ -411,9 +411,7 @@ impl<'project> JobRuntime<'project> {
                 .checked_add(1)
                 .ok_or(InvokePreparedError::Runtime(JobRuntimeError::Overflow))?;
             record.last_error_class = None;
-            store
-                .save(&record)
-                .map_err(InvokePreparedError::Runtime)?;
+            store.save(&record).map_err(InvokePreparedError::Runtime)?;
             record
         };
 
@@ -424,9 +422,7 @@ impl<'project> JobRuntime<'project> {
                 record.last_error_class = Some(class);
                 {
                     let _guard = lock_unpoisoned(intent_store_lock());
-                    store
-                        .save(&record)
-                        .map_err(InvokePreparedError::Runtime)?;
+                    store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 }
                 let retry =
                     retry_disposition(class, record.attempts, self.policy.execution.backoff());
@@ -443,9 +439,7 @@ impl<'project> JobRuntime<'project> {
         match invocation {
             Invocation::Completed(output) => {
                 record.intent.mark_invoked(None)?;
-                store
-                    .save(&record)
-                    .map_err(InvokePreparedError::Runtime)?;
+                store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Completed {
                     job_id: record.intent.job_id().clone(),
                     output,
@@ -453,9 +447,7 @@ impl<'project> JobRuntime<'project> {
             }
             Invocation::Pending(provider_job_id) => {
                 record.intent.mark_invoked(Some(provider_job_id.clone()))?;
-                store
-                    .save(&record)
-                    .map_err(InvokePreparedError::Runtime)?;
+                store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Pending {
                     job_id: record.intent.job_id().clone(),
                     provider_job_id,
@@ -726,7 +718,8 @@ struct JobOperationKey {
     job_id: String,
 }
 
-fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>> {
+fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>
+{
     PROVIDER_LIMITERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -1347,7 +1340,8 @@ impl TryFrom<StoredIntent> for RuntimeIntent {
                 "prepared intent cannot contain provider_job_id",
             ));
         }
-        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some() {
+        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some()
+        {
             return Err(JobRuntimeError::InvalidRecord(
                 "only prepared intent may contain last_error_class",
             ));
@@ -2003,9 +1997,7 @@ mod tests {
                 .unwrap(),
         );
         let mut adapter = FakeAdapter::completed(temp.0.clone());
-        runtime
-            .invoke_prepared(&job_id, &mut adapter, &1)
-            .unwrap();
+        runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
         let malformed = temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json");
         fs::write(&malformed, b"{").unwrap();
 
@@ -2049,9 +2041,7 @@ mod tests {
         let mut adapter = FakeAdapter::completed(temp.0.clone());
         adapter.assert_store_lock_available = true;
         adapter.invocation = Ok(Invocation::Pending(remote.clone()));
-        runtime
-            .invoke_prepared(&job_id, &mut adapter, &1)
-            .unwrap();
+        runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
 
         let mut recovery = FakeAdapter::completed(temp.0.clone());
         recovery.assert_store_lock_available = true;
@@ -2431,10 +2421,11 @@ mod tests {
         let directory = checked_runtime_directory(&project, RUNTIME_INTENT_DIR)
             .unwrap()
             .unwrap();
+        let expected_name = format!("{}.json", job_id.as_str());
         let entry = fs::read_dir(directory)
             .unwrap()
             .map(Result::unwrap)
-            .find(|entry| entry.file_name() == format!("{}.json", job_id.as_str()))
+            .find(|entry| entry.file_name() == expected_name.as_str())
             .unwrap();
         fs::remove_file(entry.path()).unwrap();
 
