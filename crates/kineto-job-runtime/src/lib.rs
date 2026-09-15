@@ -192,7 +192,10 @@ pub enum InvokePreparedError<E> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchOutcome<T> {
-    Completed { job_id: JobId, output: T },
+    Completed {
+        job_id: JobId,
+        output: T,
+    },
     Pending {
         job_id: JobId,
         provider_job_id: ProviderJobId,
@@ -201,13 +204,20 @@ pub enum DispatchOutcome<T> {
 
 #[derive(Debug)]
 pub enum StartupOutcome<T, E> {
-    ResultReady { job_id: JobId, output: T },
-    StillPending { job_id: JobId },
+    ResultReady {
+        job_id: JobId,
+        output: T,
+    },
+    StillPending {
+        job_id: JobId,
+    },
     RetryPrepared {
         job_id: JobId,
         retry: RetryDisposition,
     },
-    NeedsAttention { job_id: JobId },
+    NeedsAttention {
+        job_id: JobId,
+    },
     ProviderError {
         job_id: JobId,
         source: E,
@@ -373,18 +383,14 @@ impl<'project> JobRuntime<'project> {
             .checked_add(1)
             .ok_or(InvokePreparedError::Runtime(JobRuntimeError::Overflow))?;
         record.last_error_class = None;
-        store
-            .save(&record)
-            .map_err(InvokePreparedError::Runtime)?;
+        store.save(&record).map_err(InvokePreparedError::Runtime)?;
 
         let invocation = match adapter.invoke(request, record.intent.idempotency_key()) {
             Ok(invocation) => invocation,
             Err(source) => {
                 let class = adapter.classify_error(&source);
                 record.last_error_class = Some(class);
-                store
-                    .save(&record)
-                    .map_err(InvokePreparedError::Runtime)?;
+                store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 let retry =
                     retry_disposition(class, record.attempts, self.policy.execution.backoff());
                 return Err(InvokePreparedError::Provider {
@@ -399,9 +405,7 @@ impl<'project> JobRuntime<'project> {
         match invocation {
             Invocation::Completed(output) => {
                 record.intent.mark_invoked(None)?;
-                store
-                    .save(&record)
-                    .map_err(InvokePreparedError::Runtime)?;
+                store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Completed {
                     job_id: record.intent.job_id().clone(),
                     output,
@@ -409,9 +413,7 @@ impl<'project> JobRuntime<'project> {
             }
             Invocation::Pending(provider_job_id) => {
                 record.intent.mark_invoked(Some(provider_job_id.clone()))?;
-                store
-                    .save(&record)
-                    .map_err(InvokePreparedError::Runtime)?;
+                store.save(&record).map_err(InvokePreparedError::Runtime)?;
                 Ok(DispatchOutcome::Pending {
                     job_id: record.intent.job_id().clone(),
                     provider_job_id,
@@ -605,11 +607,7 @@ fn derive_idempotency_key(
     .map_err(JobRuntimeError::JobValue)
 }
 
-fn retry_disposition(
-    class: ErrorClass,
-    attempts: u16,
-    policy: BackoffPolicy,
-) -> RetryDisposition {
+fn retry_disposition(class: ErrorClass, attempts: u16, policy: BackoffPolicy) -> RetryDisposition {
     if class == ErrorClass::Terminal {
         return RetryDisposition::Never;
     }
@@ -631,8 +629,8 @@ static PROVIDER_LIMITERS: OnceLock<Mutex<BTreeMap<ProviderKey, Weak<ProviderLimi
     OnceLock::new();
 static INTENT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn provider_limiter_registry()
--> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>> {
+fn provider_limiter_registry() -> &'static Mutex<BTreeMap<ProviderKey, Weak<ProviderLimiterState>>>
+{
     PROVIDER_LIMITERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -726,10 +724,7 @@ impl ProviderLimiterState {
     fn effective_max(&self) -> Option<NonZeroU16> {
         let inner = lock_unpoisoned(&self.inner);
         // A wider runtime policy must never bypass a stricter live policy.
-        inner
-            .registrations
-            .first_key_value()
-            .map(|(max, _)| *max)
+        inner.registrations.first_key_value().map(|(max, _)| *max)
     }
 
     fn try_acquire(self: &Arc<Self>, fallback: NonZeroU16) -> Option<ProviderPermit> {
@@ -814,7 +809,8 @@ impl<'project> IntentStore<'project> {
             ));
         }
 
-        let mut reservation = StoredReservation::from_runtime(record, StoredReservationState::Reserved);
+        let mut reservation =
+            StoredReservation::from_runtime(record, StoredReservationState::Reserved);
         self.save_reservation(&reservation)?;
         self.save(record)?;
         reservation.state = StoredReservationState::Active;
@@ -849,9 +845,11 @@ impl<'project> IntentStore<'project> {
                 }
             },
             StoredReservationState::Active => {
-                let record = self.load_optional(&job_id)?.ok_or(JobRuntimeError::InvalidRecord(
-                    "active idempotency reservation is missing its intent",
-                ))?;
+                let record = self
+                    .load_optional(&job_id)?
+                    .ok_or(JobRuntimeError::InvalidRecord(
+                        "active idempotency reservation is missing its intent",
+                    ))?;
                 validate_reservation_record(&reservation, &record)?;
                 Ok(Some(record))
             }
@@ -1213,8 +1211,7 @@ impl TryFrom<StoredIntent> for RuntimeIntent {
                 "prepared intent cannot contain provider_job_id",
             ));
         }
-        if !matches!(stored.state, StoredIntentState::Prepared)
-            && stored.last_error_class.is_some()
+        if !matches!(stored.state, StoredIntentState::Prepared) && stored.last_error_class.is_some()
         {
             return Err(JobRuntimeError::InvalidRecord(
                 "only prepared intent may contain last_error_class",
@@ -1345,9 +1342,8 @@ impl fmt::Display for JobRuntimeError {
             Self::JobIdAlreadyExists => {
                 formatter.write_str("job id already has a persisted runtime intent")
             }
-            Self::ReconciledIntentPruned => {
-                formatter.write_str("paid intent already reconciled and its diagnostic record was pruned")
-            }
+            Self::ReconciledIntentPruned => formatter
+                .write_str("paid intent already reconciled and its diagnostic record was pruned"),
             Self::Overflow => formatter.write_str("job runtime counter overflow"),
             Self::UnsupportedIntentSchema(version) => {
                 write!(
@@ -1663,9 +1659,7 @@ mod tests {
                 .unwrap(),
         );
         let mut adapter = FakeAdapter::completed(temp.0.clone());
-        runtime
-            .invoke_prepared(&job_id, &mut adapter, &1)
-            .unwrap();
+        runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
         runtime.acknowledge_result(&job_id).unwrap();
         job_id
     }
@@ -2139,9 +2133,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let mut adapter = FakeAdapter::completed(temp.0.clone());
-        runtime
-            .invoke_prepared(&job_id, &mut adapter, &1)
-            .unwrap();
+        runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
 
         let after: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(
@@ -2271,7 +2263,12 @@ mod tests {
             "candidate_pruned_dedupe",
             '6',
         );
-        assert!(IntentStore::new(&project).load_optional(&job_id).unwrap().is_none());
+        assert!(
+            IntentStore::new(&project)
+                .load_optional(&job_id)
+                .unwrap()
+                .is_none()
+        );
 
         let retry = runtime.prepare(
             JobId::new("job_pruned_dedupe_retry").unwrap(),
@@ -2279,7 +2276,10 @@ mod tests {
             input_hash('6'),
             artifact("candidate_pruned_dedupe"),
         );
-        assert!(matches!(retry, Err(JobRuntimeError::ReconciledIntentPruned)));
+        assert!(matches!(
+            retry,
+            Err(JobRuntimeError::ReconciledIntentPruned)
+        ));
     }
 
     #[test]
