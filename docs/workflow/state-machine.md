@@ -91,17 +91,39 @@ Voice approval may be independent per character. A declarative workflow recipe m
 
 ## Paid job intent and reconciliation
 
-Before a provider invocation, the job system persists a write-ahead intent keyed by a deterministic idempotency key derived from semantic input and operation identity.
+Paid/asynchronous provider work uses a durable write-ahead intent in `.kineto/jobs/intents/<job_id>.json`. Every paid intent targets a concrete `artifact_id`, and its deterministic idempotency key is `{operation}:{artifact_id}:{input_hash}`. The `input_hash` may deliberately remain stable across regenerations for staleness semantics; candidate identity is therefore the discriminator between a crash retry and a fresh paid generation. Retrying the same candidate reuses the same key, while another candidate or regeneration must use a new artifact ID and therefore receives a new key.
 
-Startup reconciliation runs before rescheduling unfinished paid work:
+The runtime keeps a small direct-lookup reservation sidecar under `.kineto/jobs/idempotency/` for each idempotency key. Reservation files contain and re-validate the complete provider/key pair; their filename locator is not authoritative. `prepare` reads only that reservation and, when present, its single referenced intent instead of parsing the entire intent directory. Reservation publication is write-ahead too: `Reserved` is written before the intent, then promoted to `Active`. An interrupted `Reserved` entry with no intent is safe to clear because provider invocation could not yet have happened.
 
-1. load unfinished intent records
-2. if a provider job handle exists, query/reconcile remote state
-3. attach completed results without reissuing the request
-4. retry only according to provider error classification/backoff policy
-5. require policy approval before expensive fallback
+The runtime intent lifecycle is:
 
-Runtime state may live in `.kineto/`; resulting durable artifact/provenance state is written to canonical project files.
+```text
+Prepared
+   ↓ provider call may have happened
+Invoked
+   ↓ canonical result/provenance attached
+Reconciled
+```
+
+`Prepared` is written before the first provider call. Before every call attempt the attempt counter is atomically persisted while the intent is still `Prepared`; therefore a crash in the provider-call window leaves evidence that a paid request may already have happened. A returned remote `provider_job_id` is persisted by moving the intent to `Invoked` as soon as the adapter supplies it. A synchronous result also moves to `Invoked`, but it is not marked `Reconciled` until the caller has durably attached the result to canonical project state.
+
+Startup reconciliation runs before unfinished paid work is rescheduled:
+
+1. load and validate runtime intent records from `.kineto/jobs/intents/`
+2. for `Prepared`, reconcile by deterministic idempotency key before deciding that another call is safe
+3. for `Invoked` with a remote handle, reconcile that handle; without a handle, reconcile by idempotency key
+4. if reconciliation finds a completed or pending remote job for a `Prepared` record, persist it as `Invoked` without reissuing the request
+5. if a `Prepared` record is not found remotely, only expose retry according to the adapter's retry classification and configured backoff/attempt ceiling
+6. if an already-`Invoked` remote handle is reported missing, surface `NeedsAttention`; do not silently convert it into another paid invocation
+7. when a completed result is returned, write canonical artifact/provenance state first, then acknowledge the runtime intent as `Reconciled`
+
+Provider adapters expose side-effect-free cost estimation, invocation with the deterministic idempotency key, remote-handle reconciliation, idempotency-key reconciliation, and retryable/terminal error classification. Batch dry-run aggregates call count, integer money micros, currency, and a conservative serial-sum duration upper bound without creating intent records or invoking a provider. The duration intentionally does not model provider concurrency and must not be presented as an exact ETA.
+
+Per-provider execution policy supplies a concurrency ceiling and validated exponential-backoff policy. Paid fallback is configuration, not an implicit router behavior: both the spend ceiling and any explicit-user-approval requirement must pass before an expensive fallback is allowed.
+
+Reconciled intent files are diagnostic history, not recovery evidence. `IntentRetentionPolicy` bounds the number retained per provider (256 by default); pruning runs after canonical acknowledgement and never removes `Prepared` or `Invoked` records. Pruning leaves a compact idempotency tombstone so an exact already-paid candidate cannot become payable again merely because its diagnostic intent record aged out. Unknown JSON fields in stored intents are preserved across load/save cycles, matching the schema's `additionalProperties` contract.
+
+Runtime bookkeeping lives under `.kineto/`; durable artifact/provenance state lives in canonical project files. Deleting `.kineto/` intentionally discards in-flight recovery/idempotency bookkeeping, but it must not change what the user selected, locked, or otherwise accepted as canonical production truth.
 
 ## Engine/UI events
 

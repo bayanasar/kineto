@@ -2,6 +2,7 @@
 members = [
     "apps/kineto/rust",
     "crates/kineto-core",
+    "crates/kineto-job-runtime",
     "crates/kineto-jobs",
     "crates/kineto-project",
     "crates/kineto-prompts",

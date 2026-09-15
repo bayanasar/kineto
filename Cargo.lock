@@ -89,6 +89,16 @@ name = "kineto-core"
 version = "0.1.0"
 
 [[package]]
+name = "kineto-job-runtime"
+version = "0.1.0"
+dependencies = [
+ "kineto-jobs",
+ "kineto-project",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kineto-jobs"
 version = "0.1.0"
 dependencies = [

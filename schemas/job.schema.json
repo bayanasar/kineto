@@ -1,28 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kineto.local/schemas/job.schema.json",
-  "title": "Kineto Job / Write-ahead Intent",
+  "title": "Kineto Write-ahead Job Intent",
   "type": "object",
-  "required": ["job_id", "kind", "status", "idempotency_key", "input_hash"],
+  "required": ["schema_version", "provider", "job_id", "operation", "state", "idempotency_key", "input_hash", "attempts"],
   "properties": {
-    "job_id": {"type": "string", "minLength": 1},
-    "kind": {"type": "string", "minLength": 1},
-    "status": {"enum": ["queued", "running", "waiting_for_user", "succeeded", "failed", "canceled"]},
-    "idempotency_key": {"type": "string", "minLength": 1},
-    "input_hash": {"type": "string", "minLength": 1},
-    "artifact_id": {"type": ["string", "null"]},
-    "provider_job_id": {"type": ["string", "null"]},
-    "progress": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
-    "estimated_cost": {
-      "type": ["object", "null"],
-      "properties": {
-        "call_count": {"type": "integer", "minimum": 0},
-        "amount_micros": {"type": "integer", "minimum": 0},
-        "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
-        "estimated_duration_ms": {"type": ["integer", "null"], "minimum": 0}
-      },
-      "additionalProperties": true
-    }
+    "schema_version": {"const": 1},
+    "provider": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "job_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "operation": {"type": "string", "minLength": 1},
+    "state": {"enum": ["prepared", "invoked", "reconciled"]},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifact_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "provider_job_id": {"type": ["string", "null"], "maxLength": 256},
+    "attempts": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "last_error_class": {"enum": ["retryable", "terminal", null]}
   },
   "additionalProperties": true
 }
