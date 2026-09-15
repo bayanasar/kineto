@@ -372,14 +372,14 @@ impl<'project> JobRuntime<'project> {
     ) -> Result<DispatchOutcome<A::Output>, InvokePreparedError<A::Error>> {
         self.ensure_writable()
             .map_err(InvokePreparedError::Runtime)?;
+        let operation_lock = job_operation_lock(self.project, job_id);
+        let _operation_guard = lock_unpoisoned(&operation_lock);
         let _permit = self
             .limiter
             .try_acquire()
             .ok_or(InvokePreparedError::Runtime(
                 JobRuntimeError::ConcurrencyLimitReached,
             ))?;
-        let operation_lock = job_operation_lock(self.project, job_id);
-        let _operation_guard = lock_unpoisoned(&operation_lock);
         let store = IntentStore::new(self.project);
 
         let mut record = {
@@ -476,23 +476,29 @@ impl<'project> JobRuntime<'project> {
         job_id: &JobId,
     ) -> Result<AcknowledgeOutcome, JobRuntimeError> {
         self.ensure_writable()?;
-        let operation_lock = job_operation_lock(self.project, job_id);
-        let _operation_guard = lock_unpoisoned(&operation_lock);
         let store = IntentStore::new(self.project);
-        let _guard = lock_unpoisoned(intent_store_lock());
-        let mut record = store.load(job_id)?;
-        self.ensure_provider(&record)?;
-        match record.intent.state() {
-            IntentState::Invoked => {
-                record.intent.mark_reconciled()?;
-                store.save(&record)?;
+        let record = {
+            let operation_lock = job_operation_lock(self.project, job_id);
+            let _operation_guard = lock_unpoisoned(&operation_lock);
+            let _guard = lock_unpoisoned(intent_store_lock());
+            let mut record = store.load(job_id)?;
+            self.ensure_provider(&record)?;
+            match record.intent.state() {
+                IntentState::Invoked => {
+                    record.intent.mark_reconciled()?;
+                    store.save(&record)?;
+                }
+                IntentState::Reconciled => {}
+                IntentState::Prepared => return Err(JobRuntimeError::IntentNotPrepared),
             }
-            IntentState::Reconciled => {}
-            IntentState::Prepared => return Err(JobRuntimeError::IntentNotPrepared),
-        }
-        let retention_warning = store
-            .prune_reconciled(&self.provider, self.retention.max_reconciled())
-            .err();
+            record
+        };
+        let retention_warning = {
+            let _guard = lock_unpoisoned(intent_store_lock());
+            store
+                .prune_reconciled(&self.provider, self.retention.max_reconciled())
+                .err()
+        };
         Ok(AcknowledgeOutcome {
             record,
             retention_warning,
@@ -516,7 +522,9 @@ impl<'project> JobRuntime<'project> {
             let _operation_guard = lock_unpoisoned(&operation_lock);
             let mut record = {
                 let _guard = lock_unpoisoned(intent_store_lock());
-                let record = store.load(&job_id)?;
+                let Some(record) = store.load_optional(&job_id)? else {
+                    continue;
+                };
                 self.ensure_provider(&record)?;
                 record
             };
@@ -709,9 +717,8 @@ static PROVIDER_LIMITERS: OnceLock<Mutex<BTreeMap<ProviderKey, Weak<ProviderLimi
 static INTENT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// Keeps state-changing operations for one project/job ordered while allowing
 /// provider I/O for different jobs to remain concurrent.
-static JOB_OPERATION_LOCKS: OnceLock<
-    Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>>,
-> = OnceLock::new();
+static JOB_OPERATION_LOCKS: OnceLock<Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct JobOperationKey {
@@ -727,8 +734,7 @@ fn intent_store_lock() -> &'static Mutex<()> {
     INTENT_STORE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn job_operation_registry(
-) -> &'static Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>> {
+fn job_operation_registry() -> &'static Mutex<BTreeMap<JobOperationKey, Weak<Mutex<()>>>> {
     JOB_OPERATION_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
