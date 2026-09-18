@@ -109,19 +109,21 @@ Reconciled
 
 Startup reconciliation runs before unfinished paid work is rescheduled:
 
-1. load and validate runtime intent records from `.kineto/jobs/intents/`
+1. scan runtime intent records from `.kineto/jobs/intents/`; malformed JSON and records from a future intent schema are surfaced as per-record `UnreadableIntent` outcomes while reconciliation continues for other jobs, but symlinks, filename/job-ID mismatches, and other identity/boundary violations still fail closed
 2. for `Prepared`, reconcile by deterministic idempotency key before deciding that another call is safe
 3. for `Invoked` with a remote handle, reconcile that handle; without a handle, reconcile by idempotency key
 4. if reconciliation finds a completed or pending remote job for a `Prepared` record, persist it as `Invoked` without reissuing the request
 5. if a `Prepared` record is not found remotely, only expose retry according to the adapter's retry classification and configured backoff/attempt ceiling
 6. if an already-`Invoked` remote handle is reported missing, surface `NeedsAttention`; do not silently convert it into another paid invocation
-7. when a completed result is returned, write canonical artifact/provenance state first, then acknowledge the runtime intent as `Reconciled`
+7. when a completed result is returned, write canonical artifact/provenance state first, then durably acknowledge the runtime intent as `Reconciled`; retention runs only afterward, and a retention failure is returned as a warning on the successful acknowledgement rather than changing the acknowledgement into a failure
+
+Within one process, state-changing operations for the same canonical project/job are serialized by a per-job operation lock. Store snapshots and filesystem mutations use a short process-global intent-store lock, always inside the per-job operation lock when both are needed. Provider/network I/O runs outside the intent-store lock. The project identity used for the per-job lock comes from the already-canonical `ProjectRoot`; it is not recomputed with a fallible filesystem lookup. This locking is intentionally in-process only and does not provide cross-process multi-writer coordination.
 
 Provider adapters expose side-effect-free cost estimation, invocation with the deterministic idempotency key, remote-handle reconciliation, idempotency-key reconciliation, and retryable/terminal error classification. Batch dry-run aggregates call count, integer money micros, currency, and a conservative serial-sum duration upper bound without creating intent records or invoking a provider. The duration intentionally does not model provider concurrency and must not be presented as an exact ETA.
 
 Per-provider execution policy supplies a concurrency ceiling and validated exponential-backoff policy. Paid fallback is configuration, not an implicit router behavior: both the spend ceiling and any explicit-user-approval requirement must pass before an expensive fallback is allowed.
 
-Reconciled intent files are diagnostic history, not recovery evidence. `IntentRetentionPolicy` bounds the number retained per provider (256 by default); pruning runs after canonical acknowledgement and never removes `Prepared` or `Invoked` records. Pruning leaves a compact idempotency tombstone so an exact already-paid candidate cannot become payable again merely because its diagnostic intent record aged out. Unknown JSON fields in stored intents are preserved across load/save cycles, matching the schema's `additionalProperties` contract.
+Reconciled intent files are diagnostic history, not recovery evidence. `IntentRetentionPolicy` bounds the number retained per provider (256 by default); pruning runs after canonical acknowledgement and never removes `Prepared` or `Invoked` records. Once `Reconciled` is durably saved, pruning is best-effort housekeeping: failures are exposed through `AcknowledgeOutcome::retention_warning`, and callers are expected to surface or log that warning without retrying acknowledgement as though the durable state transition had failed. Pruning tolerates an intent that disappears after the retention scan and leaves a compact idempotency tombstone when it does retire a reconciled record, so an exact already-paid candidate cannot become payable again merely because its diagnostic intent record aged out. Unknown JSON fields in stored intents are preserved across load/save cycles, matching the schema's `additionalProperties` contract.
 
 Runtime bookkeeping lives under `.kineto/`; durable artifact/provenance state lives in canonical project files. Deleting `.kineto/` intentionally discards in-flight recovery/idempotency bookkeeping, but it must not change what the user selected, locked, or otherwise accepted as canonical production truth.
 
