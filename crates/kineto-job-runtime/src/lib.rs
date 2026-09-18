@@ -2104,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_ignores_unreadable_intent_and_prunes_decoded_history() {
+    fn retention_ignores_unreadable_intents_and_prunes_decoded_history() {
         let temp = TempDir::new();
         let project = project(&temp);
         let runtime = JobRuntime::new(
@@ -2129,6 +2129,19 @@ mod tests {
         let malformed = temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json");
         fs::write(&malformed, b"{").unwrap();
 
+        let persisted_path = temp
+            .0
+            .join(RUNTIME_INTENT_DIR)
+            .join(format!("{}.json", job_id.as_str()));
+        let mut future: Value =
+            serde_json::from_slice(&fs::read(&persisted_path).unwrap()).unwrap();
+        future.as_object_mut().unwrap().insert(
+            "schema_version".to_owned(),
+            serde_json::json!(RUNTIME_INTENT_SCHEMA_VERSION + 1),
+        );
+        let future_schema = temp.0.join(RUNTIME_INTENT_DIR).join("future-schema.json");
+        fs::write(&future_schema, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
+
         let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
         assert_eq!(
             acknowledged.record().intent().state(),
@@ -2142,6 +2155,7 @@ mod tests {
                 .is_none()
         );
         assert!(malformed.exists());
+        assert!(future_schema.exists());
 
         let retry = runtime.prepare(
             JobId::new("job_retention_unreadable_retry").unwrap(),
