@@ -1255,10 +1255,7 @@ impl<'project> IntentStore<'project> {
         let record = match RuntimeIntent::try_from(stored) {
             Ok(record) => record,
             Err(error) if is_recoverable_intent_decode_error(&error) => {
-                return Ok(ScannedIntent::Unreadable(IntentScanWarning {
-                    path,
-                    error,
-                }));
+                return Ok(ScannedIntent::Unreadable(IntentScanWarning { path, error }));
             }
             Err(error) => return Err(error),
         };
