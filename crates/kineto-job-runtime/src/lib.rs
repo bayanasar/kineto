@@ -2220,11 +2220,7 @@ mod tests {
         adapter.invocation = Ok(Invocation::Pending(remote.clone()));
         runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
 
-        fs::write(
-            temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json"),
-            b"{",
-        )
-        .unwrap();
+        fs::write(temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json"), b"{").unwrap();
 
         let persisted_path = temp
             .0
