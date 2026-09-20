@@ -251,10 +251,12 @@ pub enum StartupOutcome<T, E> {
     NeedsAttention {
         job_id: JobId,
     },
-    /// One intent could not be decoded by this build. Startup reconciliation
-    /// continues for other records; filesystem/tamper violations still fail closed.
+    /// One intent could not be decoded by this build. `path` is canonical
+    /// project-relative intent storage, not an absolute filesystem path.
+    /// Startup reconciliation continues for other records; filesystem/tamper
+    /// violations still fail closed.
     UnreadableIntent {
-        path: PathBuf,
+        path: ProjectRelativePath,
         error: JobRuntimeError,
     },
     ProviderError {
@@ -542,10 +544,7 @@ impl<'project> JobRuntime<'project> {
                     Ok(None) => continue,
                     Err(error) if is_recoverable_intent_decode_error(&error) => {
                         outcomes.push(StartupOutcome::UnreadableIntent {
-                            path: PathBuf::from(format!(
-                                "{RUNTIME_INTENT_DIR}/{}.json",
-                                job_id.as_str()
-                            )),
+                            path: intent_path(&job_id)?,
                             error,
                         });
                         continue;
@@ -1132,7 +1131,11 @@ impl<'project> IntentStore<'project> {
         max_reconciled: usize,
     ) -> Result<(), JobRuntimeError> {
         let mut reconciled = Vec::new();
-        for record in self.load_all()? {
+        let scan = self.scan_all()?;
+        // Undecodable records cannot be proven Reconciled, so they are not
+        // retention candidates. Keep them for startup diagnostics instead of
+        // letting one malformed/future-schema record disable pruning globally.
+        for record in scan.records {
             if record.provider != *provider || record.intent.state() != IntentState::Reconciled {
                 continue;
             }
@@ -1187,14 +1190,6 @@ impl<'project> IntentStore<'project> {
         Ok(())
     }
 
-    fn load_all(&self) -> Result<Vec<RuntimeIntent>, JobRuntimeError> {
-        let scan = self.scan_all()?;
-        if let Some(warning) = scan.warnings.into_iter().next() {
-            return Err(warning.error);
-        }
-        Ok(scan.records)
-    }
-
     fn scan_all(&self) -> Result<IntentScan, JobRuntimeError> {
         let Some(directory) = checked_runtime_directory(self.project, RUNTIME_INTENT_DIR)? else {
             return Ok(IntentScan::default());
@@ -1215,18 +1210,6 @@ impl<'project> IntentStore<'project> {
         scan.warnings
             .sort_by(|left, right| left.path.cmp(&right.path));
         Ok(scan)
-    }
-
-    #[cfg(test)]
-    fn load_scanned_entry(
-        &self,
-        entry: fs::DirEntry,
-    ) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
-        match self.scan_entry(entry)? {
-            ScannedIntent::Record(record) => Ok(Some(record)),
-            ScannedIntent::Skipped => Ok(None),
-            ScannedIntent::Unreadable(warning) => Err(warning.error),
-        }
     }
 
     fn scan_entry(&self, entry: fs::DirEntry) -> Result<ScannedIntent, JobRuntimeError> {
@@ -1264,7 +1247,7 @@ impl<'project> IntentStore<'project> {
             Ok(stored) => stored,
             Err(error) => {
                 return Ok(ScannedIntent::Unreadable(IntentScanWarning {
-                    path: path.as_path().to_path_buf(),
+                    path,
                     error: JobRuntimeError::Json(error),
                 }));
             }
@@ -1272,10 +1255,7 @@ impl<'project> IntentStore<'project> {
         let record = match RuntimeIntent::try_from(stored) {
             Ok(record) => record,
             Err(error) if is_recoverable_intent_decode_error(&error) => {
-                return Ok(ScannedIntent::Unreadable(IntentScanWarning {
-                    path: path.as_path().to_path_buf(),
-                    error,
-                }));
+                return Ok(ScannedIntent::Unreadable(IntentScanWarning { path, error }));
             }
             Err(error) => return Err(error),
         };
@@ -1296,7 +1276,7 @@ struct IntentScan {
 
 #[derive(Debug)]
 struct IntentScanWarning {
-    path: PathBuf,
+    path: ProjectRelativePath,
     error: JobRuntimeError,
 }
 
@@ -2121,22 +2101,23 @@ mod tests {
     }
 
     #[test]
-    fn retention_failure_is_reported_after_durable_acknowledgement() {
+    fn retention_ignores_unreadable_intents_and_prunes_decoded_history() {
         let temp = TempDir::new();
         let project = project(&temp);
         let runtime = JobRuntime::new(
             &project,
-            ProviderKey::new("fake-image-ack-warning").unwrap(),
+            ProviderKey::new("fake-image-retention-unreadable").unwrap(),
             policy(1, 3),
-        );
-        let job_id = JobId::new("job_ack_warning").unwrap();
+        )
+        .with_intent_retention(IntentRetentionPolicy::new(0));
+        let job_id = JobId::new("job_retention_unreadable").unwrap();
         created(
             runtime
                 .prepare(
                     job_id.clone(),
                     "image.generate",
                     input_hash('0'),
-                    artifact("ack_warning_candidate"),
+                    artifact("retention_unreadable_candidate"),
                 )
                 .unwrap(),
         );
@@ -2145,20 +2126,44 @@ mod tests {
         let malformed = temp.0.join(RUNTIME_INTENT_DIR).join("malformed.json");
         fs::write(&malformed, b"{").unwrap();
 
+        let persisted_path = temp
+            .0
+            .join(RUNTIME_INTENT_DIR)
+            .join(format!("{}.json", job_id.as_str()));
+        let mut future: Value =
+            serde_json::from_slice(&fs::read(&persisted_path).unwrap()).unwrap();
+        future.as_object_mut().unwrap().insert(
+            "schema_version".to_owned(),
+            serde_json::json!(RUNTIME_INTENT_SCHEMA_VERSION + 1),
+        );
+        let future_schema = temp.0.join(RUNTIME_INTENT_DIR).join("future-schema.json");
+        fs::write(&future_schema, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
+
         let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
         assert_eq!(
             acknowledged.record().intent().state(),
             IntentState::Reconciled
         );
-        assert!(acknowledged.retention_warning().is_some());
-        assert_eq!(
+        assert!(acknowledged.retention_warning().is_none());
+        assert!(
             IntentStore::new(&project)
-                .load(&job_id)
+                .load_optional(&job_id)
                 .unwrap()
-                .intent()
-                .state(),
-            IntentState::Reconciled
+                .is_none()
         );
+        assert!(malformed.exists());
+        assert!(future_schema.exists());
+
+        let retry = runtime.prepare(
+            JobId::new("job_retention_unreadable_retry").unwrap(),
+            "image.generate",
+            input_hash('0'),
+            artifact("retention_unreadable_candidate"),
+        );
+        assert!(matches!(
+            retry,
+            Err(JobRuntimeError::ReconciledIntentPruned)
+        ));
     }
 
     #[test]
@@ -2248,12 +2253,12 @@ mod tests {
         assert!(outcomes.iter().any(|outcome| matches!(
             outcome,
             StartupOutcome::UnreadableIntent { path, .. }
-                if path.ends_with("malformed.json")
+                if path.as_path().ends_with("malformed.json")
         )));
         assert!(outcomes.iter().any(|outcome| matches!(
             outcome,
             StartupOutcome::UnreadableIntent { path, .. }
-                if path.ends_with("future-schema.json")
+                if path.as_path().ends_with("future-schema.json")
         )));
         assert!(outcomes.iter().any(|outcome| matches!(
             outcome,
@@ -2610,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn load_all_skips_entry_removed_after_directory_scan() {
+    fn scan_entry_skips_entry_removed_after_directory_scan() {
         let temp = TempDir::new();
         let project = project(&temp);
         let runtime = JobRuntime::new(
@@ -2640,12 +2645,10 @@ mod tests {
             .unwrap();
         fs::remove_file(entry.path()).unwrap();
 
-        assert!(
-            IntentStore::new(&project)
-                .load_scanned_entry(entry)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            IntentStore::new(&project).scan_entry(entry).unwrap(),
+            ScannedIntent::Skipped
+        ));
     }
 
     #[test]
@@ -2691,9 +2694,10 @@ mod tests {
         complete_and_ack(&runtime, &temp, "job_gc_2", "gc_candidate_2", '2');
         complete_and_ack(&runtime, &temp, "job_gc_3", "gc_candidate_3", '3');
 
-        let records = IntentStore::new(&project).load_all().unwrap();
+        let scan = IntentStore::new(&project).scan_all().unwrap();
+        assert!(scan.warnings.is_empty());
         assert_eq!(
-            records
+            scan.records
                 .iter()
                 .filter(|record| record.intent().state() == IntentState::Reconciled)
                 .count(),
