@@ -2146,10 +2146,7 @@ mod tests {
         }));
         assert!(scan.warnings.iter().any(|warning| {
             warning.path.as_path().ends_with("future-schema.json")
-                && matches!(
-                    &warning.error,
-                    JobRuntimeError::UnsupportedIntentSchema(_)
-                )
+                && matches!(&warning.error, JobRuntimeError::UnsupportedIntentSchema(_))
         }));
 
         let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
@@ -2200,11 +2197,8 @@ mod tests {
                 )
                 .unwrap(),
         );
-        let reservation = reservation_path(
-            prepared.provider(),
-            prepared.intent().idempotency_key(),
-        )
-        .unwrap();
+        let reservation =
+            reservation_path(prepared.provider(), prepared.intent().idempotency_key()).unwrap();
 
         let mut adapter = FakeAdapter::completed(temp.0.clone());
         runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
