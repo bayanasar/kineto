@@ -2139,6 +2139,16 @@ mod tests {
         let future_schema = temp.0.join(RUNTIME_INTENT_DIR).join("future-schema.json");
         fs::write(&future_schema, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
 
+        let scan = IntentStore::new(&project).scan_all().unwrap();
+        assert!(scan.warnings.iter().any(|warning| {
+            warning.path.as_path().ends_with("malformed.json")
+                && matches!(&warning.error, JobRuntimeError::Json(_))
+        }));
+        assert!(scan.warnings.iter().any(|warning| {
+            warning.path.as_path().ends_with("future-schema.json")
+                && matches!(&warning.error, JobRuntimeError::UnsupportedIntentSchema(_))
+        }));
+
         let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
         assert_eq!(
             acknowledged.record().intent().state(),
@@ -2164,6 +2174,51 @@ mod tests {
             retry,
             Err(JobRuntimeError::ReconciledIntentPruned)
         ));
+    }
+
+    #[test]
+    fn retention_hard_failure_is_reported_after_durable_acknowledgement() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-retention-hard-failure").unwrap(),
+            policy(1, 3),
+        )
+        .with_intent_retention(IntentRetentionPolicy::new(0));
+        let job_id = JobId::new("job_retention_hard_failure").unwrap();
+        let prepared = created(
+            runtime
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('9'),
+                    artifact("retention_hard_failure_candidate"),
+                )
+                .unwrap(),
+        );
+        let reservation =
+            reservation_path(prepared.provider(), prepared.intent().idempotency_key()).unwrap();
+
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+
+        let reservation = project.root().resolve(&reservation);
+        fs::remove_file(&reservation).unwrap();
+        fs::create_dir(&reservation).unwrap();
+
+        let acknowledged = runtime.acknowledge_result(&job_id).unwrap();
+        assert_eq!(
+            acknowledged.record().intent().state(),
+            IntentState::Reconciled
+        );
+        assert!(matches!(
+            acknowledged.retention_warning(),
+            Some(JobRuntimeError::Fs(_))
+        ));
+
+        let persisted = IntentStore::new(&project).load(&job_id).unwrap();
+        assert_eq!(persisted.intent().state(), IntentState::Reconciled);
     }
 
     #[test]
