@@ -3,9 +3,11 @@ name: CI
 on:
   pull_request:
   push:
+    branches:
+      - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -15,7 +17,6 @@ jobs:
     timeout-minutes: 60
     env:
       CI: "true"
-      RUSTUP_TOOLCHAIN: "1.98.1"
       FLUTTER_VERSION: "3.47.2"
       FLUTTER_ARCHIVE_SHA256: "447878859d01ca9bfdb99a85f245af07ed8a15fedcd9d189c4749e8e92d1f185"
       PUB_CACHE: /tmp/pub-cache
@@ -28,8 +29,17 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update -qq
-          apt-get install -y -qq \
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+            SUDO="sudo -n"
+          else
+            echo "runner must be root or provide passwordless sudo" >&2
+            exit 1
+          fi
+
+          $SUDO apt-get update -qq
+          $SUDO apt-get install -y -qq \
             ca-certificates \
             clang \
             cmake \
@@ -41,41 +51,69 @@ jobs:
             liblzma-dev \
             ninja-build \
             pkg-config \
+            python3 \
             xz-utils
 
-      - name: Rust 1.98.1
+      - name: Rust toolchain from rust-toolchain.toml
         run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -fsSL https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" \
-            --profile minimal \
-            --component rustfmt \
-            --component clippy
-          rustc --version
-          cargo --version
+          export PATH="$HOME/.cargo/bin:$PATH"
 
-      - name: Cache Flutter SDK
-        uses: actions/cache@v4
-        with:
-          path: /opt/flutter
-          key: flutter-linux-x64-3.47.2
+          eval "$(
+            python3 - <<'PY'
+          import shlex
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as handle:
+              toolchain = tomllib.load(handle)["toolchain"]
+
+          print("RUST_CHANNEL=" + shlex.quote(toolchain["channel"]))
+          print("RUST_PROFILE=" + shlex.quote(toolchain.get("profile", "default")))
+          print("RUST_COMPONENTS=" + shlex.quote(",".join(toolchain.get("components", []))))
+          PY
+          )"
+
+          args=(toolchain install "$RUST_CHANNEL" --profile "$RUST_PROFILE")
+          IFS=',' read -r -a components <<< "$RUST_COMPONENTS"
+          for component in "${components[@]}"; do
+            [ -z "$component" ] || args+=(--component "$component")
+          done
+          rustup "${args[@]}"
+
+          actual_rust="$(rustc --version | awk '{print $2}')"
+          actual_cargo="$(cargo --version | awk '{print $2}')"
+          test "$actual_rust" = "$RUST_CHANNEL"
+          test "$actual_cargo" = "$RUST_CHANNEL"
+          rustfmt --version
+          cargo clippy --version
 
       - name: Flutter 3.47.2
         run: |
           test "$(uname -m)" = "x86_64"
-          if [ ! -x /opt/flutter/bin/flutter ]; then
-            rm -rf /opt/flutter
-            curl -fsSL \
-              "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
-              -o /tmp/flutter.tar.xz
-            echo "$FLUTTER_ARCHIVE_SHA256  /tmp/flutter.tar.xz" | sha256sum -c -
-            tar -xJf /tmp/flutter.tar.xz -C /opt
-            rm -f /tmp/flutter.tar.xz
-          fi
-          echo "/opt/flutter/bin" >> "$GITHUB_PATH"
+
+          flutter_root="/tmp/kineto-flutter-$FLUTTER_VERSION"
+          archive="/tmp/flutter-$FLUTTER_VERSION.tar.xz"
+          rm -rf "$flutter_root" "$archive"
+          mkdir -p "$flutter_root"
+
+          curl -fsSL \
+            "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+            -o "$archive"
+          echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$flutter_root" --strip-components=1
+          rm -f "$archive"
+
+          echo "$flutter_root/bin" >> "$GITHUB_PATH"
 
       - name: Flutter toolchain
         run: |
           flutter config --no-analytics
+          actual_flutter="$(flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')"
+          test "$actual_flutter" = "$FLUTTER_VERSION"
           flutter precache --linux
           flutter --version
           dart --version
@@ -120,5 +158,10 @@ jobs:
         working-directory: apps/kineto
         run: flutter build linux --release
 
-      - name: No tracked build drift
-        run: git diff --exit-code
+      - name: No checkout drift
+        run: |
+          drift="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$drift" ]; then
+            printf '%s\n' "$drift"
+            exit 1
+          fi
