@@ -17,6 +17,7 @@ jobs:
       CI: "true"
       RUSTUP_TOOLCHAIN: "1.98.1"
       FLUTTER_VERSION: "3.47.2"
+      FLUTTER_ARCHIVE_SHA256: "447878859d01ca9bfdb99a85f245af07ed8a15fedcd9d189c4749e8e92d1f185"
       PUB_CACHE: /tmp/pub-cache
 
     steps:
@@ -66,6 +67,7 @@ jobs:
             curl -fsSL \
               "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
               -o /tmp/flutter.tar.xz
+            echo "$FLUTTER_ARCHIVE_SHA256  /tmp/flutter.tar.xz" | sha256sum -c -
             tar -xJf /tmp/flutter.tar.xz -C /opt
             rm -f /tmp/flutter.tar.xz
           fi
