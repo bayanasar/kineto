@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-gate:
+    name: linux-gate
+    runs-on: anton
+    timeout-minutes: 60
+    env:
+      CI: "true"
+      RUSTUP_TOOLCHAIN: "1.98.1"
+      FLUTTER_VERSION: "3.47.2"
+      PUB_CACHE: /tmp/pub-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            g++ \
+            git \
+            libblkid-dev \
+            libgtk-3-dev \
+            liblzma-dev \
+            ninja-build \
+            pkg-config \
+            xz-utils
+
+      - name: Rust 1.98.1
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy
+          rustc --version
+          cargo --version
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v4
+        with:
+          path: /opt/flutter
+          key: flutter-linux-x64-3.47.2
+
+      - name: Flutter 3.47.2
+        run: |
+          test "$(uname -m)" = "x86_64"
+          if [ ! -x /opt/flutter/bin/flutter ]; then
+            rm -rf /opt/flutter
+            curl -fsSL \
+              "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+              -o /tmp/flutter.tar.xz
+            tar -xJf /tmp/flutter.tar.xz -C /opt
+            rm -f /tmp/flutter.tar.xz
+          fi
+          echo "/opt/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter toolchain
+        run: |
+          flutter config --no-analytics
+          flutter precache --linux
+          flutter --version
+          dart --version
+
+      - name: Rust dependencies
+        run: cargo fetch --locked
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust locked metadata
+        run: cargo metadata --offline --locked --format-version 1 >/dev/null
+
+      - name: Rust workspace tests
+        run: cargo test --workspace --offline --locked
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --offline --locked -- -D warnings
+
+      - name: Brand hard cut
+        run: ./tool/check-brand-hard-cut.sh
+
+      - name: Clean Flutter dependency resolution
+        working-directory: apps/kineto
+        run: |
+          test ! -e pubspec_overrides.yaml
+          lock_before="$(sha256sum pubspec.lock | awk '{print $1}')"
+          flutter pub get
+          lock_after="$(sha256sum pubspec.lock | awk '{print $1}')"
+          test "$lock_before" = "$lock_after"
+          git diff --exit-code -- pubspec.lock
+
+      - name: Flutter analyze
+        working-directory: apps/kineto
+        run: flutter analyze
+
+      - name: Flutter tests
+        working-directory: apps/kineto
+        run: flutter test
+
+      - name: Linux release build
+        working-directory: apps/kineto
+        run: flutter build linux --release
+
+      - name: No tracked build drift
+        run: git diff --exit-code
