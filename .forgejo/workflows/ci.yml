@@ -90,7 +90,7 @@ jobs:
             "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
             -o "$archive"
           echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
-          tar -xJf "$archive" -C "$flutter_root" --strip-components=1
+          tar --no-same-owner -xJf "$archive" -C "$flutter_root" --strip-components=1
           rm -f "$archive"
 
           echo "$flutter_root/bin" >> "$GITHUB_PATH"
