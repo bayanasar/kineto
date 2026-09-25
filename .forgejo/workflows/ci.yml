@@ -15,6 +15,9 @@ jobs:
     name: linux-gate
     runs-on: anton
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     env:
       CI: "true"
       FLUTTER_VERSION: "3.47.2"
@@ -51,45 +54,23 @@ jobs:
             liblzma-dev \
             ninja-build \
             pkg-config \
-            python3 \
             xz-utils
 
       - name: Rust toolchain from rust-toolchain.toml
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
-            curl -fsSL https://sh.rustup.rs \
+            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
               | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
 
-          eval "$(
-            python3 - <<'PY'
-          import shlex
-          import tomllib
-
-          with open("rust-toolchain.toml", "rb") as handle:
-              toolchain = tomllib.load(handle)["toolchain"]
-
-          print("RUST_CHANNEL=" + shlex.quote(toolchain["channel"]))
-          print("RUST_PROFILE=" + shlex.quote(toolchain.get("profile", "default")))
-          print("RUST_COMPONENTS=" + shlex.quote(",".join(toolchain.get("components", []))))
-          PY
-          )"
-
-          args=(toolchain install "$RUST_CHANNEL" --profile "$RUST_PROFILE")
-          IFS=',' read -r -a components <<< "$RUST_COMPONENTS"
-          for component in "${components[@]}"; do
-            [ -z "$component" ] || args+=(--component "$component")
-          done
-          rustup "${args[@]}"
-
-          actual_rust="$(rustc --version | awk '{print $2}')"
-          actual_cargo="$(cargo --version | awk '{print $2}')"
-          test "$actual_rust" = "$RUST_CHANNEL"
-          test "$actual_cargo" = "$RUST_CHANNEL"
+          test -z "${RUSTUP_TOOLCHAIN:-}"
+          rustc --version
+          cargo --version
           rustfmt --version
           cargo clippy --version
+          rustup show active-toolchain
 
       - name: Flutter 3.47.2
         run: |
@@ -112,7 +93,7 @@ jobs:
       - name: Flutter toolchain
         run: |
           flutter config --no-analytics
-          actual_flutter="$(flutter --version | sed -n '1s/^Flutter \([^ ]*\).*/\1/p')"
+          actual_flutter="$(flutter --version | grep -m1 '^Flutter ' | awk '{print $2}')"
           test "$actual_flutter" = "$FLUTTER_VERSION"
           flutter precache --linux
           flutter --version
