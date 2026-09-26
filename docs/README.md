@@ -24,7 +24,10 @@ This directory contains the product and technical design baseline for Kineto. It
 - [`schemas/artifact.schema.json`](../schemas/artifact.schema.json) — artifact lifecycle/provenance model
 - [`schemas/selection.schema.json`](../schemas/selection.schema.json) — stable-ID candidate selection
 - [`schemas/job.schema.json`](../schemas/job.schema.json) — job/write-ahead intent model
+- [`schemas/scene.schema.json`](../schemas/scene.schema.json) — canonical scene record
+- [`schemas/shot.schema.json`](../schemas/shot.schema.json) — canonical shot record
 - [`fixtures/projects/minimal`](../fixtures/projects/minimal) — committed golden canonical project
+- [`kineto-schema-contracts`](../crates/kineto-schema-contracts) — test-only executable schema/golden-project contract
 
 ## Playbooks
 

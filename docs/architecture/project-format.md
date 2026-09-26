@@ -131,6 +131,21 @@ Hard rules:
 - unknown fields encountered in a supported schema must be preserved and written back unchanged
 - round-trip tests over golden projects guard against silent field loss
 
+## Executable schema contracts
+
+Committed JSON Schemas are the source of truth for canonical structured storage. Rust types and serializers must satisfy those schemas; the schemas are not generated from Rust.
+
+`kineto-schema-contracts` is a test-only workspace package that executes the subset of JSON Schema draft 2020-12 used by this repository. It validates the committed golden project and real persistence output from `CanonicalProject`, `ShotWorkflow`, and `JobRuntime`. The harness fails closed on schema keywords, formats, or regular-expression patterns it does not implement, so extending a schema cannot silently weaken validation.
+
+When adding or changing a canonical structured file:
+
+- add or update its committed schema under `schemas/`
+- add the file to the golden-project contract inventory when it belongs in the minimal project
+- ensure production serialization is exercised against the same schema
+- extend the contract harness before using a JSON Schema keyword, format, or pattern it does not already support
+
+Plain source payloads such as `source/story.txt` are not JSON-schema documents; the golden-project contract still inventories them and verifies the declared source is readable, valid UTF-8 text, and non-empty.
+
 ## Production memory
 
 Do not treat "memory" as only embeddings.

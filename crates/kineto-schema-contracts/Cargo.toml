@@ -1,0 +1,16 @@
+[package]
+name = "kineto-schema-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+kineto-job-runtime = { path = "../kineto-job-runtime" }
+kineto-jobs = { path = "../kineto-jobs" }
+kineto-project = { path = "../kineto-project" }
+serde_json = "1"
+toml = "1.0.0"

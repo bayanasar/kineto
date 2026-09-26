@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/shot.schema.json",
+  "title": "Kineto Shot Record",
+  "type": "object",
+  "required": ["shot_id", "schema_version"],
+  "properties": {
+    "shot_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
+    "schema_version": {"type": "integer", "minimum": 1},
+    "direction": {"enum": ["reaction", "spatial_clarity", "intimacy", "tension"]},
+    "generation_revision": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "duration_target": {"type": "number", "minimum": 0},
+    "characters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+    },
+    "framing": {"type": "string"},
+    "lens": {"type": "string"},
+    "camera_motion": {"type": "string"},
+    "action": {"type": "string"},
+    "dialogue": {"type": "string"},
+    "emotion": {"type": "string"},
+    "continuity_from": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}
