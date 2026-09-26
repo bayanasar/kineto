@@ -248,6 +248,13 @@ pub struct CanonicalProject {
 
 impl CanonicalProject {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProjectStoreError> {
+        Self::open_with_supported_version(path.as_ref(), PROJECT_FORMAT_VERSION)
+    }
+
+    fn open_with_supported_version(
+        path: &Path,
+        supported_version: u32,
+    ) -> Result<Self, ProjectStoreError> {
         let root = ProjectRoot::open(path).map_err(ProjectStoreError::Fs)?;
         let manifest_path = ProjectRelativePath::new(PROJECT_MANIFEST_PATH)
             .expect("static canonical project manifest path is valid");
@@ -256,7 +263,8 @@ impl CanonicalProject {
             std::str::from_utf8(&manifest_bytes).map_err(ProjectStoreError::Utf8)?;
         let manifest =
             ProjectManifest::from_toml(manifest_text).map_err(ProjectStoreError::Manifest)?;
-        let access = manifest.access().map_err(ProjectStoreError::Manifest)?;
+        let access = format_access(manifest.format_version, supported_version)
+            .map_err(ProjectStoreError::Manifest)?;
         let source_path = manifest
             .source_relative_path()
             .map_err(ProjectStoreError::Manifest)?;
@@ -272,6 +280,14 @@ impl CanonicalProject {
             manifest,
             access,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_supported_version_for_test(
+        path: impl AsRef<Path>,
+        supported_version: u32,
+    ) -> Result<Self, ProjectStoreError> {
+        Self::open_with_supported_version(path.as_ref(), supported_version)
     }
 
     pub fn create(
@@ -354,6 +370,16 @@ impl CanonicalProject {
     #[must_use]
     pub const fn is_read_only(&self) -> bool {
         matches!(self.access, ProjectAccess::ReadOnly)
+    }
+
+    pub(crate) fn validate_for_write(&self) -> Result<(), ProjectManifestError> {
+        self.manifest.validate()?;
+        if self.is_read_only() {
+            return Err(ProjectManifestError::ReadOnlyFormatVersion(
+                self.manifest.format_version,
+            ));
+        }
+        Ok(())
     }
 }
 
