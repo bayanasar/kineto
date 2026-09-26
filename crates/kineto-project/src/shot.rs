@@ -425,7 +425,6 @@ impl ShotWorkflow {
             return Ok(ShotMigrationReport::default());
         }
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
 
@@ -473,7 +472,6 @@ impl ShotWorkflow {
             return Ok(());
         }
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
 
@@ -490,7 +488,6 @@ impl ShotWorkflow {
             return Err(ShotWorkflowError::Locked);
         }
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
 
@@ -551,7 +548,6 @@ impl ShotWorkflow {
             return Err(ShotWorkflowError::NotGenerated);
         }
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
 
@@ -605,7 +601,6 @@ impl ShotWorkflow {
             return Err(ShotWorkflowError::StaleSelection);
         }
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
 
@@ -630,7 +625,6 @@ impl ShotWorkflow {
     pub fn reset(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
         self.ensure_mutation_allowed()?;
         project
-            .manifest()
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
         let mut next_shot = self.shot.clone();
@@ -1041,7 +1035,6 @@ fn write_json<T: Serialize + ?Sized>(
     value: &T,
 ) -> Result<(), ShotWorkflowError> {
     project
-        .manifest()
         .validate_for_write()
         .map_err(ShotWorkflowError::Manifest)?;
     let mut bytes = serde_json::to_vec_pretty(value).map_err(ShotWorkflowError::Json)?;
@@ -1615,6 +1608,65 @@ mod tests {
             assert!(ContentHash::new(artifact.content_hash).is_ok());
             assert!(InputHash::new(artifact.input_hash.unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn read_only_legacy_hashes_open_without_write_and_refuse_migration() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+
+        let shot_path = shot_dir(&target).join("shot.json");
+        let artifacts_path = shot_dir(&target).join("artifacts.json");
+        let selection_path = shot_dir(&target).join("selection.json");
+        let shot_bytes = fs::read(&shot_path).unwrap();
+        let selection_bytes = fs::read(&selection_path).unwrap();
+        let mut artifacts: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(&artifacts_path).unwrap()).unwrap();
+        for artifact in &mut artifacts {
+            artifact.content_hash = format!("demo:{}", artifact.artifact_id);
+            artifact.input_hash = Some("kineto:shot-intent:v1:shot_001:reaction".to_owned());
+        }
+        let legacy_bytes = serde_json::to_vec_pretty(&artifacts).unwrap();
+        fs::write(&artifacts_path, &legacy_bytes).unwrap();
+        drop(project);
+
+        let read_only = CanonicalProject::open_with_supported_version_for_test(
+            &target,
+            PROJECT_FORMAT_VERSION + 1,
+        )
+        .unwrap();
+        assert!(read_only.is_read_only());
+
+        let mut first = ShotWorkflow::load(&read_only, 1).unwrap();
+        assert!(first.snapshot().unwrap().migration_pending);
+        assert_eq!(fs::read(&shot_path).unwrap(), shot_bytes);
+        assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&selection_path).unwrap(), selection_bytes);
+
+        let reopened = CanonicalProject::open_with_supported_version_for_test(
+            &target,
+            PROJECT_FORMAT_VERSION + 1,
+        )
+        .unwrap();
+        let second = ShotWorkflow::load(&reopened, 1).unwrap();
+        assert!(second.snapshot().unwrap().migration_pending);
+        assert_eq!(fs::read(&shot_path).unwrap(), shot_bytes);
+        assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&selection_path).unwrap(), selection_bytes);
+
+        assert!(matches!(
+            first.migrate_legacy_hashes(&read_only),
+            Err(ShotWorkflowError::Manifest(
+                ProjectManifestError::ReadOnlyFormatVersion(PROJECT_FORMAT_VERSION)
+            ))
+        ));
+        assert_eq!(fs::read(&shot_path).unwrap(), shot_bytes);
+        assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&selection_path).unwrap(), selection_bytes);
+        assert!(!shot_dir(&target).join(LEGACY_HASH_BACKUP_FILE).exists());
     }
 
     #[test]
