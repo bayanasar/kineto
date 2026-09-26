@@ -1,0 +1,17 @@
+[package]
+name = "kineto-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+kineto-job-runtime = { path = "../kineto-job-runtime" }
+kineto-jobs = { path = "../kineto-jobs" }
+kineto-providers = { path = "../kineto-providers", features = ["testing"] }
+
+[dev-dependencies]
+kineto-project = { path = "../kineto-project" }
+
+[lib]
+path = "src/lib.rs"

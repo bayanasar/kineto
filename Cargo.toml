@@ -8,6 +8,7 @@ members = [
     "crates/kineto-prompts",
     "crates/kineto-providers",
     "crates/kineto-schema-contracts",
+    "crates/kineto-testkit",
 ]
 resolver = "3"
 

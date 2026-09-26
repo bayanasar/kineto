@@ -15,6 +15,7 @@
     "model": {"type": ["string", "null"]},
     "compiler_version": {"type": ["string", "null"]},
     "compiled_prompt": {"type": ["string", "null"]},
+    "prompt_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
     "degradation": {"enum": ["none", "cosmetic", "identity_affecting", null]},
     "dropped_constraints": {
       "type": "array",

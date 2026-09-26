@@ -52,3 +52,5 @@ Downstream generation references locked or explicitly selected artifacts.
 ## Rule
 
 Never model important generation state only as `generated: true`.
+
+A full scan of canonical project files must be sufficient to reconstruct all durable artifact lifecycle state in `.kineto/project.db`. The database may contain only derived indexes/caches and runtime or in-flight job bookkeeping; it must never be the sole copy of artifact identity, lifecycle status, selection/lock decisions, provenance, dependencies, or other durable production truth.
