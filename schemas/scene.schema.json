@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/scene.schema.json",
+  "title": "Kineto Scene Record",
+  "type": "object",
+  "required": ["scene_id", "schema_version", "location", "time", "characters", "dramatic_goal", "shots"],
+  "properties": {
+    "scene_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"},
+    "schema_version": {"type": "integer", "minimum": 1},
+    "location": {"type": "string", "minLength": 1},
+    "time": {"type": "string", "minLength": 1},
+    "characters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+    },
+    "dramatic_goal": {"type": "string"},
+    "shots": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+    }
+  },
+  "additionalProperties": true
+}
