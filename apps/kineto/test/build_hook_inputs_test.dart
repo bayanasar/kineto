@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../hook/build.dart' as native_hook;
 
 void main() {
-  test('native build cache inputs cover every Cargo manifest and toolchain pin',
+  test('native build cache configuration covers every Cargo manifest and pin',
       () {
     final appRoot = Directory.current.absolute;
     final workspaceRoot = appRoot.parent.parent;
@@ -23,12 +23,81 @@ void main() {
           .map((file) => file.absolute.path),
     };
 
-    final inputs = native_hook.nativeBuildInputs(packageRoot: appRoot);
+    final inputs = native_hook.nativeBuildConfigurationInputs(
+      packageRoot: appRoot,
+    );
     final actual = inputs
         .map((uri) => File.fromUri(uri).absolute.path)
         .toSet();
 
     expect(actual, expected);
     expect(inputs.length, actual.length, reason: 'cache inputs must be unique');
+  });
+
+  test('native build cache tracks every Rust source in the workspace', () {
+    final appRoot = Directory.current.absolute;
+    final workspaceRoot = appRoot.parent.parent;
+    final expectedSources = <String>{
+      ...Directory('${workspaceRoot.path}/crates')
+          .listSync(recursive: true, followLinks: false)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.rs'))
+          .map((file) => file.absolute.path),
+      ...Directory('${appRoot.path}/rust')
+          .listSync(recursive: true, followLinks: false)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.rs'))
+          .map((file) => file.absolute.path),
+    };
+
+    final inputs = native_hook.nativeBuildInputs(packageRoot: appRoot);
+    final actual = inputs
+        .map((uri) => File.fromUri(uri).absolute.path)
+        .toSet();
+
+    expect(actual, containsAll(expectedSources));
+    expect(inputs.length, actual.length, reason: 'cache inputs must be unique');
+  });
+
+  test('root and app Rust toolchain pins agree and do not preinstall targets',
+      () {
+    final appRoot = Directory.current.absolute;
+    final workspaceRoot = appRoot.parent.parent;
+    final rootToolchain = File('${workspaceRoot.path}/rust-toolchain.toml');
+    final appToolchain = File('${appRoot.path}/rust/rust-toolchain.toml');
+
+    expect(
+      native_hook.readToolchainChannel(appToolchain),
+      native_hook.readToolchainChannel(rootToolchain),
+    );
+    expect(appToolchain.readAsStringSync(), isNot(contains('targets =')));
+  });
+
+  test('rustup setup installs only the requested build target', () {
+    const requestedTarget = 'x86_64-unknown-linux-gnu';
+    final commands = native_hook.rustupSetupArguments(
+      channel: '1.98.1',
+      targetTriple: requestedTarget,
+    );
+
+    expect(commands, hasLength(2));
+    expect(commands[1], <String>[
+      'target',
+      'add',
+      requestedTarget,
+      '--toolchain',
+      '1.98.1',
+    ]);
+    final flattened = commands.expand((command) => command).toList();
+    expect(flattened.where((value) => value == requestedTarget), hasLength(1));
+    for (final otherTarget in <String>[
+      'aarch64-apple-darwin',
+      'x86_64-apple-darwin',
+      'aarch64-pc-windows-msvc',
+      'x86_64-pc-windows-msvc',
+      'aarch64-unknown-linux-gnu',
+    ]) {
+      expect(flattened, isNot(contains(otherTarget)));
+    }
   });
 }
