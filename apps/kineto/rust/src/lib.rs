@@ -28,6 +28,22 @@ pub struct KinetoEngine {
     _engine: Engine,
 }
 
+#[cfg(feature = "ownership-test-hooks")]
+fn record_engine_destroy_for_test() {
+    let Some(path) = std::env::var_os("KINETO_OWNERSHIP_PROBE_FILE") else {
+        return;
+    };
+    let Ok(mut marker) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    let _ = marker.write_all(b"destroy\n");
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn kineto_engine_create() -> *mut KinetoEngine {
     guarded(std::ptr::null_mut(), || {
@@ -50,6 +66,8 @@ pub unsafe extern "C" fn kineto_engine_destroy(engine: *mut KinetoEngine) {
         // SAFETY: the caller contract requires a live pointer allocated by
         // `kineto_engine_create`, and this function consumes that allocation once.
         unsafe { drop(Box::from_raw(engine)) };
+        #[cfg(feature = "ownership-test-hooks")]
+        record_engine_destroy_for_test();
     });
 }
 

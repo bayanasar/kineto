@@ -8,6 +8,9 @@ rust-version.workspace = true
 name = "kineto_native"
 crate-type = ["staticlib", "cdylib"]
 
+[features]
+ownership-test-hooks = []
+
 [dependencies]
 kineto-core = { path = "../../../crates/kineto-core" }
 kineto-project = { path = "../../../crates/kineto-project" }
