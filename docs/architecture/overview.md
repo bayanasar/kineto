@@ -65,7 +65,8 @@ kineto/
 │   ├── kineto-prompts/          # prompt degradation/compiler contract
 │   ├── kineto-jobs/             # paid-job intent/cost/retry policy model
 │   ├── kineto-job-runtime/      # write-ahead persistence/executor/reconciliation
-│   └── kineto-providers/        # provider capability/routing model
+│   ├── kineto-providers/        # provider capability/routing model
+│   └── kineto-testkit/          # offline fake adapters behind the real runtime contract
 ├── schemas/                     # canonical wire/storage contracts
 ├── fixtures/projects/           # deterministic golden projects
 ├── docs/
@@ -188,7 +189,8 @@ Deleting `.kineto/` may lose active runtime bookkeeping and therefore the abilit
 ## Testing seam
 
 - Rust domain crates remain pure/headless.
-- `kineto-job-runtime` tests persistence ordering, crash-window reconciliation, retry policy, cost dry-run, paid fallback policy, and provider concurrency with deterministic fake adapters and no provider spend.
+- `kineto-job-runtime` tests persistence ordering, crash-window reconciliation, retry policy, cost dry-run, paid fallback policy, and provider concurrency with no provider spend.
+- `kineto-testkit` supplies deterministic LLM/image/video/TTS adapters behind the real `PaidJobAdapter` contract, including injected latency, retryable-then-success, terminal failure, pending/reconciliation, and capability-limited variants for offline integration tests.
 - the FFI shim has native ownership tests; Flutter native tests load the real Code Asset.
 - `fixtures/projects/minimal` is the committed golden canonical project.
 - fake provider capability descriptors exercise provider portability offline.

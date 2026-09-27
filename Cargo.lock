@@ -126,6 +126,9 @@ dependencies = [
 [[package]]
 name = "kineto-prompts"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "kineto-providers"
@@ -140,6 +143,16 @@ dependencies = [
  "kineto-project",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "kineto-testkit"
+version = "0.1.0"
+dependencies = [
+ "kineto-job-runtime",
+ "kineto-jobs",
+ "kineto-project",
+ "kineto-providers",
 ]
 
 [[package]]

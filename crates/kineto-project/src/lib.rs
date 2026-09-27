@@ -4,6 +4,8 @@ pub mod shot;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
+use sha2::{Digest, Sha256};
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArtifactId(String);
 
@@ -73,15 +75,81 @@ impl ContentHash {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InputHash(String);
 
+/// Canonical semantic inputs that determine whether a generated artifact is current.
+///
+/// Callers own canonical serialization of structured intent and provider parameters.
+/// These byte slices must be deterministic; debug output and order-unstable map
+/// serialization are not valid inputs. Semantic dependencies are sorted internally,
+/// so their storage order does not affect the derived hash. Cosmetic dependencies are
+/// intentionally excluded.
+#[derive(Debug, Clone, Copy)]
+pub struct InputHashMaterial<'a> {
+    pub dependencies: &'a [ArtifactDependency],
+    pub canonical_intent: &'a [u8],
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub canonical_params: &'a [u8],
+    pub compiler_version: &'a str,
+}
+
 impl InputHash {
     pub fn new(value: impl Into<String>) -> Result<Self, HashValueError> {
         canonical_sha256(value.into()).map(Self)
+    }
+
+    /// Derive the canonical generation-input hash.
+    ///
+    /// The digest is domain-separated and length-framed. It covers semantic parent
+    /// artifact IDs/content hashes/field context, canonical structured intent,
+    /// provider, model, canonical provider parameters, and compiler version.
+    #[must_use]
+    pub fn derive(material: InputHashMaterial<'_>) -> Self {
+        let mut dependencies = material
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.impact == DependencyImpact::Semantic)
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| {
+            left.artifact_id
+                .cmp(&right.artifact_id)
+                .then_with(|| left.field.cmp(&right.field))
+                .then_with(|| left.content_hash.cmp(&right.content_hash))
+        });
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"kineto.input_hash.v1");
+        let dependency_count =
+            u64::try_from(dependencies.len()).expect("dependency count must fit in u64");
+        hasher.update(dependency_count.to_be_bytes());
+        for dependency in dependencies {
+            update_input_hash_framed(&mut hasher, dependency.artifact_id.as_str().as_bytes());
+            update_input_hash_framed(&mut hasher, dependency.content_hash.as_str().as_bytes());
+            match dependency.field.as_deref() {
+                Some(field) => {
+                    hasher.update([1]);
+                    update_input_hash_framed(&mut hasher, field.as_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+        update_input_hash_framed(&mut hasher, material.canonical_intent);
+        update_input_hash_framed(&mut hasher, material.provider.as_bytes());
+        update_input_hash_framed(&mut hasher, material.model.as_bytes());
+        update_input_hash_framed(&mut hasher, material.canonical_params);
+        update_input_hash_framed(&mut hasher, material.compiler_version.as_bytes());
+        Self(format!("sha256:{:x}", hasher.finalize()))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn update_input_hash_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    let length = u64::try_from(bytes.len()).expect("input-hash field length must fit in u64");
+    hasher.update(length.to_be_bytes());
+    hasher.update(bytes);
 }
 
 fn canonical_sha256(value: String) -> Result<String, HashValueError> {
@@ -231,6 +299,10 @@ pub enum DependencyChange {
         recorded: ContentHash,
         current: ContentHash,
     },
+    InputHashChanged {
+        recorded: Option<InputHash>,
+        current: InputHash,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +329,11 @@ impl ArtifactIndex {
     }
 
     #[must_use]
-    pub fn currentness(&self, record: &ArtifactRecord) -> Currentness {
+    pub fn currentness(
+        &self,
+        record: &ArtifactRecord,
+        expected_input_hash: Option<&InputHash>,
+    ) -> Currentness {
         let mut missing = Vec::new();
         let mut changed = Vec::new();
 
@@ -281,6 +357,15 @@ impl ArtifactIndex {
                 }
                 Some(_) => {}
             }
+        }
+
+        if let Some(current) = expected_input_hash
+            && record.input_hash.as_ref() != Some(current)
+        {
+            changed.push(DependencyChange::InputHashChanged {
+                recorded: record.input_hash.clone(),
+                current: current.clone(),
+            });
         }
 
         if !missing.is_empty() {
@@ -412,10 +497,165 @@ mod tests {
         };
         let index = ArtifactIndex::from_records([&scene_one_new, &scene_two]);
         assert!(matches!(
-            index.currentness(&shot_one),
+            index.currentness(&shot_one, shot_one.input_hash.as_ref()),
             Currentness::Stale(_)
         ));
-        assert_eq!(index.currentness(&shot_two), Currentness::Current);
+        assert_eq!(
+            index.currentness(&shot_two, shot_two.input_hash.as_ref()),
+            Currentness::Current
+        );
+    }
+
+    #[test]
+    fn input_hash_covers_all_generation_inputs_and_ignores_cosmetic_dependencies() {
+        let semantic = ArtifactDependency {
+            artifact_id: id("scene_001"),
+            content_hash: hash("scene-semantic"),
+            impact: DependencyImpact::Semantic,
+            field: Some("action".to_owned()),
+        };
+        let cosmetic = ArtifactDependency {
+            artifact_id: id("screenplay_title"),
+            content_hash: hash("title"),
+            impact: DependencyImpact::Cosmetic,
+            field: Some("display_title".to_owned()),
+        };
+        let base_dependencies = [semantic.clone()];
+        let with_cosmetic = [cosmetic, semantic];
+
+        let derive = |dependencies: &[ArtifactDependency],
+                      intent: &[u8],
+                      provider: &str,
+                      model: &str,
+                      params: &[u8],
+                      compiler_version: &str| {
+            InputHash::derive(InputHashMaterial {
+                dependencies,
+                canonical_intent: intent,
+                provider,
+                model,
+                canonical_params: params,
+                compiler_version,
+            })
+        };
+
+        let base = derive(
+            &base_dependencies,
+            br#"{"shot":"reaction"}"#,
+            "provider-a",
+            "model-a",
+            br#"{"seed":7}"#,
+            "compiler/1",
+        );
+        assert_eq!(
+            base,
+            derive(
+                &with_cosmetic,
+                br#"{"shot":"reaction"}"#,
+                "provider-a",
+                "model-a",
+                br#"{"seed":7}"#,
+                "compiler/1",
+            )
+        );
+        assert_ne!(
+            base,
+            derive(
+                &base_dependencies,
+                br#"{"shot":"closeup"}"#,
+                "provider-a",
+                "model-a",
+                br#"{"seed":7}"#,
+                "compiler/1",
+            )
+        );
+        assert_ne!(
+            base,
+            derive(
+                &base_dependencies,
+                br#"{"shot":"reaction"}"#,
+                "provider-b",
+                "model-a",
+                br#"{"seed":7}"#,
+                "compiler/1",
+            )
+        );
+        assert_ne!(
+            base,
+            derive(
+                &base_dependencies,
+                br#"{"shot":"reaction"}"#,
+                "provider-a",
+                "model-b",
+                br#"{"seed":7}"#,
+                "compiler/1",
+            )
+        );
+        assert_ne!(
+            base,
+            derive(
+                &base_dependencies,
+                br#"{"shot":"reaction"}"#,
+                "provider-a",
+                "model-a",
+                br#"{"seed":8}"#,
+                "compiler/1",
+            )
+        );
+        assert_ne!(
+            base,
+            derive(
+                &base_dependencies,
+                br#"{"shot":"reaction"}"#,
+                "provider-a",
+                "model-a",
+                br#"{"seed":7}"#,
+                "compiler/2",
+            )
+        );
+    }
+
+    #[test]
+    fn same_dependencies_with_a_different_model_are_stale() {
+        let scene = record("scene_001", "scene-current");
+        let dependencies = vec![ArtifactDependency {
+            artifact_id: scene.artifact_id.clone(),
+            content_hash: scene.content_hash.clone(),
+            impact: DependencyImpact::Semantic,
+            field: Some("action".to_owned()),
+        }];
+        let recorded = InputHash::derive(InputHashMaterial {
+            dependencies: &dependencies,
+            canonical_intent: br#"{"shot":"reaction"}"#,
+            provider: "provider-a",
+            model: "model-a",
+            canonical_params: br#"{"seed":7}"#,
+            compiler_version: "compiler/1",
+        });
+        let current = InputHash::derive(InputHashMaterial {
+            dependencies: &dependencies,
+            canonical_intent: br#"{"shot":"reaction"}"#,
+            provider: "provider-a",
+            model: "model-b",
+            canonical_params: br#"{"seed":7}"#,
+            compiler_version: "compiler/1",
+        });
+        let shot = ArtifactRecord {
+            artifact_id: id("shot_001"),
+            status: ArtifactStatus::Candidate,
+            content_hash: hash("shot"),
+            input_hash: Some(recorded.clone()),
+            dependencies,
+        };
+        let index = ArtifactIndex::from_records([&scene]);
+
+        assert_eq!(
+            index.currentness(&shot, Some(&current)),
+            Currentness::Stale(vec![DependencyChange::InputHashChanged {
+                recorded: Some(recorded),
+                current,
+            }])
+        );
     }
 
     #[test]
@@ -434,7 +674,7 @@ mod tests {
             }],
         };
         let index = ArtifactIndex::from_records([&title_new]);
-        assert_eq!(index.currentness(&shot), Currentness::Current);
+        assert_eq!(index.currentness(&shot, None), Currentness::Current);
     }
 
     #[test]

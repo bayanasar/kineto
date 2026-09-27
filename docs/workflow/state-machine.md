@@ -72,7 +72,7 @@ Cross-cutting dependencies include character, style, location, props, and contin
 
 `current` / `stale` / `incompatible` are computed properties, not hand-maintained flags.
 
-Each generated artifact records an `input_hash` derived from semantic parents, structured intent, provider/model/params, and compiler version. The engine recomputes expected inputs and explains which semantic parent/field changed. Cosmetic presentation edits do not invalidate production work.
+Each generated artifact records an `input_hash` derived from semantic parents, structured intent, provider/model/params, and compiler version. The caller supplies deterministic canonical bytes for structured intent and provider parameters; the project domain sorts semantic dependency records, excludes cosmetic dependencies, length-frames every variable field, and derives the SHA-256 digest. When currentness is evaluated, the caller recomputes the expected input hash from the current generation inputs and passes it alongside the artifact record. A mismatch is a stale reason even when parent content hashes are unchanged, so provider/model/params/compiler changes cannot remain silently current. Semantic dependency changes retain artifact/field context for UI explanation, while cosmetic presentation edits do not invalidate production work.
 
 Changing a parent never automatically deletes children.
 

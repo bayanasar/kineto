@@ -259,6 +259,7 @@ pub fn evaluate_image(
     CompatibilityReport { gaps }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub mod fake {
     use super::*;
 

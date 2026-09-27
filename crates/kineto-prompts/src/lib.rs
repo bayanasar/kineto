@@ -1,5 +1,41 @@
 use std::{error::Error, fmt};
 
+use sha2::{Digest, Sha256};
+
+const PROMPT_HASH_DOMAIN: &[u8] = b"kineto.prompt_hash.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PromptHash(String);
+
+impl PromptHash {
+    /// Derive the canonical provenance hash for one compiled provider input.
+    ///
+    /// `canonical_intent` must be a deterministic canonical encoding of the
+    /// structured intent. Callers must not pass `Debug` output or an
+    /// order-unstable map serialization here. The hash is domain-separated and
+    /// length-framed so field boundaries cannot alias each other.
+    #[must_use]
+    pub fn derive(canonical_intent: &[u8], compiled: &CompiledPrompt) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(PROMPT_HASH_DOMAIN);
+        update_framed(&mut hasher, canonical_intent);
+        update_framed(&mut hasher, compiled.compiler_version.as_bytes());
+        update_framed(&mut hasher, compiled.prompt.as_bytes());
+        Self(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    let length = u64::try_from(bytes.len()).expect("prompt-hash field length must fit in u64");
+    hasher.update(length.to_be_bytes());
+    hasher.update(bytes);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstraintId(String);
 
@@ -122,6 +158,16 @@ impl CompiledPrompt {
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         self.degradation() != DegradationLevel::None
+    }
+
+    /// Hash the structured intent, compiler version, and verbatim compiled
+    /// provider input required by the canonical artifact provenance contract.
+    ///
+    /// `canonical_intent` has the same canonical-encoding requirement as
+    /// [`PromptHash::derive`].
+    #[must_use]
+    pub fn prompt_hash(&self, canonical_intent: &[u8]) -> PromptHash {
+        PromptHash::derive(canonical_intent, self)
     }
 }
 
@@ -251,5 +297,56 @@ mod tests {
         assert!(ConstraintId::new("identity.alice_reference-1").is_ok());
         assert!(ConstraintId::new("contains space").is_err());
         assert!(ConstraintId::new("x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn prompt_hash_covers_intent_compiler_version_and_provider_input() {
+        let compiled = CompiledPrompt::new(
+            "portrait of Alice",
+            vec![constraint("identity.alice")],
+            Vec::new(),
+            "image-prompt/1",
+        )
+        .unwrap();
+        let intent = br#"{"camera":"static","subject":"alice"}"#;
+
+        let first = compiled.prompt_hash(intent);
+        let second = compiled.prompt_hash(intent);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.as_str(),
+            "sha256:633a444286a909f2bb6f7caf3ad8dbedb4688e4997f0f009fb1d505302d8b4bd"
+        );
+
+        assert_ne!(
+            first,
+            compiled.prompt_hash(br#"{"camera":"dolly","subject":"alice"}"#)
+        );
+
+        let newer_compiler = CompiledPrompt::new(
+            "portrait of Alice",
+            vec![constraint("identity.alice")],
+            Vec::new(),
+            "image-prompt/2",
+        )
+        .unwrap();
+        assert_ne!(first, newer_compiler.prompt_hash(intent));
+
+        let changed_provider_input = CompiledPrompt::new(
+            "cinematic portrait of Alice",
+            vec![constraint("identity.alice")],
+            Vec::new(),
+            "image-prompt/1",
+        )
+        .unwrap();
+        assert_ne!(first, changed_provider_input.prompt_hash(intent));
+    }
+
+    #[test]
+    fn prompt_hash_length_framing_prevents_boundary_aliases() {
+        let left = CompiledPrompt::new("c", Vec::new(), Vec::new(), "b").unwrap();
+        let right = CompiledPrompt::new("bc", Vec::new(), Vec::new(), "a").unwrap();
+
+        assert_ne!(left.prompt_hash(b"a"), right.prompt_hash(b""));
     }
 }
