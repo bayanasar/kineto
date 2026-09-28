@@ -65,8 +65,11 @@ String readToolchainChannel(File toolchainFile) {
 List<List<String>> rustupSetupArguments({
   required String channel,
   required String targetTriple,
-}) =>
-    <List<String>>[
+  required bool toolchainInstalled,
+  required bool targetInstalled,
+}) {
+  return <List<String>>[
+    if (!toolchainInstalled)
       <String>[
         'toolchain',
         'install',
@@ -78,8 +81,26 @@ List<List<String>> rustupSetupArguments({
         '--component',
         'clippy',
       ],
+    if (!targetInstalled)
       <String>['target', 'add', targetTriple, '--toolchain', channel],
-    ];
+  ];
+}
+
+Future<ProcessResult> _runCapture(
+  String executable,
+  List<String> arguments, {
+  required String workingDirectory,
+  Map<String, String>? environment,
+}) {
+  return Process.run(
+    executable,
+    arguments,
+    workingDirectory: workingDirectory,
+    environment: environment,
+    includeParentEnvironment: true,
+    runInShell: Platform.isWindows,
+  );
+}
 
 Future<void> _run(
   String executable,
@@ -87,13 +108,11 @@ Future<void> _run(
   required String workingDirectory,
   Map<String, String>? environment,
 }) async {
-  final result = await Process.run(
+  final result = await _runCapture(
     executable,
     arguments,
     workingDirectory: workingDirectory,
     environment: environment,
-    includeParentEnvironment: true,
-    runInShell: Platform.isWindows,
   );
   if ((result.stdout as String).isNotEmpty) {
     stdout.write(result.stdout);
@@ -109,6 +128,38 @@ Future<void> _run(
       result.exitCode,
     );
   }
+}
+
+Future<bool> _rustToolchainInstalled({
+  required String channel,
+  required String workingDirectory,
+}) async {
+  final result = await _runCapture(
+    'rustup',
+    <String>['run', channel, 'rustc', '--version'],
+    workingDirectory: workingDirectory,
+  );
+  return result.exitCode == 0;
+}
+
+Future<bool> _rustTargetInstalled({
+  required String channel,
+  required String targetTriple,
+  required String workingDirectory,
+}) async {
+  final result = await _runCapture(
+    'rustup',
+    <String>['target', 'list', '--installed', '--toolchain', channel],
+    workingDirectory: workingDirectory,
+  );
+  if (result.exitCode != 0) {
+    return false;
+  }
+  final targets = (result.stdout as String)
+      .split(RegExp(r'\\s+'))
+      .where((entry) => entry.isNotEmpty)
+      .toSet();
+  return targets.contains(targetTriple);
 }
 
 Map<String, String>? _cargoEnvironment() {
@@ -203,13 +254,25 @@ void main(List<String> args) async {
     final targetTriple = targetTripleFor(codeConfig);
     final linkMode = linkModeFor(codeConfig);
 
-    // Install the pinned toolchain without a target list, then install only
-    // the target actually requested by this build. This keeps ordinary host
-    // development host-only while allowing CI/cross jobs to request exactly
-    // the target they need.
+    // Keep the build hook idempotent with respect to the global rustup state.
+    // CI and normal developer setup already install the pinned host toolchain;
+    // in that common path the hook must not re-run toolchain installation or
+    // target mutation. Only fill an actually missing toolchain/target.
+    final toolchainInstalled = await _rustToolchainInstalled(
+      channel: appChannel,
+      workingDirectory: appRoot.path,
+    );
+    final targetInstalled = toolchainInstalled &&
+        await _rustTargetInstalled(
+          channel: appChannel,
+          targetTriple: targetTriple,
+          workingDirectory: appRoot.path,
+        );
     for (final rustupArgs in rustupSetupArguments(
       channel: appChannel,
       targetTriple: targetTriple,
+      toolchainInstalled: toolchainInstalled,
+      targetInstalled: targetInstalled,
     )) {
       await _run(
         'rustup',

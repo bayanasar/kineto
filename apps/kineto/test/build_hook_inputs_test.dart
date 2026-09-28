@@ -73,11 +73,14 @@ void main() {
     expect(appToolchain.readAsStringSync(), isNot(contains('targets =')));
   });
 
-  test('rustup setup installs only the requested build target', () {
+  test('rustup setup installs only the requested build target when missing',
+      () {
     const requestedTarget = 'x86_64-unknown-linux-gnu';
     final commands = native_hook.rustupSetupArguments(
       channel: '1.98.1',
       targetTriple: requestedTarget,
+      toolchainInstalled: false,
+      targetInstalled: false,
     );
 
     expect(commands, hasLength(2));
@@ -99,5 +102,35 @@ void main() {
     ]) {
       expect(flattened, isNot(contains(otherTarget)));
     }
+  });
+
+  test('rustup setup is mutation-free when toolchain and target exist', () {
+    final commands = native_hook.rustupSetupArguments(
+      channel: '1.98.1',
+      targetTriple: 'x86_64-unknown-linux-gnu',
+      toolchainInstalled: true,
+      targetInstalled: true,
+    );
+
+    expect(commands, isEmpty);
+  });
+
+  test('rustup setup adds only target when toolchain already exists', () {
+    final commands = native_hook.rustupSetupArguments(
+      channel: '1.98.1',
+      targetTriple: 'aarch64-unknown-linux-gnu',
+      toolchainInstalled: true,
+      targetInstalled: false,
+    );
+
+    expect(commands, <List<String>>[
+      <String>[
+        'target',
+        'add',
+        'aarch64-unknown-linux-gnu',
+        '--toolchain',
+        '1.98.1',
+      ],
+    ]);
   });
 }
