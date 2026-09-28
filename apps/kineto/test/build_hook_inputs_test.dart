@@ -9,26 +9,24 @@ void main() {
       () {
     final appRoot = Directory.current.absolute;
     final workspaceRoot = appRoot.parent.parent;
-    final expected = <String>{
-      File('${workspaceRoot.path}/Cargo.toml').absolute.path,
-      File('${workspaceRoot.path}/Cargo.lock').absolute.path,
-      File('${workspaceRoot.path}/rust-toolchain.toml').absolute.path,
-      File('${appRoot.path}/rust/Cargo.toml').absolute.path,
-      File('${appRoot.path}/rust/rust-toolchain.toml').absolute.path,
+    final expected = <Uri>{
+      File('${workspaceRoot.path}/Cargo.toml').absolute.uri,
+      File('${workspaceRoot.path}/Cargo.lock').absolute.uri,
+      File('${workspaceRoot.path}/rust-toolchain.toml').absolute.uri,
+      File('${appRoot.path}/rust/Cargo.toml').absolute.uri,
+      File('${appRoot.path}/rust/rust-toolchain.toml').absolute.uri,
       ...Directory('${workspaceRoot.path}/crates')
           .listSync(followLinks: false)
           .whereType<Directory>()
           .map((entry) => File('${entry.path}/Cargo.toml'))
           .where((file) => file.existsSync())
-          .map((file) => file.absolute.path),
+          .map((file) => file.absolute.uri),
     };
 
     final inputs = native_hook.nativeBuildConfigurationInputs(
       packageRoot: appRoot,
     );
-    final actual = inputs
-        .map((uri) => File.fromUri(uri).absolute.path)
-        .toSet();
+    final actual = inputs.toSet();
 
     expect(actual, expected);
     expect(inputs.length, actual.length, reason: 'cache inputs must be unique');

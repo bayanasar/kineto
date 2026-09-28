@@ -14,7 +14,7 @@ jobs:
   linux-gate:
     name: linux-gate
     runs-on: anton
-    timeout-minutes: 20
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -28,84 +28,141 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rust toolchain
+      - name: Linux build dependencies
+        id: linux_deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+            SUDO="sudo -n"
+          else
+            echo "runner must be root or provide passwordless sudo" >&2
+            exit 1
+          fi
+
+          $SUDO apt-get update -qq
+          $SUDO apt-get install -y -qq \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            g++ \
+            git \
+            libblkid-dev \
+            libgtk-3-dev \
+            liblzma-dev \
+            ninja-build \
+            pkg-config \
+            python3 \
+            xz-utils
+
+      - name: Rust toolchain from rust-toolchain.toml
         id: rust_toolchain
         run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
-          command -v rustup
+
+          test -z "${RUSTUP_TOOLCHAIN:-}"
           rustup toolchain install
           rustup show active-toolchain
           rustc --version
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
 
-      - name: Reuse Flutter 3.47.2
+      - name: Flutter 3.47.2
         id: flutter_sdk
         run: |
+          test "$(uname -m)" = "x86_64"
+
           flutter_root="/tmp/kineto-flutter-$FLUTTER_VERSION"
-          if [ -x "$flutter_root/bin/flutter" ] &&              [ "$("$flutter_root/bin/flutter" --version | grep -m1 '^Flutter ' | awk '{print $2}')" = "$FLUTTER_VERSION" ]; then
-            echo "reusing cached Flutter $FLUTTER_VERSION"
-          else
-            archive="/tmp/flutter-$FLUTTER_VERSION.tar.xz"
-            rm -rf "$flutter_root" "$archive"
-            mkdir -p "$flutter_root"
-            curl --retry 3 --retry-all-errors -fsSL               "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"               -o "$archive"
-            echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
-            tar --no-same-owner -xJf "$archive" -C "$flutter_root" --strip-components=1
-            rm -f "$archive"
-          fi
+          archive="/tmp/flutter-$FLUTTER_VERSION.tar.xz"
+          rm -rf "$flutter_root" "$archive"
+          mkdir -p "$flutter_root"
+
+          curl --retry 3 --retry-all-errors -fsSL \
+            "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+            -o "$archive"
+          echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
+          tar --no-same-owner -xJf "$archive" -C "$flutter_root" --strip-components=1
+          rm -f "$archive"
+
           echo "$flutter_root/bin" >> "$GITHUB_PATH"
 
       - name: Flutter toolchain
         id: flutter_toolchain
         run: |
           flutter config --no-analytics
+          actual_flutter="$(flutter --version | grep -m1 '^Flutter ' | awk '{print $2}')"
+          test "$actual_flutter" = "$FLUTTER_VERSION"
+          flutter precache --linux
           flutter --version
           dart --version
 
-      - name: Pub get
+      - name: Rust dependencies
+        id: rust_fetch
+        run: cargo fetch --locked
+
+      - name: Rust format
+        id: rust_fmt
+        run: cargo fmt --all -- --check
+
+      - name: Rust locked metadata
+        id: rust_metadata
+        run: cargo metadata --offline --locked --format-version 1 >/dev/null
+
+      - name: Rust workspace tests
+        id: rust_tests
+        run: cargo test --workspace --offline --locked
+
+      - name: Rust clippy
+        id: rust_clippy
+        run: cargo clippy --workspace --all-targets --offline --locked -- -D warnings
+
+      - name: Brand hard cut
+        id: brand
+        run: ./tool/check-brand-hard-cut.sh
+
+      - name: Clean Flutter dependency resolution
         id: flutter_pub_get
         working-directory: apps/kineto
-        run: flutter pub get
+        run: |
+          test ! -e pubspec_overrides.yaml
+          lock_before="$(sha256sum pubspec.lock | awk '{print $1}')"
+          flutter pub get
+          lock_after="$(sha256sum pubspec.lock | awk '{print $1}')"
+          test "$lock_before" = "$lock_after"
+          git diff --exit-code -- pubspec.lock
 
-      - name: Hook inputs — config inputs
-        id: hook_test_config_inputs
+      - name: Flutter analyze
+        id: flutter_analyze
         working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "native build cache configuration covers every Cargo manifest and pin"
+        run: flutter analyze
 
-      - name: Hook inputs — Rust sources
-        id: hook_test_rust_sources
-        if: always()
+      - name: Flutter tests
+        id: flutter_tests
         working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "native build cache tracks every Rust source in the workspace"
+        run: flutter test
 
-      - name: Hook inputs — toolchain pins
-        id: hook_test_toolchain_pins
-        if: always()
+      - name: Linux release build
+        id: linux_build
         working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "root and app Rust toolchain pins agree and do not preinstall targets"
+        run: flutter build linux --release
 
-      - name: Hook inputs — target parser
-        id: hook_test_target_parser
-        if: always()
-        working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "installed rust targets are parsed from rustup whitespace output"
-
-      - name: Hook inputs — missing toolchain
-        id: hook_test_missing_toolchain
-        if: always()
-        working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "rustup setup installs only the requested build target when missing"
-
-      - name: Hook inputs — zero mutation
-        id: hook_test_zero_mutation
-        if: always()
-        working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "rustup setup is mutation-free when toolchain and target exist"
-
-      - name: Hook inputs — target only
-        id: hook_test_target_only
-        if: always()
-        working-directory: apps/kineto
-        run: flutter test test/build_hook_inputs_test.dart --plain-name "rustup setup adds only target when toolchain already exists"
+      - name: No checkout drift
+        id: checkout_drift
+        run: |
+          drift="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$drift" ]; then
+            printf '%s\n' "$drift"
+            exit 1
+          fi
 
       - name: Report gate outcomes
         if: always()
