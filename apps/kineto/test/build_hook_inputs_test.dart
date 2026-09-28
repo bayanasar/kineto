@@ -73,6 +73,18 @@ void main() {
     expect(appToolchain.readAsStringSync(), isNot(contains('targets =')));
   });
 
+  test('installed rust targets are parsed from rustup whitespace output', () {
+    expect(
+      native_hook.parseInstalledRustTargets(
+        'x86_64-unknown-linux-gnu\naarch64-unknown-linux-gnu\n',
+      ),
+      <String>{
+        'x86_64-unknown-linux-gnu',
+        'aarch64-unknown-linux-gnu',
+      },
+    );
+  });
+
   test('rustup setup installs only the requested build target when missing',
       () {
     const requestedTarget = 'x86_64-unknown-linux-gnu';

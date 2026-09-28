@@ -142,6 +142,11 @@ Future<bool> _rustToolchainInstalled({
   return result.exitCode == 0;
 }
 
+Set<String> parseInstalledRustTargets(String output) => output
+    .split(RegExp(r'\s+'))
+    .where((entry) => entry.isNotEmpty)
+    .toSet();
+
 Future<bool> _rustTargetInstalled({
   required String channel,
   required String targetTriple,
@@ -155,10 +160,7 @@ Future<bool> _rustTargetInstalled({
   if (result.exitCode != 0) {
     return false;
   }
-  final targets = (result.stdout as String)
-      .split(RegExp(r'\\s+'))
-      .where((entry) => entry.isNotEmpty)
-      .toSet();
+  final targets = parseInstalledRustTargets(result.stdout as String);
   return targets.contains(targetTriple);
 }
 
