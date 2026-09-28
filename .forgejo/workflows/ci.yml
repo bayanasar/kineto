@@ -145,10 +145,22 @@ jobs:
         working-directory: apps/kineto
         run: flutter analyze
 
-      - name: Flutter tests
-        id: flutter_tests
+      - name: Flutter tests — build hook inputs
+        id: flutter_test_hook_inputs
         working-directory: apps/kineto
-        run: flutter test
+        run: flutter test test/build_hook_inputs_test.dart
+
+      - name: Flutter tests — native FFI
+        id: flutter_test_native
+        if: always()
+        working-directory: apps/kineto
+        run: flutter test test/native
+
+      - name: Flutter tests — UI shell
+        id: flutter_test_ui
+        if: always()
+        working-directory: apps/kineto
+        run: flutter test test/engine_status_screen_test.dart test/theme_toggle_test.dart
 
       - name: Linux release build
         id: linux_build
