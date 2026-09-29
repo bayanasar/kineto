@@ -85,4 +85,44 @@ void main() {
       'rustup target add x86_64-unknown-linux-gnu --toolchain 1.98.1',
     );
   });
+  test('rust process environment disables rustup proxy auto-install', () {
+    expect(
+      native_hook.rustProcessEnvironment(
+        parentEnvironment: <String, String>{
+          'PATH': '/Applications/Xcode.app/Contents/Developer/usr/bin:/usr/bin',
+        },
+        isMacOS: true,
+      ),
+      <String, String>{
+        'RUSTUP_AUTO_INSTALL': '0',
+        'PATH': '/usr/bin',
+      },
+    );
+    expect(
+      native_hook.rustProcessEnvironment(
+        parentEnvironment: const <String, String>{'PATH': '/usr/bin'},
+        isMacOS: false,
+      ),
+      <String, String>{'RUSTUP_AUTO_INSTALL': '0'},
+    );
+  });
+
+  test('reported code asset is copied out of shared intermediates', () async {
+    final temp = await Directory.systemTemp.createTemp('kineto-code-asset-');
+    addTearDown(() => temp.delete(recursive: true));
+    final shared = File('${temp.path}/shared/libkineto_native.so');
+    await shared.parent.create(recursive: true);
+    await shared.writeAsString('shared-v1');
+    final output = Directory('${temp.path}/config-output');
+
+    final copied = await native_hook.copyCodeAssetForConfiguration(
+      sharedLibrary: shared,
+      outputDirectory: output.uri,
+    );
+
+    expect(copied.path, '${output.path}/libkineto_native.so');
+    expect(await copied.readAsString(), 'shared-v1');
+    await shared.writeAsString('shared-v2');
+    expect(await copied.readAsString(), 'shared-v1');
+  });
 }
