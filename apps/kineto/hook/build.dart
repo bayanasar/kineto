@@ -192,7 +192,7 @@ Future<File> copyCodeAssetForConfiguration({
   final outputDir = Directory.fromUri(outputDirectory);
   await outputDir.create(recursive: true);
   final fileName = sharedLibrary.path.split(Platform.pathSeparator).last;
-  return sharedLibrary.copy(_join(outputDir.path, fileName));
+  return sharedLibrary.copy(File.fromUri(outputDirectory.resolve(fileName)).path);
 }
 String targetTripleFor(CodeConfig codeConfig) {
   return switch ((codeConfig.targetOS, codeConfig.targetArchitecture)) {
