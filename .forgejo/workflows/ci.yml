@@ -14,7 +14,7 @@ jobs:
   linux-gate:
     name: linux-gate
     runs-on: anton
-    timeout-minutes: 15
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -28,92 +28,141 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Linux build dependencies
+        id: linux_deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+            SUDO="sudo -n"
+          else
+            echo "runner must be root or provide passwordless sudo" >&2
+            exit 1
+          fi
+
+          $SUDO apt-get update -qq
+          $SUDO apt-get install -y -qq \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            g++ \
+            git \
+            libblkid-dev \
+            libgtk-3-dev \
+            liblzma-dev \
+            ninja-build \
+            pkg-config \
+            python3 \
+            xz-utils
+
       - name: Rust toolchain from rust-toolchain.toml
         id: rust_toolchain
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs               | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
+
+          test -z "${RUSTUP_TOOLCHAIN:-}"
           rustup toolchain install
           rustup show active-toolchain
+          rustc --version
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
 
       - name: Flutter 3.47.2
         id: flutter_sdk
         run: |
-          flutter_root="$HOME/.cache/kineto/flutter-$FLUTTER_VERSION"
-          if [ -x "$flutter_root/bin/flutter" ] &&              [ "$("$flutter_root/bin/flutter" --version | grep -m1 '^Flutter ' | awk '{print $2}')" = "$FLUTTER_VERSION" ]; then
-            echo "reusing cached Flutter $FLUTTER_VERSION"
-          else
-            archive="/tmp/flutter-$FLUTTER_VERSION.tar.xz"
-            rm -rf "$flutter_root" "$archive"
-            mkdir -p "$flutter_root"
-            curl --retry 3 --retry-all-errors -fsSL               "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"               -o "$archive"
-            echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
-            tar --no-same-owner -xJf "$archive" -C "$flutter_root" --strip-components=1
-            rm -f "$archive"
-          fi
+          test "$(uname -m)" = "x86_64"
+
+          flutter_root="/tmp/kineto-flutter-$FLUTTER_VERSION"
+          archive="/tmp/flutter-$FLUTTER_VERSION.tar.xz"
+          rm -rf "$flutter_root" "$archive"
+          mkdir -p "$flutter_root"
+
+          curl --retry 3 --retry-all-errors -fsSL \
+            "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+            -o "$archive"
+          echo "$FLUTTER_ARCHIVE_SHA256  $archive" | sha256sum -c -
+          tar --no-same-owner -xJf "$archive" -C "$flutter_root" --strip-components=1
+          rm -f "$archive"
+
           echo "$flutter_root/bin" >> "$GITHUB_PATH"
 
-      - name: Environment + pub get
-        id: env_snapshot
-        working-directory: apps/kineto
+      - name: Flutter toolchain
+        id: flutter_toolchain
         run: |
-          printf 'HOME=%s\n' "$HOME"
-          printf 'PATH=%s\n' "$PATH"
-          printf 'CARGO_HOME=%s\n' "${CARGO_HOME-}"
-          printf 'RUSTUP_HOME=%s\n' "${RUSTUP_HOME-}"
-          command -v rustup || true
-          command -v cargo || true
+          flutter config --no-analytics
+          actual_flutter="$(flutter --version | grep -m1 '^Flutter ' | awk '{print $2}')"
+          test "$actual_flutter" = "$FLUTTER_VERSION"
+          flutter precache --linux
           flutter --version
           dart --version
-          flutter pub get
 
-      - name: Reproduce config-input test and publish output
-        id: hook_config_inputs
+      - name: Rust dependencies
+        id: rust_fetch
+        run: cargo fetch --locked
+
+      - name: Rust format
+        id: rust_fmt
+        run: cargo fmt --all -- --check
+
+      - name: Rust locked metadata
+        id: rust_metadata
+        run: cargo metadata --offline --locked --format-version 1 >/dev/null
+
+      - name: Rust workspace tests
+        id: rust_tests
+        run: cargo test --workspace --offline --locked
+
+      - name: Rust clippy
+        id: rust_clippy
+        run: cargo clippy --workspace --all-targets --offline --locked -- -D warnings
+
+      - name: Brand hard cut
+        id: brand
+        run: ./tool/check-brand-hard-cut.sh
+
+      - name: Clean Flutter dependency resolution
+        id: flutter_pub_get
         working-directory: apps/kineto
-        env:
-          STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SERVER_URL: ${{ github.server_url }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          set +e
-          flutter test test/build_hook_inputs_test.dart             --plain-name "native build cache configuration covers every Cargo manifest and pin"             > /tmp/hook-config-inputs.log 2>&1
-          rc=$?
-          set -e
+          test ! -e pubspec_overrides.yaml
+          lock_before="$(sha256sum pubspec.lock | awk '{print $1}')"
+          flutter pub get
+          lock_after="$(sha256sum pubspec.lock | awk '{print $1}')"
+          test "$lock_before" = "$lock_after"
+          git diff --exit-code -- pubspec.lock
 
-          python3 - "$rc" <<'PY'
-          import json, os, pathlib, sys, urllib.request
-          rc = int(sys.argv[1])
-          log = pathlib.Path("/tmp/hook-config-inputs.log").read_text(errors="replace")
-          tail = log[-12000:]
-          body = (
-              "## CI diagnostic: config-input test\n\n"
-              f"HEAD: \`{os.environ['HEAD_SHA']}\`\n"
-              f"exit: {rc}\n\n"
-              "\`\`\`text\n" + tail + "\n\`\`\`"
-          )
-          data = json.dumps({"body": body}).encode()
-          url = (
-              f"{os.environ['SERVER_URL']}/api/v1/repos/"
-              f"{os.environ['REPOSITORY']}/issues/{os.environ['PR_NUMBER']}/comments"
-          )
-          req = urllib.request.Request(
-              url, data=data, method="POST",
-              headers={
-                  "Authorization": f"token {os.environ['STATUS_TOKEN']}",
-                  "Content-Type": "application/json",
-              },
-          )
-          with urllib.request.urlopen(req, timeout=30) as response:
-              response.read()
-          PY
+      - name: Flutter analyze
+        id: flutter_analyze
+        working-directory: apps/kineto
+        run: flutter analyze
 
-          cat /tmp/hook-config-inputs.log
-          exit "$rc"
+      - name: Flutter tests
+        id: flutter_tests
+        working-directory: apps/kineto
+        run: flutter test
+
+      - name: Linux release build
+        id: linux_build
+        working-directory: apps/kineto
+        run: flutter build linux --release
+
+      - name: No checkout drift
+        id: checkout_drift
+        run: |
+          drift="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$drift" ]; then
+            printf '%s\n' "$drift"
+            exit 1
+          fi
 
       - name: Report gate outcomes
         if: always()

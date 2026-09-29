@@ -83,64 +83,18 @@ void main() {
     );
   });
 
-  test('rustup setup installs only the requested build target when missing',
-      () {
-    const requestedTarget = 'x86_64-unknown-linux-gnu';
-    final commands = native_hook.rustupSetupArguments(
-      channel: '1.98.1',
-      targetTriple: requestedTarget,
-      toolchainInstalled: false,
-      targetInstalled: false,
+  test('rust setup guidance keeps target installation explicit and narrow', () {
+    expect(
+      native_hook.rustToolchainInstallCommand('1.98.1'),
+      'rustup toolchain install 1.98.1 --profile minimal '
+      '--component rustfmt --component clippy',
     );
-
-    expect(commands, hasLength(2));
-    expect(commands[1], <String>[
-      'target',
-      'add',
-      requestedTarget,
-      '--toolchain',
-      '1.98.1',
-    ]);
-    final flattened = commands.expand((command) => command).toList();
-    expect(flattened.where((value) => value == requestedTarget), hasLength(1));
-    for (final otherTarget in <String>[
-      'aarch64-apple-darwin',
-      'x86_64-apple-darwin',
-      'aarch64-pc-windows-msvc',
-      'x86_64-pc-windows-msvc',
-      'aarch64-unknown-linux-gnu',
-    ]) {
-      expect(flattened, isNot(contains(otherTarget)));
-    }
-  });
-
-  test('rustup setup is mutation-free when toolchain and target exist', () {
-    final commands = native_hook.rustupSetupArguments(
-      channel: '1.98.1',
-      targetTriple: 'x86_64-unknown-linux-gnu',
-      toolchainInstalled: true,
-      targetInstalled: true,
+    expect(
+      native_hook.rustTargetInstallCommand(
+        channel: '1.98.1',
+        targetTriple: 'x86_64-unknown-linux-gnu',
+      ),
+      'rustup target add x86_64-unknown-linux-gnu --toolchain 1.98.1',
     );
-
-    expect(commands, isEmpty);
-  });
-
-  test('rustup setup adds only target when toolchain already exists', () {
-    final commands = native_hook.rustupSetupArguments(
-      channel: '1.98.1',
-      targetTriple: 'aarch64-unknown-linux-gnu',
-      toolchainInstalled: true,
-      targetInstalled: false,
-    );
-
-    expect(commands, <List<String>>[
-      <String>[
-        'target',
-        'add',
-        'aarch64-unknown-linux-gnu',
-        '--toolchain',
-        '1.98.1',
-      ],
-    ]);
   });
 }

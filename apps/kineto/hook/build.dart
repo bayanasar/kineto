@@ -62,44 +62,36 @@ String readToolchainChannel(File toolchainFile) {
   return match.group(1)!;
 }
 
-List<List<String>> rustupSetupArguments({
+String rustToolchainInstallCommand(String channel) =>
+    'rustup toolchain install $channel --profile minimal '
+    '--component rustfmt --component clippy';
+
+String rustTargetInstallCommand({
   required String channel,
   required String targetTriple,
-  required bool toolchainInstalled,
-  required bool targetInstalled,
-}) {
-  return <List<String>>[
-    if (!toolchainInstalled)
-      <String>[
-        'toolchain',
-        'install',
-        channel,
-        '--profile',
-        'minimal',
-        '--component',
-        'rustfmt',
-        '--component',
-        'clippy',
-      ],
-    if (!targetInstalled)
-      <String>['target', 'add', targetTriple, '--toolchain', channel],
-  ];
-}
-
+}) => 'rustup target add $targetTriple --toolchain $channel';
 Future<ProcessResult> _runCapture(
   String executable,
   List<String> arguments, {
   required String workingDirectory,
   Map<String, String>? environment,
-}) {
-  return Process.run(
-    executable,
-    arguments,
-    workingDirectory: workingDirectory,
-    environment: environment,
-    includeParentEnvironment: true,
-    runInShell: Platform.isWindows,
-  );
+}) async {
+  try {
+    return await Process.run(
+      executable,
+      arguments,
+      workingDirectory: workingDirectory,
+      environment: environment,
+      includeParentEnvironment: true,
+      runInShell: Platform.isWindows,
+    );
+  } on ProcessException catch (error) {
+    final path = Platform.environment['PATH'] ?? '<unset>';
+    throw StateError(
+      'required executable "$executable" was not found or could not start '
+      'for the build hook (PATH=$path): $error',
+    );
+  }
 }
 
 Future<void> _run(
@@ -172,6 +164,8 @@ Map<String, String>? _cargoEnvironment() {
   if (path == null) {
     return null;
   }
+  // Xcode injects developer-tool shims ahead of the host toolchain. Remove
+  // those entries so Cargo resolves the normal linker/toolchain consistently.
   return <String, String>{
     'PATH': path
         .split(':')
@@ -256,35 +250,36 @@ void main(List<String> args) async {
     final targetTriple = targetTripleFor(codeConfig);
     final linkMode = linkModeFor(codeConfig);
 
-    // Keep the build hook idempotent with respect to the global rustup state.
-    // CI and normal developer setup already install the pinned host toolchain;
-    // in that common path the hook must not re-run toolchain installation or
-    // target mutation. Only fill an actually missing toolchain/target.
+    // Toolchain/target provisioning belongs to developer setup and CI. The
+    // hook only verifies prerequisites and never mutates the global rustup
+    // installation. This keeps host builds cheap and cross/CI targets explicit.
     final toolchainInstalled = await _rustToolchainInstalled(
       channel: appChannel,
       workingDirectory: appRoot.path,
     );
-    final targetInstalled = toolchainInstalled &&
-        await _rustTargetInstalled(
-          channel: appChannel,
-          targetTriple: targetTriple,
-          workingDirectory: appRoot.path,
-        );
-    for (final rustupArgs in rustupSetupArguments(
-      channel: appChannel,
-      targetTriple: targetTriple,
-      toolchainInstalled: toolchainInstalled,
-      targetInstalled: targetInstalled,
-    )) {
-      await _run(
-        'rustup',
-        rustupArgs,
-        workingDirectory: appRoot.path,
+    if (!toolchainInstalled) {
+      throw StateError(
+        'Rust toolchain $appChannel is not installed for this build. '
+        'Install it before building: ${rustToolchainInstallCommand(appChannel)}',
       );
     }
 
+    final targetInstalled = await _rustTargetInstalled(
+      channel: appChannel,
+      targetTriple: targetTriple,
+      workingDirectory: appRoot.path,
+    );
+    if (!targetInstalled) {
+      throw StateError(
+        'Rust target $targetTriple is not installed for toolchain $appChannel. '
+        'Install it before building: ${rustTargetInstallCommand(channel: appChannel, targetTriple: targetTriple)}',
+      );
+    }
+
+    // Share Cargo outputs across hook configurations. Cargo already isolates
+    // target triples and profiles below one target directory.
     final targetDir = Directory(
-      _join(Directory.fromUri(input.outputDirectory).path, 'target'),
+      _join(Directory.fromUri(input.outputDirectoryShared).path, 'target'),
     );
     final cargoArgs = <String>[
       'run',
