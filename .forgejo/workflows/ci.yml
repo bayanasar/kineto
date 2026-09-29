@@ -141,7 +141,10 @@ jobs:
           fi
 
           test -z "${RUSTUP_TOOLCHAIN:-}"
-          rustup show active-toolchain
+          (
+            cd apps/kineto
+            rustup show active-toolchain | tee /dev/stderr | grep -q 'rust-toolchain.toml'
+          )
           rustc --version
           cargo --version
           rustfmt --version
@@ -222,6 +225,11 @@ jobs:
           test "$lock_before" = "$lock_after"
           git diff --exit-code -- pubspec.lock
 
+      - name: Native ownership
+        id: native_ownership
+        working-directory: apps/kineto
+        run: dart tool/check_native_finalizer_ownership.dart
+
       - name: Flutter analyze
         id: flutter_analyze
         working-directory: apps/kineto
@@ -248,6 +256,7 @@ jobs:
 
       - name: Report gate outcomes
         if: always()
+        continue-on-error: true
         env:
           STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STEPS: ${{ toJSON(steps) }}
