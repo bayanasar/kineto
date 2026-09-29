@@ -120,7 +120,10 @@ void main() {
       outputDirectory: output.uri,
     );
 
-    expect(copied.path, '${output.path}/libkineto_native.so');
+    expect(
+      copied.path,
+      File.fromUri(output.uri.resolve('libkineto_native.so')).path,
+    );
     expect(await copied.readAsString(), 'shared-v1');
     await shared.writeAsString('shared-v2');
     expect(await copied.readAsString(), 'shared-v1');
