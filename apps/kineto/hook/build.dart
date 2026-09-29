@@ -70,6 +70,20 @@ String rustTargetInstallCommand({
   required String channel,
   required String targetTriple,
 }) => 'rustup target add $targetTriple --toolchain $channel';
+
+String rustToolchainUnavailableMessage({
+  required String channel,
+  required String rustcError,
+}) {
+  final detail = rustcError.trim();
+  return 'rustc failed while verifying Rust $channel'
+      '${detail.isEmpty ? '.' : ':\n$detail'}\n'
+      'Flutter build hooks do not inherit RUSTUP_HOME or CARGO_HOME, so the '
+      r'toolchain must be installed in the default rustup home ($HOME/.rustup, '
+      r'or %USERPROFILE%\.rustup on Windows). '
+      'Install it before building: ${rustToolchainInstallCommand(channel)}';
+}
+
 Future<ProcessResult> _runCapture(
   String executable,
   List<String> arguments, {
@@ -137,8 +151,10 @@ Future<void> _verifyRustPrerequisites({
   );
   if (version.exitCode != 0) {
     throw StateError(
-      'rustc failed while verifying Rust $channel. '
-      'Install it before building: ${rustToolchainInstallCommand(channel)}',
+      rustToolchainUnavailableMessage(
+        channel: channel,
+        rustcError: version.stderr as String,
+      ),
     );
   }
   final versionText = (version.stdout as String).trim();

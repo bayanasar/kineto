@@ -61,12 +61,20 @@ jobs:
       - name: Rust toolchain from rust-toolchain.toml
         id: rust_toolchain
         run: |
-          if ! command -v rustup >/dev/null 2>&1; then
+          # Flutter runs build hooks with HOME and PATH but without RUSTUP_HOME
+          # or CARGO_HOME, so the hook only finds rustup's default homes.
+          # Provision there rather than in any homes the runner image sets.
+          export RUSTUP_HOME="$HOME/.rustup"
+          export CARGO_HOME="$HOME/.cargo"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$CARGO_HOME/bin:$PATH"
+
+          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
             curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
               | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
           fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
 
           test -z "${RUSTUP_TOOLCHAIN:-}"
           rustup toolchain install
@@ -75,6 +83,9 @@ jobs:
           cargo --version
           rustfmt --version
           cargo clippy --version
+
+          # Resolve the pinned toolchain exactly as the build hook will.
+          (cd apps/kineto && env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 rustc --version)
 
       - name: Flutter 3.47.2
         id: flutter_sdk

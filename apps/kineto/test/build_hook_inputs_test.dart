@@ -107,6 +107,24 @@ void main() {
     );
   });
 
+  test('missing toolchain error names the hook-visible rustup home', () {
+    final message = native_hook.rustToolchainUnavailableMessage(
+      channel: '1.98.1',
+      rustcError: "error: toolchain '1.98.1-x86_64-unknown-linux-gnu' is not installed\n",
+    );
+
+    expect(
+      message,
+      contains("toolchain '1.98.1-x86_64-unknown-linux-gnu' is not installed"),
+    );
+    expect(message, contains('do not inherit RUSTUP_HOME or CARGO_HOME'));
+    expect(message, contains(r'$HOME/.rustup'));
+    expect(
+      message,
+      contains(native_hook.rustToolchainInstallCommand('1.98.1')),
+    );
+  });
+
   test('reported code asset is copied out of shared intermediates', () async {
     final temp = await Directory.systemTemp.createTemp('kineto-code-asset-');
     addTearDown(() => temp.delete(recursive: true));

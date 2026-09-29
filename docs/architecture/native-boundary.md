@@ -14,7 +14,7 @@ The bootstrap targets the current 2026 native stack:
 - Dart 3.13+
 - Dart `@Native` FFI declarations
 - Flutter/Dart build hooks and Code Assets
-- `native_toolchain_rust` for Cargo compilation/bundling
+- Cargo, invoked directly by the build hook
 - Rust 1.98.1, edition 2024
 
 The Rust toolchain is pinned rather than floating on `stable` so native builds are reproducible.
@@ -47,7 +47,9 @@ The demo snapshot remains one packed `u64` containing generated/locked flags, ca
 
 ## Build and packaging
 
-`apps/kineto/hook/build.dart` runs as part of Flutter `run`, `build`, and native-aware tests. It uses `native_toolchain_rust` to compile `apps/kineto/rust` and registers the result as the Code Asset consumed by the Dart native bindings.
+`apps/kineto/hook/build.dart` runs as part of Flutter `run`, `build`, and native-aware tests. It verifies the pinned `rustc` and the requested target, runs `cargo build --release --locked` for `apps/kineto/rust`, and registers the result as the Code Asset consumed by the Dart native bindings. Cargo intermediates are shared across hook configurations; the reported library is copied into each configuration's own output directory.
+
+The hook verifies Rust but never provisions it. It sets `RUSTUP_AUTO_INSTALL=0`, so a missing toolchain or target fails the build with the install command instead of being installed as a side effect. Flutter runs hooks with a filtered environment that keeps `HOME`, `USERPROFILE`, and `PATH` but drops `RUSTUP_HOME` and `CARGO_HOME`, so the pinned toolchain must live in rustup's default home (`~/.rustup`). CI provisions it there for the same reason.
 
 Dart resolves `@Native` symbols against that Code Asset. No platform-specific `DynamicLibrary.open()` path and no `PATH` lookup is required.
 
