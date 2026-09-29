@@ -61,31 +61,102 @@ jobs:
       - name: Rust toolchain from rust-toolchain.toml
         id: rust_toolchain
         run: |
-          # Flutter runs build hooks with HOME and PATH but without RUSTUP_HOME
-          # or CARGO_HOME, so the hook only finds rustup's default homes.
-          # Provision there rather than in any homes the runner image sets.
-          export RUSTUP_HOME="$HOME/.rustup"
-          export CARGO_HOME="$HOME/.cargo"
+          # Flutter build hooks keep HOME/PATH but drop RUSTUP_HOME/CARGO_HOME.
+          # Prefer the runner image's preinstalled Rust by exposing it through
+          # rustup's default homes; fall back to provisioning defaults only when
+          # the image does not already contain the pinned toolchain + host target.
+          image_rustup_home="${RUSTUP_HOME:-}"
+          image_cargo_home="${CARGO_HOME:-}"
+          default_rustup_home="$HOME/.rustup"
+          default_cargo_home="$HOME/.cargo"
+
+          if [ ! -e "$default_rustup_home" ] &&
+             [ -n "$image_rustup_home" ] &&
+             [ "$image_rustup_home" != "$default_rustup_home" ] &&
+             [ -d "$image_rustup_home" ]; then
+            ln -s "$image_rustup_home" "$default_rustup_home"
+          fi
+          if [ ! -e "$default_cargo_home" ] &&
+             [ -n "$image_cargo_home" ] &&
+             [ "$image_cargo_home" != "$default_cargo_home" ] &&
+             [ -d "$image_cargo_home" ]; then
+            ln -s "$image_cargo_home" "$default_cargo_home"
+          fi
+
+          export RUSTUP_HOME="$default_rustup_home"
+          export CARGO_HOME="$default_cargo_home"
+          export PATH="$CARGO_HOME/bin:$PATH"
           echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
           echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          export PATH="$CARGO_HOME/bin:$PATH"
 
-          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
-            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          hook_view_ok=false
+          if [ -x "$CARGO_HOME/bin/rustup" ]; then
+            hook_target_libdir="$(
+              cd apps/kineto &&
+              env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 \
+                rustc --print target-libdir --target x86_64-unknown-linux-gnu 2>/dev/null || true
+            )"
+            if (cd apps/kineto &&
+                env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 rustc --version >/dev/null 2>&1) &&
+               [ -n "$hook_target_libdir" ] &&
+               [ -d "$hook_target_libdir" ] &&
+               rustfmt --version >/dev/null 2>&1 &&
+               cargo clippy --version >/dev/null 2>&1; then
+              hook_view_ok=true
+              echo "reusing runner image Rust toolchain through default-home links"
+            fi
+          fi
+
+          if [ "$hook_view_ok" != true ]; then
+            # Do not mutate image-owned /usr/local homes through the temporary
+            # links. Replace them with real default homes before provisioning.
+            if [ -L "$default_rustup_home" ]; then
+              rm "$default_rustup_home"
+            fi
+            if [ -L "$default_cargo_home" ]; then
+              rm "$default_cargo_home"
+            fi
+            mkdir -p "$default_rustup_home" "$default_cargo_home"
+
+            if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+              curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+            fi
+
+            if ! RUSTUP_AUTO_INSTALL=0 rustup run 1.98.1 rustc --version >/dev/null 2>&1; then
+              rustup toolchain install 1.98.1 \
+                --profile minimal \
+                --component rustfmt \
+                --component clippy
+            fi
+
+            target_libdir="$(
+              RUSTUP_AUTO_INSTALL=0 rustup run 1.98.1 rustc \
+                --print target-libdir --target x86_64-unknown-linux-gnu 2>/dev/null || true
+            )"
+            if [ -z "$target_libdir" ] || [ ! -d "$target_libdir" ]; then
+              rustup target add x86_64-unknown-linux-gnu --toolchain 1.98.1
+            fi
           fi
 
           test -z "${RUSTUP_TOOLCHAIN:-}"
-          rustup toolchain install
           rustup show active-toolchain
           rustc --version
           cargo --version
           rustfmt --version
           cargo clippy --version
 
-          # Resolve the pinned toolchain exactly as the build hook will.
-          (cd apps/kineto && env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 rustc --version)
+          # Resolve toolchain and target exactly as the build hook will.
+          (
+            cd apps/kineto
+            env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 rustc --version
+            target_libdir="$(
+              env -i HOME="$HOME" PATH="$PATH" RUSTUP_AUTO_INSTALL=0 \
+                rustc --print target-libdir --target x86_64-unknown-linux-gnu
+            )"
+            test -d "$target_libdir"
+          )
 
       - name: Flutter 3.47.2
         id: flutter_sdk

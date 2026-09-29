@@ -137,13 +137,18 @@ void main() {
       sharedLibrary: shared,
       outputDirectory: output.uri,
     );
-
-    expect(
-      copied.path,
-      File.fromUri(output.uri.resolve('libkineto_native.so')).path,
+    final slashlessOutput = Directory('${temp.path}/slashless-output');
+    final slashlessCopied = await native_hook.copyCodeAssetForConfiguration(
+      sharedLibrary: shared,
+      outputDirectory: Uri.file(slashlessOutput.path),
     );
+
+    expect(copied.parent.absolute.path, output.absolute.path);
+    expect(slashlessCopied.parent.absolute.path, slashlessOutput.absolute.path);
     expect(await copied.readAsString(), 'shared-v1');
+    expect(await slashlessCopied.readAsString(), 'shared-v1');
     await shared.writeAsString('shared-v2');
     expect(await copied.readAsString(), 'shared-v1');
+    expect(await slashlessCopied.readAsString(), 'shared-v1');
   });
 }
