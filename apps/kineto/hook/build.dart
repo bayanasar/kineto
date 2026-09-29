@@ -122,40 +122,45 @@ Future<void> _run(
   }
 }
 
-Future<bool> _rustToolchainInstalled({
-  required String channel,
-  required String workingDirectory,
-}) async {
-  final result = await _runCapture(
-    'rustup',
-    <String>['run', channel, 'rustc', '--version'],
-    workingDirectory: workingDirectory,
-  );
-  return result.exitCode == 0;
-}
-
-Set<String> parseInstalledRustTargets(String output) => output
-    .split(RegExp(r'\s+'))
-    .where((entry) => entry.isNotEmpty)
-    .toSet();
-
-Future<bool> _rustTargetInstalled({
+Future<void> _verifyRustPrerequisites({
   required String channel,
   required String targetTriple,
   required String workingDirectory,
 }) async {
-  final result = await _runCapture(
-    'rustup',
-    <String>['target', 'list', '--installed', '--toolchain', channel],
+  final version = await _runCapture(
+    'rustc',
+    const <String>['--version'],
     workingDirectory: workingDirectory,
   );
-  if (result.exitCode != 0) {
-    return false;
+  if (version.exitCode != 0) {
+    throw StateError(
+      'rustc failed while verifying Rust $channel. '
+      'Install it before building: ${rustToolchainInstallCommand(channel)}',
+    );
   }
-  final targets = parseInstalledRustTargets(result.stdout as String);
-  return targets.contains(targetTriple);
-}
+  final versionText = (version.stdout as String).trim();
+  if (!versionText.startsWith('rustc $channel ')) {
+    throw StateError(
+      'Rust toolchain mismatch: expected $channel but got "$versionText". '
+      'Install/select the pinned toolchain before building.',
+    );
+  }
 
+  final targetLibdirResult = await _runCapture(
+    'rustc',
+    <String>['--print', 'target-libdir', '--target', targetTriple],
+    workingDirectory: workingDirectory,
+  );
+  final targetLibdir = (targetLibdirResult.stdout as String).trim();
+  if (targetLibdirResult.exitCode != 0 ||
+      targetLibdir.isEmpty ||
+      !Directory(targetLibdir).existsSync()) {
+    throw StateError(
+      'Rust target $targetTriple is not installed for toolchain $channel. '
+      'Install it before building: ${rustTargetInstallCommand(channel: channel, targetTriple: targetTriple)}',
+    );
+  }
+}
 Map<String, String>? _cargoEnvironment() {
   if (!Platform.isMacOS) {
     return null;
@@ -251,40 +256,19 @@ void main(List<String> args) async {
     final linkMode = linkModeFor(codeConfig);
 
     // Toolchain/target provisioning belongs to developer setup and CI. The
-    // hook only verifies prerequisites and never mutates the global rustup
-    // installation. This keeps host builds cheap and cross/CI targets explicit.
-    final toolchainInstalled = await _rustToolchainInstalled(
-      channel: appChannel,
-      workingDirectory: appRoot.path,
-    );
-    if (!toolchainInstalled) {
-      throw StateError(
-        'Rust toolchain $appChannel is not installed for this build. '
-        'Install it before building: ${rustToolchainInstallCommand(appChannel)}',
-      );
-    }
-
-    final targetInstalled = await _rustTargetInstalled(
+    // hook only verifies the pinned rustc + requested target and never invokes
+    // rustup, avoiding runner-specific HOME/CARGO_HOME self-location issues.
+    await _verifyRustPrerequisites(
       channel: appChannel,
       targetTriple: targetTriple,
       workingDirectory: appRoot.path,
     );
-    if (!targetInstalled) {
-      throw StateError(
-        'Rust target $targetTriple is not installed for toolchain $appChannel. '
-        'Install it before building: ${rustTargetInstallCommand(channel: appChannel, targetTriple: targetTriple)}',
-      );
-    }
-
     // Share Cargo outputs across hook configurations. Cargo already isolates
     // target triples and profiles below one target directory.
     final targetDir = Directory(
       _join(Directory.fromUri(input.outputDirectoryShared).path, 'target'),
     );
     final cargoArgs = <String>[
-      'run',
-      appChannel,
-      'cargo',
       'build',
       '--release',
       '--locked',
@@ -302,7 +286,7 @@ void main(List<String> args) async {
       ],
     ];
     await _run(
-      'rustup',
+      'cargo',
       cargoArgs,
       workingDirectory: workspaceRoot.path,
       environment: _cargoEnvironment(),

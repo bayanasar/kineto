@@ -71,18 +71,6 @@ void main() {
     expect(appToolchain.readAsStringSync(), isNot(contains('targets =')));
   });
 
-  test('installed rust targets are parsed from rustup whitespace output', () {
-    expect(
-      native_hook.parseInstalledRustTargets(
-        'x86_64-unknown-linux-gnu\naarch64-unknown-linux-gnu\n',
-      ),
-      <String>{
-        'x86_64-unknown-linux-gnu',
-        'aarch64-unknown-linux-gnu',
-      },
-    );
-  });
-
   test('rust setup guidance keeps target installation explicit and narrow', () {
     expect(
       native_hook.rustToolchainInstallCommand('1.98.1'),
