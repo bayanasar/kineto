@@ -70,6 +70,20 @@ String rustTargetInstallCommand({
   required String channel,
   required String targetTriple,
 }) => 'rustup target add $targetTriple --toolchain $channel';
+
+String rustToolchainUnavailableMessage({
+  required String channel,
+  required String rustcError,
+}) {
+  final detail = rustcError.trim();
+  return 'rustc failed while verifying Rust $channel'
+      '${detail.isEmpty ? '.' : ':\n$detail'}\n'
+      'Flutter build hooks do not inherit RUSTUP_HOME or CARGO_HOME, so the '
+      r'toolchain must be installed in the default rustup home ($HOME/.rustup, '
+      r'or %USERPROFILE%\.rustup on Windows). '
+      'Install it before building: ${rustToolchainInstallCommand(channel)}';
+}
+
 Future<ProcessResult> _runCapture(
   String executable,
   List<String> arguments, {
@@ -86,7 +100,8 @@ Future<ProcessResult> _runCapture(
       runInShell: Platform.isWindows,
     );
   } on ProcessException catch (error) {
-    final path = Platform.environment['PATH'] ?? '<unset>';
+    final path =
+        environment?['PATH'] ?? Platform.environment['PATH'] ?? '<unset>';
     throw StateError(
       'required executable "$executable" was not found or could not start '
       'for the build hook (PATH=$path): $error',
@@ -127,15 +142,19 @@ Future<void> _verifyRustPrerequisites({
   required String targetTriple,
   required String workingDirectory,
 }) async {
+  final environment = rustProcessEnvironment();
   final version = await _runCapture(
     'rustc',
     const <String>['--version'],
     workingDirectory: workingDirectory,
+    environment: environment,
   );
   if (version.exitCode != 0) {
     throw StateError(
-      'rustc failed while verifying Rust $channel. '
-      'Install it before building: ${rustToolchainInstallCommand(channel)}',
+      rustToolchainUnavailableMessage(
+        channel: channel,
+        rustcError: version.stderr as String,
+      ),
     );
   }
   final versionText = (version.stdout as String).trim();
@@ -150,6 +169,7 @@ Future<void> _verifyRustPrerequisites({
     'rustc',
     <String>['--print', 'target-libdir', '--target', targetTriple],
     workingDirectory: workingDirectory,
+    environment: environment,
   );
   final targetLibdir = (targetLibdirResult.stdout as String).trim();
   if (targetLibdirResult.exitCode != 0 ||
@@ -161,24 +181,35 @@ Future<void> _verifyRustPrerequisites({
     );
   }
 }
-Map<String, String>? _cargoEnvironment() {
-  if (!Platform.isMacOS) {
-    return null;
+Map<String, String> rustProcessEnvironment({
+  Map<String, String>? parentEnvironment,
+  bool? isMacOS,
+}) {
+  final parent = parentEnvironment ?? Platform.environment;
+  final environment = <String, String>{'RUSTUP_AUTO_INSTALL': '0'};
+  if (isMacOS ?? Platform.isMacOS) {
+    final path = parent['PATH'];
+    if (path != null) {
+      // Xcode injects developer-tool shims ahead of the host toolchain. Remove
+      // those entries so Cargo resolves the normal linker/toolchain consistently.
+      environment['PATH'] = path
+          .split(':')
+          .where((entry) => !entry.contains('Contents/Developer/'))
+          .join(':');
+    }
   }
-  final path = Platform.environment['PATH'];
-  if (path == null) {
-    return null;
-  }
-  // Xcode injects developer-tool shims ahead of the host toolchain. Remove
-  // those entries so Cargo resolves the normal linker/toolchain consistently.
-  return <String, String>{
-    'PATH': path
-        .split(':')
-        .where((entry) => !entry.contains('Contents/Developer/'))
-        .join(':'),
-  };
+  return environment;
 }
 
+Future<File> copyCodeAssetForConfiguration({
+  required File sharedLibrary,
+  required Uri outputDirectory,
+}) async {
+  final outputDir = Directory.fromUri(outputDirectory);
+  await outputDir.create(recursive: true);
+  final fileName = sharedLibrary.path.split(Platform.pathSeparator).last;
+  return sharedLibrary.copy(File.fromUri(outputDirectory.resolve(fileName)).path);
+}
 String targetTripleFor(CodeConfig codeConfig) {
   return switch ((codeConfig.targetOS, codeConfig.targetArchitecture)) {
     (OS.android, Architecture.arm64) => 'aarch64-linux-android',
@@ -289,14 +320,14 @@ void main(List<String> args) async {
       'cargo',
       cargoArgs,
       workingDirectory: workspaceRoot.path,
-      environment: _cargoEnvironment(),
+      environment: rustProcessEnvironment(),
     );
 
     final libraryFileName = codeConfig.targetOS.libraryFileName(
       _libraryName,
       linkMode,
     );
-    final library = File(
+    final sharedLibrary = File(
       _join(
         _join(
           _join(targetDir.path, targetTriple),
@@ -305,9 +336,15 @@ void main(List<String> args) async {
         libraryFileName,
       ),
     );
-    if (!library.existsSync()) {
-      throw StateError('Cargo succeeded but native library is missing: ${library.path}');
+    if (!sharedLibrary.existsSync()) {
+      throw StateError(
+        'Cargo succeeded but native library is missing: ${sharedLibrary.path}',
+      );
     }
+    final library = await copyCodeAssetForConfiguration(
+      sharedLibrary: sharedLibrary,
+      outputDirectory: input.outputDirectory,
+    );
 
     output.assets.code.add(
       CodeAsset(
