@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -7,11 +8,11 @@ import 'demo_workspace.dart';
 import 'native/kineto_engine.dart';
 import 'project_busy.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final engine = KinetoEngine.open();
   try {
-    final project = _openDemoProject();
+    final project = await _openDemoProject();
     runApp(KinetoApp(engine: engine, project: project));
   } on KinetoProjectException catch (error) {
     engine.close();
@@ -31,15 +32,15 @@ void main() {
   }
 }
 
-KinetoProjectSession _openDemoProject() {
+Future<KinetoProjectSession> _openDemoProject() async {
   final target = Directory(_demoProjectPath());
-  if (target.existsSync()) {
+  if (await target.exists()) {
     return KinetoProjectSession.open(target.path);
   }
 
-  target.parent.createSync(recursive: true);
+  await target.parent.create(recursive: true);
   try {
-    return KinetoProjectSession.createTextProject(
+    return await KinetoProjectSession.createTextProject(
       path: target.path,
       projectId: 'kineto_demo',
       title: 'Kineto Demo Project',
@@ -52,7 +53,7 @@ KinetoProjectSession _openDemoProject() {
     // Another process may have created the same canonical demo project between
     // the existence check and create. Never overwrite it; reopen the winner.
     if (error.code == KinetoProjectException.alreadyExists &&
-        target.existsSync()) {
+        await target.exists()) {
       return KinetoProjectSession.open(target.path);
     }
     rethrow;
@@ -105,6 +106,21 @@ class KinetoApp extends StatefulWidget {
 
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    // Close the session before the process exits so its worker stops
+    // reporting and the project's writer lock is released cleanly.
+    _lifecycle = AppLifecycleListener(onExitRequested: _closeNative);
+  }
+
+  Future<AppExitResponse> _closeNative() async {
+    widget.project.close();
+    widget.engine.close();
+    return AppExitResponse.exit;
+  }
 
   void _toggleTheme() {
     setState(() {
@@ -114,6 +130,7 @@ class _KinetoAppState extends State<KinetoApp> {
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     widget.project.close();
     widget.engine.close();
     super.dispose();

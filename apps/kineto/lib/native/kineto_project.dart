@@ -7,6 +7,7 @@ typedef _ProjectTextCopyDart = int Function(
   int,
   Pointer<Uint64>,
 );
+typedef _PostCObject = NativeFunction<Int8 Function(Int64, Pointer<Dart_CObject>)>;
 
 @Native<
     Int32 Function(
@@ -22,6 +23,8 @@ typedef _ProjectTextCopyDart = int Function(
       Uint64,
       Pointer<Uint8>,
       Uint64,
+      Pointer<_PostCObject>,
+      Int64,
       Pointer<Pointer<Void>>,
     )>(symbol: 'kineto_project_create_text')
 external int _kinetoProjectCreateText(
@@ -37,6 +40,8 @@ external int _kinetoProjectCreateText(
   int languageLength,
   Pointer<Uint8> source,
   int sourceLength,
+  Pointer<_PostCObject> post,
+  int port,
   Pointer<Pointer<Void>> outSession,
 );
 
@@ -44,11 +49,15 @@ external int _kinetoProjectCreateText(
     Int32 Function(
       Pointer<Uint8>,
       Uint64,
+      Pointer<_PostCObject>,
+      Int64,
       Pointer<Pointer<Void>>,
     )>(symbol: 'kineto_project_open')
 external int _kinetoProjectOpen(
   Pointer<Uint8> path,
   int pathLength,
+  Pointer<_PostCObject> post,
+  int port,
   Pointer<Pointer<Void>> outSession,
 );
 
@@ -96,45 +105,60 @@ external int _kinetoProjectShotState(
   Pointer<Uint64> outState,
 );
 
-@Native<Int32 Function(Pointer<Void>, Uint32, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_set_direction',
 )
 external int _kinetoProjectShotSetDirection(
   Pointer<Void> session,
   int shotIndex,
   int direction,
+  int token,
 );
 
-@Native<Int32 Function(Pointer<Void>, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_generate',
 )
-external int _kinetoProjectShotGenerate(Pointer<Void> session, int shotIndex);
+external int _kinetoProjectShotGenerate(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
 
-@Native<Int32 Function(Pointer<Void>, Uint32, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_select',
 )
 external int _kinetoProjectShotSelect(
   Pointer<Void> session,
   int shotIndex,
   int candidateIndex,
+  int token,
 );
 
-@Native<Int32 Function(Pointer<Void>, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_lock',
 )
-external int _kinetoProjectShotLock(Pointer<Void> session, int shotIndex);
+external int _kinetoProjectShotLock(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
 
-@Native<Int32 Function(Pointer<Void>, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_reset',
 )
-external int _kinetoProjectShotReset(Pointer<Void> session, int shotIndex);
+external int _kinetoProjectShotReset(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
 
-@Native<Int32 Function(Pointer<Void>, Uint32)>(
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_migrate_legacy_hashes',
 )
 external int _kinetoProjectShotMigrateLegacyHashes(
   Pointer<Void> session,
   int shotIndex,
+  int token,
 );
 
 final class KinetoProjectException implements Exception {
@@ -162,11 +186,17 @@ final class KinetoProjectException implements Exception {
 
 /// Thin Dart owner for an opened canonical Kineto project.
 ///
-/// Strings cross the native boundary only as borrowed UTF-8 pointer/length
-/// pairs. Metadata and shot snapshots come back in caller-owned fixed-width
-/// storage; TOML, JSON, and serialized project models do not cross FFI.
+/// The project runs on its own Rust worker thread. Every operation that may
+/// touch the filesystem returns a [Future] and never blocks this isolate; the
+/// worker reports back through a port owned by this session. Snapshot and
+/// metadata reads return state the worker has already published and never do
+/// I/O. Strings cross the native boundary only as borrowed UTF-8
+/// pointer/length pairs; TOML, JSON, and serialized project models do not.
+///
+/// A session belongs to the isolate that opened it: its port delivers there.
+/// Call [close] when done; it waits for at most the running command.
 final class KinetoProjectSession implements Finalizable {
-  KinetoProjectSession._(this._handle) {
+  KinetoProjectSession._(this._handle, this._port) {
     _finalizer.attach(this, _handle, detach: this);
   }
 
@@ -179,9 +209,11 @@ final class KinetoProjectSession implements Finalizable {
   );
 
   final Pointer<Void> _handle;
+  final _SessionPort _port;
   bool _closed = false;
 
-  factory KinetoProjectSession.createTextProject({
+  /// Create a canonical text-source project at [path] and open it.
+  static Future<KinetoProjectSession> createTextProject({
     required String path,
     required String projectId,
     required String title,
@@ -190,6 +222,7 @@ final class KinetoProjectSession implements Finalizable {
     required String sourceText,
   }) {
     _assertAbiCompatible();
+    final port = _SessionPort();
     final arena = Arena();
     try {
       final pathBytes = _encodeUtf8(arena, path);
@@ -214,20 +247,20 @@ final class KinetoProjectSession implements Finalizable {
         languageBytes.length,
         sourceBytes.pointer,
         sourceBytes.length,
+        NativeApi.postCObject,
+        port.nativePort,
         out,
       );
-      _checkProjectResult(code);
-      if (out.value == nullptr) {
-        throw StateError('Kineto native project create returned a null session');
-      }
-      return KinetoProjectSession._(out.value);
+      return _finishOpen(code, out.value, port);
     } finally {
       arena.releaseAll();
     }
   }
 
-  factory KinetoProjectSession.open(String path) {
+  /// Open the canonical project at [path].
+  static Future<KinetoProjectSession> open(String path) {
     _assertAbiCompatible();
+    final port = _SessionPort();
     final arena = Arena();
     try {
       final pathBytes = _encodeUtf8(arena, path);
@@ -236,16 +269,37 @@ final class KinetoProjectSession implements Finalizable {
       final code = _kinetoProjectOpen(
         pathBytes.pointer,
         pathBytes.length,
+        NativeApi.postCObject,
+        port.nativePort,
         out,
       );
-      _checkProjectResult(code);
-      if (out.value == nullptr) {
-        throw StateError('Kineto native project open returned a null session');
-      }
-      return KinetoProjectSession._(out.value);
+      return _finishOpen(code, out.value, port);
     } finally {
       arena.releaseAll();
     }
+  }
+
+  static Future<KinetoProjectSession> _finishOpen(
+    int code,
+    Pointer<Void> handle,
+    _SessionPort port,
+  ) async {
+    if (code != 0) {
+      port.close();
+      throw _projectException(code);
+    }
+    if (handle == nullptr) {
+      port.close();
+      throw StateError('Kineto native project open returned a null session');
+    }
+    final session = KinetoProjectSession._(handle, port);
+    try {
+      await port.opened;
+    } on Object {
+      session.close();
+      rethrow;
+    }
+    return session;
   }
 
   int get formatVersion {
@@ -268,6 +322,7 @@ final class KinetoProjectSession implements Finalizable {
     return _copyProjectUtf8(_handle, _kinetoProjectTitleCopy, 'project title');
   }
 
+  /// The shot's most recently published state. Never does I/O.
   KinetoShotSnapshot shotSnapshot(int shotIndex) {
     _ensureOpen();
     _checkShotIndex(shotIndex);
@@ -284,23 +339,23 @@ final class KinetoProjectSession implements Finalizable {
     }
   }
 
-  void setShotDirection(int shotIndex, KinetoShotDirection direction) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
-    _checkProjectResult(
-      _kinetoProjectShotSetDirection(_handle, shotIndex, direction.wireValue),
-    );
-  }
+  Future<void> setShotDirection(int shotIndex, KinetoShotDirection direction) =>
+      _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotSetDirection(
+          _handle,
+          shotIndex,
+          direction.wireValue,
+          token,
+        ),
+      );
 
-  void generateShotCandidates(int shotIndex) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
-    _checkProjectResult(_kinetoProjectShotGenerate(_handle, shotIndex));
-  }
+  Future<void> generateShotCandidates(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotGenerate(_handle, shotIndex, token),
+      );
 
-  void selectShotCandidate(int shotIndex, int candidateIndex) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
+  Future<void> selectShotCandidate(int shotIndex, int candidateIndex) {
     if (candidateIndex < 0) {
       throw RangeError.value(
         candidateIndex,
@@ -308,38 +363,51 @@ final class KinetoProjectSession implements Finalizable {
         'Candidate index must be non-negative',
       );
     }
-    _checkProjectResult(
-      _kinetoProjectShotSelect(_handle, shotIndex, candidateIndex),
+    return _submit(
+      shotIndex,
+      (token) =>
+          _kinetoProjectShotSelect(_handle, shotIndex, candidateIndex, token),
     );
   }
 
-  void lockShotSelection(int shotIndex) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
-    _checkProjectResult(_kinetoProjectShotLock(_handle, shotIndex));
-  }
+  Future<void> lockShotSelection(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotLock(_handle, shotIndex, token),
+      );
 
-  void resetShot(int shotIndex) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
-    _checkProjectResult(_kinetoProjectShotReset(_handle, shotIndex));
-  }
+  Future<void> resetShot(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotReset(_handle, shotIndex, token),
+      );
 
   /// Rewrite this shot's known legacy hashes to canonical form, after writing
   /// a backup of the original records. Opening a project never does this.
-  void migrateLegacyHashes(int shotIndex) {
-    _ensureOpen();
-    _checkShotIndex(shotIndex);
-    _checkProjectResult(
-      _kinetoProjectShotMigrateLegacyHashes(_handle, shotIndex),
-    );
-  }
+  Future<void> migrateLegacyHashes(int shotIndex) => _submit(
+        shotIndex,
+        (token) =>
+            _kinetoProjectShotMigrateLegacyHashes(_handle, shotIndex, token),
+      );
 
+  /// Close the session. Commands that have not started are discarded and their
+  /// futures fail; the command already running finishes before this returns,
+  /// and the project's single-writer lock is released.
   void close() {
     if (_closed) return;
     _closed = true;
     _finalizer.detach(this);
+    // Destroy first: after it returns the worker posts nothing more, so the
+    // port can be closed without losing a message that still matters.
     _kinetoProjectDestroy(_handle);
+    _port.close();
+  }
+
+  Future<void> _submit(int shotIndex, int Function(int token) queue) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final (token, done) = _port.begin();
+    final code = queue(token);
+    if (code != 0) _port.fail(token, _projectException(code));
+    return done;
   }
 
   void _checkShotIndex(int shotIndex) {
@@ -353,6 +421,93 @@ final class KinetoProjectSession implements Finalizable {
       throw StateError('Kineto project session is closed');
     }
   }
+}
+
+/// Receives one session's `[kind, token, status, shot]` messages from the
+/// native worker and completes the matching futures.
+final class _SessionPort {
+  _SessionPort() {
+    _raw = RawReceivePort(_onMessage, 'kineto project session');
+    _updateKeepAlive();
+  }
+
+  static const int _opened = 1;
+  static const int _completed = 2;
+
+  late final RawReceivePort _raw;
+  final Completer<void> _openCompleter = Completer<void>();
+  final Map<int, Completer<void>> _pending = <int, Completer<void>>{};
+  int _nextToken = 1;
+  bool _closed = false;
+
+  int get nativePort => _raw.sendPort.nativePort;
+
+  Future<void> get opened => _openCompleter.future;
+
+  (int, Future<void>) begin() {
+    final token = _nextToken++;
+    final completer = Completer<void>();
+    _pending[token] = completer;
+    _updateKeepAlive();
+    return (token, completer.future);
+  }
+
+  void fail(int token, Object error) {
+    _pending.remove(token)?.completeError(error);
+    _updateKeepAlive();
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _raw.close();
+    const error = KinetoProjectSessionClosedException();
+    if (!_openCompleter.isCompleted) _openCompleter.completeError(error);
+    for (final completer in _pending.values) {
+      completer.completeError(error);
+    }
+    _pending.clear();
+  }
+
+  void _onMessage(Object? message) {
+    final values = message! as List<int>;
+    final status = values[2];
+    switch (values[0]) {
+      case _opened:
+        if (_openCompleter.isCompleted) break;
+        if (status == 0) {
+          _openCompleter.complete();
+        } else {
+          _openCompleter.completeError(_projectException(status));
+        }
+      case _completed:
+        final completer = _pending.remove(values[1]);
+        if (completer == null) break;
+        if (status == 0) {
+          completer.complete();
+        } else {
+          completer.completeError(_projectException(status));
+        }
+    }
+    _updateKeepAlive();
+  }
+
+  // Keep the isolate alive only while an answer is still owed, so a session
+  // that is merely open never pins its isolate.
+  void _updateKeepAlive() {
+    if (_closed) return;
+    _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
+  }
+}
+
+/// A queued operation was abandoned because its session was closed first.
+final class KinetoProjectSessionClosedException implements Exception {
+  const KinetoProjectSessionClosedException();
+
+  @override
+  String toString() =>
+      'KinetoProjectSessionClosedException: the project session was closed '
+      'before the operation ran';
 }
 
 final class _NativeBytes {
@@ -407,7 +562,11 @@ String _copyProjectUtf8(
 
 void _checkProjectResult(int code) {
   if (code == 0) return;
-  throw KinetoProjectException(code, switch (code) {
+  throw _projectException(code);
+}
+
+KinetoProjectException _projectException(int code) {
+  return KinetoProjectException(code, switch (code) {
     100 => 'Invalid project argument',
     101 => 'Project input is not valid UTF-8',
     102 => 'Project filesystem operation failed',
@@ -428,6 +587,7 @@ void _checkProjectResult(int code) {
     117 => 'Project is already open for writing in another Kineto window',
     118 => 'Legacy shot hashes need migration before this shot can change',
     119 => 'Project cannot be locked for single-writer access on this filesystem',
+    120 => 'Project session is not open',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

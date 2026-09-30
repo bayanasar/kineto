@@ -1,13 +1,29 @@
-use std::{collections::BTreeMap, ptr, slice, str};
+//! Canonical project sessions across the C ABI.
+//!
+//! A session runs on its own worker thread (`kineto_core::session`). Every call
+//! that may touch the filesystem returns before doing so: open/create hand back
+//! a handle at once, and each shot command is queued with a caller token. The
+//! worker reports outcomes by posting `Int64List [kind, token, status, shot]`
+//! messages to the Dart port supplied at open, through Dart's
+//! `NativeApi.postCObject`. Posting to a closed port is defined behaviour, so a
+//! Dart isolate that goes away first cannot be called into.
+//!
+//! Snapshot and metadata reads return state the worker has already published;
+//! they never do I/O and never wait for a running command.
+
+use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::guarded;
+use kineto_core::session::{
+    OpenRequest, ProjectSession, SessionError, SessionSink, ShotCommand, SnapshotError, SubmitError,
+};
 use kineto_project::{
     fs::ProjectFsError,
     manifest::{
-        CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest,
-        ProjectManifestError, ProjectSource, ProjectStoreError, ProjectWorkflow,
+        PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
+        ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
-    shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
+    shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflowError},
 };
 
 const PROJECT_OK: i32 = 0;
@@ -31,57 +47,122 @@ const PROJECT_ERR_GENERATION_OVERFLOW: i32 = 116;
 const PROJECT_ERR_BUSY: i32 = 117;
 const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
 const PROJECT_ERR_LOCK_UNAVAILABLE: i32 = 119;
+const PROJECT_ERR_NOT_OPEN: i32 = 120;
 const PROJECT_ERR_PANIC: i32 = 199;
-const PROJECT_SHOT_COUNT: usize = 2;
+
+/// Message kinds posted to a session's Dart port.
+const MESSAGE_OPENED: i64 = 1;
+const MESSAGE_COMPLETED: i64 = 2;
+
+/// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
+pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
+
+// `Dart_CObject` from `dart_native_api.h`. Only the typed-data member is used;
+// the padding member gives the union the header's size (40 bytes on 64-bit).
+const DART_COBJECT_TYPED_DATA: i32 = 7;
+const DART_TYPED_DATA_INT64: i32 = 8;
+
+#[repr(C)]
+pub struct DartCObject {
+    kind: i32,
+    value: DartCObjectValue,
+}
+
+#[repr(C)]
+union DartCObjectValue {
+    as_typed_data: DartTypedData,
+    _size: [u64; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DartTypedData {
+    kind: i32,
+    /// In elements, not bytes.
+    length: isize,
+    values: *const u8,
+}
+
+struct DartPort {
+    post: PostCObject,
+    port: i64,
+}
+
+impl DartPort {
+    fn post(&self, message: [i64; 4]) {
+        let mut object = DartCObject {
+            kind: DART_COBJECT_TYPED_DATA,
+            value: DartCObjectValue {
+                as_typed_data: DartTypedData {
+                    kind: DART_TYPED_DATA_INT64,
+                    length: 4,
+                    values: message.as_ptr().cast(),
+                },
+            },
+        };
+        // SAFETY: `post` is Dart's `NativeApi.postCObject`, which copies typed
+        // data before returning, so `message` only needs to outlive the call.
+        // A closed port makes it return false, which needs no handling.
+        let _ = unsafe { (self.post)(self.port, &raw mut object) };
+    }
+}
+
+impl SessionSink for DartPort {
+    fn opened(&self, result: &Result<(), SessionError>) {
+        self.post([MESSAGE_OPENED, 0, i64::from(session_status(result)), 0]);
+    }
+
+    fn completed(&self, token: u64, shot_index: u32, result: &Result<(), SessionError>) {
+        self.post([
+            MESSAGE_COMPLETED,
+            i64::from_ne_bytes(token.to_ne_bytes()),
+            i64::from(session_status(result)),
+            i64::from(shot_index),
+        ]);
+    }
+}
 
 /// Opaque canonical-project handle. Dart never dereferences this allocation.
 pub struct KinetoProjectSession {
-    project: CanonicalProject,
-    // Canonical JSON is loaded once per shot per open session. UI reads then
-    // stay typed/in-process rather than repeatedly parsing project files.
-    shots: [Option<ShotWorkflow>; PROJECT_SHOT_COUNT],
+    session: ProjectSession,
 }
 
-impl KinetoProjectSession {
-    fn new(project: CanonicalProject) -> Self {
-        Self {
-            project,
-            shots: [None, None],
+unsafe fn spawn(
+    request: OpenRequest,
+    post: Option<PostCObject>,
+    port: i64,
+    out_session: *mut *mut KinetoProjectSession,
+) -> i32 {
+    let Some(post) = post else {
+        return PROJECT_ERR_INVALID_ARGUMENT;
+    };
+    match ProjectSession::spawn(request, Box::new(DartPort { post, port })) {
+        Ok(session) => {
+            let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
+            // SAFETY: callers validated `out_session` as writable pointer storage.
+            unsafe { ptr::write(out_session, session) };
+            PROJECT_OK
         }
-    }
-
-    fn with_shot<R>(
-        &mut self,
-        shot_index: u32,
-        operation: impl FnOnce(&CanonicalProject, &mut ShotWorkflow) -> Result<R, ShotWorkflowError>,
-    ) -> Result<R, ShotWorkflowError> {
-        let index =
-            usize::try_from(shot_index).map_err(|_| ShotWorkflowError::InvalidShotNumber)?;
-        if index >= PROJECT_SHOT_COUNT {
-            return Err(ShotWorkflowError::InvalidShotNumber);
-        }
-        if self.shots[index].is_none() {
-            let shot_number = u32::try_from(index + 1).expect("project shot count fits in u32");
-            self.shots[index] = Some(ShotWorkflow::load(&self.project, shot_number)?);
-        }
-        let project = &self.project;
-        let shot = self.shots[index]
-            .as_mut()
-            .expect("shot is installed immediately above");
-        operation(project, shot)
+        Err(_) => PROJECT_ERR_IO,
     }
 }
 
-/// Open and validate an existing canonical Kineto project.
+/// Start opening an existing canonical Kineto project.
+///
+/// Returns at once. On `PROJECT_OK` a handle is written to `out_session` and
+/// the open runs on the session worker; its result arrives on `port` as an
+/// `OPENED` message. The handle must be destroyed whatever that result is.
 ///
 /// # Safety
 /// `out_session` must point to writable storage for one pointer. When
 /// `path_len` is non-zero, `path_ptr` must point to at least `path_len` readable
-/// bytes containing UTF-8.
+/// bytes containing UTF-8. `post` must be Dart's `NativeApi.postCObject`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_open(
     path_ptr: *const u8,
     path_len: u64,
+    post: Option<PostCObject>,
+    port: i64,
     out_session: *mut *mut KinetoProjectSession,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
@@ -91,30 +172,25 @@ pub unsafe extern "C" fn kineto_project_open(
         // SAFETY: caller guarantees writable storage for one pointer.
         unsafe { ptr::write(out_session, ptr::null_mut()) };
         let path = match unsafe { utf8_owned(path_ptr, path_len) } {
-            Ok(path) if !path.is_empty() => path,
+            Ok(path) if !path.is_empty() => PathBuf::from(path),
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
-        match CanonicalProject::open(&path) {
-            Ok(project) => {
-                let session = Box::into_raw(Box::new(KinetoProjectSession::new(project)));
-                // SAFETY: caller guarantees writable storage for one pointer.
-                unsafe { ptr::write(out_session, session) };
-                PROJECT_OK
-            }
-            Err(error) => project_error_code(&error),
-        }
+        // SAFETY: `out_session` was checked above.
+        unsafe { spawn(OpenRequest::Open { path }, post, port, out_session) }
     })
 }
 
-/// Create a new canonical UTF-8 text-source project and return it opened.
+/// Start creating a new canonical UTF-8 text-source project, then open it.
 ///
-/// All input buffers are borrowed only for this call and all must be valid
-/// UTF-8. `source_ptr` is written to `source/story.txt`.
+/// Input buffers are borrowed only for this call and must all be valid UTF-8;
+/// they are validated and copied before it returns. `source_ptr` is written to
+/// `source/story.txt`. The result arrives on `port` as an `OPENED` message.
 ///
 /// # Safety
 /// `out_session` must point to writable storage for one pointer. Each non-empty
 /// input buffer must be valid for reads of its declared length for the call.
+/// `post` must be Dart's `NativeApi.postCObject`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_create_text(
     path_ptr: *const u8,
@@ -129,6 +205,8 @@ pub unsafe extern "C" fn kineto_project_create_text(
     language_len: u64,
     source_ptr: *const u8,
     source_len: u64,
+    post: Option<PostCObject>,
+    port: i64,
     out_session: *mut *mut KinetoProjectSession,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
@@ -139,7 +217,7 @@ pub unsafe extern "C" fn kineto_project_create_text(
         unsafe { ptr::write(out_session, ptr::null_mut()) };
 
         let path = match unsafe { utf8_owned(path_ptr, path_len) } {
-            Ok(path) if !path.is_empty() => path,
+            Ok(path) if !path.is_empty() => PathBuf::from(path),
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
@@ -159,22 +237,10 @@ pub unsafe extern "C" fn kineto_project_create_text(
             Ok(value) => value,
             Err(code) => return code,
         };
-        let source_len = match usize::try_from(source_len) {
-            Ok(length) => length,
-            Err(_) => return PROJECT_ERR_INVALID_ARGUMENT,
+        let source = match unsafe { utf8_owned(source_ptr, source_len) } {
+            Ok(value) => value.into_bytes(),
+            Err(code) => return code,
         };
-        if source_len != 0 && source_ptr.is_null() {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        }
-        let source: &[u8] = if source_len == 0 {
-            &[]
-        } else {
-            // SAFETY: caller guarantees this buffer remains readable for the call.
-            unsafe { slice::from_raw_parts(source_ptr, source_len) }
-        };
-        if str::from_utf8(source).is_err() {
-            return PROJECT_ERR_INVALID_UTF8;
-        }
 
         let manifest = ProjectManifest {
             format_version: PROJECT_FORMAT_VERSION,
@@ -197,19 +263,20 @@ pub unsafe extern "C" fn kineto_project_create_text(
             },
             extra: BTreeMap::new(),
         };
-
-        match CanonicalProject::create(&path, manifest, source) {
-            Ok(project) => {
-                let session = Box::into_raw(Box::new(KinetoProjectSession::new(project)));
-                // SAFETY: caller guarantees writable storage for one pointer.
-                unsafe { ptr::write(out_session, session) };
-                PROJECT_OK
-            }
-            Err(error) => project_error_code(&error),
-        }
+        let request = OpenRequest::CreateText {
+            path,
+            manifest: Box::new(manifest),
+            source,
+        };
+        // SAFETY: `out_session` was checked above.
+        unsafe { spawn(request, post, port, out_session) }
     })
 }
 
+/// Close a session. Stops message delivery before returning, discards queued
+/// commands that have not started, waits for the running command (at most one
+/// canonical write) and releases the project's writer lock.
+///
 /// # Safety
 /// `session` must be null or a live pointer returned exactly once by project
 /// open/create.
@@ -224,6 +291,8 @@ pub unsafe extern "C" fn kineto_project_destroy(session: *mut KinetoProjectSessi
     });
 }
 
+/// Project format version, or 0 until the open has succeeded.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
@@ -234,10 +303,15 @@ pub unsafe extern "C" fn kineto_project_format_version(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        session.project.manifest().format_version
+        session
+            .session
+            .metadata()
+            .map_or(0, |metadata| metadata.format_version)
     })
 }
 
+/// 1 when the project is read-only or not yet open, 0 when it is writable.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
@@ -246,7 +320,10 @@ pub unsafe extern "C" fn kineto_project_is_read_only(session: *const KinetoProje
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 1;
         };
-        u8::from(session.project.is_read_only())
+        session
+            .session
+            .metadata()
+            .map_or(1, |metadata| u8::from(metadata.read_only))
     })
 }
 
@@ -266,15 +343,11 @@ pub unsafe extern "C" fn kineto_project_id_copy(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
+        let Some(metadata) = session.session.metadata() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
         // SAFETY: forwarded caller-owned output contract.
-        unsafe {
-            copy_utf8(
-                session.project.manifest().project_id.as_bytes(),
-                out_buf,
-                out_cap,
-                out_len,
-            )
-        }
+        unsafe { copy_utf8(metadata.project_id.as_bytes(), out_buf, out_cap, out_len) }
     })
 }
 
@@ -293,19 +366,16 @@ pub unsafe extern "C" fn kineto_project_title_copy(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
+        let Some(metadata) = session.session.metadata() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
         // SAFETY: forwarded caller-owned output contract.
-        unsafe {
-            copy_utf8(
-                session.project.manifest().title.as_bytes(),
-                out_buf,
-                out_cap,
-                out_len,
-            )
-        }
+        unsafe { copy_utf8(metadata.title.as_bytes(), out_buf, out_cap, out_len) }
     })
 }
 
-/// Return one shot's typed canonical approval state as a fixed-width snapshot.
+/// Return one shot's most recently published approval state as a fixed-width
+/// snapshot. Never does I/O and never waits for a running command.
 ///
 /// Layout:
 /// - bit 0: candidates generated
@@ -323,140 +393,169 @@ pub unsafe extern "C" fn kineto_project_title_copy(
 /// `session` must be live and `out_state` must point to writable `u64` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_state(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
     out_state: *mut u64,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
+        let Some(session) = (unsafe { session.as_ref() }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
         if out_state.is_null() {
             return PROJECT_ERR_INVALID_ARGUMENT;
         }
-        match session.with_shot(shot_index, |_, shot| shot.snapshot()) {
+        match session.session.snapshot(shot_index) {
             Ok(snapshot) => {
                 // SAFETY: caller guarantees writable storage for one u64.
                 unsafe { ptr::write(out_state, encode_shot_snapshot(snapshot)) };
                 PROJECT_OK
             }
-            Err(error) => shot_error_code(&error),
+            Err(SnapshotError::InvalidShot) => PROJECT_ERR_INVALID_SHOT,
+            Err(SnapshotError::NotOpen) => PROJECT_ERR_NOT_OPEN,
+            Err(SnapshotError::Failed(error)) => shot_error_code(&error),
         }
     })
 }
 
+unsafe fn submit(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    command: ShotCommand,
+    token: u64,
+) -> i32 {
+    let Some(session) = (unsafe { session.as_ref() }) else {
+        return PROJECT_ERR_INVALID_ARGUMENT;
+    };
+    match session.session.submit(shot_index, command, token) {
+        Ok(()) => PROJECT_OK,
+        Err(SubmitError::InvalidShot) => PROJECT_ERR_INVALID_SHOT,
+        Err(SubmitError::Closed) => PROJECT_ERR_NOT_OPEN,
+    }
+}
+
+/// Queue a direction change. Returns once queued; the outcome arrives as a
+/// `COMPLETED` message carrying `token`.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_set_direction(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
     direction: u32,
+    token: u64,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
         let Some(direction) = u8::try_from(direction)
             .ok()
             .and_then(ShotDirection::from_code)
         else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
-        shot_result_code(session.with_shot(shot_index, |project, shot| {
-            shot.set_direction(project, direction)
-        }))
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            submit(
+                session,
+                shot_index,
+                ShotCommand::SetDirection(direction),
+                token,
+            )
+        }
     })
 }
 
+/// Queue candidate generation. Returns once queued.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_generate(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
+    token: u64,
 ) -> i32 {
-    guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
-        shot_result_code(session.with_shot(shot_index, |project, shot| shot.generate(project)))
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::Generate, token)
     })
 }
 
+/// Queue a candidate selection. Returns once queued.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_select(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
     candidate_index: u32,
+    token: u64,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
         let Ok(candidate_index) = usize::try_from(candidate_index) else {
             return PROJECT_ERR_INVALID_CANDIDATE;
         };
-        shot_result_code(session.with_shot(shot_index, |project, shot| {
-            shot.select(project, candidate_index)
-        }))
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            submit(
+                session,
+                shot_index,
+                ShotCommand::Select(candidate_index),
+                token,
+            )
+        }
     })
 }
 
+/// Queue locking the current selection. Returns once queued.
+///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_lock(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
+    token: u64,
 ) -> i32 {
-    guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
-        shot_result_code(session.with_shot(shot_index, |project, shot| shot.lock(project)))
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::Lock, token)
     })
 }
 
-/// Explicitly discard this shot's active approval state while retaining
-/// superseded lineage. This is never called implicitly by an upstream edit.
+/// Queue an explicit reset of this shot's active approval state, retaining
+/// superseded lineage. This is never triggered implicitly by an upstream edit.
 ///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_reset(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
+    token: u64,
 ) -> i32 {
-    guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
-        shot_result_code(session.with_shot(shot_index, |project, shot| shot.reset(project)))
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::Reset, token)
     })
 }
 
-/// Explicitly migrate one shot's known legacy demo hashes to canonical
-/// `sha256:` form. The original `artifacts.json` bytes are written to a backup
-/// file first. Loading a shot never does this on its own; this call is the
-/// user's opt-in.
+/// Queue the explicit migration of one shot's known legacy demo hashes to
+/// canonical `sha256:` form. The original `artifacts.json` bytes are written
+/// to a backup file first. Loading a shot never does this on its own; this call
+/// is the user's opt-in.
 ///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
-    session: *mut KinetoProjectSession,
+    session: *const KinetoProjectSession,
     shot_index: u32,
+    token: u64,
 ) -> i32 {
-    guarded(PROJECT_ERR_PANIC, || {
-        let Some(session) = (unsafe { session.as_mut() }) else {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        };
-        shot_result_code(session.with_shot(shot_index, |project, shot| {
-            shot.migrate_legacy_hashes(project).map(|_report| ())
-        }))
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::MigrateLegacyHashes, token)
     })
 }
 
@@ -476,10 +575,13 @@ fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
         | (u64::from(snapshot.superseded_count) << 48)
 }
 
-fn shot_result_code(result: Result<(), ShotWorkflowError>) -> i32 {
+fn session_status(result: &Result<(), SessionError>) -> i32 {
     match result {
         Ok(()) => PROJECT_OK,
-        Err(error) => shot_error_code(&error),
+        Err(SessionError::Open(error)) => project_error_code(error),
+        Err(SessionError::Shot(error)) => shot_error_code(error),
+        Err(SessionError::NotOpen) => PROJECT_ERR_NOT_OPEN,
+        Err(SessionError::Panicked) => PROJECT_ERR_PANIC,
     }
 }
 
@@ -579,11 +681,83 @@ fn project_error_code(error: &ProjectStoreError) -> i32 {
 mod tests {
     use super::*;
     use std::{
+        collections::VecDeque,
         fs,
-        time::{SystemTime, UNIX_EPOCH},
+        sync::{
+            Condvar, Mutex,
+            atomic::{AtomicI64, Ordering},
+        },
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
-    fn temp_target() -> std::path::PathBuf {
+    /// Messages the fake `postCObject` received, per port.
+    static POSTED: Mutex<Vec<(i64, [i64; 4])>> = Mutex::new(Vec::new());
+    static POSTED_SIGNAL: Condvar = Condvar::new();
+    static NEXT_PORT: AtomicI64 = AtomicI64::new(1);
+
+    /// Stands in for Dart's `NativeApi.postCObject`: decodes the typed-data
+    /// message exactly as the Dart VM would receive it.
+    unsafe extern "C" fn record_post(port: i64, message: *mut DartCObject) -> bool {
+        // SAFETY: the session posts a live typed-data object for the call.
+        let object = unsafe { &*message };
+        assert_eq!(object.kind, DART_COBJECT_TYPED_DATA);
+        // SAFETY: the kind check selects the typed-data union member.
+        let data = unsafe { object.value.as_typed_data };
+        assert_eq!(data.kind, DART_TYPED_DATA_INT64);
+        assert_eq!(data.length, 4);
+        // SAFETY: four aligned i64 values live for the duration of the call.
+        let values = unsafe { slice::from_raw_parts(data.values.cast::<i64>(), 4) };
+        let mut posted = POSTED.lock().unwrap();
+        posted.push((port, [values[0], values[1], values[2], values[3]]));
+        POSTED_SIGNAL.notify_all();
+        true
+    }
+
+    struct Port(i64);
+
+    impl Port {
+        fn new() -> Self {
+            Self(NEXT_PORT.fetch_add(1, Ordering::SeqCst))
+        }
+
+        fn next(&self) -> [i64; 4] {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut posted = POSTED.lock().unwrap();
+            loop {
+                if let Some(index) = posted.iter().position(|(port, _)| *port == self.0) {
+                    return posted.remove(index).1;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "no message on port {}", self.0);
+                posted = POSTED_SIGNAL.wait_timeout(posted, remaining).unwrap().0;
+            }
+        }
+
+        fn opened(&self) -> i32 {
+            let [kind, _, status, _] = self.next();
+            assert_eq!(kind, MESSAGE_OPENED);
+            i32::try_from(status).unwrap()
+        }
+
+        fn completed(&self, token: u64) -> i32 {
+            let [kind, actual, status, _] = self.next();
+            assert_eq!(kind, MESSAGE_COMPLETED);
+            assert_eq!(actual, i64::try_from(token).unwrap());
+            i32::try_from(status).unwrap()
+        }
+
+        fn pending(&self) -> VecDeque<[i64; 4]> {
+            POSTED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(port, _)| *port == self.0)
+                .map(|(_, message)| *message)
+                .collect()
+        }
+    }
+
+    fn temp_target() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -591,7 +765,7 @@ mod tests {
         std::env::temp_dir().join(format!("kineto-project-ffi-{}-{nonce}", std::process::id()))
     }
 
-    unsafe fn create_text(path: &str, out: *mut *mut KinetoProjectSession) -> i32 {
+    unsafe fn create_text(path: &str, port: &Port, out: *mut *mut KinetoProjectSession) -> i32 {
         let id = "ffi_project_001";
         let title = "FFI Project";
         let created_at = "2026-09-10T08:00:00Z";
@@ -613,12 +787,47 @@ mod tests {
                 language.len() as u64,
                 source.as_ptr(),
                 source.len() as u64,
+                Some(record_post),
+                port.0,
                 out,
             )
         }
     }
 
-    unsafe fn snapshot(session: *mut KinetoProjectSession, shot: u32) -> u64 {
+    unsafe fn open(path: &str, port: &Port, out: *mut *mut KinetoProjectSession) -> i32 {
+        // SAFETY: `path` outlives the call and `out` is writable test storage.
+        unsafe {
+            kineto_project_open(
+                path.as_ptr(),
+                path.len() as u64,
+                Some(record_post),
+                port.0,
+                out,
+            )
+        }
+    }
+
+    /// Create a project and wait until its session reports open.
+    fn created(path: &str) -> (*mut KinetoProjectSession, Port) {
+        let port = Port::new();
+        let mut session = ptr::null_mut();
+        assert_eq!(
+            unsafe { create_text(path, &port, &raw mut session) },
+            PROJECT_OK
+        );
+        assert_eq!(port.opened(), PROJECT_OK);
+        (session, port)
+    }
+
+    fn opened(path: &str) -> (*mut KinetoProjectSession, Port) {
+        let port = Port::new();
+        let mut session = ptr::null_mut();
+        assert_eq!(unsafe { open(path, &port, &raw mut session) }, PROJECT_OK);
+        assert_eq!(port.opened(), PROJECT_OK);
+        (session, port)
+    }
+
+    unsafe fn snapshot(session: *const KinetoProjectSession, shot: u32) -> u64 {
         let mut state = 0_u64;
         // SAFETY: callers pass a live session and writable local state pointer.
         assert_eq!(
@@ -633,27 +842,29 @@ mod tests {
         let target = temp_target();
         let path = target.to_string_lossy();
         let title = "FFI Project";
-        let mut created = ptr::null_mut();
-        assert_eq!(unsafe { create_text(&path, &raw mut created) }, PROJECT_OK);
-        assert!(!created.is_null());
+        let (created, _port) = created(&path);
         assert_eq!(unsafe { kineto_project_format_version(created) }, 1);
         assert_eq!(unsafe { kineto_project_is_read_only(created) }, 0);
 
-        // A second writer session is refused while the first one is live.
+        // A second writer session is refused while the first one is live. The
+        // handle exists at once; the refusal arrives as the open result.
+        let contender_port = Port::new();
         let mut contender = ptr::null_mut();
         assert_eq!(
-            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut contender) },
-            PROJECT_ERR_BUSY
-        );
-        assert!(contender.is_null());
-        unsafe { kineto_project_destroy(created) };
-
-        let mut reopened = ptr::null_mut();
-        assert_eq!(
-            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut reopened) },
+            unsafe { open(&path, &contender_port, &raw mut contender) },
             PROJECT_OK
         );
+        assert_eq!(contender_port.opened(), PROJECT_ERR_BUSY);
+        assert_eq!(unsafe { kineto_project_format_version(contender) }, 0);
         let mut required = 0_u64;
+        assert_eq!(
+            unsafe { kineto_project_title_copy(contender, ptr::null_mut(), 0, &raw mut required) },
+            PROJECT_ERR_NOT_OPEN
+        );
+        unsafe { kineto_project_destroy(contender) };
+        unsafe { kineto_project_destroy(created) };
+
+        let (reopened, _port) = opened(&path);
         assert_eq!(
             unsafe { kineto_project_title_copy(reopened, ptr::null_mut(), 0, &raw mut required) },
             PROJECT_ERR_BUFFER_TOO_SMALL
@@ -677,103 +888,128 @@ mod tests {
     }
 
     #[test]
-    fn shot_approval_survives_reopen_and_dot_kineto_deletion() {
+    fn shot_commands_complete_by_token_and_survive_reopen() {
         let target = temp_target();
         let path = target.to_string_lossy();
-        let mut session = ptr::null_mut();
-        assert_eq!(unsafe { create_text(&path, &raw mut session) }, PROJECT_OK);
+        let (session, port) = created(&path);
 
         assert_eq!(
-            unsafe { kineto_project_shot_set_direction(session, 0, 4) },
+            unsafe { kineto_project_shot_set_direction(session, 0, 4, 11) },
             PROJECT_OK
         );
         assert_eq!(
-            unsafe { kineto_project_shot_generate(session, 0) },
+            unsafe { kineto_project_shot_generate(session, 0, 12) },
             PROJECT_OK
         );
         assert_eq!(
-            unsafe { kineto_project_shot_select(session, 0, 2) },
+            unsafe { kineto_project_shot_select(session, 0, 2, 13) },
             PROJECT_OK
         );
-        assert_eq!(unsafe { kineto_project_shot_lock(session, 0) }, PROJECT_OK);
+        assert_eq!(
+            unsafe { kineto_project_shot_lock(session, 0, 14) },
+            PROJECT_OK
+        );
+        for token in 11..=14 {
+            assert_eq!(port.completed(token), PROJECT_OK);
+        }
         let before = unsafe { snapshot(session, 0) };
+        assert_eq!(before & 0b11, 0b11);
         unsafe { kineto_project_destroy(session) };
 
         fs::create_dir_all(target.join(".kineto")).unwrap();
         fs::write(target.join(".kineto/project.db"), b"derived").unwrap();
         fs::remove_dir_all(target.join(".kineto")).unwrap();
 
-        let mut reopened = ptr::null_mut();
-        assert_eq!(
-            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut reopened) },
-            PROJECT_OK
-        );
+        let (reopened, _port) = opened(&path);
         assert_eq!(unsafe { snapshot(reopened, 0) }, before);
         unsafe { kineto_project_destroy(reopened) };
         fs::remove_dir_all(target).unwrap();
     }
 
     #[test]
-    fn direction_change_preserves_stale_selection_until_regenerate() {
+    fn refused_commands_carry_their_status_in_the_completion() {
         let target = temp_target();
         let path = target.to_string_lossy();
-        let mut session = ptr::null_mut();
-        assert_eq!(unsafe { create_text(&path, &raw mut session) }, PROJECT_OK);
+        let (session, port) = created(&path);
+
         assert_eq!(
-            unsafe { kineto_project_shot_generate(session, 0) },
+            unsafe { kineto_project_shot_generate(session, 0, 1) },
             PROJECT_OK
         );
         assert_eq!(
-            unsafe { kineto_project_shot_select(session, 0, 1) },
+            unsafe { kineto_project_shot_select(session, 0, 1, 2) },
             PROJECT_OK
         );
         assert_eq!(
-            unsafe { kineto_project_shot_set_direction(session, 0, 3) },
+            unsafe { kineto_project_shot_set_direction(session, 0, 3, 3) },
             PROJECT_OK
         );
+        assert_eq!(
+            unsafe { kineto_project_shot_lock(session, 0, 4) },
+            PROJECT_OK
+        );
+        assert_eq!(port.completed(1), PROJECT_OK);
+        assert_eq!(port.completed(2), PROJECT_OK);
+        assert_eq!(port.completed(3), PROJECT_OK);
+        assert_eq!(port.completed(4), PROJECT_ERR_STALE_SELECTION);
 
         let stale = unsafe { snapshot(session, 0) };
         assert_eq!((stale >> 2) & 1, 1);
         assert_eq!((stale >> 16) & 0xff, 2);
-        assert_eq!(
-            unsafe { kineto_project_shot_lock(session, 0) },
-            PROJECT_ERR_STALE_SELECTION
-        );
 
+        // Arguments the ABI can reject without the worker are refused at once.
         assert_eq!(
-            unsafe { kineto_project_shot_generate(session, 0) },
-            PROJECT_OK
+            unsafe { kineto_project_shot_generate(session, 2, 5) },
+            PROJECT_ERR_INVALID_SHOT
         );
-        let regenerated = unsafe { snapshot(session, 0) };
-        assert_eq!((regenerated >> 2) & 1, 0);
-        assert_eq!((regenerated >> 16) & 0xff, 0);
-        assert_eq!((regenerated >> 32) & 0xffff, 2);
-        assert_eq!((regenerated >> 48) & 0xffff, 3);
-
+        assert_eq!(
+            unsafe { kineto_project_shot_set_direction(session, 0, 99, 6) },
+            PROJECT_ERR_INVALID_ARGUMENT
+        );
         unsafe { kineto_project_destroy(session) };
+        assert!(port.pending().is_empty());
         fs::remove_dir_all(target).unwrap();
     }
 
     #[test]
     fn ffi_rejects_invalid_inputs_and_existing_target() {
+        let port = Port::new();
         let invalid = [0xff_u8];
         let mut out = ptr::null_mut();
         assert_eq!(
-            unsafe { kineto_project_open(invalid.as_ptr(), invalid.len() as u64, &raw mut out) },
+            unsafe {
+                kineto_project_open(
+                    invalid.as_ptr(),
+                    invalid.len() as u64,
+                    Some(record_post),
+                    port.0,
+                    &raw mut out,
+                )
+            },
             PROJECT_ERR_INVALID_UTF8
+        );
+        assert!(out.is_null());
+        let path = "/tmp/kineto-never-opened";
+        assert_eq!(
+            unsafe {
+                kineto_project_open(path.as_ptr(), path.len() as u64, None, port.0, &raw mut out)
+            },
+            PROJECT_ERR_INVALID_ARGUMENT
         );
         assert!(out.is_null());
 
         let target = temp_target();
         let path = target.to_string_lossy();
-        assert_eq!(unsafe { create_text(&path, &raw mut out) }, PROJECT_OK);
-        unsafe { kineto_project_destroy(out) };
-        out = ptr::null_mut();
+        let (session, _port) = created(&path);
+        unsafe { kineto_project_destroy(session) };
+
+        let port = Port::new();
         assert_eq!(
-            unsafe { create_text(&path, &raw mut out) },
-            PROJECT_ERR_ALREADY_EXISTS
+            unsafe { create_text(&path, &port, &raw mut out) },
+            PROJECT_OK
         );
-        assert!(out.is_null());
+        assert_eq!(port.opened(), PROJECT_ERR_ALREADY_EXISTS);
+        unsafe { kineto_project_destroy(out) };
         fs::remove_dir_all(target).unwrap();
     }
 
@@ -781,12 +1017,12 @@ mod tests {
     fn legacy_hashes_block_writes_until_explicit_migration_with_backup() {
         let target = temp_target();
         let path = target.to_string_lossy().into_owned();
-        let mut session = ptr::null_mut();
-        assert_eq!(unsafe { create_text(&path, &raw mut session) }, PROJECT_OK);
+        let (session, port) = created(&path);
         assert_eq!(
-            unsafe { kineto_project_shot_generate(session, 0) },
+            unsafe { kineto_project_shot_generate(session, 0, 1) },
             PROJECT_OK
         );
+        assert_eq!(port.completed(1), PROJECT_OK);
         unsafe { kineto_project_destroy(session) };
 
         // Rewrite the shot's records in the pre-sha256 demo form an older
@@ -803,33 +1039,50 @@ mod tests {
         let legacy = serde_json::to_vec_pretty(&artifacts).unwrap();
         fs::write(&artifacts_path, &legacy).unwrap();
 
-        let mut reopened = ptr::null_mut();
-        assert_eq!(
-            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut reopened) },
-            PROJECT_OK
-        );
+        let (reopened, port) = opened(&path);
         assert_ne!(unsafe { snapshot(reopened, 0) } & (1 << 3), 0);
         assert_eq!(
-            unsafe { kineto_project_shot_generate(reopened, 0) },
-            PROJECT_ERR_MIGRATION_REQUIRED
+            unsafe { kineto_project_shot_generate(reopened, 0, 2) },
+            PROJECT_OK
         );
+        assert_eq!(port.completed(2), PROJECT_ERR_MIGRATION_REQUIRED);
         assert_eq!(fs::read(&artifacts_path).unwrap(), legacy);
 
         assert_eq!(
-            unsafe { kineto_project_shot_migrate_legacy_hashes(reopened, 0) },
+            unsafe { kineto_project_shot_migrate_legacy_hashes(reopened, 0, 3) },
             PROJECT_OK
         );
+        assert_eq!(port.completed(3), PROJECT_OK);
         assert_eq!(unsafe { snapshot(reopened, 0) } & (1 << 3), 0);
         assert_eq!(
             fs::read(shot_dir.join("artifacts.pre-sha256-migration.json")).unwrap(),
             legacy
         );
         assert_eq!(
-            unsafe { kineto_project_shot_generate(reopened, 0) },
+            unsafe { kineto_project_shot_generate(reopened, 0, 4) },
             PROJECT_OK
         );
+        assert_eq!(port.completed(4), PROJECT_OK);
         unsafe { kineto_project_destroy(reopened) };
         let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn destroy_stops_delivery_before_returning() {
+        let target = temp_target();
+        let path = target.to_string_lossy();
+        let (session, port) = created(&path);
+        for token in 0..20 {
+            assert_eq!(
+                unsafe { kineto_project_shot_generate(session, 0, token) },
+                PROJECT_OK
+            );
+        }
+        unsafe { kineto_project_destroy(session) };
+        let delivered = port.pending().len();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(port.pending().len(), delivered);
+        fs::remove_dir_all(target).unwrap();
     }
 
     #[test]
@@ -845,6 +1098,21 @@ mod tests {
             }),
             PROJECT_ERR_LOCK_UNAVAILABLE
         );
+        assert_eq!(
+            session_status(&Err(SessionError::NotOpen)),
+            PROJECT_ERR_NOT_OPEN
+        );
+    }
+
+    #[test]
+    fn dart_cobject_layout_matches_the_c_header() {
+        // dart_native_api.h: the enum tag, then a union whose largest member
+        // (external typed data) is five pointer-sized fields.
+        assert_eq!(std::mem::size_of::<DartCObjectValue>(), 40);
+        assert_eq!(std::mem::size_of::<DartCObject>(), 48);
+        assert_eq!(std::mem::offset_of!(DartCObject, value), 8);
+        assert_eq!(std::mem::offset_of!(DartTypedData, length), 8);
+        assert_eq!(std::mem::offset_of!(DartTypedData, values), 16);
     }
 
     #[test]

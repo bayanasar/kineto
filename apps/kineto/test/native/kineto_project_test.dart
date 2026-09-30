@@ -5,12 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/native/kineto_engine.dart';
 
 void main() {
-  test('canonical project create and open round-trip through Code Asset', () {
+  test('canonical project create and open round-trip through Code Asset', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      final created = _createProject(target, 'ffi_project_001');
+      final created = await _createProject(target, 'ffi_project_001');
 
       expect(created.formatVersion, 1);
       expect(created.isReadOnly, isFalse);
@@ -23,8 +23,8 @@ void main() {
       );
 
       // A second writer session is refused while this one is open.
-      expect(
-        () => KinetoProjectSession.open(target.path),
+      await expectLater(
+        KinetoProjectSession.open(target.path),
         throwsA(
           isA<KinetoProjectException>().having(
             (error) => error.code,
@@ -39,7 +39,7 @@ void main() {
       expect(() => created.shotSnapshot(0), throwsStateError);
       created.close();
 
-      final reopened = KinetoProjectSession.open(target.path);
+      final reopened = await KinetoProjectSession.open(target.path);
       expect(reopened.formatVersion, 1);
       expect(reopened.isReadOnly, isFalse);
       expect(reopened.projectId, 'ffi_project_001');
@@ -50,13 +50,67 @@ void main() {
     }
   });
 
-  test('legacy shot hashes stay read-only until an explicit migration', () {
+  test('queued commands resolve in submission order off the UI isolate', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      var project = _createProject(target, 'ffi_project_legacy');
-      project.generateShotCandidates(0);
+      final project = await _createProject(target, 'ffi_project_queue');
+      final order = <String>[];
+      // Nothing is awaited between submissions: each call only queues.
+      final futures = <Future<void>>[
+        project.generateShotCandidates(0).then((_) => order.add('generate')),
+        project.selectShotCandidate(0, 1).then((_) => order.add('select')),
+        project.lockShotSelection(0).then((_) => order.add('lock')),
+      ];
+      expect(order, isEmpty);
+      await Future.wait(futures);
+
+      expect(order, <String>['generate', 'select', 'lock']);
+      final snapshot = project.shotSnapshot(0);
+      expect(snapshot.locked, isTrue);
+      expect(snapshot.selectedIndex, 1);
+      project.close();
+    } finally {
+      sandbox.deleteSync(recursive: true);
+    }
+  });
+
+  test('closing a session fails its unanswered commands instead of hanging', () async {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
+    final target = Directory(_path(sandbox.path, 'film'));
+
+    try {
+      final project = await _createProject(target, 'ffi_project_close');
+      final pending = List<Future<void>>.generate(
+        10,
+        (_) => project.generateShotCandidates(0),
+      );
+      project.close();
+
+      for (final future in pending) {
+        await expectLater(
+          future,
+          throwsA(isA<KinetoProjectSessionClosedException>()),
+        );
+      }
+      expect(() => project.generateShotCandidates(0), throwsStateError);
+
+      // The writer lock was released by close.
+      final reopened = await KinetoProjectSession.open(target.path);
+      reopened.close();
+    } finally {
+      sandbox.deleteSync(recursive: true);
+    }
+  });
+
+  test('legacy shot hashes stay read-only until an explicit migration', () async {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
+    final target = Directory(_path(sandbox.path, 'film'));
+
+    try {
+      var project = await _createProject(target, 'ffi_project_legacy');
+      await project.generateShotCandidates(0);
       project.close();
 
       // Rewrite the records in the pre-sha256 form an older build produced.
@@ -78,13 +132,12 @@ void main() {
       final legacy = const JsonEncoder.withIndent('  ').convert(artifacts);
       artifactsFile.writeAsStringSync(legacy);
 
-      project = KinetoProjectSession.open(target.path);
+      project = await KinetoProjectSession.open(target.path);
       var snapshot = project.shotSnapshot(0);
       expect(snapshot.migrationPending, isTrue);
       expect(snapshot.hasInvalidHashes, isFalse);
       expect(snapshot.changesBlocked, isTrue);
-      expect(
-        () => project.generateShotCandidates(0),
+      await expectLater(project.generateShotCandidates(0),
         throwsA(
           isA<KinetoProjectException>().having(
             (error) => error.code,
@@ -95,7 +148,7 @@ void main() {
       );
       expect(artifactsFile.readAsStringSync(), legacy);
 
-      project.migrateLegacyHashes(0);
+      await project.migrateLegacyHashes(0);
       snapshot = project.shotSnapshot(0);
       expect(snapshot.migrationPending, isFalse);
       expect(snapshot.changesBlocked, isFalse);
@@ -104,7 +157,7 @@ void main() {
             .readAsStringSync(),
         legacy,
       );
-      project.generateShotCandidates(0);
+      await project.generateShotCandidates(0);
       expect(project.shotSnapshot(0).generation, 2);
       project.close();
     } finally {
@@ -112,16 +165,16 @@ void main() {
     }
   });
 
-  test('shot approval survives reopen and deletion of .kineto cache', () {
+  test('shot approval survives reopen and deletion of .kineto cache', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      var project = _createProject(target, 'ffi_project_durable');
-      project.setShotDirection(0, KinetoShotDirection.tension);
-      project.generateShotCandidates(0);
-      project.selectShotCandidate(0, 2);
-      project.lockShotSelection(0);
+      var project = await _createProject(target, 'ffi_project_durable');
+      await project.setShotDirection(0, KinetoShotDirection.tension);
+      await project.generateShotCandidates(0);
+      await project.selectShotCandidate(0, 2);
+      await project.lockShotSelection(0);
 
       final before = project.shotSnapshot(0);
       final selectionFile = File(
@@ -145,7 +198,7 @@ void main() {
       File(_path(cache.path, 'project.db')).writeAsStringSync('derived only');
       cache.deleteSync(recursive: true);
 
-      project = KinetoProjectSession.open(target.path);
+      project = await KinetoProjectSession.open(target.path);
       final after = project.shotSnapshot(0);
       final selectedAfter =
           (jsonDecode(selectionFile.readAsStringSync()) as Map<String, dynamic>)[
@@ -165,23 +218,22 @@ void main() {
     }
   });
 
-  test('direction change preserves stale lineage until regeneration', () {
+  test('direction change preserves stale lineage until regeneration', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      final project = _createProject(target, 'ffi_project_stale');
-      project.generateShotCandidates(0);
-      project.selectShotCandidate(0, 1);
+      final project = await _createProject(target, 'ffi_project_stale');
+      await project.generateShotCandidates(0);
+      await project.selectShotCandidate(0, 1);
       final selectedBefore = project.shotSnapshot(0).selectedIndex;
 
-      project.setShotDirection(0, KinetoShotDirection.intimacy);
+      await project.setShotDirection(0, KinetoShotDirection.intimacy);
       final stale = project.shotSnapshot(0);
       expect(stale.generated, isTrue);
       expect(stale.stale, isTrue);
       expect(stale.selectedIndex, selectedBefore);
-      expect(
-        () => project.lockShotSelection(0),
+      await expectLater(project.lockShotSelection(0),
         throwsA(
           isA<KinetoProjectException>().having(
             (error) => error.code,
@@ -191,7 +243,7 @@ void main() {
         ),
       );
 
-      project.generateShotCandidates(0);
+      await project.generateShotCandidates(0);
       final regenerated = project.shotSnapshot(0);
       expect(regenerated.stale, isFalse);
       expect(regenerated.selectedIndex, isNull);
@@ -203,26 +255,26 @@ void main() {
     }
   });
 
-  test('two shots keep independent canonical approval state', () {
+  test('two shots keep independent canonical approval state', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      var project = _createProject(target, 'ffi_project_two_shots');
-      project.setShotDirection(0, KinetoShotDirection.tension);
-      project.generateShotCandidates(0);
-      project.selectShotCandidate(0, 2);
-      project.lockShotSelection(0);
+      var project = await _createProject(target, 'ffi_project_two_shots');
+      await project.setShotDirection(0, KinetoShotDirection.tension);
+      await project.generateShotCandidates(0);
+      await project.selectShotCandidate(0, 2);
+      await project.lockShotSelection(0);
 
-      project.setShotDirection(1, KinetoShotDirection.intimacy);
-      project.generateShotCandidates(1);
-      project.selectShotCandidate(1, 1);
-      project.generateShotCandidates(1);
-      project.selectShotCandidate(1, 0);
-      project.lockShotSelection(1);
+      await project.setShotDirection(1, KinetoShotDirection.intimacy);
+      await project.generateShotCandidates(1);
+      await project.selectShotCandidate(1, 1);
+      await project.generateShotCandidates(1);
+      await project.selectShotCandidate(1, 0);
+      await project.lockShotSelection(1);
       project.close();
 
-      project = KinetoProjectSession.open(target.path);
+      project = await KinetoProjectSession.open(target.path);
       final shotOne = project.shotSnapshot(0);
       final shotTwo = project.shotSnapshot(1);
       expect(shotOne.direction, KinetoShotDirection.tension);
@@ -241,12 +293,12 @@ void main() {
     }
   });
 
-  test('shot index is validated before entering native code', () {
+  test('shot index is validated before entering native code', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      final project = _createProject(target, 'ffi_project_bounds');
+      final project = await _createProject(target, 'ffi_project_bounds');
       expect(() => project.shotSnapshot(-1), throwsRangeError);
       expect(
         () => project.shotSnapshot(KinetoProjectSession.shotCount),
@@ -258,13 +310,13 @@ void main() {
     }
   });
 
-  test('canonical project refuses a created_at the schema would reject', () {
+  test('canonical project refuses a created_at the schema would reject', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      expect(
-        () => KinetoProjectSession.createTextProject(
+      await expectLater(
+        KinetoProjectSession.createTextProject(
           path: target.path,
           projectId: 'ffi_project_003',
           title: 'Bad Timestamp',
@@ -286,13 +338,13 @@ void main() {
     }
   });
 
-  test('canonical project create refuses to replace an existing target', () {
+  test('canonical project create refuses to replace an existing target', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'))..createSync();
 
     try {
-      expect(
-        () => KinetoProjectSession.createTextProject(
+      await expectLater(
+        KinetoProjectSession.createTextProject(
           path: target.path,
           projectId: 'ffi_project_002',
           title: 'Existing',
@@ -314,7 +366,10 @@ void main() {
   });
 }
 
-KinetoProjectSession _createProject(Directory target, String projectId) =>
+Future<KinetoProjectSession> _createProject(
+  Directory target,
+  String projectId,
+) =>
     KinetoProjectSession.createTextProject(
       path: target.path,
       projectId: projectId,
