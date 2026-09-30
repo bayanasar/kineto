@@ -28,6 +28,7 @@ const PROJECT_ERR_NO_SELECTION: i32 = 113;
 const PROJECT_ERR_STALE_SELECTION: i32 = 114;
 const PROJECT_ERR_INVALID_SHOT_STATE: i32 = 115;
 const PROJECT_ERR_GENERATION_OVERFLOW: i32 = 116;
+const PROJECT_ERR_BUSY: i32 = 117;
 const PROJECT_ERR_PANIC: i32 = 199;
 const PROJECT_SHOT_COUNT: usize = 2;
 
@@ -545,6 +546,7 @@ fn project_error_code(error: &ProjectStoreError) -> i32 {
         }
         ProjectStoreError::Manifest(_) => PROJECT_ERR_INVALID_MANIFEST,
         ProjectStoreError::Fs(_) => PROJECT_ERR_IO,
+        ProjectStoreError::Busy(_) => PROJECT_ERR_BUSY,
     }
 }
 
@@ -611,6 +613,14 @@ mod tests {
         assert!(!created.is_null());
         assert_eq!(unsafe { kineto_project_format_version(created) }, 1);
         assert_eq!(unsafe { kineto_project_is_read_only(created) }, 0);
+
+        // A second writer session is refused while the first one is live.
+        let mut contender = ptr::null_mut();
+        assert_eq!(
+            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut contender) },
+            PROJECT_ERR_BUSY
+        );
+        assert!(contender.is_null());
         unsafe { kineto_project_destroy(created) };
 
         let mut reopened = ptr::null_mut();

@@ -22,6 +22,18 @@ void main() {
         'A filmmaker waits across the table.\n',
       );
 
+      // A second writer session is refused while this one is open.
+      expect(
+        () => KinetoProjectSession.open(target.path),
+        throwsA(
+          isA<KinetoProjectException>().having(
+            (error) => error.code,
+            'code',
+            KinetoProjectException.busy,
+          ),
+        ),
+      );
+
       created.close();
       expect(() => created.title, throwsStateError);
       expect(() => created.shotSnapshot(0), throwsStateError);

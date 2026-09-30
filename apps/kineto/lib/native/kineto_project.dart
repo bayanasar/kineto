@@ -132,6 +132,12 @@ external int _kinetoProjectShotReset(Pointer<Void> session, int shotIndex);
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
+  /// The create target already exists; nothing was overwritten.
+  static const int alreadyExists = 103;
+
+  /// Another live session holds the project's single-writer lock.
+  static const int busy = 117;
+
   final int code;
   final String message;
 
@@ -394,6 +400,7 @@ void _checkProjectResult(int code) {
     114 => 'Selection is stale; regenerate before locking',
     115 => 'Canonical shot approval state is invalid',
     116 => 'Shot generation revision overflow',
+    117 => 'Project is already open for writing in another Kineto window',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

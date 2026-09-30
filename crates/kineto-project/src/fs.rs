@@ -9,6 +9,7 @@ use std::{
 };
 
 static WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+const SESSION_LOCK_PATH: &str = ".kineto/session.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRelativePath(PathBuf);
@@ -200,6 +201,55 @@ impl ProjectRoot {
         sync_directory_impl(path).map_err(ProjectFsError::Io)
     }
 
+    /// Take the single-writer lock for one project session.
+    ///
+    /// The lock is an OS advisory lock on `.kineto/session.lock`, held until the
+    /// returned guard drops and released by the OS if the process dies, so no
+    /// stale lock survives a crash. Two sessions in the same process conflict
+    /// just like two processes do. `Ok(None)` means the filesystem cannot lock
+    /// files at all; the caller proceeds without single-writer protection.
+    pub fn lock_session(&self) -> Result<Option<SessionLock>, SessionLockError> {
+        let path = ProjectRelativePath::new(SESSION_LOCK_PATH)
+            .expect("static session lock path is a valid project path");
+        let resolved = self.resolve(&path);
+        let parent = resolved
+            .parent()
+            .expect("static session lock path has a parent directory");
+        ensure_directory(self, parent).map_err(SessionLockError::Fs)?;
+
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SessionLockError::Fs(ProjectFsError::Symlink(resolved)));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(SessionLockError::Fs(ProjectFsError::NotFile(resolved)));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(SessionLockError::Fs(ProjectFsError::Io(error))),
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&resolved)
+            .map_err(|error| SessionLockError::Fs(ProjectFsError::Io(error)))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(SessionLock { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Err(SessionLockError::Busy(self.root.clone())),
+            Err(fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                Ok(None)
+            }
+            Err(fs::TryLockError::Error(error)) => {
+                Err(SessionLockError::Fs(ProjectFsError::Io(error)))
+            }
+        }
+    }
+
     pub fn canonical_snapshot(&self) -> Result<CanonicalSnapshot, ProjectFsError> {
         let mut files = BTreeMap::new();
         scan_directory(&self.root, &self.root, &mut files)?;
@@ -230,6 +280,19 @@ impl ProjectRoot {
         }
         Ok(canonical)
     }
+}
+
+/// Held single-writer lock for one project. Dropping it releases the lock.
+#[derive(Debug)]
+pub struct SessionLock {
+    _file: fs::File,
+}
+
+#[derive(Debug)]
+pub enum SessionLockError {
+    /// Another live session already holds the project's writer lock.
+    Busy(PathBuf),
+    Fs(ProjectFsError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

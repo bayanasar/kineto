@@ -10,7 +10,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot};
+use crate::fs::{
+    ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot, SessionLock,
+    SessionLockError,
+};
 
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 const PROJECT_MANIFEST_PATH: &str = "project.toml";
@@ -244,6 +247,10 @@ pub struct CanonicalProject {
     root: ProjectRoot,
     manifest: ProjectManifest,
     access: ProjectAccess,
+    // A read-write session holds the project's single-writer lock for its whole
+    // life. Without it, two sessions each write from their own cached state and
+    // the later writer silently discards the earlier one's approvals.
+    _session_lock: Option<SessionLock>,
 }
 
 impl CanonicalProject {
@@ -275,10 +282,19 @@ impl CanonicalProject {
         root.ensure_file(&source_path)
             .map_err(ProjectStoreError::Fs)?;
 
+        let session_lock = match access {
+            ProjectAccess::ReadWrite => root.lock_session().map_err(|error| match error {
+                SessionLockError::Busy(path) => ProjectStoreError::Busy(path),
+                SessionLockError::Fs(error) => ProjectStoreError::Fs(error),
+            })?,
+            ProjectAccess::ReadOnly => None,
+        };
+
         Ok(Self {
             root,
             manifest,
             access,
+            _session_lock: session_lock,
         })
     }
 
@@ -390,6 +406,8 @@ pub enum ProjectStoreError {
     Utf8(std::str::Utf8Error),
     AlreadyExists(PathBuf),
     InvalidTarget(PathBuf),
+    /// The project is already open for writing by another live session.
+    Busy(PathBuf),
 }
 
 impl fmt::Display for ProjectStoreError {
@@ -406,6 +424,11 @@ impl fmt::Display for ProjectStoreError {
             Self::InvalidTarget(path) => {
                 write!(formatter, "invalid project target: {}", path.display())
             }
+            Self::Busy(path) => write!(
+                formatter,
+                "project is already open for writing in another Kineto session: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -416,7 +439,7 @@ impl Error for ProjectStoreError {
             Self::Fs(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Utf8(error) => Some(error),
-            Self::AlreadyExists(_) | Self::InvalidTarget(_) => None,
+            Self::AlreadyExists(_) | Self::InvalidTarget(_) | Self::Busy(_) => None,
         }
     }
 }
@@ -721,6 +744,54 @@ future_workflow = "keep-me-too"
             CanonicalProject::open(&target),
             Err(ProjectStoreError::Fs(ProjectFsError::NotFile(_)))
         ));
+    }
+
+    #[test]
+    fn second_read_write_session_is_refused_until_the_first_closes() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let first = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        assert!(matches!(
+            CanonicalProject::open(&target),
+            Err(ProjectStoreError::Busy(_))
+        ));
+
+        drop(first);
+        let reopened = CanonicalProject::open(&target).unwrap();
+        assert_eq!(reopened.access(), ProjectAccess::ReadWrite);
+    }
+
+    #[test]
+    fn read_only_sessions_do_not_take_the_writer_lock() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let writer = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        // A build that treats this format as older opens it read-only, and a
+        // read-only session never writes, so it neither needs nor blocks the lock.
+        let first_reader =
+            CanonicalProject::open_with_supported_version_for_test(&target, 2).unwrap();
+        let second_reader =
+            CanonicalProject::open_with_supported_version_for_test(&target, 2).unwrap();
+        assert!(first_reader.is_read_only() && second_reader.is_read_only());
+        assert!(!writer.is_read_only());
+    }
+
+    #[test]
+    fn session_lock_lives_outside_canonical_state() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let project = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        assert!(target.join(".kineto/session.lock").is_file());
+        let snapshot = project.root().canonical_snapshot().unwrap();
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|path| !path.starts_with(".kineto"))
+        );
     }
 
     #[test]

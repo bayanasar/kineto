@@ -73,6 +73,8 @@ kineto_project_create_text/open -> writes one opaque session through an out poin
 kineto_project_destroy          -> consumes that session exactly once
 ```
 
+A read-write project session is the project's only writer. Opening one takes an OS advisory lock on `.kineto/session.lock` and holds it until `kineto_project_destroy`; a second read-write open, from this process or another, fails with status `117` (`KinetoProjectException.busy`) instead of writing from its own stale copy of the state. Read-only sessions (older project formats) do not take the lock. The lock file is derived state under `.kineto/`; deleting it loses nothing canonical.
+
 Dart wraps these handles in `KinetoEngine` and `KinetoProjectSession`, performs deterministic `close()`, and installs a `NativeFinalizer` as a safety net.
 
 Create/open input buffers are caller-owned and borrowed only for the native call. Rust does not retain those pointers. Project ID and title are returned with caller-buffer copy functions: native first reports the required byte length, then copies UTF-8 bytes into Dart-owned memory. No pointer into mutable Rust string storage escapes the call.
