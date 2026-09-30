@@ -9,6 +9,11 @@ use std::{
 };
 
 static WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+const SESSION_LOCK_PATH: &str = ".kineto/session.lock";
+
+/// Locks an opened session lock file. Production uses the OS advisory lock
+/// (`File::try_lock`); tests substitute a failing lock to prove the refusal path.
+pub(crate) type TryLockFn = fn(&fs::File) -> Result<(), fs::TryLockError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRelativePath(PathBuf);
@@ -200,6 +205,74 @@ impl ProjectRoot {
         sync_directory_impl(path).map_err(ProjectFsError::Io)
     }
 
+    /// Take the single-writer lock for one project session.
+    ///
+    /// The lock is an OS advisory lock on `.kineto/session.lock`, held until the
+    /// returned guard drops and released by the OS if the process dies, so no
+    /// stale lock survives a crash. Two sessions in the same process conflict
+    /// just like two processes do.
+    ///
+    /// The lock fails closed. If the lock file cannot be created or opened, or
+    /// the filesystem cannot lock it, the result is
+    /// [`SessionLockError::Unavailable`] and the caller must not write: a
+    /// session without the lock is exactly the unprotected writer the lock
+    /// exists to prevent.
+    pub fn lock_session(&self) -> Result<SessionLock, SessionLockError> {
+        self.lock_session_with(fs::File::try_lock)
+    }
+
+    pub(crate) fn lock_session_with(
+        &self,
+        try_lock: TryLockFn,
+    ) -> Result<SessionLock, SessionLockError> {
+        let path = ProjectRelativePath::new(SESSION_LOCK_PATH)
+            .expect("static session lock path is a valid project path");
+        let resolved = self.resolve(&path);
+        let parent = resolved
+            .parent()
+            .expect("static session lock path has a parent directory");
+        ensure_directory(self, parent).map_err(|error| self.lock_unavailable(error))?;
+
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SessionLockError::Fs(ProjectFsError::Symlink(resolved)));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(SessionLockError::Fs(ProjectFsError::NotFile(resolved)));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(self.lock_unavailable(ProjectFsError::Io(error))),
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&resolved)
+            .map_err(|error| self.lock_unavailable(ProjectFsError::Io(error)))?;
+        match try_lock(&file) {
+            Ok(()) => Ok(SessionLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(SessionLockError::Busy(self.root.clone())),
+            Err(fs::TryLockError::Error(error)) => {
+                Err(self.lock_unavailable(ProjectFsError::Io(error)))
+            }
+        }
+    }
+
+    /// An I/O failure while providing the lock means no lock. Tamper-shaped
+    /// failures (a symlink or a non-directory in the way) keep their own error.
+    fn lock_unavailable(&self, error: ProjectFsError) -> SessionLockError {
+        match error {
+            ProjectFsError::Io(source) => SessionLockError::Unavailable {
+                path: self.root.clone(),
+                source,
+            },
+            other => SessionLockError::Fs(other),
+        }
+    }
+
     pub fn canonical_snapshot(&self) -> Result<CanonicalSnapshot, ProjectFsError> {
         let mut files = BTreeMap::new();
         scan_directory(&self.root, &self.root, &mut files)?;
@@ -230,6 +303,25 @@ impl ProjectRoot {
         }
         Ok(canonical)
     }
+}
+
+/// Held single-writer lock for one project. Dropping it releases the lock.
+#[derive(Debug)]
+pub struct SessionLock {
+    _file: fs::File,
+}
+
+#[derive(Debug)]
+pub enum SessionLockError {
+    /// Another live session already holds the project's writer lock.
+    Busy(PathBuf),
+    /// The lock could not be provided here, for example because the
+    /// filesystem does not support file locking. Writing is refused.
+    Unavailable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Fs(ProjectFsError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -321,6 +413,11 @@ fn ensure_directory(root: &ProjectRoot, directory: &Path) -> Result<(), ProjectF
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir(&current).map_err(ProjectFsError::Io)?;
+                // The new entry lives in the parent directory. Flush it so a
+                // file later published inside this directory cannot outlive
+                // the directory's own name after a crash.
+                let parent = current.parent().unwrap_or(root.root());
+                sync_directory_impl(parent).map_err(ProjectFsError::Io)?;
             }
             Err(error) => return Err(ProjectFsError::Io(error)),
         }
@@ -468,6 +565,47 @@ mod tests {
         let read_path = ProjectRelativePath::new("escape/secret.txt").unwrap();
         let read_error = root.read(&read_path).unwrap_err();
         assert!(matches!(read_error, ProjectFsError::Symlink(_)));
+    }
+
+    fn unsupported_lock(_: &fs::File) -> Result<(), fs::TryLockError> {
+        Err(fs::TryLockError::Error(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        )))
+    }
+
+    fn failing_lock(_: &fs::File) -> Result<(), fs::TryLockError> {
+        Err(fs::TryLockError::Error(std::io::Error::other(
+            "no locks available",
+        )))
+    }
+
+    #[test]
+    fn session_lock_fails_closed_when_the_filesystem_cannot_lock() {
+        let temp = TempProject::new();
+        let root = ProjectRoot::open(&temp.path).unwrap();
+
+        for try_lock in [unsupported_lock as TryLockFn, failing_lock] {
+            assert!(matches!(
+                root.lock_session_with(try_lock),
+                Err(SessionLockError::Unavailable { .. })
+            ));
+        }
+        // Nothing is left holding the lock after a refusal.
+        assert!(root.lock_session().is_ok());
+    }
+
+    #[test]
+    fn session_lock_is_exclusive_within_one_process() {
+        let temp = TempProject::new();
+        let root = ProjectRoot::open(&temp.path).unwrap();
+
+        let held = root.lock_session().unwrap();
+        assert!(matches!(
+            root.lock_session(),
+            Err(SessionLockError::Busy(_))
+        ));
+        drop(held);
+        assert!(root.lock_session().is_ok());
     }
 
     #[test]

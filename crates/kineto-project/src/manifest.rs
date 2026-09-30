@@ -10,7 +10,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::fs::{ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot};
+use crate::fs::{
+    ProjectFsError, ProjectPathError, ProjectRelativePath, ProjectRoot, SessionLock,
+    SessionLockError, TryLockFn,
+};
 
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 const PROJECT_MANIFEST_PATH: &str = "project.toml";
@@ -244,16 +247,21 @@ pub struct CanonicalProject {
     root: ProjectRoot,
     manifest: ProjectManifest,
     access: ProjectAccess,
+    // A read-write session holds the project's single-writer lock for its whole
+    // life. Without it, two sessions each write from their own cached state and
+    // the later writer silently discards the earlier one's approvals.
+    _session_lock: Option<SessionLock>,
 }
 
 impl CanonicalProject {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProjectStoreError> {
-        Self::open_with_supported_version(path.as_ref(), PROJECT_FORMAT_VERSION)
+        Self::open_with(path.as_ref(), PROJECT_FORMAT_VERSION, fs::File::try_lock)
     }
 
-    fn open_with_supported_version(
+    fn open_with(
         path: &Path,
         supported_version: u32,
+        try_lock: TryLockFn,
     ) -> Result<Self, ProjectStoreError> {
         let root = ProjectRoot::open(path).map_err(ProjectStoreError::Fs)?;
         let manifest_path = ProjectRelativePath::new(PROJECT_MANIFEST_PATH)
@@ -275,10 +283,26 @@ impl CanonicalProject {
         root.ensure_file(&source_path)
             .map_err(ProjectStoreError::Fs)?;
 
+        // Read-write access requires the writer lock; there is no unlocked
+        // read-write session. Read-only sessions never write and take none.
+        let session_lock = match access {
+            ProjectAccess::ReadWrite => Some(root.lock_session_with(try_lock).map_err(
+                |error| match error {
+                    SessionLockError::Busy(path) => ProjectStoreError::Busy(path),
+                    SessionLockError::Unavailable { path, source } => {
+                        ProjectStoreError::LockUnavailable { path, source }
+                    }
+                    SessionLockError::Fs(error) => ProjectStoreError::Fs(error),
+                },
+            )?),
+            ProjectAccess::ReadOnly => None,
+        };
+
         Ok(Self {
             root,
             manifest,
             access,
+            _session_lock: session_lock,
         })
     }
 
@@ -287,7 +311,16 @@ impl CanonicalProject {
         path: impl AsRef<Path>,
         supported_version: u32,
     ) -> Result<Self, ProjectStoreError> {
-        Self::open_with_supported_version(path.as_ref(), supported_version)
+        Self::open_with(path.as_ref(), supported_version, fs::File::try_lock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_lock_for_test(
+        path: impl AsRef<Path>,
+        supported_version: u32,
+        try_lock: TryLockFn,
+    ) -> Result<Self, ProjectStoreError> {
+        Self::open_with(path.as_ref(), supported_version, try_lock)
     }
 
     pub fn create(
@@ -390,6 +423,15 @@ pub enum ProjectStoreError {
     Utf8(std::str::Utf8Error),
     AlreadyExists(PathBuf),
     InvalidTarget(PathBuf),
+    /// The project is already open for writing by another live session.
+    Busy(PathBuf),
+    /// The single-writer lock cannot be provided for this project (for example
+    /// the filesystem does not support file locking), so it is not opened for
+    /// writing.
+    LockUnavailable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for ProjectStoreError {
@@ -406,6 +448,16 @@ impl fmt::Display for ProjectStoreError {
             Self::InvalidTarget(path) => {
                 write!(formatter, "invalid project target: {}", path.display())
             }
+            Self::Busy(path) => write!(
+                formatter,
+                "project is already open for writing in another Kineto session: {}",
+                path.display()
+            ),
+            Self::LockUnavailable { path, source } => write!(
+                formatter,
+                "project cannot be locked for single-writer access, so it is not opened for writing: {}: {source}",
+                path.display()
+            ),
         }
     }
 }
@@ -416,7 +468,8 @@ impl Error for ProjectStoreError {
             Self::Fs(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Utf8(error) => Some(error),
-            Self::AlreadyExists(_) | Self::InvalidTarget(_) => None,
+            Self::LockUnavailable { source, .. } => Some(source),
+            Self::AlreadyExists(_) | Self::InvalidTarget(_) | Self::Busy(_) => None,
         }
     }
 }
@@ -721,6 +774,89 @@ future_workflow = "keep-me-too"
             CanonicalProject::open(&target),
             Err(ProjectStoreError::Fs(ProjectFsError::NotFile(_)))
         ));
+    }
+
+    #[test]
+    fn second_read_write_session_is_refused_until_the_first_closes() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let first = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        assert!(matches!(
+            CanonicalProject::open(&target),
+            Err(ProjectStoreError::Busy(_))
+        ));
+
+        drop(first);
+        let reopened = CanonicalProject::open(&target).unwrap();
+        assert_eq!(reopened.access(), ProjectAccess::ReadWrite);
+    }
+
+    #[test]
+    fn read_only_sessions_do_not_take_the_writer_lock() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let writer = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        // A build that treats this format as older opens it read-only, and a
+        // read-only session never writes, so it neither needs nor blocks the lock.
+        let first_reader =
+            CanonicalProject::open_with_supported_version_for_test(&target, 2).unwrap();
+        let second_reader =
+            CanonicalProject::open_with_supported_version_for_test(&target, 2).unwrap();
+        assert!(first_reader.is_read_only() && second_reader.is_read_only());
+        assert!(!writer.is_read_only());
+    }
+
+    fn unsupported_lock(_: &fs::File) -> Result<(), fs::TryLockError> {
+        Err(fs::TryLockError::Error(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        )))
+    }
+
+    #[test]
+    fn read_write_open_fails_closed_when_the_writer_lock_is_unavailable() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        drop(CanonicalProject::create(&target, manifest(), b"source\n").unwrap());
+
+        match CanonicalProject::open_with_lock_for_test(
+            &target,
+            PROJECT_FORMAT_VERSION,
+            unsupported_lock,
+        ) {
+            Err(ProjectStoreError::LockUnavailable { source, .. }) => {
+                assert_eq!(source.kind(), std::io::ErrorKind::Unsupported);
+            }
+            other => panic!("expected LockUnavailable, got {other:?}"),
+        }
+
+        // Read-only sessions never lock, so they still open on such a filesystem.
+        let read_only =
+            CanonicalProject::open_with_lock_for_test(&target, 2, unsupported_lock).unwrap();
+        assert!(read_only.is_read_only());
+
+        // The refusal left nothing held.
+        assert_eq!(
+            CanonicalProject::open(&target).unwrap().access(),
+            ProjectAccess::ReadWrite
+        );
+    }
+
+    #[test]
+    fn session_lock_lives_outside_canonical_state() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let project = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+
+        assert!(target.join(".kineto/session.lock").is_file());
+        let snapshot = project.root().canonical_snapshot().unwrap();
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|path| !path.starts_with(".kineto"))
+        );
     }
 
     #[test]

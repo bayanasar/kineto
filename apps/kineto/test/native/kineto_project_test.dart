@@ -22,6 +22,18 @@ void main() {
         'A filmmaker waits across the table.\n',
       );
 
+      // A second writer session is refused while this one is open.
+      expect(
+        () => KinetoProjectSession.open(target.path),
+        throwsA(
+          isA<KinetoProjectException>().having(
+            (error) => error.code,
+            'code',
+            KinetoProjectException.busy,
+          ),
+        ),
+      );
+
       created.close();
       expect(() => created.title, throwsStateError);
       expect(() => created.shotSnapshot(0), throwsStateError);
@@ -33,6 +45,68 @@ void main() {
       expect(reopened.projectId, 'ffi_project_001');
       expect(reopened.title, 'FFI Project');
       reopened.close();
+    } finally {
+      sandbox.deleteSync(recursive: true);
+    }
+  });
+
+  test('legacy shot hashes stay read-only until an explicit migration', () {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
+    final target = Directory(_path(sandbox.path, 'film'));
+
+    try {
+      var project = _createProject(target, 'ffi_project_legacy');
+      project.generateShotCandidates(0);
+      project.close();
+
+      // Rewrite the records in the pre-sha256 form an older build produced.
+      final shotDir = _path(
+        target.path,
+        'scenes',
+        'scene_001',
+        'shots',
+        'shot_001',
+      );
+      final artifactsFile = File(_path(shotDir, 'artifacts.json'));
+      final artifacts = (jsonDecode(
+        artifactsFile.readAsStringSync(),
+      ) as List<dynamic>).cast<Map<String, dynamic>>();
+      for (final artifact in artifacts) {
+        artifact['content_hash'] = 'demo:${artifact['artifact_id']}';
+        artifact['input_hash'] = 'kineto:shot-intent:v1:shot_001:reaction';
+      }
+      final legacy = const JsonEncoder.withIndent('  ').convert(artifacts);
+      artifactsFile.writeAsStringSync(legacy);
+
+      project = KinetoProjectSession.open(target.path);
+      var snapshot = project.shotSnapshot(0);
+      expect(snapshot.migrationPending, isTrue);
+      expect(snapshot.hasInvalidHashes, isFalse);
+      expect(snapshot.changesBlocked, isTrue);
+      expect(
+        () => project.generateShotCandidates(0),
+        throwsA(
+          isA<KinetoProjectException>().having(
+            (error) => error.code,
+            'code',
+            KinetoProjectException.migrationRequired,
+          ),
+        ),
+      );
+      expect(artifactsFile.readAsStringSync(), legacy);
+
+      project.migrateLegacyHashes(0);
+      snapshot = project.shotSnapshot(0);
+      expect(snapshot.migrationPending, isFalse);
+      expect(snapshot.changesBlocked, isFalse);
+      expect(
+        File(_path(shotDir, 'artifacts.pre-sha256-migration.json'))
+            .readAsStringSync(),
+        legacy,
+      );
+      project.generateShotCandidates(0);
+      expect(project.shotSnapshot(0).generation, 2);
+      project.close();
     } finally {
       sandbox.deleteSync(recursive: true);
     }

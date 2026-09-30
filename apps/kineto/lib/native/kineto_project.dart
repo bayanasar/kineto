@@ -129,8 +129,29 @@ external int _kinetoProjectShotLock(Pointer<Void> session, int shotIndex);
 )
 external int _kinetoProjectShotReset(Pointer<Void> session, int shotIndex);
 
+@Native<Int32 Function(Pointer<Void>, Uint32)>(
+  symbol: 'kineto_project_shot_migrate_legacy_hashes',
+)
+external int _kinetoProjectShotMigrateLegacyHashes(
+  Pointer<Void> session,
+  int shotIndex,
+);
+
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
+
+  /// The create target already exists; nothing was overwritten.
+  static const int alreadyExists = 103;
+
+  /// Another live session holds the project's single-writer lock.
+  static const int busy = 117;
+
+  /// The shot's stored hashes need explicit migration before it can change.
+  static const int migrationRequired = 118;
+
+  /// The single-writer lock cannot be provided here (for example the
+  /// filesystem cannot lock files), so the project is not opened for writing.
+  static const int lockUnavailable = 119;
 
   final int code;
   final String message;
@@ -304,6 +325,16 @@ final class KinetoProjectSession implements Finalizable {
     _checkProjectResult(_kinetoProjectShotReset(_handle, shotIndex));
   }
 
+  /// Rewrite this shot's known legacy hashes to canonical form, after writing
+  /// a backup of the original records. Opening a project never does this.
+  void migrateLegacyHashes(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    _checkProjectResult(
+      _kinetoProjectShotMigrateLegacyHashes(_handle, shotIndex),
+    );
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
@@ -394,6 +425,9 @@ void _checkProjectResult(int code) {
     114 => 'Selection is stale; regenerate before locking',
     115 => 'Canonical shot approval state is invalid',
     116 => 'Shot generation revision overflow',
+    117 => 'Project is already open for writing in another Kineto window',
+    118 => 'Legacy shot hashes need migration before this shot can change',
+    119 => 'Project cannot be locked for single-writer access on this filesystem',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

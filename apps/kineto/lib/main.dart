@@ -5,6 +5,7 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'demo_workspace.dart';
 import 'native/kineto_engine.dart';
+import 'project_busy.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,6 +13,18 @@ void main() {
   try {
     final project = _openDemoProject();
     runApp(KinetoApp(engine: engine, project: project));
+  } on KinetoProjectException catch (error) {
+    engine.close();
+    // A project Kineto cannot hold as its only writer is never opened for
+    // writing; explain why instead of opening it or crashing.
+    switch (error.code) {
+      case KinetoProjectException.busy:
+        runApp(KinetoProjectBusyApp(projectPath: _demoProjectPath()));
+      case KinetoProjectException.lockUnavailable:
+        runApp(KinetoProjectLockUnavailableApp(projectPath: _demoProjectPath()));
+      default:
+        rethrow;
+    }
   } on Object {
     engine.close();
     rethrow;
@@ -38,7 +51,8 @@ KinetoProjectSession _openDemoProject() {
   } on KinetoProjectException catch (error) {
     // Another process may have created the same canonical demo project between
     // the existence check and create. Never overwrite it; reopen the winner.
-    if (error.code == 103 && target.existsSync()) {
+    if (error.code == KinetoProjectException.alreadyExists &&
+        target.existsSync()) {
       return KinetoProjectSession.open(target.path);
     }
     rethrow;
