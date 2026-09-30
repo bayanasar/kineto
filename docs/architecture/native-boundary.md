@@ -115,11 +115,23 @@ Human-readable TOML/JSON/Markdown remain appropriate for **project storage** bec
 
 The two-shot demo keeps its approval state in canonical project files — `scenes/scene_001/shots/shot_00N/shot.json`, `artifacts.json` and `selection.json` — inside the project directory. The earlier machine-level demo sidecars are retired; deleting `.kineto/` loses no approval state.
 
+## Concurrency model
+
+Each open project session is owned by one Rust worker thread (`kineto_core::session::ProjectSession`). The worker is the only code that touches the session's `CanonicalProject` and its cached shot workflows, so project state is never shared between threads and the domain types need no internal locking.
+
+- Commands are queued and run strictly in submission order on the worker. Submitting a command never waits for it to run.
+- After every command the worker publishes the affected shot's snapshot. Snapshot and metadata reads return that published state; they never do I/O and never wait for a running command.
+- Outcomes reach the caller through a sink invoked on the worker thread, after the snapshot is published.
+- The handle is `Send + Sync`: any thread may submit commands or read published state. Only the owner closes it. Closing stops delivery before it returns, discards queued commands that have not started, lets the running command finish, and releases the project and its single-writer lock before returning.
+- A panic inside a command is caught. The shot's in-memory state is discarded and reloaded from its canonical files before its next use.
+
+A worker thread, not an async runtime, because every current operation is blocking local filesystem I/O. One thread per session gives ordered execution off the UI thread without an executor. A shared async runtime arrives with network provider I/O, as below, not before.
+
 ## Async and events
 
-The bootstrap does not invent an async framework before real jobs exist.
+There is no async runtime yet; the session worker above owns filesystem work.
 
-When P0 job work lands:
+When provider jobs land:
 
 - one Rust-side async runtime owns IO-bound orchestration
 - CPU-bound work is moved off async executor threads into bounded compute work
