@@ -30,6 +30,7 @@ const PROJECT_ERR_INVALID_SHOT_STATE: i32 = 115;
 const PROJECT_ERR_GENERATION_OVERFLOW: i32 = 116;
 const PROJECT_ERR_BUSY: i32 = 117;
 const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
+const PROJECT_ERR_LOCK_UNAVAILABLE: i32 = 119;
 const PROJECT_ERR_PANIC: i32 = 199;
 const PROJECT_SHOT_COUNT: usize = 2;
 
@@ -570,6 +571,7 @@ fn project_error_code(error: &ProjectStoreError) -> i32 {
         ProjectStoreError::Manifest(_) => PROJECT_ERR_INVALID_MANIFEST,
         ProjectStoreError::Fs(_) => PROJECT_ERR_IO,
         ProjectStoreError::Busy(_) => PROJECT_ERR_BUSY,
+        ProjectStoreError::LockUnavailable { .. } => PROJECT_ERR_LOCK_UNAVAILABLE,
     }
 }
 
@@ -828,6 +830,21 @@ mod tests {
         );
         unsafe { kineto_project_destroy(reopened) };
         let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn writer_lock_refusals_have_distinct_statuses() {
+        assert_eq!(
+            project_error_code(&ProjectStoreError::Busy(temp_target())),
+            PROJECT_ERR_BUSY
+        );
+        assert_eq!(
+            project_error_code(&ProjectStoreError::LockUnavailable {
+                path: temp_target(),
+                source: std::io::Error::from(std::io::ErrorKind::Unsupported),
+            }),
+            PROJECT_ERR_LOCK_UNAVAILABLE
+        );
     }
 
     #[test]

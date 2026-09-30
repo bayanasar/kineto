@@ -149,6 +149,10 @@ final class KinetoProjectException implements Exception {
   /// The shot's stored hashes need explicit migration before it can change.
   static const int migrationRequired = 118;
 
+  /// The single-writer lock cannot be provided here (for example the
+  /// filesystem cannot lock files), so the project is not opened for writing.
+  static const int lockUnavailable = 119;
+
   final int code;
   final String message;
 
@@ -423,6 +427,7 @@ void _checkProjectResult(int code) {
     116 => 'Shot generation revision overflow',
     117 => 'Project is already open for writing in another Kineto window',
     118 => 'Legacy shot hashes need migration before this shot can change',
+    119 => 'Project cannot be locked for single-writer access on this filesystem',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

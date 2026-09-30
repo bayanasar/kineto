@@ -41,7 +41,7 @@ There is no desktop:
 - engine executable lookup
 - duplicate request/response schema
 
-Native ABI v11 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer session status (`117`) and v11 the explicit legacy-hash migration entry point with its refusal status (`118`). Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
+Native ABI v12 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer busy status (`117`), v11 the explicit legacy-hash migration entry point with its refusal status (`118`), and v12 the lock-unavailable status (`119`). Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
 
 The demo snapshot remains one packed `u64` containing generated/locked/stale flags, legacy-migration-pending and invalid-hash flags, candidate count, selected candidate, shot direction, generation revision, and superseded count. This compact demo ABI is disposable scaffolding, not the final project model.
 
@@ -73,7 +73,7 @@ kineto_project_create_text/open -> writes one opaque session through an out poin
 kineto_project_destroy          -> consumes that session exactly once
 ```
 
-A read-write project session is the project's only writer. Opening one takes an OS advisory lock on `.kineto/session.lock` and holds it until `kineto_project_destroy`; a second read-write open, from this process or another, fails with status `117` (`KinetoProjectException.busy`) instead of writing from its own stale copy of the state. Read-only sessions (older project formats) do not take the lock. The lock file is derived state under `.kineto/`; deleting it loses nothing canonical.
+A read-write project session is the project's only writer. Opening one takes an OS advisory lock on `.kineto/session.lock` and holds it until `kineto_project_destroy`; a second read-write open, from this process or another, fails with status `117` (`KinetoProjectException.busy`) instead of writing from its own stale copy of the state. The lock fails closed: if the lock file cannot be created or the filesystem cannot lock it, the read-write open fails with status `119` (`KinetoProjectException.lockUnavailable`); there is no unlocked read-write session. Read-only sessions (older project formats) do not take the lock. The lock file is derived state under `.kineto/`; deleting it loses nothing canonical.
 
 Dart wraps these handles in `KinetoEngine` and `KinetoProjectSession`, performs deterministic `close()`, and installs a `NativeFinalizer` as a safety net.
 

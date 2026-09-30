@@ -15,4 +15,17 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('unlockable filesystem refuses to open the project for writing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const KinetoProjectLockUnavailableApp(
+        projectPath: '/mnt/share/demo-project',
+      ),
+    );
+
+    expect(find.text('Project cannot be locked'), findsOneWidget);
+    expect(find.textContaining('/mnt/share/demo-project'), findsOneWidget);
+  });
 }

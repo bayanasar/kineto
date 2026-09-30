@@ -15,10 +15,16 @@ void main() {
     runApp(KinetoApp(engine: engine, project: project));
   } on KinetoProjectException catch (error) {
     engine.close();
-    if (error.code != KinetoProjectException.busy) rethrow;
-    // A second window must not write the same project from its own stale
-    // copy of the state; explain instead of opening it.
-    runApp(KinetoProjectBusyApp(projectPath: _demoProjectPath()));
+    // A project Kineto cannot hold as its only writer is never opened for
+    // writing; explain why instead of opening it or crashing.
+    switch (error.code) {
+      case KinetoProjectException.busy:
+        runApp(KinetoProjectBusyApp(projectPath: _demoProjectPath()));
+      case KinetoProjectException.lockUnavailable:
+        runApp(KinetoProjectLockUnavailableApp(projectPath: _demoProjectPath()));
+      default:
+        rethrow;
+    }
   } on Object {
     engine.close();
     rethrow;
