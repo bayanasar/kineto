@@ -68,7 +68,14 @@ void main() {
     expect(find.textContaining('3 superseded'), findsOneWidget);
     expect(find.text('Native ABI 9'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Shot 002'));
+    // Centre the button: the default top alignment can leave it under the
+    // translucent app bar, where it cannot be tapped (as on macOS hosts,
+    // whose text layout makes this page tall enough to scroll that far).
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Shot 002')),
+      alignment: 0.5,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Shot 002'));
     expect(requestedShot, 1);
   });
