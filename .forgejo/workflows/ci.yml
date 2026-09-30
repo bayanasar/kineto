@@ -159,7 +159,11 @@ jobs:
       - name: Flutter tests
         id: flutter_tests
         working-directory: apps/kineto
-        run: flutter test
+        env:
+          # Garbage-collection regressions force collections through the VM
+          # service; require it so they fail here instead of being skipped.
+          KINETO_REQUIRE_VM_SERVICE: "1"
+        run: flutter test --enable-vmservice
 
       - name: Linux release build
         id: linux_build
