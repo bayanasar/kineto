@@ -192,6 +192,15 @@ void main() {
               'selected_artifact_id'
           ] as String;
       expect(selectedBefore, isNotEmpty);
+
+      // Generation ran as write-ahead jobs: one reconciled intent per candidate.
+      final intents = Directory(_path(target.path, '.kineto', 'jobs', 'intents'))
+          .listSync()
+          .whereType<File>()
+          .map((file) => jsonDecode(file.readAsStringSync()) as Map<String, dynamic>)
+          .toList();
+      expect(intents, hasLength(3));
+      expect(intents.map((intent) => intent['state']), everyElement('reconciled'));
       project.close();
 
       final cache = Directory(_path(target.path, '.kineto'))..createSync();

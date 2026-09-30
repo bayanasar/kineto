@@ -20,6 +20,12 @@ const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 const GENERATED_CANDIDATE_COUNT: usize = 3;
 const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
+/// Provider key recorded on candidates from the deterministic local demo
+/// generator. It stands in for a real image provider until P0.5.
+pub const DEMO_PROVIDER: &str = "local-demo";
+/// Model recorded on candidates from the deterministic local demo generator.
+pub const DEMO_MODEL: &str = "deterministic-demo-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +117,87 @@ pub struct ShotMigrationReport {
     pub rewritten: Vec<ShotHashMigrationRecord>,
 }
 
+/// One generation of candidates for a shot, decided before anything is
+/// written: the revision it publishes, the candidate IDs it creates and the
+/// input hash they are generated for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationPlan {
+    shot_number: u32,
+    revision: u16,
+    input_hash: InputHash,
+    candidate_ids: Vec<ArtifactId>,
+}
+
+impl GenerationPlan {
+    /// Rebuild the plan a candidate belongs to from its ID and the input hash
+    /// recorded with its job, for example when an interrupted generation is
+    /// completed after a restart.
+    pub fn for_candidate(
+        candidate: &ArtifactId,
+        input_hash: InputHash,
+    ) -> Result<Self, ShotWorkflowError> {
+        let (shot_number, revision) = parse_candidate_id(candidate.as_str()).ok_or(
+            ShotWorkflowError::InvalidTarget(std::path::PathBuf::from(candidate.as_str())),
+        )?;
+        let shot_id = format!("shot_{shot_number:03}");
+        Ok(Self {
+            shot_number,
+            revision,
+            input_hash,
+            candidate_ids: candidate_ids(&shot_id, revision)?,
+        })
+    }
+
+    #[must_use]
+    pub const fn shot_number(&self) -> u32 {
+        self.shot_number
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u16 {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn input_hash(&self) -> &InputHash {
+        &self.input_hash
+    }
+
+    #[must_use]
+    pub fn candidate_ids(&self) -> &[ArtifactId] {
+        &self.candidate_ids
+    }
+}
+
+/// What a provider produced for one planned candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateOutput {
+    pub artifact_id: ArtifactId,
+    pub content_hash: ContentHash,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The generation was published by this call.
+    Attached,
+    /// Every candidate was already in canonical state; nothing was written.
+    AlreadyAttached,
+}
+
+/// Output of the deterministic local demo generator for one candidate.
+pub fn demo_candidate_output(
+    artifact_id: &ArtifactId,
+) -> Result<CandidateOutput, ShotWorkflowError> {
+    Ok(CandidateOutput {
+        artifact_id: artifact_id.clone(),
+        content_hash: demo_content_hash(artifact_id)?,
+        provider: DEMO_PROVIDER.to_owned(),
+        model: DEMO_MODEL.to_owned(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StoredArtifactStatus {
@@ -191,6 +278,10 @@ struct StoredArtifactRecord {
     content_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     dependencies: Vec<StoredArtifactDependency>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -482,7 +573,70 @@ impl ShotWorkflow {
         Ok(())
     }
 
-    pub fn generate(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+    /// Decide the next generation without writing anything.
+    pub fn plan_generation(
+        &self,
+        project: &CanonicalProject,
+    ) -> Result<GenerationPlan, ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
+        if self.snapshot()?.locked {
+            return Err(ShotWorkflowError::Locked);
+        }
+        project
+            .validate_for_write()
+            .map_err(ShotWorkflowError::Manifest)?;
+        let revision = self
+            .shot
+            .generation_revision
+            .checked_add(1)
+            .ok_or(ShotWorkflowError::GenerationOverflow)?;
+        Ok(GenerationPlan {
+            shot_number: self.shot_number,
+            revision,
+            input_hash: input_hash(&self.shot)?,
+            candidate_ids: candidate_ids(&self.shot.shot_id, revision)?,
+        })
+    }
+
+    /// Publish a planned generation with the provider's outputs.
+    ///
+    /// Idempotent: if every planned candidate is already in canonical state,
+    /// nothing is written. This is what lets an interrupted generation be
+    /// completed after a restart without duplicating candidates. A plan older
+    /// than a generation that has since been published is refused.
+    pub fn attach_generation(
+        &mut self,
+        project: &CanonicalProject,
+        plan: &GenerationPlan,
+        outputs: &[CandidateOutput],
+    ) -> Result<AttachOutcome, ShotWorkflowError> {
+        if plan.shot_number != self.shot_number
+            || outputs.len() != plan.candidate_ids.len()
+            || outputs
+                .iter()
+                .zip(&plan.candidate_ids)
+                .any(|(output, planned)| {
+                    &output.artifact_id != planned
+                        || output.provider.trim().is_empty()
+                        || output.model.trim().is_empty()
+                })
+        {
+            return Err(ShotWorkflowError::InvalidCanonicalState);
+        }
+        if self.shot.generation_revision >= plan.revision
+            && plan
+                .candidate_ids
+                .iter()
+                .all(|candidate| self.artifact(candidate).is_some())
+        {
+            return Ok(AttachOutcome::AlreadyAttached);
+        }
+        if self.shot.generation_revision > plan.revision {
+            return Err(ShotWorkflowError::StaleGeneration);
+        }
+        if self.shot.generation_revision.saturating_add(1) < plan.revision {
+            return Err(ShotWorkflowError::InvalidCanonicalState);
+        }
         self.ensure_mutation_allowed()?;
         if self.snapshot()?.locked {
             return Err(ShotWorkflowError::Locked);
@@ -492,34 +646,31 @@ impl ShotWorkflow {
             .map_err(ShotWorkflowError::Manifest)?;
 
         let mut next_shot = self.shot.clone();
-        next_shot.generation_revision = next_shot
-            .generation_revision
-            .checked_add(1)
-            .ok_or(ShotWorkflowError::GenerationOverflow)?;
+        next_shot.generation_revision = plan.revision;
         let mut next_artifacts = self.artifacts.clone();
         supersede_active_shot_candidates(&mut next_artifacts)?;
 
-        let input_hash = input_hash(&next_shot)?;
-        let candidate_ids = candidate_ids(&next_shot.shot_id, next_shot.generation_revision)?;
-        let mut candidate_artifact_ids = Vec::with_capacity(candidate_ids.len());
-        for artifact_id in candidate_ids {
+        let mut candidate_artifact_ids = Vec::with_capacity(outputs.len());
+        for output in outputs {
             if next_artifacts
                 .iter()
-                .any(|record| record.artifact_id == artifact_id.as_str())
+                .any(|record| record.artifact_id == output.artifact_id.as_str())
             {
                 return Err(ShotWorkflowError::InvalidCanonicalState);
             }
             next_artifacts.push(StoredArtifactRecord {
-                artifact_id: artifact_id.as_str().to_owned(),
+                artifact_id: output.artifact_id.as_str().to_owned(),
                 schema_version: ARTIFACT_SCHEMA_VERSION,
                 artifact_type: "shot_candidate".to_owned(),
                 status: StoredArtifactStatus::Candidate,
-                content_hash: demo_content_hash(&artifact_id)?.as_str().to_owned(),
-                input_hash: Some(input_hash.as_str().to_owned()),
+                content_hash: output.content_hash.as_str().to_owned(),
+                input_hash: Some(plan.input_hash.as_str().to_owned()),
+                provider: Some(output.provider.clone()),
+                model: Some(output.model.clone()),
                 dependencies: Vec::new(),
                 extra: BTreeMap::new(),
             });
-            candidate_artifact_ids.push(artifact_id.as_str().to_owned());
+            candidate_artifact_ids.push(output.artifact_id.as_str().to_owned());
         }
         let next_selection = StoredSelectionManifest {
             selected_artifact_id: None,
@@ -531,7 +682,20 @@ impl ShotWorkflow {
         self.shot = next_shot;
         self.artifacts = next_artifacts;
         self.selection = next_selection;
-        Ok(())
+        Ok(AttachOutcome::Attached)
+    }
+
+    /// Generate with the deterministic local demo generator, without a job.
+    /// Production generation goes through `kineto_core::generation`, which
+    /// records write-ahead intents around the same plan and attach steps.
+    pub fn generate(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        let plan = self.plan_generation(project)?;
+        let outputs = plan
+            .candidate_ids
+            .iter()
+            .map(demo_candidate_output)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.attach_generation(project, &plan, &outputs).map(|_| ())
     }
 
     pub fn select(
@@ -993,6 +1157,28 @@ fn candidate_ids(shot_id: &str, revision: u16) -> Result<Vec<ArtifactId>, ShotWo
         .collect()
 }
 
+/// Parse `shot_NNN_gRRRR_candidate_x` back into its shot number and revision.
+fn parse_candidate_id(value: &str) -> Option<(u32, u16)> {
+    let rest = value.strip_prefix("shot_")?;
+    let (shot, rest) = rest.split_once("_g")?;
+    let (revision, label) = rest.split_once("_candidate_")?;
+    if shot.len() < 3
+        || revision.len() != 4
+        || label.len() != 1
+        || !shot.bytes().all(|byte| byte.is_ascii_digit())
+        || !revision.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let shot_number = shot.parse::<u32>().ok().filter(|number| *number != 0)?;
+    let revision = revision
+        .parse::<u16>()
+        .ok()
+        .filter(|revision| *revision != 0)?;
+    let index = usize::from(label.as_bytes()[0].checked_sub(b'a')?);
+    (index < GENERATED_CANDIDATE_COUNT).then_some((shot_number, revision))
+}
+
 fn find_artifact_mut<'a>(
     artifacts: &'a mut [StoredArtifactRecord],
     artifact_id: &ArtifactId,
@@ -1056,6 +1242,8 @@ pub enum ShotWorkflowError {
     NoSelection,
     StaleSelection,
     GenerationOverflow,
+    /// A generation newer than the one being attached is already published.
+    StaleGeneration,
     MigrationRequired,
     InvalidStoredHash {
         artifact_id: String,
@@ -1091,6 +1279,8 @@ impl fmt::Display for ShotWorkflowError {
                 formatter.write_str("selected candidate is stale; regenerate before locking")
             }
             Self::GenerationOverflow => formatter.write_str("shot generation revision overflow"),
+            Self::StaleGeneration => formatter
+                .write_str("a newer shot generation is already published; this one cannot attach"),
             Self::MigrationRequired => {
                 formatter.write_str("legacy shot hashes require explicit migration before writing")
             }
@@ -1145,6 +1335,7 @@ impl Error for ShotWorkflowError {
             | Self::NoSelection
             | Self::StaleSelection
             | Self::GenerationOverflow
+            | Self::StaleGeneration
             | Self::MigrationRequired
             | Self::InvalidStoredHash { .. }
             | Self::MigrationBackupConflict(_)
@@ -1718,6 +1909,165 @@ mod tests {
                 value,
             }) if actual_id == artifact_id && value == "banana"
         ));
+    }
+
+    fn demo_outputs(plan: &GenerationPlan) -> Vec<CandidateOutput> {
+        plan.candidate_ids()
+            .iter()
+            .map(|id| demo_candidate_output(id).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn planning_a_generation_writes_nothing() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let shot = ShotWorkflow::load(&project, 1).unwrap();
+        let before = project.root().canonical_snapshot().unwrap();
+
+        let plan = shot.plan_generation(&project).unwrap();
+        assert_eq!(plan.shot_number(), 1);
+        assert_eq!(plan.revision(), 1);
+        assert_eq!(plan.candidate_ids().len(), GENERATED_CANDIDATE_COUNT);
+        assert_eq!(project.root().canonical_snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn attaching_a_generation_twice_writes_once_and_records_provenance() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let plan = shot.plan_generation(&project).unwrap();
+        let outputs = demo_outputs(&plan);
+
+        assert_eq!(
+            shot.attach_generation(&project, &plan, &outputs).unwrap(),
+            AttachOutcome::Attached
+        );
+        let published = project.root().canonical_snapshot().unwrap();
+        assert_eq!(
+            shot.attach_generation(&project, &plan, &outputs).unwrap(),
+            AttachOutcome::AlreadyAttached
+        );
+        // A fresh load (as after a restart) sees the same generation as done.
+        let mut reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        assert_eq!(
+            reloaded
+                .attach_generation(&project, &plan, &outputs)
+                .unwrap(),
+            AttachOutcome::AlreadyAttached
+        );
+        assert_eq!(project.root().canonical_snapshot().unwrap(), published);
+
+        let artifacts: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(shot_dir(&target).join("artifacts.json")).unwrap())
+                .unwrap();
+        assert_eq!(artifacts.len(), GENERATED_CANDIDATE_COUNT);
+        for artifact in artifacts {
+            assert_eq!(artifact.provider.as_deref(), Some(DEMO_PROVIDER));
+            assert_eq!(artifact.model.as_deref(), Some(DEMO_MODEL));
+            assert_eq!(
+                artifact.input_hash.as_deref(),
+                Some(plan.input_hash().as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn an_orphaned_older_plan_cannot_attach_over_a_newer_generation() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+        let orphan = shot.plan_generation(&project).unwrap();
+        assert_eq!(orphan.revision(), 2);
+
+        // Revision 2 was published before a crash, and a later generation
+        // then moved the shot on to revision 3 without it.
+        let mut half = shot.shot.clone();
+        half.generation_revision = orphan.revision();
+        write_json(&project, &shot_path(1, "shot.json").unwrap(), &half).unwrap();
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+        assert_eq!(shot.snapshot().unwrap().generation_revision, 3);
+
+        assert!(matches!(
+            shot.attach_generation(&project, &orphan, &demo_outputs(&orphan)),
+            Err(ShotWorkflowError::StaleGeneration)
+        ));
+        // Revision 1 was published and is now superseded: reattaching it is a
+        // no-op rather than an error or a duplicate.
+        let first = GenerationPlan::for_candidate(
+            &ArtifactId::new("shot_001_g0001_candidate_a").unwrap(),
+            orphan.input_hash().clone(),
+        )
+        .unwrap();
+        let before = project.root().canonical_snapshot().unwrap();
+        assert_eq!(
+            shot.attach_generation(&project, &first, &demo_outputs(&first))
+                .unwrap(),
+            AttachOutcome::AlreadyAttached
+        );
+        assert_eq!(project.root().canonical_snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn a_half_published_generation_completes_when_attached_again() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let shot = ShotWorkflow::load(&project, 1).unwrap();
+        let plan = shot.plan_generation(&project).unwrap();
+
+        // A crash after the revision was published but before the artifacts.
+        let mut half = shot.shot.clone();
+        half.generation_revision = plan.revision();
+        write_json(&project, &shot_path(1, "shot.json").unwrap(), &half).unwrap();
+
+        let mut reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        assert!(!reloaded.snapshot().unwrap().generated);
+        assert_eq!(
+            reloaded
+                .attach_generation(&project, &plan, &demo_outputs(&plan))
+                .unwrap(),
+            AttachOutcome::Attached
+        );
+        let snapshot = ShotWorkflow::load(&project, 1).unwrap().snapshot().unwrap();
+        assert!(snapshot.generated);
+        assert_eq!(snapshot.generation_revision, plan.revision());
+        assert_eq!(
+            usize::from(snapshot.candidate_count),
+            GENERATED_CANDIDATE_COUNT
+        );
+    }
+
+    #[test]
+    fn candidate_ids_round_trip_into_their_plan() {
+        let input = input_hash_for("shot_002", ShotDirection::Tension).unwrap();
+        let candidate = ArtifactId::new("shot_002_g0007_candidate_c").unwrap();
+        let plan = GenerationPlan::for_candidate(&candidate, input.clone()).unwrap();
+        assert_eq!(plan.shot_number(), 2);
+        assert_eq!(plan.revision(), 7);
+        assert_eq!(plan.input_hash(), &input);
+        assert_eq!(plan.candidate_ids()[2], candidate);
+
+        for malformed in [
+            "shot_002_g07_candidate_a",
+            "shot_000_g0001_candidate_a",
+            "shot_002_g0000_candidate_a",
+            "shot_002_g0001_candidate_d",
+            "shot_002_g0001_candidate_ab",
+            "take_002_g0001_candidate_a",
+        ] {
+            let id = ArtifactId::new(malformed).unwrap();
+            assert!(
+                GenerationPlan::for_candidate(&id, input.clone()).is_err(),
+                "{malformed}"
+            );
+        }
     }
 
     #[test]

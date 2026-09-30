@@ -101,6 +101,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
   bool _working = false;
+  String _workingLabel = 'Working';
   String? _error;
 
   @override
@@ -127,10 +128,14 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   // Native work runs on the project's worker thread; this isolate only waits
   // for the answer. One command at a time keeps the UI honest about which
   // state the director is looking at.
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _run(
+    Future<void> Function() action, {
+    String label = 'Working',
+  }) async {
     if (_working) return;
     setState(() {
       _working = true;
+      _workingLabel = label;
       _error = null;
     });
     String? error;
@@ -157,6 +162,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       activeShotIndex: _activeShotIndex,
       isDarkMode: widget.isDarkMode,
       working: _working,
+      workingLabel: _workingLabel,
       error: _error,
       onThemeToggle: widget.onThemeToggle,
       onShotChanged: _switchShot,
@@ -165,6 +171,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       ),
       onGenerate: () => _run(
         () => widget.project.generateShotCandidates(_activeShotIndex),
+        label: 'Generating',
       ),
       onSelect: (candidateIndex) => _run(
         () => widget.project.selectShotCandidate(
@@ -199,6 +206,7 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onReset,
     this.onMigrate,
     this.working = false,
+    this.workingLabel = 'Working',
     this.isDarkMode = true,
     this.onThemeToggle,
     this.error,
@@ -221,6 +229,9 @@ class DemoWorkspaceView extends StatelessWidget {
 
   /// A command is running on the project's worker; changes wait for it.
   final bool working;
+
+  /// What the running command is, for example 'Generating'.
+  final String workingLabel;
   final String? error;
 
   @override
@@ -267,7 +278,7 @@ class DemoWorkspaceView extends StatelessWidget {
                 WabPanel(
                   title: 'Scene 001',
                   trailing: working
-                      ? const WabStatusBadge('Working', kind: WabBadgeKind.progress)
+                      ? WabStatusBadge(workingLabel, kind: WabBadgeKind.progress)
                       : WabStatusBadge(
                           sceneReady ? 'Ready' : 'In progress',
                           kind: sceneReady ? WabBadgeKind.done : WabBadgeKind.progress,

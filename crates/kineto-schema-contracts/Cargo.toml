@@ -9,6 +9,7 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
+kineto-core = { path = "../kineto-core" }
 kineto-job-runtime = { path = "../kineto-job-runtime" }
 kineto-jobs = { path = "../kineto-jobs" }
 kineto-project = { path = "../kineto-project" }

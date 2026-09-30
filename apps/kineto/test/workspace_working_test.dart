@@ -55,4 +55,44 @@ void main() {
     }
     expect(calls, 0);
   });
+
+  testWidgets('a running generation says so', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const shot = KinetoShotSnapshot(
+      direction: KinetoShotDirection.reaction,
+      generated: false,
+      stale: false,
+      selectedIndex: null,
+      locked: false,
+      candidateCount: 0,
+      generation: 0,
+      supersededCount: 0,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: WabTheme.materialTheme(lightTheme: false),
+        home: DemoWorkspaceView(
+          engineSnapshot: const KinetoEngineSnapshot(abiVersion: 14),
+          shotSnapshot: shot,
+          shotSnapshots: const <KinetoShotSnapshot>[shot, shot],
+          activeShotIndex: 0,
+          working: true,
+          workingLabel: 'Generating',
+          onShotChanged: (_) {},
+          onDirectionChanged: (_) {},
+          onGenerate: () {},
+          onSelect: (_) {},
+          onLock: () {},
+          onReset: () {},
+        ),
+      ),
+    );
+
+    expect(find.text('Generating'), findsOneWidget);
+    expect(find.text('Working'), findsNothing);
+  });
 }

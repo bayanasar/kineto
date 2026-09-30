@@ -30,6 +30,8 @@ use kineto_project::{
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
+use crate::generation::{self, GenerationError, NoHooks};
+
 /// Shots addressable in the bootstrap scene.
 pub const SHOT_COUNT: usize = 2;
 
@@ -63,6 +65,9 @@ pub enum SessionError {
     Open(ProjectStoreError),
     /// The shot operation was refused or failed.
     Shot(ShotWorkflowError),
+    /// A generation job could not finish. Its write-ahead intents remain, so
+    /// the generation can be completed later.
+    Generation(GenerationError),
     /// A command arrived for a session whose open had failed.
     NotOpen,
     /// The worker caught a panic. The affected shot is reloaded from its
@@ -75,6 +80,7 @@ impl fmt::Display for SessionError {
         match self {
             Self::Open(error) => error.fmt(formatter),
             Self::Shot(error) => error.fmt(formatter),
+            Self::Generation(error) => error.fmt(formatter),
             Self::NotOpen => formatter.write_str("project session is not open"),
             Self::Panicked => formatter.write_str("project session worker panicked"),
         }
@@ -86,6 +92,7 @@ impl Error for SessionError {
         match self {
             Self::Open(error) => Some(error),
             Self::Shot(error) => Some(error),
+            Self::Generation(error) => Some(error),
             Self::NotOpen | Self::Panicked => None,
         }
     }
@@ -328,20 +335,32 @@ impl Worker {
     }
 
     fn apply(&mut self, shot_index: usize, command: ShotCommand) -> Result<(), SessionError> {
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_shot(shot_index, |project, shot| match command {
-                ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
-                ShotCommand::Generate => shot.generate(project),
-                ShotCommand::Select(candidate) => shot.select(project, candidate),
-                ShotCommand::Lock => shot.lock(project),
-                ShotCommand::Reset => shot.reset(project),
-                ShotCommand::MigrateLegacyHashes => {
-                    shot.migrate_legacy_hashes(project).map(|_report| ())
-                }
-            })
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
+            // Generation runs as write-ahead jobs so an interruption is
+            // recoverable; every other command is a single canonical update.
+            ShotCommand::Generate => self
+                .with_shot(shot_index, |project, shot| {
+                    generation::generate(project, shot, &mut NoHooks).map(|_outcome| ())
+                })
+                .map_err(|error| match error {
+                    GenerationError::Shot(error) => SessionError::Shot(error),
+                    error => SessionError::Generation(error),
+                }),
+            command => self
+                .with_shot(shot_index, |project, shot| match command {
+                    ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
+                    ShotCommand::Select(candidate) => shot.select(project, candidate),
+                    ShotCommand::Lock => shot.lock(project),
+                    ShotCommand::Reset => shot.reset(project),
+                    ShotCommand::MigrateLegacyHashes => {
+                        shot.migrate_legacy_hashes(project).map(|_report| ())
+                    }
+                    ShotCommand::Generate => unreachable!("generation is handled above"),
+                })
+                .map_err(SessionError::Shot),
         }));
         match outcome {
-            Ok(result) => result.map_err(SessionError::Shot),
+            Ok(result) => result,
             Err(_) => {
                 // Do not trust a half-applied in-memory shot; reload it from
                 // its canonical files on next use.
@@ -360,11 +379,11 @@ impl Worker {
         lock(&view.shots)[shot_index] = Some(snapshot);
     }
 
-    fn with_shot<R>(
+    fn with_shot<R, E: From<ShotWorkflowError>>(
         &mut self,
         shot_index: usize,
-        operation: impl FnOnce(&CanonicalProject, &mut ShotWorkflow) -> Result<R, ShotWorkflowError>,
-    ) -> Result<R, ShotWorkflowError> {
+        operation: impl FnOnce(&CanonicalProject, &mut ShotWorkflow) -> Result<R, E>,
+    ) -> Result<R, E> {
         if self.shots[shot_index].is_none() {
             let shot_number = u32::try_from(shot_index + 1).expect("shot count fits in u32");
             self.shots[shot_index] = Some(ShotWorkflow::load(&self.project, shot_number)?);

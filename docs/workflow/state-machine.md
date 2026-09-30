@@ -127,6 +127,21 @@ Reconciled intent files are diagnostic history, not recovery evidence. `IntentRe
 
 Runtime bookkeeping lives under `.kineto/`; durable artifact/provenance state lives in canonical project files. Deleting `.kineto/` intentionally discards in-flight recovery/idempotency bookkeeping, but it must not change what the user selected, locked, or otherwise accepted as canonical production truth.
 
+## Shot candidate generation jobs
+
+Shot candidates are generated as write-ahead jobs through `kineto-job-runtime`, one job per candidate. The candidate's artifact ID is both the job ID and the target artifact, the operation is `image.generate`, and until a real provider chain lands the provider is the deterministic `local-demo` generator (`kineto_core::generation`). A generation:
+
+1. plans the next revision, its three candidate IDs and their input hash without writing (`ShotWorkflow::plan_generation`)
+2. prepares one intent per candidate and invokes it
+3. attaches all three outputs to canonical shot state in one publication (`ShotWorkflow::attach_generation`), recording `provider`, `model`, `input_hash` and `content_hash` on each candidate
+4. acknowledges each intent as `Reconciled`
+
+Canonical state changes only in step 3, and attaching is idempotent: when every planned candidate is already published nothing is written, and a plan older than a generation published since is refused. One completion routine therefore finishes both a normal run and an interrupted one, from whichever step it last reached durably.
+
+The local demo generator keeps no remote state. Its result for an idempotency key is a pure function of the candidate and input hash the key names, so reconciling by key recomputes the result and never reports the job missing. It has no provider-side concurrency limit. The runtime refuses rather than waits when a provider's ceiling is reached, so a real provider will need a scheduler that waits for a permit.
+
+A generation that stops early is reported to the UI with status `121`; its intents stay under `.kineto/jobs/` for recovery.
+
 ## Engine/UI events
 
 The Flutter UI observes typed engine/job state through the in-process native boundary. It does not poll the filesystem and it does not receive JSON-RPC frames.

@@ -177,6 +177,10 @@ final class KinetoProjectException implements Exception {
   /// filesystem cannot lock files), so the project is not opened for writing.
   static const int lockUnavailable = 119;
 
+  /// A generation job stopped before it finished. Its write-ahead intents are
+  /// kept, so the generation can be completed later.
+  static const int generationJob = 121;
+
   final int code;
   final String message;
 
@@ -588,6 +592,7 @@ KinetoProjectException _projectException(int code) {
     118 => 'Legacy shot hashes need migration before this shot can change',
     119 => 'Project cannot be locked for single-writer access on this filesystem',
     120 => 'Project session is not open',
+    121 => 'Generation did not finish; its jobs are kept for recovery',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

@@ -48,6 +48,7 @@ const PROJECT_ERR_BUSY: i32 = 117;
 const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
 const PROJECT_ERR_LOCK_UNAVAILABLE: i32 = 119;
 const PROJECT_ERR_NOT_OPEN: i32 = 120;
+const PROJECT_ERR_GENERATION_JOB: i32 = 121;
 const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Message kinds posted to a session's Dart port.
@@ -580,6 +581,7 @@ fn session_status(result: &Result<(), SessionError>) -> i32 {
         Ok(()) => PROJECT_OK,
         Err(SessionError::Open(error)) => project_error_code(error),
         Err(SessionError::Shot(error)) => shot_error_code(error),
+        Err(SessionError::Generation(_)) => PROJECT_ERR_GENERATION_JOB,
         Err(SessionError::NotOpen) => PROJECT_ERR_NOT_OPEN,
         Err(SessionError::Panicked) => PROJECT_ERR_PANIC,
     }
@@ -608,6 +610,7 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         }
         ShotWorkflowError::Fs(_)
         | ShotWorkflowError::InvalidCanonicalState
+        | ShotWorkflowError::StaleGeneration
         | ShotWorkflowError::InvalidStoredHash { .. }
         | ShotWorkflowError::MigrationBackupConflict(_)
         | ShotWorkflowError::InvalidTarget(_)
