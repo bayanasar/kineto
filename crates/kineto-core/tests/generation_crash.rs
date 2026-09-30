@@ -122,8 +122,26 @@ fn crash_at(point: &str, target: &Path) -> ExitStatus {
     Command::new(env::current_exe().unwrap())
         .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD, format!("{point}|{}", target.display()))
+        // Where core dumps are enabled with a relative core_pattern (as in the
+        // CI runner image), the aborted child writes `core*` into its working
+        // directory. Keep that inside the test's temporary directory.
+        .current_dir(target.parent().expect("target has a parent"))
         .status()
         .unwrap()
+}
+
+/// Core dumps from aborted children must never land in the checkout.
+fn assert_no_core_dump_in_the_package() {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cores = fs::read_dir(package)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name == "core" || name.starts_with("core."))
+        .collect::<Vec<_>>();
+    assert!(
+        cores.is_empty(),
+        "core dumps left in the package: {cores:?}"
+    );
 }
 
 fn intent_states(target: &Path) -> Vec<String> {
@@ -219,6 +237,7 @@ fn crash_then_recover(point: &str, expected_intents: &[&str], candidates_on_disk
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(6), "the child must die by SIGABRT");
     }
+    assert_no_core_dump_in_the_package();
     assert_eq!(intent_states(&target), expected_intents);
     assert_eq!(artifact_ids(&target).len(), candidates_on_disk);
 
