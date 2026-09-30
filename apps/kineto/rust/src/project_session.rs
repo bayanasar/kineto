@@ -13,7 +13,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
-use crate::guarded;
+use crate::{contract::*, guarded};
 use kineto_core::session::{
     OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand, SnapshotError,
     SubmitError,
@@ -24,33 +24,8 @@ use kineto_project::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
-    shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflowError},
+    shot::{ShotDirection, ShotWorkflowError},
 };
-
-const PROJECT_OK: i32 = 0;
-const PROJECT_ERR_INVALID_ARGUMENT: i32 = 100;
-const PROJECT_ERR_INVALID_UTF8: i32 = 101;
-const PROJECT_ERR_IO: i32 = 102;
-const PROJECT_ERR_ALREADY_EXISTS: i32 = 103;
-const PROJECT_ERR_INVALID_MANIFEST: i32 = 104;
-const PROJECT_ERR_UNSUPPORTED_FORMAT: i32 = 105;
-const PROJECT_ERR_BUFFER_TOO_SMALL: i32 = 106;
-const PROJECT_ERR_READ_ONLY: i32 = 107;
-const PROJECT_ERR_INVALID_SHOT: i32 = 108;
-const PROJECT_ERR_NOT_GENERATED: i32 = 109;
-const PROJECT_ERR_INVALID_CANDIDATE: i32 = 110;
-const PROJECT_ERR_LOCKED: i32 = 111;
-const PROJECT_ERR_ALREADY_LOCKED: i32 = 112;
-const PROJECT_ERR_NO_SELECTION: i32 = 113;
-const PROJECT_ERR_STALE_SELECTION: i32 = 114;
-const PROJECT_ERR_INVALID_SHOT_STATE: i32 = 115;
-const PROJECT_ERR_GENERATION_OVERFLOW: i32 = 116;
-const PROJECT_ERR_BUSY: i32 = 117;
-const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
-const PROJECT_ERR_LOCK_UNAVAILABLE: i32 = 119;
-const PROJECT_ERR_NOT_OPEN: i32 = 120;
-const PROJECT_ERR_GENERATION_JOB: i32 = 121;
-const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
@@ -594,22 +569,6 @@ pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
     })
 }
 
-fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
-    let selected_code = snapshot
-        .selected_index
-        .map_or(0, |index| u64::from(index) + 1);
-    u64::from(snapshot.generated)
-        | (u64::from(snapshot.locked) << 1)
-        | (u64::from(snapshot.stale) << 2)
-        | (u64::from(snapshot.migration_pending) << 3)
-        | (u64::from(snapshot.invalid_hash_count != 0) << 4)
-        | (u64::from(snapshot.candidate_count) << 8)
-        | (selected_code << 16)
-        | (u64::from(snapshot.direction.code()) << 24)
-        | (u64::from(snapshot.generation_revision) << 32)
-        | (u64::from(snapshot.superseded_count) << 48)
-}
-
 fn session_status(result: &Result<(), SessionError>) -> i32 {
     match result {
         Ok(()) => PROJECT_OK,
@@ -663,7 +622,12 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
     }
 }
 
-unsafe fn copy_utf8(bytes: &[u8], out_buf: *mut u8, out_cap: u64, out_len: *mut u64) -> i32 {
+pub(crate) unsafe fn copy_utf8(
+    bytes: &[u8],
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
     if out_len.is_null() {
         return PROJECT_ERR_INVALID_ARGUMENT;
     }
@@ -723,6 +687,7 @@ fn project_error_code(error: &ProjectStoreError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kineto_project::shot::ShotApprovalSnapshot;
     use std::{
         collections::VecDeque,
         fs,
