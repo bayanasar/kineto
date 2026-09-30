@@ -104,6 +104,51 @@ void main() {
     }
   });
 
+  test('reopening completes a generation that was never acknowledged', () async {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
+    final target = Directory(_path(sandbox.path, 'film'));
+
+    try {
+      var project = await _createProject(target, 'ffi_project_recovery');
+      expect(project.recoveries, isEmpty);
+      await project.generateShotCandidates(0);
+      project.close();
+
+      // As if the app died after attaching the candidates but before the
+      // write-ahead intents were acknowledged.
+      final intents = Directory(_path(target.path, '.kineto', 'jobs', 'intents'))
+          .listSync()
+          .whereType<File>()
+          .toList();
+      expect(intents, hasLength(3));
+      for (final intent in intents) {
+        final json = jsonDecode(intent.readAsStringSync()) as Map<String, dynamic>;
+        json['state'] = 'invoked';
+        intent.writeAsStringSync(jsonEncode(json));
+      }
+
+      project = await KinetoProjectSession.open(target.path);
+      final recoveries = project.recoveries;
+      expect(recoveries, hasLength(1));
+      expect(recoveries.single.completed, isTrue);
+      expect(recoveries.single.shotIndex, 0);
+      expect(recoveries.single.revisionOrCount, 1);
+      expect(project.shotSnapshot(0).generation, 1);
+      expect(project.shotSnapshot(0).candidateCount, 3);
+      for (final intent in intents) {
+        final json = jsonDecode(intent.readAsStringSync()) as Map<String, dynamic>;
+        expect(json['state'], 'reconciled');
+      }
+      project.close();
+
+      project = await KinetoProjectSession.open(target.path);
+      expect(project.recoveries, isEmpty);
+      project.close();
+    } finally {
+      sandbox.deleteSync(recursive: true);
+    }
+  });
+
   test('legacy shot hashes stay read-only until an explicit migration', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-project-ffi-');
     final target = Directory(_path(sandbox.path, 'film'));

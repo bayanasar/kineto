@@ -30,7 +30,7 @@ use kineto_project::{
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
-use crate::generation::{self, GenerationError, NoHooks};
+use crate::generation::{self, GenerationError, NoHooks, Unfinished};
 
 /// Shots addressable in the bootstrap scene.
 pub const SHOT_COUNT: usize = 2;
@@ -65,8 +65,8 @@ pub enum SessionError {
     Open(ProjectStoreError),
     /// The shot operation was refused or failed.
     Shot(ShotWorkflowError),
-    /// A generation job could not finish. Its write-ahead intents remain, so
-    /// the generation can be completed later.
+    /// A generation job could not finish. Its write-ahead intents remain and
+    /// the generation is completed when the project is next opened.
     Generation(GenerationError),
     /// A command arrived for a session whose open had failed.
     NotOpen,
@@ -98,13 +98,35 @@ impl Error for SessionError {
     }
 }
 
+/// Work an earlier session left unfinished, dealt with when this session
+/// opened and before any command runs.
+#[derive(Debug)]
+pub enum Recovery {
+    /// An interrupted generation of this shot was completed.
+    Completed { shot_index: u32, revision: u16 },
+    /// An interrupted generation of this shot could not be completed. Its
+    /// intents remain; the next open tries again.
+    Failed {
+        shot_index: u32,
+        revision: u16,
+        error: SessionError,
+    },
+    /// Job records that could not be read, placed or scanned. Nothing was
+    /// changed; a person needs to look at them.
+    NeedsAttention { count: usize },
+}
+
 /// Receives a session's outcomes on the worker thread.
 ///
 /// Implementations must return quickly and must not call back into the
 /// session; they typically post a message to the UI.
 pub trait SessionSink: Send + 'static {
-    /// The open or create finished. Snapshots and metadata are published
-    /// before this is called.
+    /// Unfinished work from an earlier session was dealt with. Called before
+    /// [`SessionSink::opened`], once per recovery.
+    fn recovered(&self, recovery: &Recovery);
+
+    /// The open or create finished. Snapshots and metadata are published and
+    /// recoveries delivered before this is called.
     fn opened(&self, result: &Result<(), SessionError>);
 
     /// A command finished. The shot's snapshot is published before this is
@@ -271,6 +293,12 @@ fn run(request: OpenRequest, inbox: &mpsc::Receiver<Envelope>, view: &View, gate
     let mut worker = match opened {
         Ok(project) => {
             let mut worker = Worker::new(project);
+            // Finish what an earlier session left before accepting commands.
+            let recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
+                .unwrap_or_else(|_| {
+                    worker.shots = [None, None];
+                    vec![Recovery::NeedsAttention { count: 1 }]
+                });
             let project = &worker.project;
             let _ = view.metadata.set(ProjectMetadata {
                 project_id: project.manifest().project_id.clone(),
@@ -280,6 +308,9 @@ fn run(request: OpenRequest, inbox: &mpsc::Receiver<Envelope>, view: &View, gate
             });
             for shot_index in 0..SHOT_COUNT {
                 worker.publish(view, shot_index);
+            }
+            for recovery in &recoveries {
+                gate.deliver(|sink| sink.recovered(recovery));
             }
             gate.deliver(|sink| sink.opened(&Ok(())));
             Some(worker)
@@ -370,6 +401,58 @@ impl Worker {
         }
     }
 
+    /// Complete generations an earlier session left unfinished. Read-only
+    /// projects are never written, so nothing is recovered in them.
+    fn recover(&mut self) -> Vec<Recovery> {
+        if self.project.is_read_only() {
+            return Vec::new();
+        }
+        let Unfinished {
+            plans,
+            needs_attention,
+        } = match generation::unfinished(&self.project) {
+            Ok(unfinished) => unfinished,
+            Err(_) => return vec![Recovery::NeedsAttention { count: 1 }],
+        };
+        let mut recoveries = Vec::with_capacity(plans.len() + 1);
+        let mut unplaced = needs_attention;
+        for plan in plans {
+            let Some(shot_index) = usize::try_from(plan.shot_number())
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .filter(|index| *index < SHOT_COUNT)
+            else {
+                unplaced += 1;
+                continue;
+            };
+            let result = self.with_shot(shot_index, |project, shot| {
+                generation::complete(project, shot, &plan, &mut NoHooks)
+            });
+            let shot_index = u32::try_from(shot_index).expect("shot index fits in u32");
+            recoveries.push(match result {
+                Ok(_outcome) => Recovery::Completed {
+                    shot_index,
+                    revision: plan.revision(),
+                },
+                Err(error) => {
+                    self.shots[shot_index as usize] = None;
+                    Recovery::Failed {
+                        shot_index,
+                        revision: plan.revision(),
+                        error: match error {
+                            GenerationError::Shot(error) => SessionError::Shot(error),
+                            error => SessionError::Generation(error),
+                        },
+                    }
+                }
+            });
+        }
+        if unplaced > 0 {
+            recoveries.push(Recovery::NeedsAttention { count: unplaced });
+        }
+        recoveries
+    }
+
     fn publish(&mut self, view: &View, shot_index: usize) {
         let snapshot = panic::catch_unwind(AssertUnwindSafe(|| {
             self.with_shot(shot_index, |_, shot| shot.snapshot())
@@ -441,6 +524,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
+        Recovered(String),
         Opened(Result<(), String>),
         Completed {
             token: u64,
@@ -460,6 +544,10 @@ mod tests {
     }
 
     impl SessionSink for ChannelSink {
+        fn recovered(&self, recovery: &Recovery) {
+            let _ = lock(&self.0).send(Event::Recovered(format!("{recovery:?}")));
+        }
+
         fn opened(&self, result: &Result<(), SessionError>) {
             let _ = lock(&self.0).send(Event::Opened(describe(result)));
         }
@@ -571,6 +659,8 @@ mod tests {
             release: Arc<Barrier>,
         }
         impl SessionSink for GatedSink {
+            fn recovered(&self, _recovery: &Recovery) {}
+
             fn opened(&self, result: &Result<(), SessionError>) {
                 // Hold the worker here until the test has queued commands.
                 self.release.wait();

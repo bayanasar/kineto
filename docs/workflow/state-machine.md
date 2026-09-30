@@ -140,7 +140,9 @@ Canonical state changes only in step 3, and attaching is idempotent: when every 
 
 The local demo generator keeps no remote state. Its result for an idempotency key is a pure function of the candidate and input hash the key names, so reconciling by key recomputes the result and never reports the job missing. It has no provider-side concurrency limit. The runtime refuses rather than waits when a provider's ceiling is reached, so a real provider will need a scheduler that waits for a permit.
 
-A generation that stops early is reported to the UI with status `121`; its intents stay under `.kineto/jobs/` for recovery.
+A generation that stops early is reported to the UI with status `121`. Its intents stay under `.kineto/jobs/`, and the next session completes it before accepting any command. On open, the session worker runs startup reconciliation for the demo provider, regroups the reported candidates into their generation plans (a candidate ID names its shot and revision; the input hash comes back with the reconciled result), and drives each plan to the end through the same completion routine. Each recovery is reported to the UI before the open completes. A plan that cannot be completed keeps its intents and is tried again on the next open. Read-only projects are never written, so nothing is recovered in them.
+
+Crash tests kill a real process with `abort()` after the first intent is written, after every candidate is invoked, and after the attach. They then reopen the project and assert that the generation is attached exactly once and that every intent is `Reconciled`.
 
 ## Engine/UI events
 

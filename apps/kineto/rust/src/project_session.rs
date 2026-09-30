@@ -15,7 +15,8 @@ use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::guarded;
 use kineto_core::session::{
-    OpenRequest, ProjectSession, SessionError, SessionSink, ShotCommand, SnapshotError, SubmitError,
+    OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand, SnapshotError,
+    SubmitError,
 };
 use kineto_project::{
     fs::ProjectFsError,
@@ -54,6 +55,9 @@ const PROJECT_ERR_PANIC: i32 = 199;
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
 const MESSAGE_COMPLETED: i64 = 2;
+/// `[RECOVERED, revision or record count, status, shot or -1]`, posted before
+/// `OPENED` for each piece of unfinished work an earlier session left.
+const MESSAGE_RECOVERED: i64 = 3;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -109,6 +113,36 @@ impl DartPort {
 }
 
 impl SessionSink for DartPort {
+    fn recovered(&self, recovery: &Recovery) {
+        self.post(match recovery {
+            Recovery::Completed {
+                shot_index,
+                revision,
+            } => [
+                MESSAGE_RECOVERED,
+                i64::from(*revision),
+                i64::from(PROJECT_OK),
+                i64::from(*shot_index),
+            ],
+            Recovery::Failed {
+                shot_index,
+                revision,
+                error,
+            } => [
+                MESSAGE_RECOVERED,
+                i64::from(*revision),
+                i64::from(session_error_code(error)),
+                i64::from(*shot_index),
+            ],
+            Recovery::NeedsAttention { count } => [
+                MESSAGE_RECOVERED,
+                i64::try_from(*count).unwrap_or(i64::MAX),
+                i64::from(PROJECT_ERR_GENERATION_JOB),
+                -1,
+            ],
+        });
+    }
+
     fn opened(&self, result: &Result<(), SessionError>) {
         self.post([MESSAGE_OPENED, 0, i64::from(session_status(result)), 0]);
     }
@@ -579,11 +613,17 @@ fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
 fn session_status(result: &Result<(), SessionError>) -> i32 {
     match result {
         Ok(()) => PROJECT_OK,
-        Err(SessionError::Open(error)) => project_error_code(error),
-        Err(SessionError::Shot(error)) => shot_error_code(error),
-        Err(SessionError::Generation(_)) => PROJECT_ERR_GENERATION_JOB,
-        Err(SessionError::NotOpen) => PROJECT_ERR_NOT_OPEN,
-        Err(SessionError::Panicked) => PROJECT_ERR_PANIC,
+        Err(error) => session_error_code(error),
+    }
+}
+
+fn session_error_code(error: &SessionError) -> i32 {
+    match error {
+        SessionError::Open(error) => project_error_code(error),
+        SessionError::Shot(error) => shot_error_code(error),
+        SessionError::Generation(_) => PROJECT_ERR_GENERATION_JOB,
+        SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
+        SessionError::Panicked => PROJECT_ERR_PANIC,
     }
 }
 
