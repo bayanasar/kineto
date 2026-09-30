@@ -321,6 +321,11 @@ fn ensure_directory(root: &ProjectRoot, directory: &Path) -> Result<(), ProjectF
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir(&current).map_err(ProjectFsError::Io)?;
+                // The new entry lives in the parent directory. Flush it so a
+                // file later published inside this directory cannot outlive
+                // the directory's own name after a crash.
+                let parent = current.parent().unwrap_or(root.root());
+                sync_directory_impl(parent).map_err(ProjectFsError::Io)?;
             }
             Err(error) => return Err(ProjectFsError::Io(error)),
         }
