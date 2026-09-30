@@ -41,9 +41,9 @@ There is no desktop:
 - engine executable lookup
 - duplicate request/response schema
 
-Native ABI v8 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and tightens project-session ownership. Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
+Native ABI v11 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer session status (`117`) and v11 the explicit legacy-hash migration entry point with its refusal status (`118`). Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
 
-The demo snapshot remains one packed `u64` containing generated/locked flags, candidate count, selected candidate, shot direction, generation revision, and superseded count. This compact demo ABI is disposable scaffolding, not the final project model.
+The demo snapshot remains one packed `u64` containing generated/locked/stale flags, legacy-migration-pending and invalid-hash flags, candidate count, selected candidate, shot direction, generation revision, and superseded count. This compact demo ABI is disposable scaffolding, not the final project model.
 
 ## Build and packaging
 
@@ -113,7 +113,7 @@ Do not base64 media, stringify structured state, or repeatedly parse durable pro
 
 Human-readable TOML/JSON/Markdown remain appropriate for **project storage** because portability and inspectability are goals there; they are not used as the in-process call format.
 
-The current two-shot demo still uses separate compact sidecars only to prove local approval behavior. They are explicitly not canonical project files. The canonical project session now proves real `project.toml` create/open independently; subsequent work moves durable shot/selection state into that store and retires the sidecars.
+The two-shot demo keeps its approval state in canonical project files — `scenes/scene_001/shots/shot_00N/shot.json`, `artifacts.json` and `selection.json` — inside the project directory. The earlier machine-level demo sidecars are retired; deleting `.kineto/` loses no approval state.
 
 ## Async and events
 

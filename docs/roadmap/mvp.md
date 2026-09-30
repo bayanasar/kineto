@@ -57,7 +57,7 @@ Local demo project
   → selection and lock remain
 ```
 
-This checkpoint uses the real Rust artifact lifecycle, typed FFI, and WabiSabi UI. Its four-byte demo persistence is intentionally disposable scaffolding, not the final canonical project serializer and not a provider implementation.
+This checkpoint uses the real Rust artifact lifecycle, typed FFI, and WabiSabi UI. Its approval state is written as canonical project files, but the deterministic candidates are demo scaffolding with no generated media and no provider behind them; they are not a provider implementation.
 
 Exit criteria:
 
