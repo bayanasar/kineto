@@ -168,6 +168,9 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onReset: () => _run(
         () => widget.project.resetShot(_activeShotIndex),
       ),
+      onMigrate: () => _run(
+        () => widget.project.migrateLegacyHashes(_activeShotIndex),
+      ),
     );
   }
 }
@@ -184,6 +187,7 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onSelect,
     required this.onLock,
     required this.onReset,
+    this.onMigrate,
     this.isDarkMode = true,
     this.onThemeToggle,
     this.error,
@@ -202,12 +206,15 @@ class DemoWorkspaceView extends StatelessWidget {
   final ValueChanged<int> onSelect;
   final VoidCallback onLock;
   final VoidCallback onReset;
+  final VoidCallback? onMigrate;
   final String? error;
 
   @override
   Widget build(BuildContext context) {
     final selectedIndex = shotSnapshot.selectedIndex;
-    final canLock = shotSnapshot.generated &&
+    final blocked = shotSnapshot.changesBlocked;
+    final canLock = !blocked &&
+        shotSnapshot.generated &&
         selectedIndex != null &&
         !shotSnapshot.locked &&
         !shotSnapshot.stale;
@@ -284,6 +291,37 @@ class DemoWorkspaceView extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
+                if (shotSnapshot.migrationPending) ...<Widget>[
+                  WabPanel(
+                    title: 'Legacy hashes need migration',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        const Text(
+                          'This shot was saved by an older Kineto build. It stays readable, but changes are '
+                          'refused until its hashes are rewritten to the current form. The original records '
+                          'are kept in artifacts.pre-sha256-migration.json.',
+                        ),
+                        const SizedBox(height: 12),
+                        WabButton(
+                          kind: WabMaterialKind.seal,
+                          onPressed: onMigrate,
+                          child: const Text('Migrate with backup'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ] else if (shotSnapshot.hasInvalidHashes) ...<Widget>[
+                  const WabPanel(
+                    title: 'Unrecognised stored hashes',
+                    child: Text(
+                      'This shot contains hashes this build cannot verify. It stays readable; changes are '
+                      'refused until the records are repaired.',
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ],
                 WabPanel(
                   title: 'Shot direction',
                   child: Column(
@@ -304,7 +342,7 @@ class DemoWorkspaceView extends StatelessWidget {
                               kind: direction == shotSnapshot.direction
                                   ? WabMaterialKind.seal
                                   : WabMaterialKind.zhuwen,
-                              onPressed: shotSnapshot.locked
+                              onPressed: shotSnapshot.locked || blocked
                                   ? null
                                   : () => onDirectionChanged(direction),
                               child: Text(direction.label),
@@ -331,7 +369,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       if (!shotSnapshot.generated)
                         WabElevatedButton(
                           text: const Text('Generate 3 deterministic candidates'),
-                          callback: onGenerate,
+                          callback: blocked ? null : onGenerate,
                         )
                       else
                         Row(
@@ -340,7 +378,8 @@ class DemoWorkspaceView extends StatelessWidget {
                             const SizedBox(width: 16),
                             WabButton(
                               kind: WabMaterialKind.zhuwen,
-                              onPressed: shotSnapshot.locked ? null : onGenerate,
+                              onPressed:
+                                  shotSnapshot.locked || blocked ? null : onGenerate,
                               child: const Text('Regenerate'),
                             ),
                           ],
@@ -370,7 +409,7 @@ class DemoWorkspaceView extends StatelessWidget {
                                   ? (selected ? 'Locked' : 'Candidate')
                                   : (selected ? 'Selected' : 'Select'),
                               highlighted: selected,
-                              onPressed: shotSnapshot.locked
+                              onPressed: shotSnapshot.locked || blocked
                                   ? null
                                   : () => onSelect(index),
                             ),
@@ -400,7 +439,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       Expanded(
                         child: WabButton(
                           kind: WabMaterialKind.zhuwen,
-                          onPressed: onReset,
+                          onPressed: blocked ? null : onReset,
                           expand: true,
                           child: const Text('Reset shot'),
                         ),

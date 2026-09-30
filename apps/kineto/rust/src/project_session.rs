@@ -29,6 +29,7 @@ const PROJECT_ERR_STALE_SELECTION: i32 = 114;
 const PROJECT_ERR_INVALID_SHOT_STATE: i32 = 115;
 const PROJECT_ERR_GENERATION_OVERFLOW: i32 = 116;
 const PROJECT_ERR_BUSY: i32 = 117;
+const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
 const PROJECT_ERR_PANIC: i32 = 199;
 const PROJECT_SHOT_COUNT: usize = 2;
 
@@ -436,6 +437,28 @@ pub unsafe extern "C" fn kineto_project_shot_reset(
     })
 }
 
+/// Explicitly migrate one shot's known legacy demo hashes to canonical
+/// `sha256:` form. The original `artifacts.json` bytes are written to a backup
+/// file first. Loading a shot never does this on its own; this call is the
+/// user's opt-in.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
+    session: *mut KinetoProjectSession,
+    shot_index: u32,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        let Some(session) = (unsafe { session.as_mut() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        shot_result_code(session.with_shot(shot_index, |project, shot| {
+            shot.migrate_legacy_hashes(project).map(|_report| ())
+        }))
+    })
+}
+
 fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
     let selected_code = snapshot
         .selected_index
@@ -469,6 +492,7 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         ShotWorkflowError::NoSelection => PROJECT_ERR_NO_SELECTION,
         ShotWorkflowError::StaleSelection => PROJECT_ERR_STALE_SELECTION,
         ShotWorkflowError::GenerationOverflow => PROJECT_ERR_GENERATION_OVERFLOW,
+        ShotWorkflowError::MigrationRequired => PROJECT_ERR_MIGRATION_REQUIRED,
         ShotWorkflowError::Manifest(ProjectManifestError::ReadOnlyFormatVersion(_)) => {
             PROJECT_ERR_READ_ONLY
         }
@@ -481,7 +505,6 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         }
         ShotWorkflowError::Fs(_)
         | ShotWorkflowError::InvalidCanonicalState
-        | ShotWorkflowError::MigrationRequired
         | ShotWorkflowError::InvalidStoredHash { .. }
         | ShotWorkflowError::MigrationBackupConflict(_)
         | ShotWorkflowError::InvalidTarget(_)
@@ -750,6 +773,61 @@ mod tests {
         );
         assert!(out.is_null());
         fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn legacy_hashes_block_writes_until_explicit_migration_with_backup() {
+        let target = temp_target();
+        let path = target.to_string_lossy().into_owned();
+        let mut session = ptr::null_mut();
+        assert_eq!(unsafe { create_text(&path, &raw mut session) }, PROJECT_OK);
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(session, 0) },
+            PROJECT_OK
+        );
+        unsafe { kineto_project_destroy(session) };
+
+        // Rewrite the shot's records in the pre-sha256 demo form an older
+        // build produced.
+        let shot_dir = target.join("scenes/scene_001/shots/shot_001");
+        let artifacts_path = shot_dir.join("artifacts.json");
+        let mut artifacts: serde_json::Value =
+            serde_json::from_slice(&fs::read(&artifacts_path).unwrap()).unwrap();
+        for artifact in artifacts.as_array_mut().unwrap() {
+            let id = artifact["artifact_id"].as_str().unwrap().to_owned();
+            artifact["content_hash"] = format!("demo:{id}").into();
+            artifact["input_hash"] = "kineto:shot-intent:v1:shot_001:reaction".into();
+        }
+        let legacy = serde_json::to_vec_pretty(&artifacts).unwrap();
+        fs::write(&artifacts_path, &legacy).unwrap();
+
+        let mut reopened = ptr::null_mut();
+        assert_eq!(
+            unsafe { kineto_project_open(path.as_ptr(), path.len() as u64, &raw mut reopened) },
+            PROJECT_OK
+        );
+        assert_ne!(unsafe { snapshot(reopened, 0) } & (1 << 3), 0);
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(reopened, 0) },
+            PROJECT_ERR_MIGRATION_REQUIRED
+        );
+        assert_eq!(fs::read(&artifacts_path).unwrap(), legacy);
+
+        assert_eq!(
+            unsafe { kineto_project_shot_migrate_legacy_hashes(reopened, 0) },
+            PROJECT_OK
+        );
+        assert_eq!(unsafe { snapshot(reopened, 0) } & (1 << 3), 0);
+        assert_eq!(
+            fs::read(shot_dir.join("artifacts.pre-sha256-migration.json")).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            unsafe { kineto_project_shot_generate(reopened, 0) },
+            PROJECT_OK
+        );
+        unsafe { kineto_project_destroy(reopened) };
+        let _ = fs::remove_dir_all(target);
     }
 
     #[test]

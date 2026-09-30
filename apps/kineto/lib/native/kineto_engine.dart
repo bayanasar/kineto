@@ -24,7 +24,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 10;
+const int kinetoExpectedNativeAbiVersion = 11;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);
@@ -81,6 +81,8 @@ final class KinetoShotSnapshot {
     required this.candidateCount,
     required this.generation,
     required this.supersededCount,
+    this.migrationPending = false,
+    this.hasInvalidHashes = false,
   });
 
   factory KinetoShotSnapshot.fromBits(int bits) {
@@ -94,6 +96,8 @@ final class KinetoShotSnapshot {
       selectedIndex: selectedCode == 0 ? null : selectedCode - 1,
       generation: (bits >> 32) & 0xffff,
       supersededCount: (bits >> 48) & 0xffff,
+      migrationPending: ((bits >> 3) & 1) != 0,
+      hasInvalidHashes: ((bits >> 4) & 1) != 0,
     );
   }
 
@@ -105,6 +109,16 @@ final class KinetoShotSnapshot {
   final int candidateCount;
   final int generation;
   final int supersededCount;
+
+  /// Stored hashes use a known legacy form. The shot is readable, and changes
+  /// are refused until the user migrates it explicitly.
+  final bool migrationPending;
+
+  /// Stored hashes this build cannot recognise. The shot stays readable and
+  /// every change is refused.
+  final bool hasInvalidHashes;
+
+  bool get changesBlocked => migrationPending || hasInvalidHashes;
 }
 
 /// Thin owner for the in-process Rust engine.
