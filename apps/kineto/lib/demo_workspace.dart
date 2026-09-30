@@ -291,7 +291,17 @@ class DemoWorkspaceView extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
-                if (shotSnapshot.migrationPending) ...<Widget>[
+                if (shotSnapshot.hasInvalidHashes) ...<Widget>[
+                  WabPanel(
+                    title: 'Unrecognised stored hashes',
+                    child: Text(
+                      'This shot contains hashes this build cannot verify. It stays readable; changes are '
+                      'refused until the records are repaired.'
+                      '${shotSnapshot.migrationPending ? ' Legacy hash migration is refused until then too.' : ''}',
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ] else if (shotSnapshot.canMigrate) ...<Widget>[
                   WabPanel(
                     title: 'Legacy hashes need migration',
                     child: Column(
@@ -309,15 +319,6 @@ class DemoWorkspaceView extends StatelessWidget {
                           child: const Text('Migrate with backup'),
                         ),
                       ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                ] else if (shotSnapshot.hasInvalidHashes) ...<Widget>[
-                  const WabPanel(
-                    title: 'Unrecognised stored hashes',
-                    child: Text(
-                      'This shot contains hashes this build cannot verify. It stays readable; changes are '
-                      'refused until the records are repaired.',
                     ),
                   ),
                   const SizedBox(height: 20),

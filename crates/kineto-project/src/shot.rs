@@ -1719,4 +1719,36 @@ mod tests {
             }) if actual_id == artifact_id && value == "banana"
         ));
     }
+
+    #[test]
+    fn legacy_and_unrecognised_hashes_together_refuse_migration() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        shot.generate(&project).unwrap();
+
+        let artifacts_path = shot_dir(&target).join("artifacts.json");
+        let mut artifacts: Vec<StoredArtifactRecord> =
+            serde_json::from_slice(&fs::read(&artifacts_path).unwrap()).unwrap();
+        artifacts[0].content_hash = "banana".to_owned();
+        artifacts[1].content_hash = format!("demo:{}", artifacts[1].artifact_id);
+        let mixed = serde_json::to_vec_pretty(&artifacts).unwrap();
+        fs::write(&artifacts_path, &mixed).unwrap();
+        drop(project);
+
+        // Both conditions are reported at once. Migration is refused while
+        // any hash is unrecognised, so a caller must not offer it then.
+        let reopened = CanonicalProject::open(&target).unwrap();
+        let mut shot = ShotWorkflow::load(&reopened, 1).unwrap();
+        let snapshot = shot.snapshot().unwrap();
+        assert!(snapshot.migration_pending);
+        assert_eq!(snapshot.invalid_hash_count, 1);
+        assert!(matches!(
+            shot.migrate_legacy_hashes(&reopened),
+            Err(ShotWorkflowError::InvalidStoredHash { .. })
+        ));
+        assert_eq!(fs::read(&artifacts_path).unwrap(), mixed);
+        assert!(!shot_dir(&target).join(LEGACY_HASH_BACKUP_FILE).exists());
+    }
 }

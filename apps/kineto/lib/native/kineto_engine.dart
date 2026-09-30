@@ -119,6 +119,10 @@ final class KinetoShotSnapshot {
   final bool hasInvalidHashes;
 
   bool get changesBlocked => migrationPending || hasInvalidHashes;
+
+  /// Native migration refuses while any hash is unrecognised, so it is only
+  /// offered for a shot whose sole problem is the known legacy form.
+  bool get canMigrate => migrationPending && !hasInvalidHashes;
 }
 
 /// Thin owner for the in-process Rust engine.

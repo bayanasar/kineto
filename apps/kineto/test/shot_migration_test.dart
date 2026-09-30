@@ -96,6 +96,53 @@ void main() {
     expect(find.text('Migrate with backup'), findsNothing);
   });
 
+  testWidgets('unrecognised hashes take precedence over a pending migration', (
+    tester,
+  ) async {
+    const mixed = KinetoShotSnapshot(
+      direction: KinetoShotDirection.reaction,
+      generated: true,
+      stale: false,
+      selectedIndex: null,
+      locked: false,
+      candidateCount: 3,
+      generation: 1,
+      supersededCount: 0,
+      migrationPending: true,
+      hasInvalidHashes: true,
+    );
+    var migrateCalls = 0;
+    var generateCalls = 0;
+    await pump(
+      tester,
+      mixed,
+      onMigrate: () => migrateCalls++,
+      onGenerate: () => generateCalls++,
+    );
+
+    expect(find.text('Unrecognised stored hashes'), findsOneWidget);
+    expect(
+      find.textContaining('Legacy hash migration is refused until then too'),
+      findsOneWidget,
+    );
+    expect(find.text('Legacy hashes need migration'), findsNothing);
+    expect(find.text('Migrate with backup'), findsNothing);
+    await tester.tap(find.text('Regenerate'), warnIfMissed: false);
+    expect(generateCalls, 0);
+    expect(migrateCalls, 0);
+  });
+
+  test('migration is offered only when legacy hashes are the sole problem', () {
+    KinetoShotSnapshot flags({required bool pending, required bool invalid}) =>
+        KinetoShotSnapshot.fromBits(
+          (pending ? 1 << 3 : 0) | (invalid ? 1 << 4 : 0),
+        );
+    expect(flags(pending: true, invalid: false).canMigrate, isTrue);
+    expect(flags(pending: true, invalid: true).canMigrate, isFalse);
+    expect(flags(pending: false, invalid: true).canMigrate, isFalse);
+    expect(flags(pending: false, invalid: false).canMigrate, isFalse);
+  });
+
   test('snapshot flags decode from the native bit layout', () {
     final decoded = KinetoShotSnapshot.fromBits((1 << 3) | (1 << 4));
     expect(decoded.migrationPending, isTrue);
