@@ -202,6 +202,7 @@ final class KinetoProjectException implements Exception {
 final class KinetoProjectSession implements Finalizable {
   KinetoProjectSession._(this._handle, this._port) {
     _finalizer.attach(this, _handle, detach: this);
+    _portFinalizer.attach(this, _port, detach: this);
   }
 
   static const int shotCount = 2;
@@ -211,6 +212,12 @@ final class KinetoProjectSession implements Finalizable {
       _kinetoProjectDestroy,
     ),
   );
+
+  // A session collected without close() also releases its port. It can only
+  // be collected while nothing is owed: the port holds the session until
+  // every answer has arrived.
+  static final Finalizer<_SessionPort> _portFinalizer =
+      Finalizer<_SessionPort>((port) => port.close());
 
   final Pointer<Void> _handle;
   final _SessionPort _port;
@@ -403,6 +410,7 @@ final class KinetoProjectSession implements Finalizable {
     if (_closed) return;
     _closed = true;
     _finalizer.detach(this);
+    _portFinalizer.detach(this);
     // Destroy first: after it returns the worker posts nothing more, so the
     // port can be closed without losing a message that still matters.
     _kinetoProjectDestroy(_handle);
@@ -412,7 +420,7 @@ final class KinetoProjectSession implements Finalizable {
   Future<void> _submit(int shotIndex, int Function(int token) queue) {
     _ensureOpen();
     _checkShotIndex(shotIndex);
-    final (token, done) = _port.begin();
+    final (token, done) = _port.begin(this);
     final code = queue(token);
     if (code != 0) _port.fail(token, _projectException(code));
     return done;
@@ -445,6 +453,12 @@ final class _SessionPort {
 
   late final RawReceivePort _raw;
   final Completer<void> _openCompleter = Completer<void>();
+
+  // While an answer is owed, the port holds its session, so garbage
+  // collection cannot finalize the session and suppress that answer. The
+  // field exists only to keep the session reachable; it is never read.
+  // ignore: unused_field
+  Object? _owner;
   final Map<int, Completer<void>> _pending = <int, Completer<void>>{};
   final List<KinetoRecovery> recoveries = <KinetoRecovery>[];
   int _nextToken = 1;
@@ -454,10 +468,11 @@ final class _SessionPort {
 
   Future<void> get opened => _openCompleter.future;
 
-  (int, Future<void>) begin() {
+  (int, Future<void>) begin(Object owner) {
     final token = _nextToken++;
     final completer = Completer<void>();
     _pending[token] = completer;
+    _owner = owner;
     _updateKeepAlive();
     return (token, completer.future);
   }
@@ -470,6 +485,7 @@ final class _SessionPort {
   void close() {
     if (_closed) return;
     _closed = true;
+    _owner = null;
     _raw.close();
     const error = KinetoProjectSessionClosedException();
     if (!_openCompleter.isCompleted) _openCompleter.completeError(error);
@@ -516,6 +532,7 @@ final class _SessionPort {
   void _updateKeepAlive() {
     if (_closed) return;
     _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
+    if (_pending.isEmpty) _owner = null;
   }
 }
 
