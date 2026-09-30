@@ -36,7 +36,11 @@ Future<void> main() async {
     ], workingDirectory: fixture.path);
     final dart = _dartExecutable();
 
-    for (final mode in const ['runtime-finalizer', 'explicit-close']) {
+    for (final mode in const [
+      'finalizer',
+      'runtime-finalizer',
+      'explicit-close',
+    ]) {
       final marker = File(_join(sandbox.path, '$mode.marker'));
       if (marker.existsSync()) marker.deleteSync();
 
@@ -72,8 +76,8 @@ Future<void> main() async {
     }
 
     stdout.writeln(
-      'KinetoEngine ownership probe passed: runtime GC finalizer and explicit '
-      'close each destroyed exactly once.',
+      'KinetoEngine ownership probe passed: shutdown finalizer, runtime GC '
+      'finalizer and explicit close each destroyed exactly once.',
     );
   } finally {
     if (sandbox.existsSync()) {
