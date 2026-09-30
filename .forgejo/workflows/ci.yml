@@ -124,20 +124,10 @@ jobs:
                 | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
             fi
 
-            if ! RUSTUP_AUTO_INSTALL=0 rustup run 1.98.1 rustc --version >/dev/null 2>&1; then
-              rustup toolchain install 1.98.1 \
-                --profile minimal \
-                --component rustfmt \
-                --component clippy
-            fi
-
-            target_libdir="$(
-              RUSTUP_AUTO_INSTALL=0 rustup run 1.98.1 rustc \
-                --print target-libdir --target x86_64-unknown-linux-gnu 2>/dev/null || true
-            )"
-            if [ -z "$target_libdir" ] || [ ! -d "$target_libdir" ]; then
-              rustup target add x86_64-unknown-linux-gnu --toolchain 1.98.1
-            fi
+            # rust-toolchain.toml stays the only pin; both commands are no-ops
+            # when what it names is already installed.
+            rustup toolchain install
+            rustup target add x86_64-unknown-linux-gnu
           fi
 
           test -z "${RUSTUP_TOOLCHAIN:-}"
