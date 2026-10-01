@@ -321,6 +321,29 @@ pub(crate) fn document_error(error: impl Error + Send + Sync + 'static) -> Gener
     }
 }
 
+fn request_for(spec: &DocumentSpec) -> LlmRequest {
+    LlmRequest {
+        messages: vec![
+            Message::system(spec.instructions.clone()),
+            Message::user(spec.input.clone()),
+        ],
+        schema: Some(OutputSchema {
+            name: spec.schema_name.to_owned(),
+            schema_json: spec.schema_json.to_owned(),
+        }),
+        max_output_tokens: spec.max_output_tokens,
+    }
+}
+
+/// What asking for `spec` would cost with `info`, in USD micros, counting
+/// its full output allowance; `None` when the cost is not known, as for an
+/// agent on a subscription.
+#[must_use]
+pub fn estimate_micros(info: &LlmBackendInfo, spec: &DocumentSpec) -> Option<u64> {
+    let output = spec.max_output_tokens.map_or(4_000, u64::from);
+    kineto_llm::estimate_cost(info, &request_for(spec), output).map(|cost| cost.amount_micros)
+}
+
 /// Ask `backend` for the next revision of a document and keep it. The answer
 /// is parsed as `T` and turned into the stored document by `accept`; an
 /// answer either step refuses is asked for once more with the reason.
@@ -369,17 +392,7 @@ pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
         dependencies: spec.dependencies.clone(),
         based_on: spec.based_on,
     };
-    let request = LlmRequest {
-        messages: vec![
-            Message::system(spec.instructions),
-            Message::user(spec.input),
-        ],
-        schema: Some(OutputSchema {
-            name: spec.schema_name.to_owned(),
-            schema_json: spec.schema_json.to_owned(),
-        }),
-        max_output_tokens: spec.max_output_tokens,
-    };
+    let request = request_for(&spec);
 
     let runtime = JobRuntime::new(project, provider, policy());
     let job_id = JobId::new(next.artifact_id.as_str())?;

@@ -2,7 +2,7 @@
 //! and kept as a document revision that depends on the source revision it
 //! read.
 
-use kineto_llm::LlmBackend;
+use kineto_llm::{LlmBackend, LlmBackendInfo};
 use kineto_project::{
     ArtifactDependency, ArtifactId, ContentHash, DependencyImpact,
     manifest::CanonicalProject,
@@ -41,34 +41,47 @@ pub(crate) fn source_dependency(
     })
 }
 
+fn analysis_spec(project: &CanonicalProject) -> Result<DocumentSpec, GenerationError> {
+    let revision = source::current(project).map_err(source_error)?;
+    let text = source::read(project, &revision).map_err(source_error)?;
+    Ok(DocumentSpec {
+        kind: DocumentKind::StoryAnalysis,
+        compiler_version: ANALYSIS_COMPILER_VERSION,
+        instructions: INSTRUCTIONS.to_owned(),
+        input: format!("<source>\n{text}</source>"),
+        input_label: format!(
+            "<source revision {} {}>",
+            revision.revision, revision.content_hash
+        ),
+        schema_name: "story_analysis",
+        schema_json: STORY_ANALYSIS_SCHEMA,
+        dependencies: vec![source_dependency(&revision)?],
+        based_on: None,
+        max_output_tokens: Some(16_000),
+    })
+}
+
 /// Analyse the current source revision with `backend` and keep the result
 /// as the next analysis revision.
 pub fn analyze<B: LlmBackend>(
     project: &CanonicalProject,
     backend: &B,
 ) -> Result<RevisionRecord, GenerationError> {
-    let revision = source::current(project).map_err(source_error)?;
-    let text = source::read(project, &revision).map_err(source_error)?;
     documents::generate::<B, StoryAnalysis, StoryAnalysis>(
         project,
         backend,
-        DocumentSpec {
-            kind: DocumentKind::StoryAnalysis,
-            compiler_version: ANALYSIS_COMPILER_VERSION,
-            instructions: INSTRUCTIONS.to_owned(),
-            input: format!("<source>\n{text}</source>"),
-            input_label: format!(
-                "<source revision {} {}>",
-                revision.revision, revision.content_hash
-            ),
-            schema_name: "story_analysis",
-            schema_json: STORY_ANALYSIS_SCHEMA,
-            dependencies: vec![source_dependency(&revision)?],
-            based_on: None,
-            max_output_tokens: Some(16_000),
-        },
+        analysis_spec(project)?,
         Ok,
     )
+}
+
+/// What analysing the current source would cost with `info`, in USD
+/// micros; `None` when not known.
+pub fn analysis_cost(
+    project: &CanonicalProject,
+    info: &LlmBackendInfo,
+) -> Result<Option<u64>, GenerationError> {
+    Ok(documents::estimate_micros(info, &analysis_spec(project)?))
 }
 
 pub(crate) fn source_error(error: source::SourceError) -> GenerationError {

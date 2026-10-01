@@ -1,0 +1,70 @@
+{
+  "logline": "A filmmaker hears the last line of an interview and leaves before he can answer.",
+  "time_period": "The present day",
+  "tone": "Quiet, withheld, tense",
+  "themes": [
+    "what goes unsaid"
+  ],
+  "characters": [
+    {
+      "id": "filmmaker",
+      "name": "The Filmmaker",
+      "description": "A tired man in his forties in a dark coat.",
+      "role": "protagonist"
+    },
+    {
+      "id": "interviewer",
+      "name": "The Interviewer",
+      "description": "A calm woman with a notebook.",
+      "role": "supporting"
+    }
+  ],
+  "locations": [
+    {
+      "id": "small_office",
+      "name": "A small office",
+      "description": "One table, two chairs, a window at night."
+    }
+  ],
+  "events": [
+    {
+      "id": "last_line",
+      "summary": "The interviewer delivers the final line.",
+      "characters": [
+        "filmmaker",
+        "interviewer"
+      ],
+      "location": "small_office"
+    },
+    {
+      "id": "leaving",
+      "summary": "The filmmaker stands and leaves.",
+      "characters": [
+        "filmmaker"
+      ],
+      "location": "small_office"
+    }
+  ],
+  "relationships": [
+    {
+      "from": "filmmaker",
+      "to": "interviewer",
+      "nature": "subject and questioner"
+    }
+  ],
+  "candidate_scenes": [
+    {
+      "id": "the_last_line",
+      "summary": "The final line lands and the filmmaker leaves.",
+      "location": "small_office",
+      "characters": [
+        "filmmaker",
+        "interviewer"
+      ],
+      "events": [
+        "last_line",
+        "leaving"
+      ]
+    }
+  ]
+}

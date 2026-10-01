@@ -15,11 +15,12 @@ use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
 use kineto_core::{
-    generation::{GenerationError, ImageProvider, ImageProviderKind},
+    generation::{GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
     keyframe_prompt::KeyframePromptError,
+    llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
     session::{
-        OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand,
-        SnapshotError, SubmitError,
+        DocumentError, OpenRequest, ProjectSession, Recovery, SessionError, SessionOptions,
+        SessionSink, ShotCommand, SnapshotError, SubmitError,
     },
 };
 use kineto_jobs::ErrorClass;
@@ -29,7 +30,9 @@ use kineto_project::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
+    revisions::{DocumentKind, RevisionError},
     shot::{ShotDirection, ShotWorkflowError},
+    source::SourceError,
 };
 use kineto_providers::secret::EnvSecretSource;
 
@@ -42,6 +45,13 @@ const MESSAGE_RECOVERED: i64 = 3;
 /// `[VIDEO, video revision, status, shot]`, posted when a video generated in
 /// the background was attached, or failed and was retired.
 const MESSAGE_VIDEO: i64 = 4;
+/// The `shot` of a `RECOVERED` message for unplaced job records, and of a
+/// `COMPLETED` message for a document command.
+const NO_SHOT: i64 = -1;
+/// The `shot` of a `RECOVERED` message for a story analysis or screenplay
+/// revision kept from an interrupted session.
+const RECOVERED_ANALYSIS: i64 = -2;
+const RECOVERED_SCREENPLAY: i64 = -3;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -122,7 +132,16 @@ impl SessionSink for DartPort {
                 MESSAGE_RECOVERED,
                 i64::try_from(*count).unwrap_or(i64::MAX),
                 i64::from(PROJECT_ERR_GENERATION_JOB),
-                -1,
+                NO_SHOT,
+            ],
+            Recovery::Document { kind, revision } => [
+                MESSAGE_RECOVERED,
+                i64::from(*revision),
+                i64::from(PROJECT_OK),
+                match kind {
+                    DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
+                    DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
+                },
             ],
         });
     }
@@ -148,11 +167,20 @@ impl SessionSink for DartPort {
             i64::from(shot_index),
         ]);
     }
+
+    fn document_completed(&self, token: u64, result: &Result<(), SessionError>) {
+        self.post([
+            MESSAGE_COMPLETED,
+            i64::from_ne_bytes(token.to_ne_bytes()),
+            i64::from(session_status(result)),
+            NO_SHOT,
+        ]);
+    }
 }
 
 /// Opaque canonical-project handle. Dart never dereferences this allocation.
 pub struct KinetoProjectSession {
-    session: ProjectSession,
+    pub(crate) session: ProjectSession,
 }
 
 unsafe fn spawn(
@@ -167,7 +195,16 @@ unsafe fn spawn(
     let Ok(provider) = image_provider_from_environment() else {
         return PROJECT_ERR_PROVIDER_UNKNOWN;
     };
-    match ProjectSession::spawn(request, provider, Box::new(DartPort { post, port })) {
+    let Ok(model) = document_model_from_environment() else {
+        return PROJECT_ERR_MODEL_UNKNOWN;
+    };
+    match ProjectSession::spawn_with_model(
+        request,
+        provider,
+        model,
+        Box::new(DartPort { post, port }),
+        SessionOptions::default(),
+    ) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
             // SAFETY: callers validated `out_session` as writable pointer storage.
@@ -191,6 +228,21 @@ fn image_provider_from_environment() -> Result<ImageProvider, ()> {
         Err(std::env::VarError::NotUnicode(_)) => return Err(()),
     };
     ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+}
+
+/// The language model named by `KINETO_LLM_PROVIDER` (see
+/// `kineto_core::llm`). Unset means none: documents are refused rather than
+/// sent to a model nobody chose.
+fn document_model_from_environment() -> Result<DocumentModel, ()> {
+    let selection = match std::env::var(LLM_PROVIDER_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+    };
+    DocumentModel::select(selection.as_deref(), &EnvSecretSource::process(), |name| {
+        std::env::var(name).ok()
+    })
+    .map_err(|_| ())
 }
 
 /// Start opening an existing canonical Kineto project.
@@ -804,7 +856,7 @@ pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
     })
 }
 
-fn session_status(result: &Result<(), SessionError>) -> i32 {
+pub(crate) fn session_status(result: &Result<(), SessionError>) -> i32 {
     match result {
         Ok(()) => PROJECT_OK,
         Err(error) => session_error_code(error),
@@ -816,6 +868,8 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Open(error) => project_error_code(error),
         SessionError::Shot(error) => shot_error_code(error),
         SessionError::Generation(error) => generation_error_code(error),
+        SessionError::Document(DocumentError::Source(error)) => source_error_code(error),
+        SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
@@ -835,14 +889,53 @@ fn generation_error_code(error: &GenerationError) -> i32 {
             class: ErrorClass::Terminal,
             ..
         } => PROJECT_ERR_PROVIDER_REFUSED,
+        GenerationError::Prerequisite(Prerequisite::StoryAnalysis) => PROJECT_ERR_NEEDS_ANALYSIS,
+        GenerationError::Prerequisite(Prerequisite::Screenplay) => PROJECT_ERR_NEEDS_SCREENPLAY,
+        GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
+        GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall
         | GenerationError::Runtime(_)
         | GenerationError::JobId(_)
-        // Shot generation has no prerequisites of this kind; documents map
-        // it when they reach the bridge.
-        | GenerationError::Prerequisite(_)
         | GenerationError::Unexpected(_) => PROJECT_ERR_GENERATION_JOB,
+    }
+}
+
+fn manifest_error_code(error: &ProjectManifestError) -> i32 {
+    match error {
+        ProjectManifestError::ReadOnlyFormatVersion(_) => PROJECT_ERR_READ_ONLY,
+        ProjectManifestError::UnsupportedFormatVersion(_) => PROJECT_ERR_UNSUPPORTED_FORMAT,
+        _ => PROJECT_ERR_INVALID_MANIFEST,
+    }
+}
+
+fn source_error_code(error: &SourceError) -> i32 {
+    match error {
+        SourceError::NotText | SourceError::Empty | SourceError::TooLarge => {
+            PROJECT_ERR_INVALID_SOURCE
+        }
+        SourceError::Fs(_) => PROJECT_ERR_IO,
+        SourceError::Manifest(error) => manifest_error_code(error),
+        SourceError::InvalidManifest | SourceError::Path(_) | SourceError::Json(_) => {
+            PROJECT_ERR_DOCUMENT_DAMAGED
+        }
+    }
+}
+
+fn revision_error_code(error: &RevisionError) -> i32 {
+    match error {
+        RevisionError::NotLatest { .. } => PROJECT_ERR_NOT_LATEST,
+        RevisionError::InvalidDocument(_) => PROJECT_ERR_INVALID_DOCUMENT,
+        RevisionError::NoSuchRevision(_) | RevisionError::Superseded(_) => {
+            PROJECT_ERR_INVALID_REVISION
+        }
+        RevisionError::Fs(_) => PROJECT_ERR_IO,
+        RevisionError::Manifest(error) => manifest_error_code(error),
+        RevisionError::InvalidLog
+        | RevisionError::Mismatch(_)
+        | RevisionError::Conflict(_)
+        | RevisionError::Path(_)
+        | RevisionError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
     }
 }
 
@@ -917,7 +1010,7 @@ pub(crate) unsafe fn copy_utf8(
     PROJECT_OK
 }
 
-unsafe fn utf8_owned(ptr: *const u8, len: u64) -> Result<String, i32> {
+pub(crate) unsafe fn utf8_owned(ptr: *const u8, len: u64) -> Result<String, i32> {
     let len = usize::try_from(len).map_err(|_| PROJECT_ERR_INVALID_ARGUMENT)?;
     if len == 0 {
         return Ok(String::new());
@@ -1425,5 +1518,414 @@ mod tests {
         assert_eq!((bits >> 24) & 0xff, 4);
         assert_eq!((bits >> 32) & 0xffff, 7);
         assert_eq!((bits >> 48) & 0xffff, 18);
+    }
+
+    mod documents {
+        use super::*;
+        use crate::documents::*;
+        use kineto_llm::fake::FakeLlm;
+        use kineto_project::{screenplay::SAMPLE_SCREENPLAY_JSON, story::SAMPLE_ANALYSIS_JSON};
+
+        /// A session over a new project, writing documents with `model`.
+        fn with_model(model: DocumentModel) -> (*mut KinetoProjectSession, Port, PathBuf) {
+            let port = Port::new();
+            let target = temp_target();
+            let manifest = ProjectManifest {
+                format_version: PROJECT_FORMAT_VERSION,
+                project_id: "ffi_documents".to_owned(),
+                title: "FFI Documents".to_owned(),
+                created_at: "2026-10-01T00:00:00Z".to_owned(),
+                source: ProjectSource {
+                    kind: "text".to_owned(),
+                    path: "source/story.txt".to_owned(),
+                    extra: BTreeMap::new(),
+                },
+                defaults: ProjectDefaults {
+                    language: "en".to_owned(),
+                    extra: BTreeMap::new(),
+                },
+                workflow: ProjectWorkflow {
+                    recipe_id: "default-film".to_owned(),
+                    recipe_version: 1,
+                    extra: BTreeMap::new(),
+                },
+                extra: BTreeMap::new(),
+            };
+            let session = ProjectSession::spawn_with_model(
+                OpenRequest::CreateText {
+                    path: target.clone(),
+                    manifest: Box::new(manifest),
+                    source: b"A filmmaker hears the last line and leaves.\n".to_vec(),
+                },
+                ImageProvider::LocalDemo,
+                model,
+                Box::new(DartPort {
+                    post: record_post,
+                    port: port.0,
+                }),
+                SessionOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(port.opened(), PROJECT_OK);
+            (
+                Box::into_raw(Box::new(KinetoProjectSession { session })),
+                port,
+                target,
+            )
+        }
+
+        fn text(
+            session: *const KinetoProjectSession,
+            field: &str,
+            scene: u32,
+            item: u32,
+        ) -> Result<String, i32> {
+            let field = code(&SCREENPLAY_TEXTS, field);
+            let mut length = 0_u64;
+            let status = unsafe {
+                kineto_project_screenplay_text_copy(
+                    session,
+                    field,
+                    scene,
+                    item,
+                    ptr::null_mut(),
+                    0,
+                    &raw mut length,
+                )
+            };
+            if status != PROJECT_OK && status != PROJECT_ERR_BUFFER_TOO_SMALL {
+                return Err(status);
+            }
+            let mut buffer = vec![0_u8; length as usize];
+            let status = unsafe {
+                kineto_project_screenplay_text_copy(
+                    session,
+                    field,
+                    scene,
+                    item,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u64,
+                    &raw mut length,
+                )
+            };
+            assert_eq!(status, PROJECT_OK);
+            Ok(String::from_utf8(buffer).unwrap())
+        }
+
+        fn count(session: *const KinetoProjectSession, what: &str, scene: u32) -> u32 {
+            let mut found = 0_u32;
+            assert_eq!(
+                unsafe {
+                    kineto_project_screenplay_count(
+                        session,
+                        code(&SCREENPLAY_COUNTS, what),
+                        scene,
+                        &raw mut found,
+                    )
+                },
+                PROJECT_OK
+            );
+            found
+        }
+
+        fn value(session: *const KinetoProjectSession, field: &str, scene: u32, item: u32) -> u64 {
+            let mut found = 0_u64;
+            assert_eq!(
+                unsafe {
+                    kineto_project_screenplay_value(
+                        session,
+                        code(&SCREENPLAY_VALUES, field),
+                        scene,
+                        item,
+                        &raw mut found,
+                    )
+                },
+                PROJECT_OK
+            );
+            found
+        }
+
+        fn state(session: *const KinetoProjectSession, field: Field) -> u64 {
+            let mut bits = 0_u64;
+            assert_eq!(
+                unsafe { kineto_project_documents_state(session, &raw mut bits) },
+                PROJECT_OK
+            );
+            (bits >> field.shift) & ((1 << field.width) - 1)
+        }
+
+        fn cost(session: *const KinetoProjectSession, document: &str) -> Result<u64, i32> {
+            let mut micros = 0_u64;
+            match unsafe {
+                kineto_project_document_cost(
+                    session,
+                    code(&DOCUMENT_COSTS, document),
+                    &raw mut micros,
+                )
+            } {
+                PROJECT_OK => Ok(micros),
+                status => Err(status),
+            }
+        }
+
+        struct OwnedBlock {
+            kind: &'static str,
+            character: &'static str,
+            parenthetical: &'static str,
+            text: &'static str,
+        }
+
+        fn save_scene(
+            session: *const KinetoProjectSession,
+            based_on: u32,
+            blocks: &[OwnedBlock],
+            token: u64,
+        ) -> i32 {
+            let raw: Vec<KinetoScreenplayBlock> = blocks
+                .iter()
+                .map(|block| KinetoScreenplayBlock {
+                    kind: code(&BLOCK_KINDS, block.kind),
+                    character_ptr: block.character.as_ptr(),
+                    character_len: block.character.len() as u64,
+                    parenthetical_ptr: block.parenthetical.as_ptr(),
+                    parenthetical_len: block.parenthetical.len() as u64,
+                    text_ptr: block.text.as_ptr(),
+                    text_len: block.text.len() as u64,
+                })
+                .collect();
+            let (id, heading, time, goal) = (
+                "office_night",
+                "INT. SMALL OFFICE - LATER",
+                "later",
+                "He answers after all.",
+            );
+            unsafe {
+                kineto_project_save_scene(
+                    session,
+                    based_on,
+                    id.as_ptr(),
+                    id.len() as u64,
+                    heading.as_ptr(),
+                    heading.len() as u64,
+                    time.as_ptr(),
+                    time.len() as u64,
+                    goal.as_ptr(),
+                    goal.len() as u64,
+                    raw.as_ptr(),
+                    raw.len() as u64,
+                    token,
+                )
+            }
+        }
+
+        #[test]
+        fn a_story_becomes_a_locked_screenplay_through_the_abi() {
+            let (session, port, target) = with_model(DocumentModel::Fake(FakeLlm::answering([
+                SAMPLE_ANALYSIS_JSON,
+                SAMPLE_SCREENPLAY_JSON,
+            ])));
+            assert_eq!(unsafe { kineto_project_llm_ready(session) }, 1);
+            assert_eq!(
+                cost(session, "analysis"),
+                Ok(0),
+                "a free model costs nothing"
+            );
+            assert_eq!(cost(session, "screenplay"), Err(PROJECT_ERR_NEEDS_ANALYSIS));
+
+            assert_eq!(
+                unsafe { kineto_project_write_screenplay(session, 1) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(1), PROJECT_ERR_NEEDS_ANALYSIS);
+            assert_eq!(
+                unsafe { kineto_project_analyze_story(session, 2) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(2), PROJECT_OK);
+            assert_eq!(state(session, ANALYSIS_REVISION), 1);
+            assert_eq!(count(session, "analysis_characters", 0), 2);
+            assert_eq!(
+                text(session, "analysis_character_name", 0, 1).unwrap(),
+                "The Interviewer"
+            );
+            assert_eq!(
+                unsafe { kineto_project_write_screenplay(session, 3) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(3), PROJECT_OK);
+
+            assert_eq!(state(session, SCREENPLAY_REVISION), 1);
+            assert_eq!(text(session, "title", 0, 0).unwrap(), "The Last Line");
+            assert_eq!(count(session, "scenes", 0), 1);
+            assert_eq!(count(session, "scene_blocks", 0), 4);
+            assert_eq!(
+                text(session, "scene_heading", 0, 0).unwrap(),
+                "INT. SMALL OFFICE - NIGHT"
+            );
+            assert_eq!(
+                value(session, "scene_setting", 0, 0),
+                u64::from(code(&SETTINGS, "interior"))
+            );
+            assert_eq!(
+                value(session, "block_kind", 0, 1),
+                u64::from(code(&BLOCK_KINDS, "dialogue"))
+            );
+            assert_eq!(
+                text(session, "block_character", 0, 1).unwrap(),
+                "interviewer"
+            );
+            assert_eq!(
+                text(session, "block_parenthetical", 0, 0).unwrap(),
+                "",
+                "absent is empty"
+            );
+            assert_eq!(
+                text(session, "scene_heading", 1, 0),
+                Err(PROJECT_ERR_INVALID_ARGUMENT)
+            );
+
+            let line = |text| OwnedBlock {
+                kind: "dialogue",
+                character: "filmmaker",
+                parenthetical: "quietly",
+                text,
+            };
+            assert_eq!(save_scene(session, 1, &[line("It was.")], 4), PROJECT_OK);
+            assert_eq!(port.completed(4), PROJECT_OK);
+            assert_eq!(
+                save_scene(session, 1, &[line("It was not.")], 5),
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(5), PROJECT_ERR_NOT_LATEST);
+            let unknown_speaker = OwnedBlock {
+                kind: "dialogue",
+                character: "stranger",
+                parenthetical: "",
+                text: "Who?",
+            };
+            assert_eq!(save_scene(session, 2, &[unknown_speaker], 6), PROJECT_OK);
+            assert_eq!(port.completed(6), PROJECT_ERR_INVALID_DOCUMENT);
+            assert_eq!(
+                unsafe { kineto_project_lock_screenplay(session, 2, 7) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(7), PROJECT_OK);
+            assert_eq!(
+                unsafe { kineto_project_lock_screenplay(session, 1, 8) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(8), PROJECT_ERR_INVALID_REVISION);
+
+            assert_eq!(state(session, SCREENPLAY_REVISION), 2);
+            assert_eq!(state(session, LOCKED_REVISION), 2);
+            assert_eq!(count(session, "revisions", 0), 2);
+            assert_eq!(
+                value(session, "revision_origin", 0, 1),
+                u64::from(code(&ORIGINS, "edited"))
+            );
+            assert_eq!(value(session, "revision_based_on", 0, 1), 1);
+            assert_eq!(
+                value(session, "revision_status", 0, 1),
+                u64::from(code(&REVISION_STATUSES, "locked"))
+            );
+            assert_eq!(
+                text(session, "revision_provider", 0, 0).unwrap(),
+                "fake-llm"
+            );
+            assert_eq!(text(session, "block_text", 0, 0).unwrap(), "It was.");
+            assert_eq!(text(session, "scene_time", 0, 0).unwrap(), "later");
+
+            let scene = "missing";
+            assert_eq!(
+                unsafe {
+                    kineto_project_rewrite_scene(
+                        session,
+                        scene.as_ptr(),
+                        scene.len() as u64,
+                        ptr::null(),
+                        0,
+                        9,
+                    )
+                },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(9), PROJECT_ERR_NO_SUCH_SCENE);
+            unsafe { kineto_project_destroy(session) };
+            let _ = fs::remove_dir_all(target);
+        }
+
+        #[test]
+        fn without_a_model_the_abi_says_so_and_sources_still_import() {
+            let (session, port, target) = with_model(DocumentModel::None);
+            assert_eq!(
+                unsafe { kineto_project_llm_provider(session) },
+                code(&LLM_PROVIDERS, "none")
+            );
+            assert_eq!(unsafe { kineto_project_llm_ready(session) }, 0);
+            assert_eq!(
+                cost(session, "analysis"),
+                Err(PROJECT_ERR_MODEL_NOT_CONFIGURED)
+            );
+            assert_eq!(
+                unsafe { kineto_project_analyze_story(session, 1) },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(1), PROJECT_ERR_MODEL_NOT_CONFIGURED);
+            assert_eq!(text(session, "title", 0, 0).unwrap(), "");
+            assert_eq!(count(session, "scenes", 0), 0);
+
+            let story = "A second draft.";
+            let name = "draft.md";
+            assert_eq!(
+                unsafe {
+                    kineto_project_import_source(
+                        session,
+                        story.as_ptr(),
+                        story.len() as u64,
+                        name.as_ptr(),
+                        name.len() as u64,
+                        99,
+                        2,
+                    )
+                },
+                PROJECT_ERR_INVALID_ARGUMENT,
+                "an unknown format is refused before anything is queued"
+            );
+            let markdown = code(&SOURCE_FORMATS, "markdown");
+            assert_eq!(
+                unsafe {
+                    kineto_project_import_source(
+                        session,
+                        story.as_ptr(),
+                        story.len() as u64,
+                        name.as_ptr(),
+                        name.len() as u64,
+                        markdown,
+                        3,
+                    )
+                },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(3), PROJECT_OK);
+            assert_eq!(state(session, SOURCE_REVISION), 2);
+            let blank = "  ";
+            assert_eq!(
+                unsafe {
+                    kineto_project_import_source(
+                        session,
+                        blank.as_ptr(),
+                        2,
+                        ptr::null(),
+                        0,
+                        markdown,
+                        4,
+                    )
+                },
+                PROJECT_OK
+            );
+            assert_eq!(port.completed(4), PROJECT_ERR_INVALID_SOURCE);
+            unsafe { kineto_project_destroy(session) };
+            let _ = fs::remove_dir_all(target);
+        }
     }
 }

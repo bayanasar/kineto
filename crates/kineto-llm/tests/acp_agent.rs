@@ -118,6 +118,28 @@ fn a_hanging_agent_is_stopped_at_its_deadline() {
 }
 
 #[test]
+fn a_cancelled_call_stops_the_agent_at_once() {
+    let sandbox = Sandbox::new();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let agent = agent(&sandbox, "hang").with_cancel(std::sync::Arc::clone(&cancel));
+    let started = Instant::now();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let error = agent.complete(&request()).unwrap_err();
+    canceller.join().unwrap();
+    assert_eq!(error, AgentError::Cancelled);
+    assert_eq!(error.class(), ErrorClass::Retryable);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // A cancelled agent starts nothing more.
+    assert_eq!(
+        agent.complete(&request()).unwrap_err(),
+        AgentError::Cancelled
+    );
+}
+
+#[test]
 fn a_missing_executable_is_terminal() {
     let sandbox = Sandbox::new();
     let error = AcpAgent::with_command(

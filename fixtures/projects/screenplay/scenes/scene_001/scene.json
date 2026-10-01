@@ -1,0 +1,14 @@
+{
+  "characters": [
+    "filmmaker"
+  ],
+  "dramatic_goal": "The final line of the conversation lands and the filmmaker leaves",
+  "location": "small_office",
+  "scene_id": "scene_001",
+  "schema_version": 1,
+  "shots": [
+    "shot_001",
+    "shot_002"
+  ],
+  "time": "night"
+}

@@ -191,6 +191,7 @@ version = "0.1.0"
 dependencies = [
  "kineto-core",
  "kineto-jobs",
+ "kineto-llm",
  "kineto-project",
  "kineto-providers",
  "serde_json",

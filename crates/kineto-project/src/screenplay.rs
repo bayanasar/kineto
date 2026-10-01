@@ -224,6 +224,17 @@ fn tidy(text: &str) -> String {
     out.join("\n")
 }
 
+/// What the director changes when editing a scene. Its setting, location
+/// and ID stay as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneEdit {
+    pub scene_id: String,
+    pub heading: String,
+    pub time: String,
+    pub dramatic_goal: String,
+    pub blocks: Vec<Block>,
+}
+
 /// Where downstream work that depends on a scene stands against a
 /// screenplay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +360,32 @@ impl Screenplay {
         *slot = scene;
         next.validate()?;
         Ok(next)
+    }
+
+    /// This screenplay with `edit` applied. A cast member given a line in the
+    /// scene joins its characters.
+    pub fn with_scene_edit(&self, edit: SceneEdit) -> Result<Self, String> {
+        let mut scene = self
+            .scene(&edit.scene_id)
+            .ok_or_else(|| format!("there is no scene {:?}", edit.scene_id))?
+            .clone();
+        scene.heading = edit.heading;
+        scene.time = edit.time;
+        scene.dramatic_goal = edit.dramatic_goal;
+        scene.blocks = edit.blocks;
+        let speakers: Vec<String> = scene
+            .blocks
+            .iter()
+            .filter_map(|block| block.character.clone())
+            .collect();
+        for speaker in speakers {
+            if !scene.characters.contains(&speaker)
+                && self.cast.iter().any(|member| member.id == speaker)
+            {
+                scene.characters.push(speaker);
+            }
+        }
+        self.with_scene(scene)
     }
 
     /// The screenplay as Markdown. Deterministic: the same screenplay always
@@ -804,6 +841,32 @@ mod tests {
         assert_eq!(escape_line("1. not a list"), "\\1. not a list");
         assert_eq!(escape_line("a *b* <c>"), "a \\*b\\* \\<c\\>");
         assert_eq!(escape_line("1999 was long"), "1999 was long");
+    }
+
+    #[test]
+    fn an_edited_scene_gains_the_cast_members_it_gives_lines() {
+        let mut screenplay = parse(&sample()).unwrap();
+        screenplay.scenes[0].characters = vec!["interviewer".to_owned()];
+        let edit = |speaker: &str| SceneEdit {
+            scene_id: "office_night".to_owned(),
+            heading: "INT. SMALL OFFICE - LATER".to_owned(),
+            time: "later".to_owned(),
+            dramatic_goal: "He answers after all.".to_owned(),
+            blocks: vec![Block {
+                kind: BlockKind::Dialogue,
+                character: Some(speaker.to_owned()),
+                parenthetical: None,
+                text: "It was.".to_owned(),
+            }],
+        };
+        let edited = screenplay.with_scene_edit(edit("filmmaker")).unwrap();
+        assert_eq!(
+            edited.scenes[0].characters,
+            ["interviewer".to_owned(), "filmmaker".to_owned()]
+        );
+        assert_eq!(edited.scenes[0].heading, "INT. SMALL OFFICE - LATER");
+        assert_eq!(edited.scenes[0].location, "small_office", "kept");
+        assert!(screenplay.with_scene_edit(edit("stranger")).is_err());
     }
 
     #[test]

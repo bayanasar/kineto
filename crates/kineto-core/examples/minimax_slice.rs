@@ -68,6 +68,7 @@ impl SessionSink for Sink {
             result.as_ref().map(|_| ()).map_err(ToString::to_string),
         ));
     }
+    fn document_completed(&self, _token: u64, _result: &Result<(), SessionError>) {}
 }
 
 fn spawn(

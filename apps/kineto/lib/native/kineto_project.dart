@@ -326,6 +326,19 @@ final class KinetoProjectException implements Exception {
   /// The shot's video is still being generated.
   static const int videoInFlight = 126;
 
+  /// A screenplay is written from a story analysis, which does not exist yet.
+  static const int needsAnalysis = 132;
+
+  /// A newer screenplay revision exists than the one the edit started from.
+  static const int notLatest = 135;
+
+  /// No language model is configured for documents.
+  static const int modelNotConfigured = 139;
+
+  /// The language model's cost is not known, as for an agent on a
+  /// subscription.
+  static const int costUnknown = 142;
+
   final int code;
   final String message;
 
@@ -634,8 +647,14 @@ final class KinetoProjectSession implements Finalizable {
   }
 
   Future<void> _submit(int shotIndex, int Function(int token) queue) {
-    _ensureOpen();
     _checkShotIndex(shotIndex);
+    return _submitDocument(queue);
+  }
+
+  /// Queue a command that answers with a `COMPLETED` message for [queue]'s
+  /// token, whatever it concerns.
+  Future<void> _submitDocument(int Function(int token) queue) {
+    _ensureOpen();
     final (token, done) = _port.begin(this);
     final code = queue(token);
     if (code != 0) _port.fail(token, _projectException(code));
@@ -736,6 +755,11 @@ final class _SessionPort {
             shotIndex: values[3] < 0 ? null : values[3],
             revisionOrCount: values[1],
             errorCode: status,
+            document: switch (values[3]) {
+              -2 => KinetoDocumentKind.storyAnalysis,
+              -3 => KinetoDocumentKind.screenplay,
+              _ => null,
+            },
           ),
         );
       case _video:
@@ -791,23 +815,28 @@ final class KinetoRecovery {
     required this.shotIndex,
     required this.revisionOrCount,
     required this.errorCode,
+    this.document,
   });
 
-  /// The shot whose interrupted generation this was; null for job records the
-  /// engine could not read or place.
+  /// The shot whose interrupted generation this was; null for a document and
+  /// for job records the engine could not read or place.
   final int? shotIndex;
 
-  /// The generation revision for a shot, or the number of unplaced records.
+  /// The document a model answered before the interruption, kept as
+  /// revision [revisionOrCount] when the project opened.
+  final KinetoDocumentKind? document;
+
+  /// The generation or document revision, or the number of unplaced records.
   final int revisionOrCount;
 
   /// 0 when the generation was completed; otherwise why it was not.
   final int errorCode;
 
   /// The interrupted generation was completed when the project opened.
-  bool get completed => shotIndex != null && errorCode == 0;
+  bool get completed => (shotIndex != null || document != null) && errorCode == 0;
 
   /// Job records that could not be read or placed; nothing was changed.
-  bool get needsAttention => shotIndex == null;
+  bool get needsAttention => shotIndex == null && document == null;
 
   /// Why the recovery did not complete, when it did not.
   KinetoProjectException? get error =>
@@ -916,6 +945,17 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'no_video': 129,
   'stale_video': 130,
   'no_first_frame': 131,
+  'needs_analysis': 132,
+  'needs_screenplay': 133,
+  'no_such_scene': 134,
+  'not_latest': 135,
+  'invalid_document': 136,
+  'invalid_revision': 137,
+  'invalid_source': 138,
+  'model_not_configured': 139,
+  'model_unknown': 140,
+  'document_damaged': 141,
+  'cost_unknown': 142,
   'panic': 199,
 };
 
@@ -953,6 +993,17 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   129: 'Generate a video before locking it',
   130: 'The video was made from a keyframe that is no longer locked; regenerate it',
   131: 'The locked keyframe has no image to start a video from',
+  132: 'Analyse the story before writing the screenplay',
+  133: 'Write the screenplay before rewriting a scene',
+  134: 'The screenplay has no scene with that id',
+  135: 'A newer screenplay revision exists; review it before saving',
+  136: 'The edit breaks the screenplay: every line of dialogue needs a cast member, and no block may be empty',
+  137: 'Only the latest screenplay revision can be locked',
+  138: 'The source must be non-empty text of at most 8 MiB',
+  139: 'No language model is configured; set KINETO_LLM_PROVIDER',
+  140: 'KINETO_LLM_PROVIDER names a language model this Kineto build does not have',
+  141: 'A stored document no longer matches its record',
+  142: "This model's cost is not known",
   199: 'Native project call failed unexpectedly',
 };
 

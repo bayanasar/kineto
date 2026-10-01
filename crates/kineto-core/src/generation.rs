@@ -434,9 +434,10 @@ pub enum GenerationError {
     /// The locked keyframe has no image to start a video from (a demo
     /// keyframe).
     NoFirstFrame,
-    /// What this is made from does not exist yet; the message says what to
-    /// do first.
-    Prerequisite(&'static str),
+    /// What this is made from does not exist yet.
+    Prerequisite(Prerequisite),
+    /// No language model is configured, so no document can be asked for.
+    ModelNotConfigured,
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -460,7 +461,11 @@ impl fmt::Display for GenerationError {
                 "finishing this generation needs a paid provider call; generate again to make it",
             ),
             Self::JobId(error) => error.fmt(formatter),
-            Self::Prerequisite(message) | Self::Unexpected(message) => formatter.write_str(message),
+            Self::Prerequisite(missing) => missing.fmt(formatter),
+            Self::ModelNotConfigured => {
+                formatter.write_str("no language model is configured for documents")
+            }
+            Self::Unexpected(message) => formatter.write_str(message),
         }
     }
 }
@@ -477,8 +482,30 @@ impl Error for GenerationError {
             | Self::NeedsProviderCall
             | Self::NoFirstFrame
             | Self::Prerequisite(_)
+            | Self::ModelNotConfigured
             | Self::Unexpected(_) => None,
         }
+    }
+}
+
+/// What has to exist before a document can be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prerequisite {
+    /// A screenplay is written from a story analysis.
+    StoryAnalysis,
+    /// A scene is rewritten within a screenplay.
+    Screenplay,
+    /// The screenplay has no scene with the ID asked for.
+    Scene,
+}
+
+impl fmt::Display for Prerequisite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::StoryAnalysis => "analyse the story before writing the screenplay",
+            Self::Screenplay => "write the screenplay before rewriting a scene",
+            Self::Scene => "the screenplay has no scene with that id",
+        })
     }
 }
 

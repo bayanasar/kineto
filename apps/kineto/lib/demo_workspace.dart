@@ -86,6 +86,9 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
       for (final recovery in recoveries)
         if (recovery.needsAttention)
           '${recovery.revisionOrCount} job record(s) could not be read and were left untouched.'
+        else if (recovery.document != null)
+          '${recovery.document!.label} revision ${recovery.revisionOrCount} was answered before Kineto '
+              'closed and has been kept.'
         else if (recovery.completed)
           'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '
               'and has been completed.'
@@ -102,6 +105,7 @@ class DemoWorkspaceScreen extends StatefulWidget {
   const DemoWorkspaceScreen({
     required this.engine,
     required this.project,
+    this.navigation,
     this.isDarkMode = true,
     this.onThemeToggle,
     super.key,
@@ -109,6 +113,9 @@ class DemoWorkspaceScreen extends StatefulWidget {
 
   final KinetoEngine engine;
   final KinetoProjectSession project;
+
+  /// Switches to the other workspaces, shown above the scene.
+  final Widget? navigation;
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
@@ -210,6 +217,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
       isDarkMode: widget.isDarkMode,
+      navigation: widget.navigation,
       working: _working,
       workingLabel: _workingLabel,
       recoveryNotes: _recoveryNotes,
@@ -282,9 +290,12 @@ class DemoWorkspaceView extends StatelessWidget {
     this.isDarkMode = true,
     this.onThemeToggle,
     this.error,
+    this.navigation,
     super.key,
   });
 
+  /// Switches to the other workspaces, shown above the scene.
+  final Widget? navigation;
   final KinetoEngineSnapshot engineSnapshot;
   final KinetoShotSnapshot shotSnapshot;
   final List<KinetoShotSnapshot> shotSnapshots;
@@ -356,6 +367,7 @@ class DemoWorkspaceView extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
+                if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
                 WabPanel(
                   title: 'Canonical demo project',
                   trailing: Text('Native ABI ${engineSnapshot.abiVersion}'),

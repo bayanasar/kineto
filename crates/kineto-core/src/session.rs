@@ -25,14 +25,22 @@ use std::{
     thread,
 };
 
+use kineto_llm::LlmBackend;
 use kineto_project::{
     fs::ProjectRoot,
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
+    revisions::{self, DocumentKind, RevisionError, RevisionRecord},
+    screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
+    source::{self, SourceError, SourceFormat},
+    story::StoryAnalysis,
 };
 
 use crate::{
+    documents::{self, DOCUMENT_PROVIDERS},
     generation::{self, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished},
+    llm::{DocumentModel, DocumentModelInfo},
+    screenplay, story,
     video::{self, VideoClient, VideoDone, VideoJob},
 };
 
@@ -68,6 +76,59 @@ pub enum ShotCommand {
     LockVideo,
 }
 
+/// A change to the project's documents: its source, story analysis and
+/// screenplay. Every command runs on the session worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentCommand {
+    /// Import new source text as the next source revision.
+    ImportSource {
+        text: String,
+        format: SourceFormat,
+        original_name: Option<String>,
+    },
+    AnalyzeStory,
+    WriteScreenplay,
+    /// Write one scene of the latest screenplay again.
+    RewriteScene {
+        scene_id: String,
+        direction: Option<String>,
+    },
+    /// Save the director's edit of one scene of revision `based_on`, which
+    /// must be the latest.
+    SaveScene {
+        based_on: u32,
+        edit: SceneEdit,
+    },
+    LockScreenplay {
+        revision: u32,
+    },
+}
+
+/// Why a document change was refused.
+#[derive(Debug)]
+pub enum DocumentError {
+    Source(SourceError),
+    Revision(RevisionError),
+}
+
+impl fmt::Display for DocumentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source(error) => error.fmt(formatter),
+            Self::Revision(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for DocumentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Revision(error) => Some(error),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SessionError {
     /// The project could not be opened or created.
@@ -77,6 +138,8 @@ pub enum SessionError {
     /// A generation job could not finish. Its write-ahead intents remain and
     /// the generation is completed when the project is next opened.
     Generation(GenerationError),
+    /// A document change was refused.
+    Document(DocumentError),
     /// A command arrived for a session whose open had failed.
     NotOpen,
     /// The shot already has a video being generated.
@@ -92,6 +155,7 @@ impl fmt::Display for SessionError {
             Self::Open(error) => error.fmt(formatter),
             Self::Shot(error) => error.fmt(formatter),
             Self::Generation(error) => error.fmt(formatter),
+            Self::Document(error) => error.fmt(formatter),
             Self::NotOpen => formatter.write_str("project session is not open"),
             Self::VideoInFlight => {
                 formatter.write_str("this shot's video is still being generated")
@@ -107,6 +171,7 @@ impl Error for SessionError {
             Self::Open(error) => Some(error),
             Self::Shot(error) => Some(error),
             Self::Generation(error) => Some(error),
+            Self::Document(error) => Some(error),
             Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
@@ -128,6 +193,9 @@ pub enum Recovery {
     /// Job records that could not be read, placed or scanned. Nothing was
     /// changed; a person needs to look at them.
     NeedsAttention { count: usize },
+    /// A document a model answered before an interruption was kept as this
+    /// revision.
+    Document { kind: DocumentKind, revision: u32 },
 }
 
 /// Receives a session's outcomes on the worker thread.
@@ -150,6 +218,46 @@ pub trait SessionSink: Send + 'static {
     /// A submitted video finished: attached, or failed and retired so it can
     /// be asked for again. The shot's snapshot is published first.
     fn video_finished(&self, shot_index: u32, revision: u16, result: &Result<(), SessionError>);
+
+    /// A document command finished. The documents are published before this
+    /// is called.
+    fn document_completed(&self, token: u64, result: &Result<(), SessionError>);
+}
+
+/// The analysis the director's documents build on.
+#[derive(Debug, Clone)]
+pub struct PublishedAnalysis {
+    pub revision: u32,
+    pub analysis: StoryAnalysis,
+}
+
+/// What the worker last published about the project's documents. Reads
+/// never do I/O.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedDocuments {
+    /// The current source revision.
+    pub source_revision: Option<u32>,
+    /// The current story analysis: the locked one, otherwise the latest.
+    pub analysis: Option<PublishedAnalysis>,
+    /// Every screenplay revision, oldest first.
+    pub revisions: Vec<RevisionRecord>,
+    /// The latest screenplay revision still in play, and what it says: the
+    /// one the director works on.
+    pub screenplay: Option<(u32, Screenplay)>,
+    /// The locked screenplay revision, which production follows.
+    pub locked: Option<u32>,
+    /// The analysis read a source revision that is no longer current.
+    pub analysis_stale: bool,
+    /// The latest screenplay was written from an analysis that is no longer
+    /// current.
+    pub screenplay_stale: bool,
+    /// Estimated cost of the next analysis, in USD micros; `None` when not
+    /// known, such as for an agent.
+    pub analysis_cost: Option<u64>,
+    /// Estimated cost of the next screenplay, likewise.
+    pub screenplay_cost: Option<u64>,
+    /// The documents could not be read; why.
+    pub damaged: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,10 +315,12 @@ type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
 struct View {
     metadata: OnceLock<ProjectMetadata>,
     shots: Mutex<[ShotSlot; SHOT_COUNT]>,
+    documents: Mutex<Option<Arc<PublishedDocuments>>>,
 }
 
 struct Gate {
-    closed: AtomicBool,
+    /// Set when the session closes; agent calls in progress watch it too.
+    closed: Arc<AtomicBool>,
     sink: Mutex<Option<Box<dyn SessionSink>>>,
 }
 
@@ -233,10 +343,17 @@ impl Gate {
     }
 }
 
+enum Work {
+    Shot {
+        shot_index: u32,
+        command: ShotCommand,
+    },
+    Document(DocumentCommand),
+}
+
 struct Envelope {
     token: u64,
-    shot_index: u32,
-    command: ShotCommand,
+    work: Work,
 }
 
 /// Owner handle for one project session and its worker thread.
@@ -246,6 +363,7 @@ struct Envelope {
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
+    document_model: DocumentModelInfo,
     view: Arc<View>,
     gate: Arc<Gate>,
     worker: Option<thread::JoinHandle<()>>,
@@ -269,23 +387,38 @@ impl ProjectSession {
         sink: Box<dyn SessionSink>,
         options: SessionOptions,
     ) -> std::io::Result<Self> {
+        Self::spawn_with_model(request, provider, DocumentModel::None, sink, options)
+    }
+
+    /// [`Self::spawn_with`], writing documents with `model`.
+    pub fn spawn_with_model(
+        request: OpenRequest,
+        provider: ImageProvider,
+        model: DocumentModel,
+        sink: Box<dyn SessionSink>,
+        options: SessionOptions,
+    ) -> std::io::Result<Self> {
         let image_provider = provider.info();
+        let document_model = model.describe();
         let (commands, inbox) = mpsc::channel();
         let view = Arc::new(View::default());
         let gate = Arc::new(Gate {
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             sink: Mutex::new(Some(sink)),
         });
+        // Closing the session stops an agent that is still answering.
+        let model = model.cancelled_by(Arc::clone(&gate.closed));
         let worker = thread::Builder::new()
             .name("kineto-project-session".to_owned())
             .spawn({
                 let view = Arc::clone(&view);
                 let gate = Arc::clone(&gate);
-                move || run(request, provider, options, &inbox, &view, &gate)
+                move || run(request, provider, model, options, &inbox, &view, &gate)
             })?;
         Ok(Self {
             commands: Some(commands),
             image_provider,
+            document_model,
             view,
             gate,
             worker: Some(worker),
@@ -302,15 +435,42 @@ impl ProjectSession {
         if !shot_index_is_valid(shot_index) {
             return Err(SubmitError::InvalidShot);
         }
+        self.send(Envelope {
+            token,
+            work: Work::Shot {
+                shot_index,
+                command,
+            },
+        })
+    }
+
+    /// Queue a document command. Returns without waiting for it to run.
+    pub fn submit_document(&self, command: DocumentCommand, token: u64) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Document(command),
+        })
+    }
+
+    fn send(&self, envelope: Envelope) -> Result<(), SubmitError> {
         self.commands
             .as_ref()
             .ok_or(SubmitError::Closed)?
-            .send(Envelope {
-                token,
-                shot_index,
-                command,
-            })
+            .send(envelope)
             .map_err(|_| SubmitError::Closed)
+    }
+
+    /// The project's documents as last published. Never does I/O.
+    pub fn documents(&self) -> Result<Arc<PublishedDocuments>, SnapshotError> {
+        lock(&self.view.documents)
+            .clone()
+            .ok_or(SnapshotError::NotOpen)
+    }
+
+    /// The model this session writes documents with. Fixed at spawn.
+    #[must_use]
+    pub const fn document_model(&self) -> &DocumentModelInfo {
+        &self.document_model
     }
 
     /// The shot's most recently published snapshot. Never does I/O.
@@ -404,6 +564,7 @@ fn shot_index_is_valid(shot_index: u32) -> bool {
 fn run(
     request: OpenRequest,
     provider: ImageProvider,
+    model: DocumentModel,
     options: SessionOptions,
     inbox: &mpsc::Receiver<Envelope>,
     view: &View,
@@ -413,7 +574,7 @@ fn run(
         .unwrap_or(Err(SessionError::Panicked));
     let mut worker = match opened {
         Ok(project) => {
-            let mut worker = Worker::new(project, provider, Arc::clone(gate), options);
+            let mut worker = Worker::new(project, provider, model, Arc::clone(gate), options);
             // Finish what an earlier session left before accepting commands.
             let mut recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
                 .unwrap_or_else(|_| {
@@ -426,6 +587,10 @@ fn run(
             if unplaced > 0 {
                 recoveries.push(Recovery::NeedsAttention { count: unplaced });
             }
+            recoveries.extend(
+                panic::catch_unwind(AssertUnwindSafe(|| worker.recover_documents()))
+                    .unwrap_or_else(|_| vec![Recovery::NeedsAttention { count: 1 }]),
+            );
             let project = &worker.project;
             let _ = view.metadata.set(ProjectMetadata {
                 project_id: project.manifest().project_id.clone(),
@@ -436,6 +601,7 @@ fn run(
             for shot_index in 0..SHOT_COUNT {
                 worker.publish(view, shot_index);
             }
+            worker.publish_documents(view);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
             }
@@ -459,17 +625,40 @@ fn run(
         if gate.is_closed() {
             break;
         }
-        if let Some(envelope) = envelope {
-            let shot_index = envelope.shot_index as usize;
-            let result = match worker.as_mut() {
-                None => Err(SessionError::NotOpen),
-                Some(worker) => {
-                    let result = worker.apply(shot_index, envelope.command);
-                    worker.publish(view, shot_index);
-                    result
-                }
-            };
-            gate.deliver(|sink| sink.completed(envelope.token, envelope.shot_index, &result));
+        match envelope {
+            None => {}
+            Some(Envelope {
+                token,
+                work:
+                    Work::Shot {
+                        shot_index,
+                        command,
+                    },
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.apply(shot_index as usize, command);
+                        worker.publish(view, shot_index as usize);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.completed(token, shot_index, &result));
+            }
+            Some(Envelope {
+                token,
+                work: Work::Document(command),
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.apply_document(command);
+                        worker.publish_documents(view);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
         }
         if let Some(worker) = worker.as_mut() {
             for (shot_index, revision, result) in worker.finish_videos() {
@@ -571,6 +760,7 @@ fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
 struct Worker {
     project: CanonicalProject,
     provider: ImageProvider,
+    model: DocumentModel,
     videos: Videos,
     // Canonical JSON is loaded once per shot per session; reads then stay
     // typed and in memory rather than re-parsing project files.
@@ -581,6 +771,7 @@ impl Worker {
     fn new(
         project: CanonicalProject,
         provider: ImageProvider,
+        model: DocumentModel,
         gate: Arc<Gate>,
         options: SessionOptions,
     ) -> Self {
@@ -592,6 +783,7 @@ impl Worker {
         Self {
             project,
             provider,
+            model,
             videos: Videos {
                 client,
                 gate,
@@ -783,6 +975,183 @@ impl Worker {
         recoveries
     }
 
+    fn apply_document(&mut self, command: DocumentCommand) -> Result<(), SessionError> {
+        let ready = self.model.describe().ready;
+        let project = &self.project;
+        let model = &self.model;
+        let ask = |generate: &dyn Fn() -> Result<RevisionRecord, GenerationError>| {
+            if ready {
+                generate().map(|_| ()).map_err(generation_error)
+            } else {
+                Err(SessionError::Generation(
+                    GenerationError::ModelNotConfigured,
+                ))
+            }
+        };
+        let revision_error = |error| SessionError::Document(DocumentError::Revision(error));
+        panic::catch_unwind(AssertUnwindSafe(|| match command {
+            DocumentCommand::ImportSource {
+                text,
+                format,
+                original_name,
+            } => source::import(project, text.as_bytes(), format, original_name.as_deref())
+                .map(|_| ())
+                .map_err(|error| SessionError::Document(DocumentError::Source(error))),
+            DocumentCommand::AnalyzeStory => ask(&|| story::analyze(project, model)),
+            DocumentCommand::WriteScreenplay => ask(&|| screenplay::write(project, model)),
+            DocumentCommand::RewriteScene {
+                scene_id,
+                direction,
+            } => {
+                ask(&|| screenplay::rewrite_scene(project, model, &scene_id, direction.as_deref()))
+            }
+            DocumentCommand::SaveScene { based_on, edit } => {
+                let latest = revisions::latest(project, DocumentKind::Screenplay)
+                    .map_err(revision_error)?
+                    .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
+                if latest.revision != based_on {
+                    return Err(revision_error(RevisionError::NotLatest {
+                        based_on,
+                        latest: latest.revision,
+                    }));
+                }
+                let base: Screenplay = revisions::read(project, &latest).map_err(revision_error)?;
+                let edited = base
+                    .with_scene_edit(edit)
+                    .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
+                screenplay_document::edit(project, based_on, &edited)
+                    .map(|_| ())
+                    .map_err(revision_error)
+            }
+            DocumentCommand::LockScreenplay { revision } => {
+                screenplay_document::lock(project, revision).map_err(revision_error)
+            }
+        }))
+        .unwrap_or(Err(SessionError::Panicked))
+    }
+
+    /// Keep the documents models answered before an interruption, whichever
+    /// model this session uses, and render the screenplay again. Never asks
+    /// a model.
+    fn recover_documents(&mut self) -> Vec<Recovery> {
+        if self.project.is_read_only() {
+            return Vec::new();
+        }
+        let mut recoveries = Vec::new();
+        let mut attention = 0;
+        let own = self.model.info().provider;
+        let mut providers: Vec<&str> = DOCUMENT_PROVIDERS.to_vec();
+        if !providers.contains(&own.as_str()) {
+            providers.push(&own);
+        }
+        for provider in providers {
+            match documents::recover(&self.project, provider) {
+                Ok((completed, needs_attention)) => {
+                    attention += needs_attention;
+                    for record in completed {
+                        let kind = if record
+                            .artifact_id
+                            .starts_with(DocumentKind::Screenplay.id_prefix())
+                        {
+                            DocumentKind::Screenplay
+                        } else {
+                            DocumentKind::StoryAnalysis
+                        };
+                        recoveries.push(Recovery::Document {
+                            kind,
+                            revision: record.revision,
+                        });
+                    }
+                }
+                Err(_) => attention += 1,
+            }
+        }
+        if attention > 0 {
+            recoveries.push(Recovery::NeedsAttention { count: attention });
+        }
+        screenplay_document::rerender(&self.project);
+        recoveries
+    }
+
+    fn publish_documents(&self, view: &View) {
+        let published = panic::catch_unwind(AssertUnwindSafe(|| self.read_documents()))
+            .unwrap_or_else(|_| Err(SessionError::Panicked))
+            .unwrap_or_else(|error| PublishedDocuments {
+                damaged: Some(error.to_string()),
+                ..PublishedDocuments::default()
+            });
+        *lock(&view.documents) = Some(Arc::new(published));
+    }
+
+    fn read_documents(&self) -> Result<PublishedDocuments, SessionError> {
+        let project = &self.project;
+        let revision_error = |error| SessionError::Document(DocumentError::Revision(error));
+        let source = source::current(project)
+            .map_err(|error| SessionError::Document(DocumentError::Source(error)))?;
+        let analysis_record =
+            revisions::current(project, DocumentKind::StoryAnalysis).map_err(revision_error)?;
+        let analysis = match &analysis_record {
+            None => None,
+            Some(record) => Some(PublishedAnalysis {
+                revision: record.revision,
+                analysis: revisions::read(project, record).map_err(revision_error)?,
+            }),
+        };
+        let all =
+            revisions::revisions(project, DocumentKind::Screenplay).map_err(revision_error)?;
+        let latest =
+            revisions::latest(project, DocumentKind::Screenplay).map_err(revision_error)?;
+        let screenplay = match &latest {
+            None => None,
+            Some(record) => Some((
+                record.revision,
+                revisions::read::<Screenplay>(project, record).map_err(revision_error)?,
+            )),
+        };
+        let locked = all
+            .iter()
+            .find(|record| record.status == revisions::RevisionStatus::Locked)
+            .map(|record| record.revision);
+        let source_id = format!("source_r{:04}", source.revision);
+        let analysis_stale = analysis_record.as_ref().is_some_and(|record| {
+            !record.dependencies.iter().any(|dependency| {
+                dependency.artifact_id == source_id
+                    && dependency.content_hash == source.content_hash
+            })
+        });
+        let screenplay_stale = latest
+            .as_ref()
+            .is_some_and(|record| match &analysis_record {
+                None => true,
+                Some(current) => !record.dependencies.iter().any(|dependency| {
+                    dependency.artifact_id == current.artifact_id
+                        && dependency.content_hash == current.content_hash
+                }),
+            });
+        let info = self.model.info();
+        let ready = self.model.describe().ready;
+        Ok(PublishedDocuments {
+            source_revision: Some(source.revision),
+            analysis_cost: if ready {
+                story::analysis_cost(project, &info).ok().flatten()
+            } else {
+                None
+            },
+            screenplay_cost: if ready && analysis.is_some() {
+                screenplay::screenplay_cost(project, &info).ok().flatten()
+            } else {
+                None
+            },
+            analysis,
+            revisions: all,
+            screenplay,
+            locked,
+            analysis_stale,
+            screenplay_stale,
+            damaged: None,
+        })
+    }
+
     fn publish(&mut self, view: &View, shot_index: usize) {
         let published = panic::catch_unwind(AssertUnwindSafe(|| {
             self.with_shot(shot_index, |project, _, shot| {
@@ -908,6 +1277,10 @@ mod tests {
             revision: u16,
             result: Result<(), String>,
         },
+        DocumentCompleted {
+            token: u64,
+            result: Result<(), String>,
+        },
     }
 
     struct ChannelSink(Mutex<mpsc::Sender<Event>>);
@@ -946,6 +1319,13 @@ mod tests {
             let _ = lock(&self.0).send(Event::VideoFinished {
                 shot_index,
                 revision,
+                result: describe(result),
+            });
+        }
+
+        fn document_completed(&self, token: u64, result: &Result<(), SessionError>) {
+            let _ = lock(&self.0).send(Event::DocumentCompleted {
+                token,
                 result: describe(result),
             });
         }
@@ -1449,6 +1829,8 @@ mod tests {
             }
 
             fn video_finished(&self, _: u32, _: u16, _: &Result<(), SessionError>) {}
+
+            fn document_completed(&self, _: u64, _: &Result<(), SessionError>) {}
         }
 
         let temp = TempDir::new();
@@ -1584,5 +1966,235 @@ mod tests {
             generations < 50,
             "queued commands must not all run after close"
         );
+    }
+
+    mod documents {
+        use super::*;
+        use kineto_llm::fake::FakeLlm;
+        use kineto_project::{
+            revisions::Origin,
+            screenplay::{Block, BlockKind, SAMPLE_SCREENPLAY_JSON},
+            story::SAMPLE_ANALYSIS_JSON,
+        };
+
+        fn open_with(
+            path: &std::path::Path,
+            request: OpenRequest,
+            model: DocumentModel,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let _ = path;
+            let (sink, events) = sink();
+            let session = ProjectSession::spawn_with_model(
+                request,
+                ImageProvider::LocalDemo,
+                model,
+                sink,
+                SessionOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            (session, events)
+        }
+
+        fn create_with(
+            path: &std::path::Path,
+            model: DocumentModel,
+        ) -> (ProjectSession, Receiver<Event>) {
+            open_with(
+                path,
+                OpenRequest::CreateText {
+                    path: path.to_path_buf(),
+                    manifest: Box::new(manifest()),
+                    source: b"A filmmaker hears the last line and leaves.\n".to_vec(),
+                },
+                model,
+            )
+        }
+
+        fn run(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: DocumentCommand,
+        ) -> Result<(), String> {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            session.submit_document(command, token).unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::DocumentCompleted {
+                    token: actual,
+                    result,
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a document completion, got {other:?}"),
+            }
+        }
+
+        fn edit(based_on: u32, line: &str) -> DocumentCommand {
+            DocumentCommand::SaveScene {
+                based_on,
+                edit: SceneEdit {
+                    scene_id: "office_night".to_owned(),
+                    heading: "INT. SMALL OFFICE - NIGHT".to_owned(),
+                    time: "night".to_owned(),
+                    dramatic_goal: "He answers after all.".to_owned(),
+                    blocks: vec![Block {
+                        kind: BlockKind::Dialogue,
+                        character: Some("filmmaker".to_owned()),
+                        parenthetical: None,
+                        text: line.to_owned(),
+                    }],
+                },
+            }
+        }
+
+        #[test]
+        fn the_director_takes_a_story_to_a_locked_screenplay() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let model = DocumentModel::Fake(FakeLlm::answering([
+                SAMPLE_ANALYSIS_JSON,
+                SAMPLE_SCREENPLAY_JSON,
+            ]));
+            let (session, events) = create_with(&target, model);
+            let documents = session.documents().unwrap();
+            assert_eq!(documents.source_revision, Some(1));
+            assert!(documents.analysis.is_none());
+            assert_eq!(
+                documents.analysis_cost,
+                Some(0),
+                "a free model costs nothing"
+            );
+            assert_eq!(documents.screenplay_cost, None, "nothing to write from yet");
+
+            assert_eq!(
+                run(&session, &events, DocumentCommand::WriteScreenplay),
+                Err("Generation(Prerequisite(StoryAnalysis))".to_owned())
+            );
+            run(&session, &events, DocumentCommand::AnalyzeStory).unwrap();
+            let documents = session.documents().unwrap();
+            assert_eq!(documents.analysis.as_ref().unwrap().revision, 1);
+            assert_eq!(documents.screenplay_cost, Some(0));
+
+            run(&session, &events, DocumentCommand::WriteScreenplay).unwrap();
+            run(&session, &events, edit(1, "It was.")).unwrap();
+            assert!(
+                run(&session, &events, edit(1, "It was not."))
+                    .unwrap_err()
+                    .contains("NotLatest")
+            );
+            run(
+                &session,
+                &events,
+                DocumentCommand::LockScreenplay { revision: 2 },
+            )
+            .unwrap();
+
+            let documents = session.documents().unwrap();
+            let (revision, screenplay) = documents.screenplay.as_ref().unwrap();
+            assert_eq!(*revision, 2);
+            assert_eq!(screenplay.scenes[0].blocks[0].text, "It was.");
+            assert_eq!(documents.locked, Some(2));
+            assert_eq!(documents.revisions[1].origin, Origin::Edited);
+            assert!(!documents.screenplay_stale);
+            assert!(target.join("screenplay/screenplay.md").is_file());
+
+            // A new source makes the analysis, and so the screenplay, stale.
+            run(
+                &session,
+                &events,
+                DocumentCommand::ImportSource {
+                    text: "A filmmaker hears the last line and stays.".to_owned(),
+                    format: SourceFormat::Text,
+                    original_name: None,
+                },
+            )
+            .unwrap();
+            let documents = session.documents().unwrap();
+            assert_eq!(documents.source_revision, Some(2));
+            assert!(documents.analysis_stale);
+            assert!(
+                !documents.screenplay_stale,
+                "the analysis itself is unchanged"
+            );
+        }
+
+        #[test]
+        fn without_a_model_documents_are_refused_and_nothing_is_asked() {
+            let temp = TempDir::new();
+            let (session, events) = create_with(&temp.0.join("film"), DocumentModel::None);
+            assert!(!session.document_model().ready);
+            assert_eq!(
+                run(&session, &events, DocumentCommand::AnalyzeStory),
+                Err("Generation(ModelNotConfigured)".to_owned())
+            );
+            assert!(
+                run(
+                    &session,
+                    &events,
+                    DocumentCommand::ImportSource {
+                        text: "   ".to_owned(),
+                        format: SourceFormat::Text,
+                        original_name: None,
+                    },
+                )
+                .unwrap_err()
+                .contains("Empty")
+            );
+            assert_eq!(session.documents().unwrap().analysis_cost, None);
+        }
+
+        #[test]
+        fn an_answer_kept_before_a_crash_is_recovered_when_the_project_opens() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let model = DocumentModel::Fake(FakeLlm::answering([SAMPLE_ANALYSIS_JSON]));
+            let (session, events) = create_with(&target, model);
+            run(&session, &events, DocumentCommand::AnalyzeStory).unwrap();
+            drop(session);
+            // Undo the attach and acknowledgement, as if the process had died
+            // just after keeping the answer.
+            let log = target.join("story/analysis/revisions.json");
+            let record: serde_json::Value =
+                serde_json::from_slice(&fs::read(&log).unwrap()).unwrap();
+            fs::write(
+                target.join(".kineto/generation/story_analysis_r0001.json"),
+                serde_json::to_vec(&("story_analysis", &record["revisions"][0])).unwrap(),
+            )
+            .unwrap();
+            fs::remove_file(&log).unwrap();
+            let intent = target.join(".kineto/jobs/intents/story_analysis_r0001.json");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&intent).unwrap()).unwrap();
+            value["state"] = "invoked".into();
+            fs::write(&intent, serde_json::to_vec(&value).unwrap()).unwrap();
+
+            let (sink, events) = sink();
+            let reopened = ProjectSession::spawn_with_model(
+                OpenRequest::Open { path: target },
+                ImageProvider::LocalDemo,
+                // Recovery never asks a model: this one has no answers left.
+                DocumentModel::Fake(FakeLlm::answering(Vec::<String>::new())),
+                sink,
+                SessionOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::Recovered("Document { kind: StoryAnalysis, revision: 1 }".to_owned())
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(
+                reopened
+                    .documents()
+                    .unwrap()
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .revision,
+                1
+            );
+        }
     }
 }

@@ -25,7 +25,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -43,6 +44,8 @@ pub const KIMI_CODE_PROVIDER: &str = "kimi-code";
 /// How long one completion may take before the agent is stopped.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a waiting call checks whether it was cancelled.
+const CANCEL_CHECK: Duration = Duration::from_millis(100);
 /// Every Kimi Code built-in tool, as its tool reference names them.
 const KIMI_CODE_TOOLS: [&str; 24] = [
     "Read",
@@ -199,6 +202,9 @@ pub enum AgentError {
     NotSignedIn,
     /// The agent took longer than the call allows and was stopped.
     Timeout,
+    /// The caller cancelled the call, for example by closing the project;
+    /// the agent was stopped.
+    Cancelled,
     /// The agent stopped before answering.
     Exited,
     /// The agent answered a request with an error.
@@ -229,6 +235,7 @@ impl fmt::Display for AgentError {
                  KIMI_CODE_HOME set to it",
             ),
             Self::Timeout => formatter.write_str("the agent took too long and was stopped"),
+            Self::Cancelled => formatter.write_str("the call was cancelled and the agent stopped"),
             Self::Exited => formatter.write_str("the agent stopped before answering"),
             Self::Agent { code, message } => {
                 write!(formatter, "the agent reported an error ({code}): {message}")
@@ -247,7 +254,9 @@ impl AgentError {
     #[must_use]
     pub const fn class(&self) -> ErrorClass {
         match self {
-            Self::Timeout | Self::Exited | Self::Agent { .. } => ErrorClass::Retryable,
+            Self::Timeout | Self::Cancelled | Self::Exited | Self::Agent { .. } => {
+                ErrorClass::Retryable
+            }
             Self::Setup(_)
             | Self::ForeignConfig
             | Self::Spawn(_)
@@ -268,6 +277,7 @@ pub struct AcpAgent {
     timeout: Duration,
     workspace_root: PathBuf,
     home: Option<PathBuf>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl AcpAgent {
@@ -299,7 +309,15 @@ impl AcpAgent {
             timeout: DEFAULT_TIMEOUT,
             workspace_root: std::env::temp_dir(),
             home: None,
+            cancel: None,
         }
+    }
+
+    /// Stop any call in progress, and refuse new ones, once `cancel` is set.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     #[must_use]
@@ -343,6 +361,7 @@ struct Session {
     stdin: ChildStdin,
     lines: mpsc::Receiver<io::Result<String>>,
     deadline: Instant,
+    cancel: Option<Arc<AtomicBool>>,
     next_id: i64,
     answer: String,
 }
@@ -397,16 +416,24 @@ impl Session {
     }
 
     fn receive(&mut self) -> Result<Value, AgentError> {
-        let remaining = self
-            .deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(AgentError::Timeout)?;
-        match self.lines.recv_timeout(remaining) {
-            Ok(Ok(line)) => {
-                serde_json::from_str(&line).map_err(|_| AgentError::Protocol("not JSON-RPC"))
+        loop {
+            if is_cancelled(self.cancel.as_ref()) {
+                return Err(AgentError::Cancelled);
             }
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(AgentError::Exited),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(AgentError::Timeout),
+            let remaining = self
+                .deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(AgentError::Timeout)?;
+            match self.lines.recv_timeout(remaining.min(CANCEL_CHECK)) {
+                Ok(Ok(line)) => {
+                    return serde_json::from_str(&line)
+                        .map_err(|_| AgentError::Protocol("not JSON-RPC"));
+                }
+                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(AgentError::Exited);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         }
     }
 
@@ -471,6 +498,10 @@ impl Session {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn is_cancelled(cancel: Option<&Arc<AtomicBool>>) -> bool {
+    cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst))
 }
 
 static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
@@ -557,6 +588,7 @@ impl AcpAgent {
             stdin,
             lines,
             deadline: Instant::now() + self.timeout,
+            cancel: self.cancel.clone(),
             next_id: 0,
             answer: String::new(),
         })
@@ -618,6 +650,9 @@ impl LlmBackend for AcpAgent {
     }
 
     fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, AgentError> {
+        if is_cancelled(self.cancel.as_ref()) {
+            return Err(AgentError::Cancelled);
+        }
         if let Some(home) = &self.home {
             prepare_kimi_code_home(home)?;
         }
@@ -625,7 +660,10 @@ impl LlmBackend for AcpAgent {
         let mut session = self.start(&workspace)?;
         let result = Self::converse(&mut session, &workspace, prompt_text(request));
         let answer = std::mem::take(&mut session.answer);
-        session.close(result != Err(AgentError::Timeout));
+        session.close(!matches!(
+            result,
+            Err(AgentError::Timeout | AgentError::Cancelled)
+        ));
         if let Some(home) = &self.home {
             remove_empty_session_dirs(home, &workspace);
         }

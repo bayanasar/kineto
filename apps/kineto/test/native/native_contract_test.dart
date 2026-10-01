@@ -49,6 +49,34 @@ void main() {
     );
   });
 
+  test('document codes match the native tables name for name', () {
+    Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
+        <String>{for (final value in values) wireName(value)};
+    expect(names(KinetoLanguageModelKind.values, (kind) => kind.wireName), contract.llmProviders.keys.toSet());
+    expect(names(KinetoBlockKind.values, (kind) => kind.wireName), contract.blockKinds.keys.toSet());
+    expect(names(KinetoSceneSetting.values, (setting) => setting.wireName), contract.settings.keys.toSet());
+    expect(names(KinetoRevisionStatus.values, (status) => status.wireName), contract.revisionStatuses.keys.toSet());
+    expect(names(KinetoRevisionOrigin.values, (origin) => origin.wireName), contract.origins.keys.toSet());
+    expect(names(KinetoSourceFormat.values, (format) => format.wireName), contract.sourceFormats.keys.toSet());
+    expect(names(KinetoDocumentKind.values, (kind) => kind.wireName), contract.documentCosts.keys.toSet());
+    expect(
+      contract.documentFields,
+      containsAll(<String>[
+        'source_revision',
+        'analysis_revision',
+        'screenplay_revision',
+        'locked_revision',
+        'analysis_stale',
+        'screenplay_stale',
+        'documents_damaged',
+      ]),
+    );
+    expect(KinetoProjectException.needsAnalysis, contract.statuses['needs_analysis']);
+    expect(KinetoProjectException.notLatest, contract.statuses['not_latest']);
+    expect(KinetoProjectException.modelNotConfigured, contract.statuses['model_not_configured']);
+    expect(KinetoProjectException.costUnknown, contract.statuses['cost_unknown']);
+  });
+
   test('shot direction wire codes match the native table', () {
     expect(
       <String, int>{

@@ -1,0 +1,69 @@
+{
+  "title": "The Last Line",
+  "cast": [
+    {
+      "id": "filmmaker",
+      "name": "Filmmaker"
+    },
+    {
+      "id": "interviewer",
+      "name": "Interviewer"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "office_night",
+      "heading": "INT. SMALL OFFICE - NIGHT",
+      "setting": "interior",
+      "location": "small_office",
+      "time": "night",
+      "characters": [
+        "filmmaker",
+        "interviewer"
+      ],
+      "dramatic_goal": "The last question lands and he cannot stay to answer it.",
+      "blocks": [
+        {
+          "kind": "action",
+          "text": "One table, two chairs. Rain on the window."
+        },
+        {
+          "kind": "dialogue",
+          "character": "interviewer",
+          "parenthetical": "quietly",
+          "text": "Was it worth it?"
+        },
+        {
+          "kind": "action",
+          "text": "The filmmaker stands.\nHe leaves the door open."
+        },
+        {
+          "kind": "transition",
+          "text": "CUT TO BLACK."
+        }
+      ]
+    },
+    {
+      "id": "office_dawn",
+      "heading": "INT. SMALL OFFICE - DAWN",
+      "setting": "interior",
+      "location": "small_office",
+      "time": "dawn",
+      "characters": [
+        "filmmaker"
+      ],
+      "dramatic_goal": "He returns to the question he left unanswered.",
+      "blocks": [
+        {
+          "kind": "action",
+          "text": "Grey light. The chair is still pushed back."
+        },
+        {
+          "kind": "dialogue",
+          "character": "filmmaker",
+          "text": "It was."
+        }
+      ]
+    }
+  ]
+}

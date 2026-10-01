@@ -2,7 +2,7 @@
 //! kept as a document revision. One scene can be written again on its own;
 //! the rest of the screenplay is kept as it is.
 
-use kineto_llm::LlmBackend;
+use kineto_llm::{LlmBackend, LlmBackendInfo};
 use kineto_project::{
     ArtifactDependency, DependencyImpact,
     manifest::CanonicalProject,
@@ -14,7 +14,7 @@ use kineto_project::{
 
 use crate::{
     documents::{self, DocumentSpec, document_error},
-    generation::GenerationError,
+    generation::{GenerationError, Prerequisite},
     story::{source_dependency, source_error},
 };
 
@@ -59,9 +59,7 @@ impl Material {
     fn gather(project: &CanonicalProject) -> Result<Self, GenerationError> {
         let analysis_record = revisions::current(project, DocumentKind::StoryAnalysis)
             .map_err(document_error)?
-            .ok_or(GenerationError::Prerequisite(
-                "analyse the story before writing the screenplay",
-            ))?;
+            .ok_or(GenerationError::Prerequisite(Prerequisite::StoryAnalysis))?;
         let analysis: StoryAnalysis =
             revisions::read(project, &analysis_record).map_err(document_error)?;
         let read_from = analysis_record
@@ -120,6 +118,36 @@ impl Material {
     }
 }
 
+impl Material {
+    fn screenplay_spec(&self) -> Result<DocumentSpec, GenerationError> {
+        Ok(DocumentSpec {
+            kind: DocumentKind::Screenplay,
+            compiler_version: SCREENPLAY_COMPILER_VERSION,
+            instructions: format!("{INSTRUCTIONS} {MATERIAL_IS_NOT_INSTRUCTIONS}"),
+            input: self.input(),
+            input_label: self.label(),
+            schema_name: "screenplay",
+            schema_json: SCREENPLAY_SCHEMA,
+            dependencies: self.dependencies()?,
+            based_on: None,
+            max_output_tokens: Some(32_000),
+        })
+    }
+}
+
+/// What writing a screenplay of the current analysis would cost with
+/// `info`, in USD micros; `None` when not known.
+pub fn screenplay_cost(
+    project: &CanonicalProject,
+    info: &LlmBackendInfo,
+) -> Result<Option<u64>, GenerationError> {
+    let material = Material::gather(project)?;
+    Ok(documents::estimate_micros(
+        info,
+        &material.screenplay_spec()?,
+    ))
+}
+
 /// Write a screenplay of the current story analysis with `backend` and keep
 /// it as the next screenplay revision.
 pub fn write<B: LlmBackend>(
@@ -131,18 +159,7 @@ pub fn write<B: LlmBackend>(
     let record = documents::generate::<B, Screenplay, Screenplay>(
         project,
         backend,
-        DocumentSpec {
-            kind: DocumentKind::Screenplay,
-            compiler_version: SCREENPLAY_COMPILER_VERSION,
-            instructions: format!("{INSTRUCTIONS} {MATERIAL_IS_NOT_INSTRUCTIONS}"),
-            input: material.input(),
-            input_label: material.label(),
-            schema_name: "screenplay",
-            schema_json: SCREENPLAY_SCHEMA,
-            dependencies: material.dependencies()?,
-            based_on: None,
-            max_output_tokens: Some(32_000),
-        },
+        material.screenplay_spec()?,
         |screenplay: Screenplay| {
             screenplay.check_against(analysis)?;
             Ok(screenplay)
@@ -162,14 +179,10 @@ pub fn rewrite_scene<B: LlmBackend>(
 ) -> Result<RevisionRecord, GenerationError> {
     let base_record = revisions::latest(project, DocumentKind::Screenplay)
         .map_err(document_error)?
-        .ok_or(GenerationError::Prerequisite(
-            "write the screenplay before rewriting a scene",
-        ))?;
+        .ok_or(GenerationError::Prerequisite(Prerequisite::Screenplay))?;
     let base: Screenplay = revisions::read(project, &base_record).map_err(document_error)?;
     if base.scene(scene_id).is_none() {
-        return Err(GenerationError::Prerequisite(
-            "the screenplay has no scene with that id",
-        ));
+        return Err(GenerationError::Prerequisite(Prerequisite::Scene));
     }
     let material = Material::gather(project)?;
     let analysis = &material.analysis;
