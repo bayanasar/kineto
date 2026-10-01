@@ -647,6 +647,18 @@ fn complete_inner<G: CandidateGenerator>(
     if shot.is_attached(plan) {
         // Stopped after attaching: only the acknowledgements are missing. An
         // attached candidate's intent can only be invoked or already gone.
+        // Before acknowledging, prove canonical state holds the results the
+        // provider returned; an edited or corrupted record is not one.
+        let mut outputs = Vec::new();
+        for ((_, request), state) in requests.iter().zip(&states) {
+            if *state == Some(IntentState::Invoked) {
+                let output = generator
+                    .recover(request)
+                    .map_err(|source| provider_error(&generator, source))?;
+                outputs.push(output.output);
+            }
+        }
+        shot.check_attached(plan, &outputs)?;
         let invoked = states
             .iter()
             .map(|state| matches!(state, Some(IntentState::Invoked | IntentState::Reconciled)))
@@ -1057,6 +1069,50 @@ mod tests {
     }
 
     #[test]
+    fn an_attached_candidate_that_was_changed_is_not_acknowledged() {
+        let other_hash = format!("sha256:{}", "e".repeat(64));
+        let edits: [(&str, serde_json::Value); 4] = [
+            ("content_hash", other_hash.clone().into()),
+            ("input_hash", other_hash.into()),
+            ("provider", "another-provider".into()),
+            ("model", "another-model".into()),
+        ];
+        for (field, value) in edits {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            stop_at(&target, GenerationPoint::Attached);
+            // Edited offline between the attach and the acknowledgement.
+            let path = target.join("scenes/scene_001/shots/shot_001/artifacts.json");
+            let mut artifacts: Vec<serde_json::Value> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            artifacts[1][field] = value;
+            fs::write(&path, serde_json::to_vec_pretty(&artifacts).unwrap()).unwrap();
+
+            let project = CanonicalProject::open(&target).unwrap();
+            let found = unfinished(&project, &ImageProvider::LocalDemo).unwrap();
+            assert_eq!(found.plans.len(), 1);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let error = complete(
+                &project,
+                &mut shot,
+                &found.plans[0],
+                &ImageProvider::LocalDemo,
+                &mut NoHooks,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GenerationError::Shot(ShotWorkflowError::AttachedRecordMismatch(ref id))
+                        if id == "shot_001_g0001_candidate_b"
+                ),
+                "{field}: {error:?}"
+            );
+            assert_eq!(intent_states(&target), vec!["invoked"; 3], "{field}");
+        }
+    }
+
+    #[test]
     fn the_demo_adapter_recomputes_the_same_result_from_its_key() {
         let candidate = ArtifactId::new("shot_001_g0001_candidate_b").unwrap();
         let input = InputHash::new(format!("sha256:{}", "a".repeat(64))).unwrap();
@@ -1273,6 +1329,74 @@ mod tests {
             assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
             assert_eq!(shot.snapshot().unwrap().candidate_count, 3);
             assert_eq!(receipts(&target), 0);
+        }
+
+        #[test]
+        fn an_attached_keyframe_edited_before_acknowledgement_is_not_acknowledged() {
+            for edit in ["intact", "content_hash", "media_path"] {
+                let temp = TempDir::new();
+                let target = temp.0.join("film");
+                {
+                    let project = bootstrap_project(&target);
+                    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                    let (client, _calls) = client(FakeMinimax::default());
+                    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        generate_with(
+                            &project,
+                            &mut shot,
+                            MinimaxKeyframes::new(&project, Some(&client)),
+                            &mut StopAt(GenerationPoint::Attached),
+                        )
+                    }));
+                    assert!(stopped.is_err());
+                }
+                let path = target.join("scenes/scene_001/shots/shot_001/artifacts.json");
+                let mut artifacts: Vec<serde_json::Value> =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                match edit {
+                    "content_hash" => {
+                        artifacts[1]["content_hash"] = format!("sha256:{}", "e".repeat(64)).into();
+                    }
+                    "media_path" => {
+                        artifacts[1]["media_path"] =
+                            "scenes/scene_001/shots/shot_001/keyframes/other.jpg".into();
+                    }
+                    _ => {}
+                }
+                fs::write(&path, serde_json::to_vec_pretty(&artifacts).unwrap()).unwrap();
+
+                let project = CanonicalProject::open(&target).unwrap();
+                let found = unfinished_with(
+                    &project,
+                    MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+                )
+                .unwrap();
+                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let outcome = complete_with(
+                    &project,
+                    &mut shot,
+                    &found.plans[0],
+                    MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+                    &mut NoHooks,
+                );
+                if edit == "intact" {
+                    assert_eq!(outcome.unwrap(), AttachOutcome::AlreadyAttached);
+                    assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+                    assert_eq!(receipts(&target), 0);
+                } else {
+                    assert!(
+                        matches!(
+                            outcome,
+                            Err(GenerationError::Shot(
+                                ShotWorkflowError::AttachedRecordMismatch(_)
+                            ))
+                        ),
+                        "{edit}: {outcome:?}"
+                    );
+                    assert_eq!(intent_states(&target), vec!["invoked"; 3], "{edit}");
+                    assert_eq!(receipts(&target), 3, "{edit}: receipts are kept");
+                }
+            }
         }
 
         #[test]
