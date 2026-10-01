@@ -345,7 +345,12 @@ fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
             path,
             manifest,
             source,
-        } => CanonicalProject::create(path, *manifest, &source),
+        } => CanonicalProject::create_with_files(
+            path,
+            *manifest,
+            &source,
+            &crate::bootstrap::scene_files(),
+        ),
     }
     .map_err(SessionError::Open)
 }

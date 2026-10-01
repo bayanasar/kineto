@@ -186,6 +186,86 @@ pub enum AttachOutcome {
     AlreadyAttached,
 }
 
+/// What a shot is meant to show, as written in its `shot.json`.
+///
+/// Only `action` is required for a shot to have an intent; every other field
+/// is optional, and fields this build does not know stay in the file.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShotIntent {
+    pub action: String,
+    pub framing: Option<String>,
+    pub lens: Option<String>,
+    pub camera_motion: Option<String>,
+    pub emotion: Option<String>,
+    pub dialogue: Option<String>,
+    pub characters: Vec<String>,
+    pub duration_target: Option<f64>,
+}
+
+/// The scene a shot belongs to, as written in its `scene.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneIntent {
+    pub location: Option<String>,
+    pub time: Option<String>,
+    pub dramatic_goal: Option<String>,
+    pub characters: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredShotIntent {
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    framing: Option<String>,
+    #[serde(default)]
+    lens: Option<String>,
+    #[serde(default)]
+    camera_motion: Option<String>,
+    #[serde(default)]
+    emotion: Option<String>,
+    #[serde(default)]
+    dialogue: Option<String>,
+    #[serde(default)]
+    characters: Vec<String>,
+    #[serde(default)]
+    duration_target: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct StoredSceneIntent {
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    time: Option<String>,
+    #[serde(default)]
+    dramatic_goal: Option<String>,
+    #[serde(default)]
+    characters: Vec<String>,
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// The intent of the bootstrap scene, or `None` when it has no `scene.json`.
+pub fn load_scene_intent(
+    project: &CanonicalProject,
+) -> Result<Option<SceneIntent>, ShotWorkflowError> {
+    let path =
+        ProjectRelativePath::new("scenes/scene_001/scene.json").map_err(ShotWorkflowError::Path)?;
+    let Some(stored) = read_json_optional::<StoredSceneIntent>(project, &path)? else {
+        return Ok(None);
+    };
+    Ok(Some(SceneIntent {
+        location: non_blank(stored.location),
+        time: non_blank(stored.time),
+        dramatic_goal: non_blank(stored.dramatic_goal),
+        characters: stored.characters,
+    }))
+}
+
 /// Output of the deterministic local demo generator for one candidate.
 pub fn demo_candidate_output(
     artifact_id: &ArtifactId,
@@ -503,6 +583,42 @@ impl ShotWorkflow {
     #[must_use]
     pub fn hash_issues(&self) -> &[ShotHashIssue] {
         &self.hash_issues
+    }
+
+    /// The shot's written intent, or `None` when its `shot.json` has no
+    /// `action`. A field of the wrong type is invalid canonical state.
+    pub fn intent(&self) -> Result<Option<ShotIntent>, ShotWorkflowError> {
+        let stored: StoredShotIntent = serde_json::from_value(Value::Object(
+            self.shot
+                .extra
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ))
+        .map_err(ShotWorkflowError::Json)?;
+        let Some(action) = non_blank(stored.action) else {
+            return Ok(None);
+        };
+        Ok(Some(ShotIntent {
+            action,
+            framing: non_blank(stored.framing),
+            lens: non_blank(stored.lens),
+            camera_motion: non_blank(stored.camera_motion),
+            emotion: non_blank(stored.emotion),
+            dialogue: non_blank(stored.dialogue),
+            characters: stored.characters,
+            duration_target: stored.duration_target,
+        }))
+    }
+
+    #[must_use]
+    pub const fn shot_number(&self) -> u32 {
+        self.shot_number
+    }
+
+    #[must_use]
+    pub const fn direction(&self) -> ShotDirection {
+        self.shot.direction
     }
 
     pub fn migrate_legacy_hashes(
@@ -1463,6 +1579,78 @@ mod tests {
         fs::write(base.join("shot.json"), &state.shot).unwrap();
         fs::write(base.join("artifacts.json"), &state.artifacts).unwrap();
         fs::write(base.join("selection.json"), &state.selection).unwrap();
+    }
+
+    #[test]
+    fn written_intent_is_read_and_survives_a_canonical_write() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        assert_eq!(
+            ShotWorkflow::load(&project, 1).unwrap().intent().unwrap(),
+            None
+        );
+        assert_eq!(load_scene_intent(&project).unwrap(), None);
+
+        fs::create_dir_all(shot_dir(&target)).unwrap();
+        fs::write(
+            shot_dir(&target).join("shot.json"),
+            include_bytes!(
+                "../../../fixtures/projects/minimal/scenes/scene_001/shots/shot_001/shot.json"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            target.join("scenes/scene_001/scene.json"),
+            include_bytes!("../../../fixtures/projects/minimal/scenes/scene_001/scene.json"),
+        )
+        .unwrap();
+
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let expected = ShotIntent {
+            action: "Alice picks up the sealed letter".to_owned(),
+            framing: Some("medium_close_up".to_owned()),
+            lens: Some("50mm".to_owned()),
+            camera_motion: Some("slow_dolly_in".to_owned()),
+            emotion: Some("cautious curiosity".to_owned()),
+            dialogue: None,
+            characters: vec!["alice".to_owned()],
+            duration_target: Some(4.0),
+        };
+        assert_eq!(shot.intent().unwrap(), Some(expected.clone()));
+        assert_eq!(
+            load_scene_intent(&project).unwrap(),
+            Some(SceneIntent {
+                location: Some("empty_room".to_owned()),
+                time: Some("day".to_owned()),
+                dramatic_goal: Some("Alice discovers the letter".to_owned()),
+                characters: vec!["alice".to_owned()],
+            })
+        );
+
+        shot.set_direction(&project, ShotDirection::Tension)
+            .unwrap();
+        let reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        assert_eq!(reloaded.direction(), ShotDirection::Tension);
+        assert_eq!(reloaded.intent().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn an_intent_field_of_the_wrong_type_is_refused() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        fs::create_dir_all(shot_dir(&target)).unwrap();
+        fs::write(
+            shot_dir(&target).join("shot.json"),
+            br#"{"shot_id":"shot_001","schema_version":1,"action":7}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ShotWorkflow::load(&project, 1).unwrap().intent(),
+            Err(ShotWorkflowError::Json(_))
+        ));
     }
 
     #[test]

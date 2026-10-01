@@ -734,6 +734,44 @@ fn real_project_and_shot_persistence_match_committed_schemas() {
 }
 
 #[test]
+fn bootstrap_scene_written_at_creation_matches_committed_schemas() {
+    let scene_schema = schema("scene.schema.json");
+    let shot_schema = schema("shot.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create_with_files(
+        &temp.0,
+        manifest(),
+        b"schema contract story\n",
+        &kineto_core::bootstrap::scene_files(),
+    )
+    .expect("test project should be creatable with the bootstrap scene");
+
+    validate(
+        &scene_schema,
+        &json_file(&temp.0.join("scenes/scene_001/scene.json")),
+        "bootstrap scene.json",
+    );
+    for shot_number in 1..=2 {
+        let shot_json = temp.0.join(format!(
+            "scenes/scene_001/shots/shot_{shot_number:03}/shot.json"
+        ));
+        validate(&shot_schema, &json_file(&shot_json), "bootstrap shot.json");
+
+        // A canonical write keeps the intent and still matches the schema.
+        let mut shot = ShotWorkflow::load(&project, shot_number).expect("shot should load");
+        shot.generate(&project)
+            .expect("bootstrap shot should accept a generation");
+        let written = json_file(&shot_json);
+        validate(&shot_schema, &written, "bootstrap shot.json after a write");
+        assert!(
+            written["action"]
+                .as_str()
+                .is_some_and(|action| !action.is_empty())
+        );
+    }
+}
+
+#[test]
 fn real_job_runtime_intent_matches_committed_schema() {
     let job_schema = schema("job.schema.json");
     let temp = TempDir::new();

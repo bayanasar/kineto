@@ -176,6 +176,10 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
+The first compiler in use is `keyframe-prompt/1` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json` and compiles a still-image prompt. Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step. Until approved character reference images exist, every named character is an identity-affecting drop. The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it.
+
+Projects created by the desktop app start with the bootstrap scene (`kineto-core/src/bootstrap.rs`) written into these files, published atomically with the project.
+
 ## Paid job safety
 
 A paid/asynchronous provider call has a deterministic idempotency key derived from semantic `input_hash` plus operation identity.

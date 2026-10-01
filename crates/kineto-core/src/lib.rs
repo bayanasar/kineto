@@ -1,4 +1,6 @@
+pub mod bootstrap;
 pub mod generation;
+pub mod keyframe_prompt;
 pub mod session;
 
 /// Process-local engine state shared by all machine-local Kineto work.

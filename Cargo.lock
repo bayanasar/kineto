@@ -91,7 +91,9 @@ dependencies = [
  "kineto-job-runtime",
  "kineto-jobs",
  "kineto-project",
+ "kineto-prompts",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
