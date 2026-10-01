@@ -89,6 +89,8 @@ CLI adapters are experimental. Agent CLIs are not stable substitutes for inferen
 
 `kineto-llm` holds the `llm.complete` capability: an `LlmBackend` trait (blocking, static dispatch), requests that may carry the JSON Schema an answer must satisfy, and `complete_structured`, which turns an answer into typed state only after it deserializes and asks once more, with the parser's error, before refusing. Backends report how they are billed (per token, subscription, or free) so a cost estimate can say when the cost is unknown. Offline fakes cover scripted answers, latency, retryable-then-success, terminal failure and answers that do not fit the schema.
 
+One backend, `OpenAiCompatible`, serves both "one cloud provider" and "one OpenAI-compatible/local provider": Kimi's open platform by default (`kimi-k3`, key from `KINETO_KIMI_API_KEY`, prices for known models, anything else unpriced), or a local model server. It sends HTTPS, or HTTP only to a loopback address, follows no redirects, asks for `json_object` output with the schema in a system message, and treats a truncated or withheld answer as terminal. Rate limits and server errors are retryable; quota, authentication and request errors are terminal.
+
 ### Image / video
 
 Start with one cloud provider and one local path.

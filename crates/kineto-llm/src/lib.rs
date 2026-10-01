@@ -19,6 +19,8 @@ use serde::de::DeserializeOwned;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
+pub mod http;
+pub mod openai;
 
 /// Who a message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +120,8 @@ pub enum Billing {
     Subscription,
     /// A local model.
     Free,
+    /// Metered, but this build knows no price for the model.
+    Unpriced,
 }
 
 /// What the director needs to know about a backend before asking it.
@@ -161,7 +165,7 @@ pub fn estimate_cost(
     expected_output_tokens: u64,
 ) -> Option<CostEstimate> {
     let amount_micros = match info.billing {
-        Billing::Subscription => return None,
+        Billing::Subscription | Billing::Unpriced => return None,
         Billing::Free => 0,
         Billing::PerToken {
             input_micros_per_million,
