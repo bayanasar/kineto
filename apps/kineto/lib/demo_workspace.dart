@@ -100,6 +100,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late final KinetoEngineSnapshot _engineSnapshot;
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
+  bool _working = false;
   String? _error;
 
   @override
@@ -123,19 +124,27 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     });
   }
 
-  void _run(void Function() action) {
+  // Native work runs on the project's worker thread; this isolate only waits
+  // for the answer. One command at a time keeps the UI honest about which
+  // state the director is looking at.
+  Future<void> _run(Future<void> Function() action) async {
+    if (_working) return;
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    String? error;
     try {
-      action();
-      setState(() {
-        _shotSnapshots = _readShotSnapshots();
-        _error = null;
-      });
-    } on Object catch (error) {
-      setState(() {
-        _shotSnapshots = _readShotSnapshots();
-        _error = error.toString();
-      });
+      await action();
+    } on Object catch (failure) {
+      error = failure.toString();
     }
+    if (!mounted) return;
+    setState(() {
+      _working = false;
+      _shotSnapshots = _readShotSnapshots();
+      _error = error;
+    });
   }
 
   @override
@@ -147,6 +156,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
       isDarkMode: widget.isDarkMode,
+      working: _working,
       error: _error,
       onThemeToggle: widget.onThemeToggle,
       onShotChanged: _switchShot,
@@ -188,6 +198,7 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onLock,
     required this.onReset,
     this.onMigrate,
+    this.working = false,
     this.isDarkMode = true,
     this.onThemeToggle,
     this.error,
@@ -207,12 +218,15 @@ class DemoWorkspaceView extends StatelessWidget {
   final VoidCallback onLock;
   final VoidCallback onReset;
   final VoidCallback? onMigrate;
+
+  /// A command is running on the project's worker; changes wait for it.
+  final bool working;
   final String? error;
 
   @override
   Widget build(BuildContext context) {
     final selectedIndex = shotSnapshot.selectedIndex;
-    final blocked = shotSnapshot.changesBlocked;
+    final blocked = shotSnapshot.changesBlocked || working;
     final canLock = !blocked &&
         shotSnapshot.generated &&
         selectedIndex != null &&
@@ -252,10 +266,12 @@ class DemoWorkspaceView extends StatelessWidget {
                 const SizedBox(height: 20),
                 WabPanel(
                   title: 'Scene 001',
-                  trailing: WabStatusBadge(
-                    sceneReady ? 'Ready' : 'In progress',
-                    kind: sceneReady ? WabBadgeKind.done : WabBadgeKind.progress,
-                  ),
+                  trailing: working
+                      ? const WabStatusBadge('Working', kind: WabBadgeKind.progress)
+                      : WabStatusBadge(
+                          sceneReady ? 'Ready' : 'In progress',
+                          kind: sceneReady ? WabBadgeKind.done : WabBadgeKind.progress,
+                        ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
@@ -315,7 +331,7 @@ class DemoWorkspaceView extends StatelessWidget {
                         const SizedBox(height: 12),
                         WabButton(
                           kind: WabMaterialKind.seal,
-                          onPressed: onMigrate,
+                          onPressed: working ? null : onMigrate,
                           child: const Text('Migrate with backup'),
                         ),
                       ],

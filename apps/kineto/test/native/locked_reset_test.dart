@@ -4,12 +4,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/native/kineto_engine.dart';
 
 void main() {
-  test('reset deliberately discards a locked shot while retaining lineage', () {
+  test('reset deliberately discards a locked shot while retaining lineage', () async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-locked-reset-');
     final target = Directory(_path(sandbox.path, 'film'));
 
     try {
-      var project = KinetoProjectSession.createTextProject(
+      var project = await KinetoProjectSession.createTextProject(
         path: target.path,
         projectId: 'ffi_locked_reset',
         title: 'Locked Reset',
@@ -17,13 +17,13 @@ void main() {
         language: 'en',
         sourceText: 'source\n',
       );
-      project.setShotDirection(0, KinetoShotDirection.tension);
-      project.generateShotCandidates(0);
-      project.selectShotCandidate(0, 2);
-      project.lockShotSelection(0);
+      await project.setShotDirection(0, KinetoShotDirection.tension);
+      await project.generateShotCandidates(0);
+      await project.selectShotCandidate(0, 2);
+      await project.lockShotSelection(0);
       expect(project.shotSnapshot(0).locked, isTrue);
 
-      project.resetShot(0);
+      await project.resetShot(0);
       final discarded = project.shotSnapshot(0);
       expect(discarded.generated, isFalse);
       expect(discarded.locked, isFalse);
@@ -33,7 +33,7 @@ void main() {
       expect(discarded.supersededCount, 3);
       project.close();
 
-      project = KinetoProjectSession.open(target.path);
+      project = await KinetoProjectSession.open(target.path);
       final reopened = project.shotSnapshot(0);
       expect(reopened.generated, isFalse);
       expect(reopened.locked, isFalse);

@@ -41,7 +41,7 @@ There is no desktop:
 - engine executable lookup
 - duplicate request/response schema
 
-Native ABI v12 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer busy status (`117`), v11 the explicit legacy-hash migration entry point with its refusal status (`118`), and v12 the lock-unavailable status (`119`). Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
+Native ABI v13 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer busy status (`117`), v11 the explicit legacy-hash migration entry point with its refusal status (`118`), v12 the lock-unavailable status (`119`), and v13 made every filesystem-touching project call asynchronous (see Concurrency model) with status `120` for a session that is not open. Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
 
 The demo snapshot remains one packed `u64` containing generated/locked/stale flags, legacy-migration-pending and invalid-hash flags, candidate count, selected candidate, shot direction, generation revision, and superseded count. This compact demo ABI is disposable scaffolding, not the final project model.
 
@@ -73,7 +73,7 @@ kineto_project_create_text/open -> writes one opaque session through an out poin
 kineto_project_destroy          -> consumes that session exactly once
 ```
 
-A read-write project session is the project's only writer. Opening one takes an OS advisory lock on `.kineto/session.lock` and holds it until `kineto_project_destroy`; a second read-write open, from this process or another, fails with status `117` (`KinetoProjectException.busy`) instead of writing from its own stale copy of the state. The lock fails closed: if the lock file cannot be created or the filesystem cannot lock it, the read-write open fails with status `119` (`KinetoProjectException.lockUnavailable`); there is no unlocked read-write session. Read-only sessions (older project formats) do not take the lock. The lock file is derived state under `.kineto/`; deleting it loses nothing canonical.
+A read-write project session is the project's only writer. Opening one takes an OS advisory lock on `.kineto/session.lock` and holds it until `kineto_project_destroy`; a second read-write open, from this process or another, reports status `117` (`KinetoProjectException.busy`) as its open result instead of writing from its own stale copy of the state. The lock fails closed: if the lock file cannot be created or the filesystem cannot lock it, the read-write open reports status `119` (`KinetoProjectException.lockUnavailable`); there is no unlocked read-write session. Read-only sessions (older project formats) do not take the lock. The lock file is derived state under `.kineto/`; deleting it loses nothing canonical.
 
 Dart wraps these handles in `KinetoEngine` and `KinetoProjectSession`, performs deterministic `close()`, and installs a `NativeFinalizer` as a safety net.
 
@@ -115,11 +115,34 @@ Human-readable TOML/JSON/Markdown remain appropriate for **project storage** bec
 
 The two-shot demo keeps its approval state in canonical project files — `scenes/scene_001/shots/shot_00N/shot.json`, `artifacts.json` and `selection.json` — inside the project directory. The earlier machine-level demo sidecars are retired; deleting `.kineto/` loses no approval state.
 
+## Concurrency model
+
+Each open project session is owned by one Rust worker thread (`kineto_core::session::ProjectSession`). The worker is the only code that touches the session's `CanonicalProject` and its cached shot workflows, so project state is never shared between threads and the domain types need no internal locking.
+
+- Commands are queued and run strictly in submission order on the worker. Submitting a command never waits for it to run.
+- After every command the worker publishes the affected shot's snapshot. Snapshot and metadata reads return that published state; they never do I/O and never wait for a running command.
+- Outcomes reach the caller through a sink invoked on the worker thread, after the snapshot is published.
+- The handle is `Send + Sync`: any thread may submit commands or read published state. Only the owner closes it. Closing stops delivery before it returns, discards queued commands that have not started, lets the running command finish, and releases the project and its single-writer lock before returning.
+- A panic inside a command is caught. The shot's in-memory state is discarded and reloaded from its canonical files before its next use.
+
+### Across the FFI boundary
+
+Which calls must leave the UI isolate is decided by capability, not by measured duration: any native call that may touch the filesystem, the network or a subprocess returns before doing so. Durations grow with project size; capabilities do not.
+
+- `kineto_project_open` and `kineto_project_create_text` validate and copy their arguments, start the session worker and return a handle at once. The open's result arrives as an `OPENED` message; the handle is destroyed whatever that result is.
+- Shot commands (`set_direction`, `generate`, `select`, `lock`, `reset`, `migrate_legacy_hashes`) take a caller token, queue and return. The outcome arrives as a `COMPLETED` message carrying that token and a status code. Arguments the ABI can reject without the worker (null handle, shot index, direction code) are refused synchronously.
+- Messages are `Int64List [kind, token, status, shot]`, posted with Dart's `NativeApi.postCObject` to the `RawReceivePort` the session was opened with. Posting to a closed port is defined behaviour, so an isolate that goes away first (hot restart, a session reclaimed only by its finalizer) is never called into. `NativeCallable.listener` was not used for this reason: calling one after `close()` is undefined behaviour.
+- `kineto_project_shot_state`, `format_version`, `is_read_only`, `id_copy` and `title_copy` read published state only.
+- A session belongs to the isolate whose port it was opened with; completions are delivered there. Any thread may read through the handle, but only its owner destroys it. `kineto_project_destroy` stops delivery before returning, discards queued commands and waits for the running one, so the Dart owner closes its port after destroy and loses nothing that still matters.
+- The Dart binding exposes these calls as `Future`s. `KinetoProjectSession.close()` fails still-queued futures with `KinetoProjectSessionClosedException`, and the port keeps its isolate alive only while an answer is owed. While an answer is owed the port also holds the session, so garbage collection cannot finalize a session and suppress an answer it still owes. A session collected without `close()` closes its port through a Dart `Finalizer` as well as destroying its native handle; `test/native/session_finalizer_test.dart` forces that collection through the VM service (`flutter test --enable-vmservice`).
+
+A worker thread, not an async runtime, because every current operation is blocking local filesystem I/O. One thread per session gives ordered execution off the UI thread without an executor. A shared async runtime arrives with network provider I/O, as below, not before.
+
 ## Async and events
 
-The bootstrap does not invent an async framework before real jobs exist.
+There is no async runtime yet; the session worker above owns filesystem work.
 
-When P0 job work lands:
+When provider jobs land:
 
 - one Rust-side async runtime owns IO-bound orchestration
 - CPU-bound work is moved off async executor threads into bounded compute work

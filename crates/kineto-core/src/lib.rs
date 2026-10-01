@@ -1,3 +1,5 @@
+pub mod session;
+
 /// Process-local engine state shared by all machine-local Kineto work.
 ///
 /// The Flutter desktop application embeds this engine in-process. Expensive
