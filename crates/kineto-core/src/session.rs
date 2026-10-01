@@ -804,6 +804,22 @@ mod tests {
                             .to_vec(),
                 })
             }
+
+            fn get(
+                &self,
+                _url: &str,
+                _api_key: &SecretString,
+            ) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("image generation makes no GET request")
+            }
+
+            fn download(
+                &self,
+                _url: &str,
+                _max_bytes: u64,
+            ) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("image generation downloads nothing")
+            }
         }
         struct StopBeforeAttach;
         impl generation::GenerationHooks for StopBeforeAttach {

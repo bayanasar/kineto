@@ -22,6 +22,13 @@ use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
 use kineto_providers::{ImageFormat, secret::SecretString};
 use serde::{Deserialize, Serialize};
 
+mod video;
+
+pub use video::{
+    MAX_VIDEO_BYTES, VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask,
+    VideoTaskState,
+};
+
 /// The provider key MiniMax jobs are recorded under.
 pub const PROVIDER: &str = "minimax";
 /// The image model this adapter calls.
@@ -38,6 +45,7 @@ pub const IMAGE_PRICE_MICROS: u64 = 3_500;
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_STATUS_MESSAGE_CHARS: usize = 200;
 
 /// Aspect ratios `image-01` accepts.
@@ -112,11 +120,20 @@ pub trait Transport {
         api_key: &SecretString,
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure>;
+
+    /// An authenticated GET to the MiniMax API.
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure>;
+
+    /// An unauthenticated GET of a file the API pointed to, at most
+    /// `max_bytes` long. It never carries the API key: the file lives on a
+    /// content host, not on the API.
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure>;
 }
 
 /// Blocking HTTPS with rustls and the bundled Mozilla roots.
 pub struct HttpsTransport {
     agent: ureq::Agent,
+    downloads: ureq::Agent,
 }
 
 impl HttpsTransport {
@@ -132,7 +149,17 @@ impl HttpsTransport {
             .user_agent(concat!("kineto/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        Self { agent }
+        // Downloads carry no credentials, so a content host may redirect.
+        let downloads = ureq::Agent::config_builder()
+            .https_only(true)
+            .max_redirects(3)
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .user_agent(concat!("kineto/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .into();
+        Self { agent, downloads }
     }
 }
 
@@ -155,22 +182,44 @@ impl Transport for HttpsTransport {
         api_key: &SecretString,
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
-        let mut response = self
+        let response = self
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", api_key.expose()))
             .header("Content-Type", "application/json")
             .send(body)
             .map_err(failure)?;
-        let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(failure)?;
-        Ok(HttpResponse { status, body })
+        read(response, MAX_RESPONSE_BYTES)
     }
+
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        let response = self
+            .agent
+            .get(url)
+            .header("Authorization", format!("Bearer {}", api_key.expose()))
+            .call()
+            .map_err(failure)?;
+        read(response, MAX_RESPONSE_BYTES)
+    }
+
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        let response = self.downloads.get(url).call().map_err(failure)?;
+        read(response, max_bytes)
+    }
+}
+
+fn read(
+    mut response: ureq::http::Response<ureq::Body>,
+    max_bytes: u64,
+) -> Result<HttpResponse, TransportFailure> {
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(max_bytes)
+        .read_to_vec()
+        .map_err(failure)?;
+    Ok(HttpResponse { status, body })
 }
 
 fn failure(error: ureq::Error) -> TransportFailure {
@@ -194,10 +243,12 @@ pub enum MinimaxError {
     Api { code: i64, message: String },
     /// The answer was well-formed but held no image.
     NoImage,
-    /// The answer could not be read as an `image-01` response.
+    /// The answer could not be read as the response it should be.
     Malformed(&'static str),
-    /// The prompt is empty or longer than [`MAX_PROMPT_CHARS`].
+    /// The prompt is empty or longer than the model accepts.
     InvalidPrompt,
+    /// A remote task ended in failure.
+    TaskFailed,
 }
 
 impl MinimaxError {
@@ -216,9 +267,11 @@ impl MinimaxError {
                 1000 | 1001 | 1002 | 1013 | 1041 | 2045 => ErrorClass::Retryable,
                 _ => ErrorClass::Terminal,
             },
-            Self::Http { .. } | Self::NoImage | Self::Malformed(_) | Self::InvalidPrompt => {
-                ErrorClass::Terminal
-            }
+            Self::Http { .. }
+            | Self::NoImage
+            | Self::Malformed(_)
+            | Self::InvalidPrompt
+            | Self::TaskFailed => ErrorClass::Terminal,
         }
     }
 }
@@ -235,10 +288,10 @@ impl fmt::Display for MinimaxError {
             }
             Self::NoImage => formatter.write_str("MiniMax returned no image"),
             Self::Malformed(what) => write!(formatter, "MiniMax response is malformed: {what}"),
-            Self::InvalidPrompt => write!(
-                formatter,
-                "prompt must be 1..={MAX_PROMPT_CHARS} characters"
-            ),
+            Self::InvalidPrompt => {
+                formatter.write_str("prompt is empty or longer than the model accepts")
+            }
+            Self::TaskFailed => formatter.write_str("MiniMax reported the task as failed"),
         }
     }
 }
@@ -437,6 +490,18 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .expect("a recorded response")
+        }
+
+        fn get(
+            &self,
+            _url: &str,
+            _api_key: &SecretString,
+        ) -> Result<HttpResponse, TransportFailure> {
+            unreachable!("image generation makes no GET request")
+        }
+
+        fn download(&self, _url: &str, _max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+            unreachable!("image generation downloads nothing")
         }
     }
 

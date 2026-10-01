@@ -870,6 +870,24 @@ impl kineto_provider_minimax::Transport for RecordedMinimax {
                 .to_vec(),
         })
     }
+
+    fn get(
+        &self,
+        _url: &str,
+        _api_key: &kineto_providers::secret::SecretString,
+    ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+    {
+        unreachable!("image generation makes no GET request")
+    }
+
+    fn download(
+        &self,
+        _url: &str,
+        _max_bytes: u64,
+    ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+    {
+        unreachable!("image generation downloads nothing")
+    }
 }
 
 #[test]

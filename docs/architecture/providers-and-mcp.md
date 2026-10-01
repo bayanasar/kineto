@@ -93,6 +93,8 @@ Start with one cloud provider and one local path.
 
 The first cloud provider is MiniMax (`kineto-provider-minimax`): `image-01` for keyframes over blocking HTTPS with rustls and the bundled Mozilla roots, base64 responses so the image arrives inside the authenticated answer, no redirects, and every failure classified as retryable or terminal (unknown codes are terminal). Its image endpoint has no idempotency key or request lookup, so a request that fails after it was sent may already have been billed; the job runtime's attempt limit bounds the duplicate spend. `cargo run -p kineto-provider-minimax --example image_smoke` is the manual paid smoke test; no test suite calls it.
 
+Video uses MiniMax Hailuo image-to-video (`MiniMax-Hailuo-02`) as a remote task: submitting (the paid call, with the first frame inlined as a `data:` URL) returns a task ID at once; querying it is free and can be repeated after a restart; a finished task names a file whose download URL is on MiniMax's content host, which is fetched without the API key, over https only, size-bounded and checked to be MP4.
+
 Local generation should be implementable through a process/API adapter such as ComfyUI without coupling core workflow logic to it.
 
 ### TTS
