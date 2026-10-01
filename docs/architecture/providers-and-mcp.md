@@ -87,6 +87,8 @@ Recommended first-wave support:
 
 CLI adapters are experimental. Agent CLIs are not stable substitutes for inference APIs and must follow ADR-0003 process-spawn restrictions.
 
+`kineto-llm` holds the `llm.complete` capability: an `LlmBackend` trait (blocking, static dispatch), requests that may carry the JSON Schema an answer must satisfy, and `complete_structured`, which turns an answer into typed state only after it deserializes and asks once more, with the parser's error, before refusing. Backends report how they are billed (per token, subscription, or free) so a cost estimate can say when the cost is unknown. Offline fakes cover scripted answers, latency, retryable-then-success, terminal failure and answers that do not fit the schema.
+
 ### Image / video
 
 Start with one cloud provider and one local path.

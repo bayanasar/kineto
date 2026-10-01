@@ -173,6 +173,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kineto-llm"
+version = "0.1.0"
+dependencies = [
+ "kineto-jobs",
+ "kineto-providers",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kineto-native"
 version = "0.1.0"
 dependencies = [
