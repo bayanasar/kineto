@@ -561,6 +561,43 @@ mod tests {
     }
 
     #[test]
+    fn an_attached_candidate_that_was_changed_is_not_acknowledged() {
+        let other_hash = format!("sha256:{}", "e".repeat(64));
+        let edits: [(&str, serde_json::Value); 4] = [
+            ("content_hash", other_hash.clone().into()),
+            ("input_hash", other_hash.into()),
+            ("provider", "another-provider".into()),
+            ("model", "another-model".into()),
+        ];
+        for (field, value) in edits {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            stop_at(&target, GenerationPoint::Attached);
+            // Edited offline between the attach and the acknowledgement.
+            let path = target.join("scenes/scene_001/shots/shot_001/artifacts.json");
+            let mut artifacts: Vec<serde_json::Value> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            artifacts[1][field] = value;
+            fs::write(&path, serde_json::to_vec_pretty(&artifacts).unwrap()).unwrap();
+
+            let project = CanonicalProject::open(&target).unwrap();
+            let found = unfinished(&project).unwrap();
+            assert_eq!(found.plans.len(), 1);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let error = complete(&project, &mut shot, &found.plans[0], &mut NoHooks).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GenerationError::Shot(ShotWorkflowError::AttachedRecordMismatch(ref id))
+                        if id == "shot_001_g0001_candidate_b"
+                ),
+                "{field}: {error:?}"
+            );
+            assert_eq!(intent_states(&target), vec!["invoked"; 3], "{field}");
+        }
+    }
+
+    #[test]
     fn the_demo_adapter_recomputes_the_same_result_from_its_key() {
         let candidate = ArtifactId::new("shot_001_g0001_candidate_b").unwrap();
         let input = InputHash::new(format!("sha256:{}", "a".repeat(64))).unwrap();
