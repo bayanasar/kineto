@@ -629,6 +629,13 @@ impl ShotWorkflow {
                 .iter()
                 .all(|candidate| self.artifact(candidate).is_some())
         {
+            // Records with the planned IDs are only this plan's attachment if
+            // they hold its outputs. Anything else must not be acknowledged
+            // as the provider's result.
+            self.ensure_mutation_allowed()?;
+            for output in outputs {
+                self.verify_attached(plan, output)?;
+            }
             return Ok(AttachOutcome::AlreadyAttached);
         }
         if self.shot.generation_revision > plan.revision {
@@ -902,6 +909,30 @@ impl ShotWorkflow {
 
         self.hash_issues = issues;
         self.hash_migration_records = migration_records;
+        Ok(())
+    }
+
+    /// The canonical record of `output`'s candidate must be exactly what
+    /// attaching `plan` with `output` wrote.
+    fn verify_attached(
+        &self,
+        plan: &GenerationPlan,
+        output: &CandidateOutput,
+    ) -> Result<(), ShotWorkflowError> {
+        let record = self
+            .artifact(&output.artifact_id)
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        if record.artifact_type != "shot_candidate"
+            || record.status == StoredArtifactStatus::Draft
+            || record.input_hash.as_deref() != Some(plan.input_hash.as_str())
+            || record.content_hash != output.content_hash.as_str()
+            || record.provider.as_deref() != Some(output.provider.as_str())
+            || record.model.as_deref() != Some(output.model.as_str())
+        {
+            return Err(ShotWorkflowError::AttachedRecordMismatch(
+                output.artifact_id.as_str().to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -1251,6 +1282,9 @@ pub enum ShotWorkflowError {
         value: String,
     },
     MigrationBackupConflict(String),
+    /// A candidate already in canonical state does not hold the output its
+    /// generation produced, so that generation cannot be acknowledged.
+    AttachedRecordMismatch(String),
     InvalidTarget(std::path::PathBuf),
     Path(ProjectPathError),
     Fs(ProjectFsError),
@@ -1298,6 +1332,10 @@ impl fmt::Display for ShotWorkflowError {
                     "legacy hash migration backup conflicts at {path}"
                 )
             }
+            Self::AttachedRecordMismatch(artifact_id) => write!(
+                formatter,
+                "candidate {artifact_id} in canonical state does not match its generation"
+            ),
             Self::InvalidTarget(path) => {
                 write!(formatter, "invalid shot state target: {}", path.display())
             }
@@ -1339,6 +1377,7 @@ impl Error for ShotWorkflowError {
             | Self::MigrationRequired
             | Self::InvalidStoredHash { .. }
             | Self::MigrationBackupConflict(_)
+            | Self::AttachedRecordMismatch(_)
             | Self::InvalidTarget(_) => None,
         }
     }
