@@ -91,6 +91,14 @@ CLI adapters are experimental. Agent CLIs are not stable substitutes for inferen
 
 One backend, `OpenAiCompatible`, serves both "one cloud provider" and "one OpenAI-compatible/local provider": Kimi's open platform by default (`kimi-k3`, key from `KINETO_KIMI_API_KEY`, prices for known models, anything else unpriced), or a local model server. It sends HTTPS, or HTTP only to a loopback address, follows no redirects, asks for `json_object` output with the schema in a system message, and treats a truncated or withheld answer as terminal. Rate limits and server errors are retryable; quota, authentication and request errors are terminal.
 
+Agent CLIs are the other kind of backend. Kineto drives the CLI itself (Kimi Code first) and never reads or reuses its credentials. It speaks the Agent Client Protocol (`kimi acp`) rather than the one-shot `-p` mode: `-p` takes the prompt as a command-line argument, which caps its length, and runs with automatic tool approval, so an instruction hidden in source text could run commands. Measured on Kimi Code 2.1.1 with the user's own configuration, an ACP session also inherited the user's hooks, and read-only tools such as `Glob` ran locally without asking or routing through the client. Every call therefore runs inside these layers:
+
+- a data root kineto writes and owns (`KIMI_CODE_HOME`): every built-in tool disabled in `[tools]` and denied in `[[permission.rules]]`, manual permission mode, no hooks, no telemetry. A data root with any other configuration is refused. The user signs in once under it (`KIMI_CODE_HOME=<root> kimi login`).
+- kineto as the ACP client: file access is declared as client-routed and refused, there is no terminal, and every permission request is answered with the reject option.
+- a fresh empty working directory per call, removed afterwards, and the session deleted from the agent's history.
+
+The answer is the concatenated `agent_message_chunk` text; thoughts and tool traffic are ignored. Agent backends are billed by subscription, so their cost is reported as unknown. Offline tests drive a scripted agent binary (`fake_acp_agent`) through approval and file requests, missing sign-in, crashes, refusal, malformed output and a hang past the deadline.
+
 ### Image / video
 
 Start with one cloud provider and one local path.

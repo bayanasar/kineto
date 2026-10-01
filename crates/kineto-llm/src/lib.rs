@@ -17,6 +17,7 @@ use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
 use kineto_providers::LlmCapabilities;
 use serde::de::DeserializeOwned;
 
+pub mod acp;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod http;
