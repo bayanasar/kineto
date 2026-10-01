@@ -21,6 +21,19 @@ void main() {
         File(_path(target.path, 'source', 'story.txt')).readAsStringSync(),
         'A filmmaker waits across the table.\n',
       );
+      // The bootstrap scene's intent is written with the project.
+      final shot = jsonDecode(
+        File(_path(target.path, 'scenes', 'scene_001', 'shots', 'shot_001', 'shot.json'))
+            .readAsStringSync(),
+      ) as Map<String, Object?>;
+      expect(shot['action'], contains('filmmaker'));
+
+      // No provider was named, so the free demo generator is used.
+      final provider = created.imageProvider;
+      expect(provider.kind, KinetoImageProviderKind.localDemo);
+      expect(provider.ready, isTrue);
+      expect(provider.isPaid, isFalse);
+      expect(provider.generationCostMicros, 0);
 
       // A second writer session is refused while this one is open.
       await expectLater(

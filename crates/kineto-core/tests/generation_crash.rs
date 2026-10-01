@@ -222,6 +222,7 @@ fn open_session(target: &Path) -> (ProjectSession, Vec<String>) {
         OpenRequest::Open {
             path: target.to_path_buf(),
         },
+        generation::ImageProvider::LocalDemo,
         Box::new(Sink(Mutex::new(sender))),
     )
     .unwrap();

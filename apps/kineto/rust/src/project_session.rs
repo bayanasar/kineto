@@ -14,10 +14,15 @@
 use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
-use kineto_core::session::{
-    OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand, SnapshotError,
-    SubmitError,
+use kineto_core::{
+    generation::{GenerationError, ImageProvider, ImageProviderKind},
+    keyframe_prompt::KeyframePromptError,
+    session::{
+        OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand,
+        SnapshotError, SubmitError,
+    },
 };
+use kineto_jobs::ErrorClass;
 use kineto_project::{
     fs::ProjectFsError,
     manifest::{
@@ -26,6 +31,7 @@ use kineto_project::{
     },
     shot::{ShotDirection, ShotWorkflowError},
 };
+use kineto_providers::secret::EnvSecretSource;
 
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
@@ -146,7 +152,10 @@ unsafe fn spawn(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    match ProjectSession::spawn(request, Box::new(DartPort { post, port })) {
+    let Ok(provider) = image_provider_from_environment() else {
+        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    };
+    match ProjectSession::spawn(request, provider, Box::new(DartPort { post, port })) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
             // SAFETY: callers validated `out_session` as writable pointer storage.
@@ -155,6 +164,21 @@ unsafe fn spawn(
         }
         Err(_) => PROJECT_ERR_IO,
     }
+}
+
+/// The environment variable that names the image provider a session uses.
+/// Unset, empty or `local-demo` means the free demo generator; `minimax`
+/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`. A paid provider is
+/// used only when named here, never because a key happens to be set.
+const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
+
+fn image_provider_from_environment() -> Result<ImageProvider, ()> {
+    let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+    };
+    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
 }
 
 /// Start opening an existing canonical Kineto project.
@@ -335,6 +359,67 @@ pub unsafe extern "C" fn kineto_project_is_read_only(session: *const KinetoProje
             .metadata()
             .map_or(1, |metadata| u8::from(metadata.read_only))
     })
+}
+
+/// The session's image provider as a contract `image_provider` code: 1 for the
+/// local demo generator, 2 for MiniMax; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_image_provider(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        image_provider_code(session.session.image_provider().kind)
+    })
+}
+
+/// 1 when the session's image provider can generate, 0 when it cannot (a
+/// paid provider without credentials) or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_image_provider_ready(
+    session: *const KinetoProjectSession,
+) -> u8 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u8::from(session.session.image_provider().ready)
+    })
+}
+
+/// Estimated cost of one shot generation with the session's image provider,
+/// in USD micros; 0 for a free provider or a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_generation_cost_micros(
+    session: *const KinetoProjectSession,
+) -> u64 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        session.session.image_provider().generation_cost_micros
+    })
+}
+
+fn image_provider_code(kind: ImageProviderKind) -> u32 {
+    match kind {
+        ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
+        ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
+    }
 }
 
 /// Copy the UTF-8 project ID into caller-owned memory.
@@ -580,9 +665,29 @@ fn session_error_code(error: &SessionError) -> i32 {
     match error {
         SessionError::Open(error) => project_error_code(error),
         SessionError::Shot(error) => shot_error_code(error),
-        SessionError::Generation(_) => PROJECT_ERR_GENERATION_JOB,
+        SessionError::Generation(error) => generation_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+    }
+}
+
+fn generation_error_code(error: &GenerationError) -> i32 {
+    match error {
+        GenerationError::Shot(error) => shot_error_code(error),
+        GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
+        GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
+            PROJECT_ERR_SHOT_INTENT_MISSING
+        }
+        GenerationError::Prompt(_) => PROJECT_ERR_INVALID_SHOT_STATE,
+        GenerationError::Provider {
+            class: ErrorClass::Terminal,
+            ..
+        } => PROJECT_ERR_PROVIDER_REFUSED,
+        GenerationError::Provider { .. }
+        | GenerationError::NeedsProviderCall
+        | GenerationError::Runtime(_)
+        | GenerationError::JobId(_)
+        | GenerationError::Unexpected(_) => PROJECT_ERR_GENERATION_JOB,
     }
 }
 

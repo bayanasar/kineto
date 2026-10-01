@@ -38,12 +38,13 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::{
         AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
-        GenerationPlan, PromptProvenance, ShotWorkflow, ShotWorkflowError, demo_candidate_output,
-        load_scene_intent,
+        GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotWorkflow,
+        ShotWorkflowError, demo_candidate_output, load_scene_intent,
     },
 };
 use kineto_prompts::DegradationLevel;
-use kineto_provider_minimax::MinimaxClient;
+use kineto_provider_minimax::{IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER};
+use kineto_providers::secret::{SecretError, SecretSource};
 
 use crate::{
     keyframe_prompt::{self, KeyframePrompt, KeyframePromptError},
@@ -119,6 +120,82 @@ pub enum ImageProvider {
     /// MiniMax `image-01`. Paid. Without a client, finished calls can still
     /// be completed from their receipts but no new call is made.
     Minimax(Option<MinimaxClient>),
+}
+
+/// Which image provider a session generates with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageProviderKind {
+    LocalDemo,
+    Minimax,
+}
+
+/// What the director needs to know about the session's image provider before
+/// asking for a generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageProviderInfo {
+    pub kind: ImageProviderKind,
+    /// Whether a generation can be made: a paid provider needs credentials.
+    pub ready: bool,
+    /// Estimated cost of one generation (every candidate), in USD micros.
+    pub generation_cost_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderSelectionError {
+    /// The selection names no provider this build has.
+    Unknown(String),
+    Secret(SecretError),
+}
+
+impl fmt::Display for ProviderSelectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(name) => write!(formatter, "unknown image provider {name:?}"),
+            Self::Secret(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ProviderSelectionError {}
+
+impl ImageProvider {
+    /// The provider named by `selection`: none or `local-demo` for the free
+    /// demo generator, `minimax` for MiniMax with the key `secrets` holds.
+    /// A paid provider is used only when it is named, never because a key
+    /// happens to be present.
+    pub fn select(
+        selection: Option<&str>,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, ProviderSelectionError> {
+        match selection.map(str::trim) {
+            None | Some("" | DEMO_PROVIDER) => Ok(Self::LocalDemo),
+            Some(MINIMAX_PROVIDER) => Ok(Self::Minimax(
+                secrets
+                    .api_key(MINIMAX_PROVIDER)
+                    .map_err(ProviderSelectionError::Secret)?
+                    .map(MinimaxClient::new),
+            )),
+            Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
+        }
+    }
+
+    #[must_use]
+    pub fn info(&self) -> ImageProviderInfo {
+        match self {
+            Self::LocalDemo => ImageProviderInfo {
+                kind: ImageProviderKind::LocalDemo,
+                ready: true,
+                generation_cost_micros: 0,
+            },
+            Self::Minimax(client) => ImageProviderInfo {
+                kind: ImageProviderKind::Minimax,
+                ready: client.is_some(),
+                generation_cost_micros: IMAGE_PRICE_MICROS
+                    * u64::try_from(GENERATED_CANDIDATE_COUNT)
+                        .expect("candidate count fits in u64"),
+            },
+        }
+    }
 }
 
 /// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives

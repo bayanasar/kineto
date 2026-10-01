@@ -177,7 +177,9 @@ name = "kineto-native"
 version = "0.1.0"
 dependencies = [
  "kineto-core",
+ "kineto-jobs",
  "kineto-project",
+ "kineto-providers",
  "serde_json",
 ]
 

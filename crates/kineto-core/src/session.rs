@@ -30,7 +30,9 @@ use kineto_project::{
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
-use crate::generation::{self, GenerationError, ImageProvider, NoHooks, Unfinished};
+use crate::generation::{
+    self, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
+};
 
 /// Shots addressable in the bootstrap scene.
 pub const SHOT_COUNT: usize = 2;
@@ -201,6 +203,7 @@ struct Envelope {
 /// published state. Only the owner may drop it.
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
+    image_provider: ImageProviderInfo,
     view: Arc<View>,
     gate: Arc<Gate>,
     worker: Option<thread::JoinHandle<()>>,
@@ -209,7 +212,12 @@ pub struct ProjectSession {
 impl ProjectSession {
     /// Start a session. Returns as soon as the worker thread exists; the open
     /// or create runs on the worker and reports through [`SessionSink::opened`].
-    pub fn spawn(request: OpenRequest, sink: Box<dyn SessionSink>) -> std::io::Result<Self> {
+    pub fn spawn(
+        request: OpenRequest,
+        provider: ImageProvider,
+        sink: Box<dyn SessionSink>,
+    ) -> std::io::Result<Self> {
+        let image_provider = provider.info();
         let (commands, inbox) = mpsc::channel();
         let view = Arc::new(View::default());
         let gate = Arc::new(Gate {
@@ -221,10 +229,11 @@ impl ProjectSession {
             .spawn({
                 let view = Arc::clone(&view);
                 let gate = Arc::clone(&gate);
-                move || run(request, &inbox, &view, &gate)
+                move || run(request, provider, &inbox, &view, &gate)
             })?;
         Ok(Self {
             commands: Some(commands),
+            image_provider,
             view,
             gate,
             worker: Some(worker),
@@ -264,6 +273,12 @@ impl ProjectSession {
         }
     }
 
+    /// The image provider this session generates with. Fixed at spawn.
+    #[must_use]
+    pub const fn image_provider(&self) -> ImageProviderInfo {
+        self.image_provider
+    }
+
     /// Project metadata, available once the open has succeeded.
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
@@ -287,12 +302,18 @@ fn shot_index_is_valid(shot_index: u32) -> bool {
     usize::try_from(shot_index).is_ok_and(|index| index < SHOT_COUNT)
 }
 
-fn run(request: OpenRequest, inbox: &mpsc::Receiver<Envelope>, view: &View, gate: &Gate) {
+fn run(
+    request: OpenRequest,
+    provider: ImageProvider,
+    inbox: &mpsc::Receiver<Envelope>,
+    view: &View,
+    gate: &Gate,
+) {
     let opened = panic::catch_unwind(AssertUnwindSafe(|| open(request)))
         .unwrap_or(Err(SessionError::Panicked));
     let mut worker = match opened {
         Ok(project) => {
-            let mut worker = Worker::new(project);
+            let mut worker = Worker::new(project, provider);
             // Finish what an earlier session left before accepting commands.
             let recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
                 .unwrap_or_else(|_| {
@@ -364,10 +385,10 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(project: CanonicalProject) -> Self {
+    fn new(project: CanonicalProject, provider: ImageProvider) -> Self {
         Self {
             project,
-            provider: ImageProvider::LocalDemo,
+            provider,
             shots: [None, None],
         }
     }
@@ -380,10 +401,7 @@ impl Worker {
                 .with_shot(shot_index, |project, provider, shot| {
                     generation::generate(project, shot, provider, &mut NoHooks).map(|_outcome| ())
                 })
-                .map_err(|error| match error {
-                    GenerationError::Shot(error) => SessionError::Shot(error),
-                    error => SessionError::Generation(error),
-                }),
+                .map_err(generation_error),
             command => self
                 .with_shot(shot_index, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
@@ -410,49 +428,69 @@ impl Worker {
 
     /// Complete generations an earlier session left unfinished. Read-only
     /// projects are never written, so nothing is recovered in them.
+    ///
+    /// Each provider's jobs are completed by that provider, whichever one this
+    /// session generates with: a session without MiniMax credentials still
+    /// completes MiniMax calls that finished before the restart.
     fn recover(&mut self) -> Vec<Recovery> {
         if self.project.is_read_only() {
             return Vec::new();
         }
-        let Unfinished {
-            plans,
-            needs_attention,
-        } = match generation::unfinished(&self.project, &self.provider) {
-            Ok(unfinished) => unfinished,
-            Err(_) => return vec![Recovery::NeedsAttention { count: 1 }],
+        let demo = ImageProvider::LocalDemo;
+        let keyless = ImageProvider::Minimax(None);
+        let Self {
+            project,
+            provider,
+            shots,
+        } = self;
+        let minimax = match provider {
+            ImageProvider::Minimax(_) => &*provider,
+            ImageProvider::LocalDemo => &keyless,
         };
-        let mut recoveries = Vec::with_capacity(plans.len() + 1);
-        let mut unplaced = needs_attention;
-        for plan in plans {
-            let Some(shot_index) = usize::try_from(plan.shot_number())
-                .ok()
-                .and_then(|number| number.checked_sub(1))
-                .filter(|index| *index < SHOT_COUNT)
-            else {
-                unplaced += 1;
-                continue;
-            };
-            let result = self.with_shot(shot_index, |project, provider, shot| {
-                generation::complete(project, shot, &plan, provider, &mut NoHooks)
-            });
-            let shot_index = u32::try_from(shot_index).expect("shot index fits in u32");
-            recoveries.push(match result {
-                Ok(_outcome) => Recovery::Completed {
-                    shot_index,
-                    revision: plan.revision(),
-                },
-                Err(error) => {
-                    self.shots[shot_index as usize] = None;
-                    Recovery::Failed {
-                        shot_index,
-                        revision: plan.revision(),
-                        error: match error {
-                            GenerationError::Shot(error) => SessionError::Shot(error),
-                            error => SessionError::Generation(error),
-                        },
-                    }
+        let mut recoveries = Vec::new();
+        let mut unplaced = 0;
+        for provider in [&demo, minimax] {
+            let Unfinished {
+                plans,
+                needs_attention,
+            } = match generation::unfinished(project, provider) {
+                Ok(unfinished) => unfinished,
+                Err(_) => {
+                    unplaced += 1;
+                    continue;
                 }
-            });
+            };
+            unplaced += needs_attention;
+            for plan in plans {
+                let Some(shot_index) = usize::try_from(plan.shot_number())
+                    .ok()
+                    .and_then(|number| number.checked_sub(1))
+                    .filter(|index| *index < SHOT_COUNT)
+                else {
+                    unplaced += 1;
+                    continue;
+                };
+                let result = shot_mut(project, shots, shot_index)
+                    .map_err(GenerationError::Shot)
+                    .and_then(|shot| {
+                        generation::complete(project, shot, &plan, provider, &mut NoHooks)
+                    });
+                let shot_number = u32::try_from(shot_index).expect("shot index fits in u32");
+                recoveries.push(match result {
+                    Ok(_outcome) => Recovery::Completed {
+                        shot_index: shot_number,
+                        revision: plan.revision(),
+                    },
+                    Err(error) => {
+                        shots[shot_index] = None;
+                        Recovery::Failed {
+                            shot_index: shot_number,
+                            revision: plan.revision(),
+                            error: generation_error(error),
+                        }
+                    }
+                });
+            }
         }
         if unplaced > 0 {
             recoveries.push(Recovery::NeedsAttention { count: unplaced });
@@ -474,14 +512,30 @@ impl Worker {
         shot_index: usize,
         operation: impl FnOnce(&CanonicalProject, &ImageProvider, &mut ShotWorkflow) -> Result<R, E>,
     ) -> Result<R, E> {
-        if self.shots[shot_index].is_none() {
-            let shot_number = u32::try_from(shot_index + 1).expect("shot count fits in u32");
-            self.shots[shot_index] = Some(ShotWorkflow::load(&self.project, shot_number)?);
-        }
-        let shot = self.shots[shot_index]
-            .as_mut()
-            .expect("shot is installed immediately above");
+        let shot = shot_mut(&self.project, &mut self.shots, shot_index)?;
         operation(&self.project, &self.provider, shot)
+    }
+}
+
+/// The shot's cached workflow, loaded from its canonical files on first use.
+fn shot_mut<'a>(
+    project: &CanonicalProject,
+    shots: &'a mut [Option<ShotWorkflow>; SHOT_COUNT],
+    shot_index: usize,
+) -> Result<&'a mut ShotWorkflow, ShotWorkflowError> {
+    if shots[shot_index].is_none() {
+        let shot_number = u32::try_from(shot_index + 1).expect("shot count fits in u32");
+        shots[shot_index] = Some(ShotWorkflow::load(project, shot_number)?);
+    }
+    Ok(shots[shot_index]
+        .as_mut()
+        .expect("shot is installed immediately above"))
+}
+
+fn generation_error(error: GenerationError) -> SessionError {
+    match error {
+        GenerationError::Shot(error) => SessionError::Shot(error),
+        error => SessionError::Generation(error),
     }
 }
 
@@ -494,6 +548,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::{ImageProviderKind, ProviderSelectionError};
     use kineto_project::manifest::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectSource, ProjectWorkflow,
     };
@@ -613,6 +668,7 @@ mod tests {
                 manifest: Box::new(manifest()),
                 source: b"A filmmaker waits across the table.\n".to_vec(),
             },
+            ImageProvider::LocalDemo,
             sink,
         )
         .unwrap();
@@ -634,6 +690,116 @@ mod tests {
             }
             other => panic!("expected completion {token}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_paid_provider_is_used_only_when_named() {
+        use kineto_providers::secret::EnvSecretSource;
+        let with_key = EnvSecretSource::with_lookup(|_| Some("sk-test".into()));
+        let without_key = EnvSecretSource::with_lookup(|_| None);
+
+        for selection in [None, Some(""), Some("local-demo")] {
+            let provider = ImageProvider::select(selection, &with_key).unwrap();
+            assert_eq!(
+                provider.info(),
+                ImageProviderInfo {
+                    kind: ImageProviderKind::LocalDemo,
+                    ready: true,
+                    generation_cost_micros: 0,
+                }
+            );
+        }
+        let minimax = ImageProvider::select(Some("minimax"), &with_key).unwrap();
+        assert_eq!(
+            minimax.info(),
+            ImageProviderInfo {
+                kind: ImageProviderKind::Minimax,
+                ready: true,
+                generation_cost_micros: 10_500,
+            }
+        );
+        assert!(!format!("{minimax:?}").contains("sk-test"));
+        assert!(
+            !ImageProvider::select(Some("minimax"), &without_key)
+                .unwrap()
+                .info()
+                .ready
+        );
+        assert_eq!(
+            ImageProvider::select(Some("midjourney"), &with_key).unwrap_err(),
+            ProviderSelectionError::Unknown("midjourney".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_session_completes_every_providers_finished_calls_on_open() {
+        use crate::minimax::MinimaxKeyframes;
+        use kineto_provider_minimax::{HttpResponse, MinimaxClient, Transport, TransportFailure};
+        use kineto_providers::secret::SecretString;
+
+        struct OneImage;
+        impl Transport for OneImage {
+            fn post_json(
+                &self,
+                _url: &str,
+                _api_key: &SecretString,
+                _body: &[u8],
+            ) -> Result<HttpResponse, TransportFailure> {
+                Ok(HttpResponse {
+                    status: 200,
+                    body:
+                        br#"{"data":{"image_base64":["/9j/4AAQ"]},"base_resp":{"status_code":0}}"#
+                            .to_vec(),
+                })
+            }
+        }
+        struct StopBeforeAttach;
+        impl generation::GenerationHooks for StopBeforeAttach {
+            fn reached(&mut self, point: generation::GenerationPoint) {
+                if point == generation::GenerationPoint::Invoked {
+                    panic!("stopped before attaching");
+                }
+            }
+        }
+
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        drop(create(&target));
+        {
+            let project = CanonicalProject::open(&target).unwrap();
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let client = MinimaxClient::with_transport(
+                OneImage,
+                SecretString::new("sk-test".to_owned()).unwrap(),
+                "https://example.test",
+            );
+            let stopped = panic::catch_unwind(AssertUnwindSafe(|| {
+                generation::generate_with(
+                    &project,
+                    &mut shot,
+                    MinimaxKeyframes::new(&project, Some(&client)),
+                    &mut StopBeforeAttach,
+                )
+            }));
+            assert!(stopped.is_err());
+        }
+
+        // The demo session has no MiniMax key, and needs none to finish.
+        let (sink, events) = sink();
+        let session = ProjectSession::spawn(
+            OpenRequest::Open { path: target },
+            ImageProvider::LocalDemo,
+            sink,
+        )
+        .unwrap();
+        assert_eq!(
+            events.recv_timeout(WAIT).unwrap(),
+            Event::Recovered("Completed { shot_index: 0, revision: 1 }".to_owned())
+        );
+        assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+        let snapshot = session.snapshot(0).unwrap();
+        assert!(snapshot.generated);
+        assert_eq!(snapshot.candidate_count, 3);
     }
 
     #[test]
@@ -699,6 +865,7 @@ mod tests {
                 manifest: Box::new(manifest()),
                 source: b"source\n".to_vec(),
             },
+            ImageProvider::LocalDemo,
             Box::new(GatedSink {
                 events: Mutex::new(sender),
                 release: Arc::clone(&release),
@@ -744,6 +911,7 @@ mod tests {
             OpenRequest::Open {
                 path: temp.0.join("missing"),
             },
+            ImageProvider::LocalDemo,
             sink,
         )
         .unwrap();
@@ -770,6 +938,7 @@ mod tests {
             OpenRequest::Open {
                 path: target.clone(),
             },
+            ImageProvider::LocalDemo,
             sink,
         )
         .unwrap();
@@ -799,7 +968,12 @@ mod tests {
 
         // The writer lock is already released: a new session opens at once.
         let (sink, reopened_events) = sink();
-        let reopened = ProjectSession::spawn(OpenRequest::Open { path: target }, sink).unwrap();
+        let reopened = ProjectSession::spawn(
+            OpenRequest::Open { path: target },
+            ImageProvider::LocalDemo,
+            sink,
+        )
+        .unwrap();
         assert_eq!(
             reopened_events.recv_timeout(WAIT).unwrap(),
             Event::Opened(Ok(()))

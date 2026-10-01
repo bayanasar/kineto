@@ -161,6 +161,72 @@ external int _kinetoProjectShotMigrateLegacyHashes(
   int token,
 );
 
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_image_provider',
+  isLeaf: true,
+)
+external int _kinetoProjectImageProvider(Pointer<Void> session);
+
+@Native<Uint8 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_image_provider_ready',
+  isLeaf: true,
+)
+external int _kinetoProjectImageProviderReady(Pointer<Void> session);
+
+@Native<Uint64 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_generation_cost_micros',
+  isLeaf: true,
+)
+external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
+
+/// Who generates a session's shot candidates. Chosen when Kineto starts, by
+/// `KINETO_IMAGE_PROVIDER`; a paid provider is never chosen implicitly.
+enum KinetoImageProviderKind {
+  localDemo(1, 'local_demo', 'Local demo'),
+  minimax(2, 'minimax', 'MiniMax image-01');
+
+  const KinetoImageProviderKind(this.wireValue, this.wireName, this.label);
+
+  final int wireValue;
+  final String wireName;
+  final String label;
+
+  static KinetoImageProviderKind fromWireValue(int value) {
+    for (final kind in values) {
+      if (kind.wireValue == value) return kind;
+    }
+    throw StateError('Unknown Kineto image provider code $value');
+  }
+}
+
+/// The session's image provider, as the director needs to know it before
+/// asking for a generation.
+final class KinetoImageProvider {
+  const KinetoImageProvider({
+    required this.kind,
+    required this.ready,
+    required this.generationCostMicros,
+  });
+
+  final KinetoImageProviderKind kind;
+
+  /// False for a paid provider without credentials: generating would fail.
+  final bool ready;
+
+  /// Estimated cost of one generation (every candidate), in USD micros.
+  final int generationCostMicros;
+
+  bool get isPaid => kind != KinetoImageProviderKind.localDemo;
+
+  /// The estimate in US dollars, for example `$0.0105`.
+  String get generationCostLabel {
+    final dollars = generationCostMicros ~/ 1000000;
+    final micros = (generationCostMicros % 1000000).toString().padLeft(6, '0');
+    final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
+    return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
+  }
+}
+
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
@@ -180,6 +246,16 @@ final class KinetoProjectException implements Exception {
   /// A generation job stopped before it finished. Its write-ahead intents are
   /// kept and the generation is completed when the project is next opened.
   static const int generationJob = 121;
+
+  /// The selected image provider has no credentials configured.
+  static const int providerNotConfigured = 123;
+
+  /// The shot has no written intent for a real provider to generate from.
+  static const int shotIntentMissing = 124;
+
+  /// The image provider refused the request; asking again unchanged will not
+  /// help (for example a content or account refusal).
+  static const int providerRefused = 125;
 
   final int code;
   final String message;
@@ -335,6 +411,18 @@ final class KinetoProjectSession implements Finalizable {
   String get title {
     _ensureOpen();
     return _copyProjectUtf8(_handle, _kinetoProjectTitleCopy, 'project title');
+  }
+
+  /// The image provider this session generates with. Fixed when it opened.
+  KinetoImageProvider get imageProvider {
+    _ensureOpen();
+    return KinetoImageProvider(
+      kind: KinetoImageProviderKind.fromWireValue(
+        _kinetoProjectImageProvider(_handle),
+      ),
+      ready: _kinetoProjectImageProviderReady(_handle) != 0,
+      generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
+    );
   }
 
   /// The shot's most recently published state. Never does I/O.
@@ -657,6 +745,10 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'lock_unavailable': 119,
   'not_open': 120,
   'generation_job': 121,
+  'provider_unknown': 122,
+  'provider_not_configured': 123,
+  'shot_intent_missing': 124,
+  'provider_refused': 125,
   'panic': 199,
 };
 
@@ -683,7 +775,11 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   118: 'Legacy shot hashes need migration before this shot can change',
   119: 'Project cannot be locked for single-writer access on this filesystem',
   120: 'Project session is not open',
-  121: 'Generation did not finish; it resumes when the project reopens',
+  121: 'Generation did not finish. Finished candidates are kept; generate again to retry the rest',
+  122: 'KINETO_IMAGE_PROVIDER names an image provider this Kineto build does not have',
+  123: 'The image provider has no API key configured',
+  124: 'This shot has no written intent to generate from',
+  125: 'The image provider refused the request; it will not succeed unchanged',
   199: 'Native project call failed unexpectedly',
 };
 

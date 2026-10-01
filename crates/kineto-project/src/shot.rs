@@ -17,7 +17,8 @@ use crate::{
 
 const SHOT_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_SCHEMA_VERSION: u32 = 1;
-const GENERATED_CANDIDATE_COUNT: usize = 3;
+/// Candidates one generation creates.
+pub const GENERATED_CANDIDATE_COUNT: usize = 3;
 const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
 /// Provider key recorded on candidates from the deterministic local demo

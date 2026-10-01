@@ -35,10 +35,14 @@ pub(crate) const PROJECT_ERR_MIGRATION_REQUIRED: i32 = 118;
 pub(crate) const PROJECT_ERR_LOCK_UNAVAILABLE: i32 = 119;
 pub(crate) const PROJECT_ERR_NOT_OPEN: i32 = 120;
 pub(crate) const PROJECT_ERR_GENERATION_JOB: i32 = 121;
+pub(crate) const PROJECT_ERR_PROVIDER_UNKNOWN: i32 = 122;
+pub(crate) const PROJECT_ERR_PROVIDER_NOT_CONFIGURED: i32 = 123;
+pub(crate) const PROJECT_ERR_SHOT_INTENT_MISSING: i32 = 124;
+pub(crate) const PROJECT_ERR_PROVIDER_REFUSED: i32 = 125;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 24] = [
+const STATUSES: [(&str, i32); 28] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -62,6 +66,13 @@ const STATUSES: [(&str, i32); 24] = [
     ("lock_unavailable", PROJECT_ERR_LOCK_UNAVAILABLE),
     ("not_open", PROJECT_ERR_NOT_OPEN),
     ("generation_job", PROJECT_ERR_GENERATION_JOB),
+    ("provider_unknown", PROJECT_ERR_PROVIDER_UNKNOWN),
+    (
+        "provider_not_configured",
+        PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
+    ),
+    ("shot_intent_missing", PROJECT_ERR_SHOT_INTENT_MISSING),
+    ("provider_refused", PROJECT_ERR_PROVIDER_REFUSED),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -70,6 +81,15 @@ const DIRECTIONS: [(&str, ShotDirection); 4] = [
     ("spatial_clarity", ShotDirection::SpatialClarity),
     ("intimacy", ShotDirection::Intimacy),
     ("tension", ShotDirection::Tension),
+];
+
+pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
+pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
+
+/// Image provider codes returned by `kineto_project_image_provider`.
+const IMAGE_PROVIDERS: [(&str, u32); 2] = [
+    ("local_demo", IMAGE_PROVIDER_LOCAL_DEMO),
+    ("minimax", IMAGE_PROVIDER_MINIMAX),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -151,13 +171,21 @@ const SAMPLE: ShotApprovalSnapshot = ShotApprovalSnapshot {
 const ENTRY_STATUS: u32 = 1;
 const ENTRY_DIRECTION: u32 = 2;
 const ENTRY_SNAPSHOT_FIELD: u32 = 3;
+const ENTRY_IMAGE_PROVIDER: u32 = 4;
 
 /// `(kind, name, value, extra)` for contract entry `index`: a status (value =
-/// code), a direction (value = wire code) or a snapshot field (value = shift,
-/// extra = width).
+/// code), a direction (value = wire code), a snapshot field (value = shift,
+/// extra = width) or an image provider (value = code).
 fn entry(index: usize) -> Option<(u32, &'static str, i64, u32)> {
     let directions_start = STATUSES.len();
     let fields_start = directions_start + DIRECTIONS.len();
+    let providers_start = fields_start + SNAPSHOT_FIELDS.len();
+    if let Some((name, code)) = index
+        .checked_sub(providers_start)
+        .and_then(|index| IMAGE_PROVIDERS.get(index))
+    {
+        return Some((ENTRY_IMAGE_PROVIDER, name, i64::from(*code), 0));
+    }
     if let Some((name, code)) = STATUSES.get(index) {
         return Some((ENTRY_STATUS, name, i64::from(*code), 0));
     }
@@ -180,7 +208,8 @@ fn entry(index: usize) -> Option<(u32, &'static str, i64, u32)> {
         })
 }
 
-const ENTRY_COUNT: usize = STATUSES.len() + DIRECTIONS.len() + SNAPSHOT_FIELDS.len();
+const ENTRY_COUNT: usize =
+    STATUSES.len() + DIRECTIONS.len() + SNAPSHOT_FIELDS.len() + IMAGE_PROVIDERS.len();
 
 /// Number of entries in the native contract table.
 #[unsafe(no_mangle)]
@@ -308,9 +337,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_SNAPSHOT_FIELD);
-        assert_eq!(&name[..len as usize], b"superseded_count");
-        assert_eq!((value, extra), (48, 16));
+        assert_eq!(kind, ENTRY_IMAGE_PROVIDER);
+        assert_eq!(&name[..len as usize], b"minimax");
+        assert_eq!((value, extra), (2, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(
