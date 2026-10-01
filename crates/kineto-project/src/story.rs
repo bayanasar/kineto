@@ -259,7 +259,8 @@ mod tests {
 
     #[test]
     fn inconsistent_analyses_are_refused_with_a_reason() {
-        let cases: [(fn(&mut serde_json::Value), &str); 7] = [
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(Edit, &str); 7] = [
             (
                 |v| v["events"][0]["characters"][0] = "ghost".into(),
                 "not defined",
