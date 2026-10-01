@@ -1,6 +1,7 @@
 pub mod fs;
 pub mod manifest;
 pub mod revisions;
+pub mod screenplay;
 pub mod shot;
 pub mod source;
 pub mod story;

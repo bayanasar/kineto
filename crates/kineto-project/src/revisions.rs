@@ -144,6 +144,14 @@ pub enum RevisionError {
     NoSuchRevision(u32),
     /// A superseded revision cannot be locked; it is history.
     Superseded(u32),
+    /// An edit started from a revision that is no longer the latest; the
+    /// director has to see the newer one first.
+    NotLatest {
+        based_on: u32,
+        latest: u32,
+    },
+    /// The document breaks its own rules.
+    InvalidDocument(String),
     Path(ProjectPathError),
     Fs(ProjectFsError),
     Manifest(ProjectManifestError),
@@ -168,6 +176,11 @@ impl fmt::Display for RevisionError {
                     "revision {revision} is superseded and cannot be locked"
                 )
             }
+            Self::NotLatest { based_on, latest } => write!(
+                formatter,
+                "the edit started from revision {based_on}, but revision {latest} is newer"
+            ),
+            Self::InvalidDocument(reason) => write!(formatter, "the document is invalid: {reason}"),
             Self::Path(error) => error.fmt(formatter),
             Self::Fs(error) => error.fmt(formatter),
             Self::Manifest(error) => error.fmt(formatter),
@@ -277,6 +290,19 @@ pub fn current(
                 .find(|record| record.status == RevisionStatus::Candidate)
         })
         .cloned())
+}
+
+/// The newest revision still in play: the one the director is working on,
+/// whether it is a candidate newer than the locked revision or the locked
+/// revision itself.
+pub fn latest(
+    project: &CanonicalProject,
+    kind: DocumentKind,
+) -> Result<Option<RevisionRecord>, RevisionError> {
+    Ok(revisions(project, kind)?
+        .into_iter()
+        .rev()
+        .find(|record| record.status != RevisionStatus::Superseded))
 }
 
 /// The revision a new generation or edit of `kind` would create.
@@ -555,13 +581,21 @@ mod tests {
 
         lock(&project, DocumentKind::Screenplay, 2).unwrap();
         let third = add(&project, &serde_json::json!({"draft": 3}));
-        // The lock holds while a newer candidate exists.
+        // The lock holds while a newer candidate exists, and the director
+        // works on that candidate.
         assert_eq!(
             current(&project, DocumentKind::Screenplay)
                 .unwrap()
                 .unwrap()
                 .revision,
             2
+        );
+        assert_eq!(
+            latest(&project, DocumentKind::Screenplay)
+                .unwrap()
+                .unwrap()
+                .revision,
+            3
         );
         lock(&project, DocumentKind::Screenplay, 3).unwrap();
         let all = revisions(&project, DocumentKind::Screenplay).unwrap();

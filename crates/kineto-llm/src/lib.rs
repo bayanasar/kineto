@@ -199,7 +199,7 @@ pub fn estimate_cost(
 pub struct Structured<T> {
     pub value: T,
     pub response: LlmResponse,
-    /// Calls made: 1, or 2 when the first answer did not fit the schema.
+    /// Calls made: 1, or 2 when the first answer was not accepted.
     pub attempts: u8,
 }
 
@@ -209,9 +209,9 @@ pub enum StructuredError<E> {
         source: E,
         class: ErrorClass,
     },
-    /// The answer did not fit the schema, twice. `detail` is the parser's
-    /// account of the second answer; the answer itself is not kept, since it
-    /// may quote untrusted source text at length.
+    /// The answer did not fit the schema or failed its check, twice.
+    /// `detail` says why the second answer was refused; the answer itself is
+    /// not kept, since it may quote untrusted source text at length.
     Schema {
         detail: String,
     },
@@ -222,10 +222,7 @@ impl<E: fmt::Display> fmt::Display for StructuredError<E> {
         match self {
             Self::Backend { source, .. } => source.fmt(formatter),
             Self::Schema { detail } => {
-                write!(
-                    formatter,
-                    "the model's answer did not fit the schema: {detail}"
-                )
+                write!(formatter, "the model's answer was not accepted: {detail}")
             }
         }
     }
@@ -270,6 +267,18 @@ pub fn complete_structured<B: LlmBackend, T: DeserializeOwned>(
     backend: &B,
     request: &LlmRequest,
 ) -> Result<Structured<T>, StructuredError<B::Error>> {
+    complete_checked(backend, request, Ok)
+}
+
+/// Like [`complete_structured`], with a further `check` the parsed answer
+/// must pass, such as references into another document. An answer that
+/// fails to parse or fails the check is asked for once more with the
+/// reason, then refused.
+pub fn complete_checked<B: LlmBackend, T: DeserializeOwned, U>(
+    backend: &B,
+    request: &LlmRequest,
+    check: impl Fn(T) -> Result<U, String>,
+) -> Result<Structured<U>, StructuredError<B::Error>> {
     let mut request = request.clone();
     let mut attempts = 0;
     loop {
@@ -280,7 +289,12 @@ pub fn complete_structured<B: LlmBackend, T: DeserializeOwned>(
                 class: backend.classify(&source),
                 source,
             })?;
-        match serde_json::from_str::<T>(json_body(&response.text)) {
+        let checked = serde_json::from_str::<T>(json_body(&response.text))
+            .map_err(|error| format!("it does not satisfy the required JSON Schema ({error})"))
+            .and_then(|value| {
+                check(value).map_err(|reason| format!("it is not consistent ({reason})"))
+            });
+        match checked {
             Ok(value) => {
                 return Ok(Structured {
                     value,
@@ -288,18 +302,14 @@ pub fn complete_structured<B: LlmBackend, T: DeserializeOwned>(
                     attempts,
                 });
             }
-            Err(error) if attempts == 1 => {
+            Err(reason) if attempts == 1 => {
                 request.messages.push(Message::assistant(response.text));
                 request.messages.push(Message::user(format!(
-                    "That reply does not satisfy the required JSON Schema ({error}). Reply \
-                     again with only the JSON value, no prose and no code fence."
+                    "That reply was not accepted: {reason}. Reply again with only the JSON \
+                     value, no prose and no code fence."
                 )));
             }
-            Err(error) => {
-                return Err(StructuredError::Schema {
-                    detail: error.to_string(),
-                });
-            }
+            Err(detail) => return Err(StructuredError::Schema { detail }),
         }
     }
 }
@@ -364,6 +374,30 @@ mod tests {
         assert!(matches!(error, StructuredError::Schema { .. }));
         assert_eq!(error.class(), ErrorClass::Terminal);
         assert!(!error.to_string().contains("more prose"));
+    }
+
+    #[test]
+    fn an_answer_that_fails_its_check_is_asked_for_once_more_then_refused() {
+        let check = |title: Title| {
+            if title.title.starts_with("The") {
+                Ok(title.title.len())
+            } else {
+                Err(format!("{:?} does not start with The", title.title))
+            }
+        };
+        let backend = FakeLlm::answering([r#"{"title":"Wait"}"#, r#"{"title":"The Wait"}"#]);
+        let structured = complete_checked(&backend, &request(), check).unwrap();
+        assert_eq!(structured.value, 8);
+        assert!(
+            backend.requests()[1].messages[3]
+                .content
+                .contains("\"Wait\" does not start with The")
+        );
+
+        let backend = FakeLlm::answering([r#"{"title":"Wait"}"#, r#"{"title":"Still"}"#]);
+        let error = complete_checked(&backend, &request(), check).unwrap_err();
+        assert!(matches!(error, StructuredError::Schema { .. }));
+        assert!(error.to_string().contains("\"Still\" does not start"));
     }
 
     #[test]

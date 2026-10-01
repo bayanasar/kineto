@@ -434,6 +434,9 @@ pub enum GenerationError {
     /// The locked keyframe has no image to start a video from (a demo
     /// keyframe).
     NoFirstFrame,
+    /// What this is made from does not exist yet; the message says what to
+    /// do first.
+    Prerequisite(&'static str),
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -457,7 +460,7 @@ impl fmt::Display for GenerationError {
                 "finishing this generation needs a paid provider call; generate again to make it",
             ),
             Self::JobId(error) => error.fmt(formatter),
-            Self::Unexpected(message) => formatter.write_str(message),
+            Self::Prerequisite(message) | Self::Unexpected(message) => formatter.write_str(message),
         }
     }
 }
@@ -473,6 +476,7 @@ impl Error for GenerationError {
             Self::NotConfigured
             | Self::NeedsProviderCall
             | Self::NoFirstFrame
+            | Self::Prerequisite(_)
             | Self::Unexpected(_) => None,
         }
     }

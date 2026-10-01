@@ -21,7 +21,7 @@ use kineto_jobs::{
     BackoffPolicy, CostEstimate, ErrorClass, FallbackPolicy, IdempotencyKey, IntentState, JobId,
     PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
-use kineto_llm::{LlmBackend, LlmRequest, Message, OutputSchema, complete_structured};
+use kineto_llm::{LlmBackend, LlmBackendInfo, LlmRequest, Message, OutputSchema, complete_checked};
 use kineto_project::{
     ArtifactDependency, ArtifactId, ContentHash, InputHash, InputHashMaterial,
     fs::{ProjectFsError, ProjectRelativePath},
@@ -54,6 +54,9 @@ pub struct DocumentSpec {
     pub schema_json: &'static str,
     /// What the document is made from.
     pub dependencies: Vec<ArtifactDependency>,
+    /// The revision this one reworks, such as a screenplay one scene of
+    /// which is written again.
+    pub based_on: Option<u32>,
     pub max_output_tokens: Option<u32>,
 }
 
@@ -155,26 +158,43 @@ struct Planned {
     model: String,
     provenance: PromptProvenance,
     dependencies: Vec<ArtifactDependency>,
+    based_on: Option<u32>,
+}
+
+/// An accepted answer, encoded as the document it becomes.
+struct Answer {
+    bytes: Vec<u8>,
+    /// The model that actually answered, when the backend says.
+    model: String,
+}
+
+type Ask<'a> = dyn Fn(&LlmRequest) -> Result<Answer, DocumentJobError> + 'a;
+
+/// What asking needs; absent during recovery, which never asks.
+struct Asker<'a> {
+    info: LlmBackendInfo,
+    planned: &'a Planned,
+    ask: &'a Ask<'a>,
 }
 
 /// Asks the model and keeps its answer, or completes from a receipt.
-struct DocumentAdapter<'a, B, T> {
+struct DocumentAdapter<'a> {
     project: &'a CanonicalProject,
-    backend: Option<&'a B>,
-    planned: Option<&'a Planned>,
-    _document: std::marker::PhantomData<fn() -> T>,
+    asker: Option<Asker<'a>>,
 }
 
-impl<B: LlmBackend, T: Serialize + DeserializeOwned> PaidJobAdapter for DocumentAdapter<'_, B, T> {
+impl PaidJobAdapter for DocumentAdapter<'_> {
     type Request = LlmRequest;
     type Output = (DocumentKind, RevisionRecord);
     type Error = DocumentJobError;
 
     fn estimate_cost(&self, request: &LlmRequest) -> Result<CostEstimate, DocumentJobError> {
-        let backend = self
-            .backend
+        let asker = self
+            .asker
+            .as_ref()
             .ok_or_else(|| DocumentJobError::terminal("no model is configured"))?;
-        kineto_llm::estimate_cost(&backend.info(), request, 4_000)
+        let output = request.max_output_tokens.map_or(4_000, u64::from);
+        kineto_llm::estimate_cost(&asker.info, request, output)
             .ok_or_else(|| DocumentJobError::terminal("the model's cost is not known"))
     }
 
@@ -183,16 +203,12 @@ impl<B: LlmBackend, T: Serialize + DeserializeOwned> PaidJobAdapter for Document
         request: &LlmRequest,
         _idempotency_key: &IdempotencyKey,
     ) -> Result<Invocation<Self::Output>, DocumentJobError> {
-        let (Some(backend), Some(planned)) = (self.backend, self.planned) else {
+        let Some(asker) = &self.asker else {
             return Err(DocumentJobError::terminal("no model is configured"));
         };
-        let structured =
-            complete_structured::<B, T>(backend, request).map_err(|error| DocumentJobError {
-                class: error.class(),
-                message: error.to_string(),
-            })?;
-        let bytes = revisions::encode(&structured.value)
-            .map_err(|error| DocumentJobError::terminal(error.to_string()))?;
+        let planned = asker.planned;
+        let answer = (asker.ask)(request)?;
+        let bytes = answer.bytes;
         let next = revisions::revision_at(planned.kind, planned.revision)
             .map_err(|error| DocumentJobError::terminal(error.to_string()))?;
         let content_hash =
@@ -211,14 +227,13 @@ impl<B: LlmBackend, T: Serialize + DeserializeOwned> PaidJobAdapter for Document
             content_hash: content_hash.as_str().to_owned(),
             input_hash: Some(planned.input_hash.as_str().to_owned()),
             provider: Some(planned.provider.clone()),
-            // The model that actually answered, when the backend says.
-            model: Some(if structured.response.model.trim().is_empty() {
+            model: Some(if answer.model.trim().is_empty() {
                 planned.model.clone()
             } else {
-                structured.response.model.clone()
+                answer.model
             }),
             provenance: Some(planned.provenance.clone()),
-            based_on: None,
+            based_on: planned.based_on,
             dependencies: planned
                 .dependencies
                 .iter()
@@ -299,18 +314,21 @@ fn attach_and_acknowledge(
     Ok(record)
 }
 
-fn document_error(error: impl Error + Send + Sync + 'static) -> GenerationError {
+pub(crate) fn document_error(error: impl Error + Send + Sync + 'static) -> GenerationError {
     GenerationError::Provider {
         source: Box::new(error),
         class: ErrorClass::Terminal,
     }
 }
 
-/// Ask `backend` for the next revision of a document and keep it.
-pub fn generate<B: LlmBackend, T: Serialize + DeserializeOwned>(
+/// Ask `backend` for the next revision of a document and keep it. The answer
+/// is parsed as `T` and turned into the stored document by `accept`; an
+/// answer either step refuses is asked for once more with the reason.
+pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
     project: &CanonicalProject,
     backend: &B,
     spec: DocumentSpec,
+    accept: impl Fn(T) -> Result<D, String>,
 ) -> Result<RevisionRecord, GenerationError> {
     let info = backend.info();
     let provider = ProviderKey::new(info.provider.clone())
@@ -349,6 +367,7 @@ pub fn generate<B: LlmBackend, T: Serialize + DeserializeOwned>(
         model: info.model.clone(),
         provenance: provenance_of(&compiled, &prompt_hash),
         dependencies: spec.dependencies.clone(),
+        based_on: spec.based_on,
     };
     let request = LlmRequest {
         messages: vec![
@@ -377,11 +396,27 @@ pub fn generate<B: LlmBackend, T: Serialize + DeserializeOwned>(
         }
         Err(error) => return Err(error.into()),
     };
-    let mut adapter = DocumentAdapter::<B, T> {
+    let ask = |request: &LlmRequest| {
+        let structured =
+            complete_checked::<B, T, D>(backend, request, &accept).map_err(|error| {
+                DocumentJobError {
+                    class: error.class(),
+                    message: error.to_string(),
+                }
+            })?;
+        Ok(Answer {
+            bytes: revisions::encode(&structured.value)
+                .map_err(|error| DocumentJobError::terminal(error.to_string()))?,
+            model: structured.response.model,
+        })
+    };
+    let mut adapter = DocumentAdapter {
         project,
-        backend: Some(backend),
-        planned: Some(&planned),
-        _document: std::marker::PhantomData,
+        asker: Some(Asker {
+            info,
+            planned: &planned,
+            ask: &ask,
+        }),
     };
     let (kind, record) = match state {
         IntentState::Prepared => {
@@ -427,11 +462,9 @@ pub fn recover(
         return Ok((Vec::new(), 0));
     };
     let runtime = JobRuntime::new(project, key, policy());
-    let mut adapter = DocumentAdapter::<NoBackend, serde_json::Value> {
+    let mut adapter = DocumentAdapter {
         project,
-        backend: None,
-        planned: None,
-        _document: std::marker::PhantomData,
+        asker: None,
     };
     let mut completed = Vec::new();
     let mut attention = 0;
@@ -450,25 +483,6 @@ pub fn recover(
         }
     }
     Ok((completed, attention))
-}
-
-/// Stands in for a model during recovery, which never asks one.
-struct NoBackend;
-
-impl LlmBackend for NoBackend {
-    type Error = DocumentJobError;
-
-    fn info(&self) -> kineto_llm::LlmBackendInfo {
-        unreachable!("recovery never consults a model")
-    }
-
-    fn complete(&self, _request: &LlmRequest) -> Result<kineto_llm::LlmResponse, DocumentJobError> {
-        Err(DocumentJobError::terminal("recovery never asks a model"))
-    }
-
-    fn classify(&self, error: &DocumentJobError) -> ErrorClass {
-        error.class
-    }
 }
 
 /// Every provider key a document job may be recorded under.

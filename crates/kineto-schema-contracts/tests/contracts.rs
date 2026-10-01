@@ -428,6 +428,7 @@ fn is_supported_pattern(pattern: &str) -> bool {
     matches!(
         pattern,
         "^[A-Za-z0-9_.-]+$"
+            | "^[A-Za-z0-9_.-]{1,64}$"
             | "^[A-Za-z0-9_.-]{1,128}$"
             | "^[A-Za-z0-9_./-]+$"
             | "^sha256:[0-9a-f]{64}$"
@@ -437,6 +438,9 @@ fn is_supported_pattern(pattern: &str) -> bool {
 fn matches_pattern(pattern: &str, value: &str) -> Result<bool, String> {
     match pattern {
         "^[A-Za-z0-9_.-]+$" => Ok(!value.is_empty() && value.bytes().all(is_portable_id_byte)),
+        "^[A-Za-z0-9_.-]{1,64}$" => {
+            Ok((1..=64).contains(&value.len()) && value.bytes().all(is_portable_id_byte))
+        }
         "^[A-Za-z0-9_.-]{1,128}$" => {
             Ok((1..=128).contains(&value.len()) && value.bytes().all(is_portable_id_byte))
         }
@@ -646,6 +650,8 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "project.schema.json",
             "revisions.schema.json",
             "scene.schema.json",
+            "screenplay-scene.schema.json",
+            "screenplay.schema.json",
             "selection.schema.json",
             "shot.schema.json",
             "source.schema.json",
@@ -915,6 +921,87 @@ fn the_story_analysis_schema_rejects_unknown_fields() {
         .expect("the sample is JSON");
     sample["characters"][0]["age"] = 40.into();
     assert!(validate_value(&analysis_schema, &sample, "$").is_err());
+}
+
+#[test]
+fn generated_screenplays_and_their_revision_log_match_committed_schemas() {
+    let screenplay_schema = schema("screenplay.schema.json");
+    let scene_schema = schema("screenplay-scene.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    let written = kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    let sample: Value = serde_json::from_str(kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON)
+        .expect("the sample is JSON");
+    validate(&scene_schema, &sample["scenes"][0], "sample scene");
+    let mut scene = sample["scenes"][0].clone();
+    scene["blocks"][0]["text"] = "Two chairs, one empty.".into();
+    let rewritten = kineto_core::screenplay::rewrite_scene(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([scene.to_string()]),
+        "office_night",
+        None,
+    )
+    .expect("the scene should be rewritten");
+    for record in [&written, &rewritten] {
+        validate(
+            &screenplay_schema,
+            &json_file(&temp.0.join(&record.path)),
+            &record.path,
+        );
+    }
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("screenplay/revisions.json")),
+        "screenplay revisions",
+    );
+}
+
+#[test]
+fn a_screenplay_scene_is_the_same_shape_alone_and_in_a_screenplay() {
+    let strip = |mut value: Value| {
+        let object = value.as_object_mut().expect("schemas are objects");
+        for key in ["$schema", "$id", "title", "description"] {
+            object.remove(key);
+        }
+        value
+    };
+    let screenplay_schema = schema("screenplay.schema.json");
+    assert_eq!(
+        strip(schema("screenplay-scene.schema.json")),
+        strip(screenplay_schema["properties"]["scenes"]["items"].clone()),
+        "a scene rewritten on its own must fit back into the screenplay"
+    );
+}
+
+#[test]
+fn the_screenplay_schema_rejects_drift() {
+    let screenplay_schema = schema("screenplay.schema.json");
+    let sample: Value = serde_json::from_str(kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON)
+        .expect("the sample is JSON");
+    type Edit = fn(&mut Value);
+    let drift: [Edit; 5] = [
+        |value| value["scenes"][0]["mood"] = "dark".into(),
+        |value| value["scenes"][0]["blocks"][0]["kind"] = "montage".into(),
+        |value| value["scenes"][0]["setting"] = "indoors".into(),
+        |value| value["scenes"] = serde_json::json!([]),
+        |value| value["scenes"][0]["id"] = "s".repeat(65).into(),
+    ];
+    for edit in drift {
+        let mut value = sample.clone();
+        edit(&mut value);
+        assert!(validate_value(&screenplay_schema, &value, "$").is_err());
+    }
 }
 
 #[test]

@@ -839,6 +839,9 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         | GenerationError::NeedsProviderCall
         | GenerationError::Runtime(_)
         | GenerationError::JobId(_)
+        // Shot generation has no prerequisites of this kind; documents map
+        // it when they reach the bridge.
+        | GenerationError::Prerequisite(_)
         | GenerationError::Unexpected(_) => PROJECT_ERR_GENERATION_JOB,
     }
 }
