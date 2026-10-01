@@ -779,6 +779,63 @@ fn bootstrap_scene_written_at_creation_matches_committed_schemas() {
 }
 
 #[test]
+fn shot_video_records_match_committed_schemas() {
+    let artifact_schema = schema("artifact.schema.json");
+    let shot_schema = schema("shot.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    shot.generate(&project)
+        .expect("shot generation should persist");
+    shot.select(&project, 0)
+        .expect("a candidate should be selectable");
+    shot.lock(&project).expect("the selection should lock");
+
+    let plan = shot
+        .plan_video(
+            &project,
+            kineto_project::shot::VideoGenerationSpec {
+                provider: "schema-contract-video",
+                model: "clip-1",
+                canonical_params: b"duration=6",
+                compiler_version: "video-prompt/1",
+            },
+        )
+        .expect("a video should be plannable from the locked keyframe");
+    let media_path = kineto_project::shot::video_media_path(1, plan.artifact_id())
+        .expect("video path should be valid");
+    let bytes = b"\0\0\0\x18ftypisomschema";
+    project
+        .root()
+        .write_atomic(&media_path, bytes)
+        .expect("video bytes should be written");
+    shot.attach_video(
+        &project,
+        &plan,
+        &kineto_project::shot::VideoOutput {
+            artifact_id: plan.artifact_id().clone(),
+            content_hash: kineto_project::ContentHash::of(bytes),
+            provider: "schema-contract-video".to_owned(),
+            model: "clip-1".to_owned(),
+            media_path,
+            provenance: None,
+            keyframe: plan.keyframe().expect("plan names its keyframe").0.clone(),
+        },
+    )
+    .expect("the video should attach");
+    shot.lock_video(&project).expect("the video should lock");
+
+    let shot_root = temp.0.join("scenes/scene_001/shots/shot_001");
+    validate(
+        &shot_schema,
+        &json_file(&shot_root.join("shot.json")),
+        "shot.json with a video revision",
+    );
+    validate_artifact_array(&shot_root.join("artifacts.json"), &artifact_schema);
+}
+
+#[test]
 fn real_job_runtime_intent_matches_committed_schema() {
     let job_schema = schema("job.schema.json");
     let temp = TempDir::new();

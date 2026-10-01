@@ -10,7 +10,7 @@
 use std::ptr;
 
 use crate::guarded;
-use kineto_project::shot::{ShotApprovalSnapshot, ShotDirection};
+use kineto_project::shot::{ShotApprovalSnapshot, ShotDirection, VideoState};
 
 pub(crate) const PROJECT_OK: i32 = 0;
 pub(crate) const PROJECT_ERR_INVALID_ARGUMENT: i32 = 100;
@@ -166,6 +166,8 @@ const SAMPLE: ShotApprovalSnapshot = ShotApprovalSnapshot {
     superseded_count: 18,
     migration_pending: true,
     invalid_hash_count: 2,
+    video: VideoState::None,
+    video_revision: 0,
 };
 
 const ENTRY_STATUS: u32 = 1;

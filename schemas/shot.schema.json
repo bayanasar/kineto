@@ -9,6 +9,7 @@
     "schema_version": {"type": "integer", "minimum": 1},
     "direction": {"enum": ["reaction", "spatial_clarity", "intimacy", "tension"]},
     "generation_revision": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "video_revision": {"type": "integer", "minimum": 0, "maximum": 65535},
     "duration_target": {"type": "number", "minimum": 0},
     "characters": {
       "type": "array",

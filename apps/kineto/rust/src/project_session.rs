@@ -766,6 +766,10 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         | ShotWorkflowError::InvalidStoredHash { .. }
         | ShotWorkflowError::MigrationBackupConflict(_)
         | ShotWorkflowError::MediaMismatch(_)
+        | ShotWorkflowError::KeyframeNotLocked
+        | ShotWorkflowError::VideoLocked
+        | ShotWorkflowError::NoVideo
+        | ShotWorkflowError::StaleVideo
         | ShotWorkflowError::InvalidTarget(_)
         | ShotWorkflowError::Path(_)
         | ShotWorkflowError::Json(_)
@@ -1297,6 +1301,8 @@ mod tests {
             superseded_count: 18,
             migration_pending: true,
             invalid_hash_count: 2,
+            video: kineto_project::shot::VideoState::None,
+            video_revision: 0,
         });
         assert_eq!(bits & 1, 1);
         assert_eq!((bits >> 1) & 1, 0);
