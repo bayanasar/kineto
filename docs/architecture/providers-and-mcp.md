@@ -91,6 +91,8 @@ CLI adapters are experimental. Agent CLIs are not stable substitutes for inferen
 
 Start with one cloud provider and one local path.
 
+The first cloud provider is MiniMax (`kineto-provider-minimax`): `image-01` for keyframes over blocking HTTPS with rustls and the bundled Mozilla roots, base64 responses so the image arrives inside the authenticated answer, no redirects, and every failure classified as retryable or terminal (unknown codes are terminal). Its image endpoint has no idempotency key or request lookup, so a request that fails after it was sent may already have been billed; the job runtime's attempt limit bounds the duplicate spend. `cargo run -p kineto-provider-minimax --example image_smoke` is the manual paid smoke test; no test suite calls it.
+
 Local generation should be implementable through a process/API adapter such as ComfyUI without coupling core workflow logic to it.
 
 ### TTS
