@@ -644,10 +644,12 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "artifact.schema.json",
             "job.schema.json",
             "project.schema.json",
+            "revisions.schema.json",
             "scene.schema.json",
             "selection.schema.json",
             "shot.schema.json",
             "source.schema.json",
+            "story-analysis.schema.json",
         ]
     );
 
@@ -874,6 +876,45 @@ fn imported_source_revisions_match_committed_schema() {
         &json_file(&temp.0.join("source/source.json")),
         "source/source.json",
     );
+}
+
+#[test]
+fn generated_story_analysis_and_its_revision_log_match_committed_schemas() {
+    let analysis_schema = schema("story-analysis.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    validate(
+        &analysis_schema,
+        &serde_json::from_str(kineto_project::story::SAMPLE_ANALYSIS_JSON)
+            .expect("the sample is JSON"),
+        "sample story analysis",
+    );
+    let record = kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    validate(
+        &analysis_schema,
+        &json_file(&temp.0.join(&record.path)),
+        "generated story analysis",
+    );
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("story/analysis/revisions.json")),
+        "story analysis revisions",
+    );
+}
+
+#[test]
+fn the_story_analysis_schema_rejects_unknown_fields() {
+    let analysis_schema = schema("story-analysis.schema.json");
+    let mut sample: Value = serde_json::from_str(kineto_project::story::SAMPLE_ANALYSIS_JSON)
+        .expect("the sample is JSON");
+    sample["characters"][0]["age"] = 40.into();
+    assert!(validate_value(&analysis_schema, &sample, "$").is_err());
 }
 
 #[test]

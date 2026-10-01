@@ -49,6 +49,10 @@ my-film/
 
 Candidate filenames use stable artifact IDs or content-addressed names. Selection is metadata; there is no canonical `selected.png` or `selected.mp4` rename step.
 
+## Document revisions
+
+The story analysis (`story/analysis/`) and the screenplay (`screenplay/`) are document artifacts kept as revisions. Each revision is a JSON file named by its artifact ID (`story_analysis_r0001.json`, `screenplay_r0003.json`); `revisions.json` in the same directory (`revisions.schema.json`) records each revision's status (`candidate`, `locked`, `superseded`), origin (`generated` by a model or `edited` by the director, with `based_on`), content hash, input hash, provider, model, prompt provenance and dependencies. A new revision supersedes the earlier candidates; locking one supersedes the previously locked revision; nothing is deleted. A revision whose file no longer matches its hash is refused rather than read. The story analysis body follows `story-analysis.schema.json`, which is also the schema the model is asked to satisfy; a revision depends on the source revision it read (`source_rNNNN`).
+
 ## `project.toml`
 
 Minimum fields:

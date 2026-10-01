@@ -97,7 +97,7 @@ Agent CLIs are the other kind of backend. Kineto drives the CLI itself (Kimi Cod
 - kineto as the ACP client: file access is declared as client-routed and refused, there is no terminal, and every permission request is answered with the reject option.
 - a fresh empty working directory per call, removed afterwards, and the session deleted from the agent's history.
 
-Verified live (2026-10-01) with Kimi Code 2.1.1 under such a root: a prompt that also asked it to run `ls` and read a file produced no tool calls, permission or file requests at all, and the file's content did not appear. The answer is the concatenated `agent_message_chunk` text; thoughts and tool traffic are ignored. Agent backends are billed by subscription, so their cost is reported as unknown. Offline tests drive a scripted agent binary (`fake_acp_agent`) through approval and file requests, missing sign-in, crashes, refusal, malformed output and a hang past the deadline.
+Verified live (2026-10-01) with Kimi Code 2.1.1 under such a root: a prompt that also asked it to run `ls` and read a file produced no tool calls, permission or file requests at all, and the file's content did not appear. The answer is the concatenated `agent_message_chunk` text; thoughts and tool traffic are ignored. Agent backends are billed by subscription, so their cost is reported as unknown. A live story analysis of a one-paragraph story through Kimi Code took about 100 seconds and satisfied the schema on its first answer. Offline tests drive a scripted agent binary (`fake_acp_agent`) through approval and file requests, missing sign-in, crashes, refusal, malformed output and a hang past the deadline.
 
 ### Image / video
 

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 kineto-core = { path = "../kineto-core" }
 kineto-job-runtime = { path = "../kineto-job-runtime" }
 kineto-jobs = { path = "../kineto-jobs" }
+kineto-llm = { path = "../kineto-llm", features = ["testing"] }
 kineto-project = { path = "../kineto-project" }
 kineto-provider-minimax = { path = "../kineto-provider-minimax" }
 kineto-providers = { path = "../kineto-providers" }

@@ -750,15 +750,15 @@ const PERMIT_POLL: Duration = Duration::from_millis(200);
 /// Invoke a prepared candidate, waiting while the provider's process-wide
 /// concurrency ceiling is reached. The runtime refuses rather than queues, and
 /// a refusal spends no attempt, so waiting here is the scheduler.
-fn invoke_when_permitted<G: CandidateGenerator>(
+pub(crate) fn invoke_when_permitted<A: PaidJobAdapter>(
     runtime: &JobRuntime<'_>,
     job_id: &JobId,
-    generator: &mut G,
-    request: &CandidateRequest,
-) -> Result<DispatchOutcome<GeneratedCandidate>, InvokePreparedError<G::Error>> {
+    adapter: &mut A,
+    request: &A::Request,
+) -> Result<DispatchOutcome<A::Output>, InvokePreparedError<A::Error>> {
     let deadline = Instant::now() + PERMIT_WAIT;
     loop {
-        match runtime.invoke_prepared(job_id, generator, request) {
+        match runtime.invoke_prepared(job_id, adapter, request) {
             Err(InvokePreparedError::Runtime(JobRuntimeError::ConcurrencyLimitReached))
                 if Instant::now() < deadline =>
             {
