@@ -1324,6 +1324,10 @@ impl ShotWorkflow {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
         if self.is_video_attached(plan) {
+            // Only this video, exactly as generated, counts as attached; the
+            // job is acknowledged on the strength of it.
+            self.ensure_mutation_allowed()?;
+            self.verify_attached_video(plan, output)?;
             return Ok(AttachOutcome::AlreadyAttached);
         }
         if self.shot.video_revision > plan.revision {
@@ -1403,6 +1407,41 @@ impl ShotWorkflow {
         self.shot = next_shot;
         self.artifacts = next_artifacts;
         Ok(AttachOutcome::Attached)
+    }
+
+    fn verify_attached_video(
+        &self,
+        plan: &VideoPlan,
+        output: &VideoOutput,
+    ) -> Result<(), ShotWorkflowError> {
+        let record = self
+            .artifact(&plan.artifact_id)
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        let media_path = output.media_path.as_path().to_string_lossy().into_owned();
+        let prompt_hash = output
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.prompt_hash.as_str());
+        let keyframe = &output.keyframe;
+        let depends_on_keyframe = record.dependencies.len() == 1
+            && record.dependencies[0].artifact_id == keyframe.artifact_id.as_str()
+            && record.dependencies[0].content_hash == keyframe.content_hash.as_str()
+            && record.dependencies[0].field == keyframe.field;
+        if record.artifact_type != VIDEO_ARTIFACT_TYPE
+            || record.status == StoredArtifactStatus::Draft
+            || record.input_hash.as_deref() != Some(plan.input_hash.as_str())
+            || record.content_hash != output.content_hash.as_str()
+            || record.provider.as_deref() != Some(output.provider.as_str())
+            || record.model.as_deref() != Some(output.model.as_str())
+            || record.media_path.as_deref() != Some(media_path.as_str())
+            || record.prompt_hash.as_deref() != prompt_hash
+            || !depends_on_keyframe
+        {
+            return Err(ShotWorkflowError::AttachedRecordMismatch(
+                plan.artifact_id.as_str().to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Approve the current video as production truth.
@@ -2426,6 +2465,19 @@ mod tests {
             shot.attach_video(&project, &first, &first_output).unwrap(),
             AttachOutcome::AlreadyAttached
         );
+        // But only with the output it was attached with.
+        let mut other = first_output.clone();
+        other.content_hash = ContentHash::of(b"another clip");
+        assert!(matches!(
+            shot.attach_video(&project, &first, &other),
+            Err(ShotWorkflowError::AttachedRecordMismatch(_))
+        ));
+        let mut other = first_output.clone();
+        other.keyframe.content_hash = ContentHash::of(b"another frame");
+        assert!(matches!(
+            shot.attach_video(&project, &first, &other),
+            Err(ShotWorkflowError::AttachedRecordMismatch(_))
+        ));
 
         let artifacts: Vec<serde_json::Value> =
             serde_json::from_slice(&fs::read(shot_dir(&target).join("artifacts.json")).unwrap())
