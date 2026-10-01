@@ -766,6 +766,7 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         | ShotWorkflowError::InvalidStoredHash { .. }
         | ShotWorkflowError::MigrationBackupConflict(_)
         | ShotWorkflowError::MediaMismatch(_)
+        | ShotWorkflowError::AttachedRecordMismatch(_)
         | ShotWorkflowError::InvalidTarget(_)
         | ShotWorkflowError::Path(_)
         | ShotWorkflowError::Json(_)
