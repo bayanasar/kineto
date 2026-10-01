@@ -95,6 +95,13 @@ pub trait CandidateGenerator:
         true
     }
 
+    /// Whether completing an interrupted generation when a project opens may
+    /// make new provider calls. Only a free generator may; a paid call is
+    /// made only when the director asks for a generation.
+    fn invokes_on_recovery(&self) -> bool {
+        false
+    }
+
     /// The result of a candidate whose provider call already finished,
     /// without calling the provider again.
     fn recover(&mut self, request: &CandidateRequest) -> Result<GeneratedCandidate, Self::Error>;
@@ -283,6 +290,10 @@ impl CandidateGenerator for LocalDemoAdapter {
         false
     }
 
+    fn invokes_on_recovery(&self) -> bool {
+        true
+    }
+
     fn recover(
         &mut self,
         request: &CandidateRequest,
@@ -328,6 +339,9 @@ pub enum GenerationError {
     },
     /// The chosen provider has no credentials, so no new call can be made.
     NotConfigured,
+    /// Completing the generation needs a paid provider call, which is made
+    /// only when the director asks for a generation again.
+    NeedsProviderCall,
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -344,6 +358,9 @@ impl fmt::Display for GenerationError {
             Self::NotConfigured => {
                 formatter.write_str("the image provider has no credentials configured")
             }
+            Self::NeedsProviderCall => formatter.write_str(
+                "finishing this generation needs a paid provider call; generate again to make it",
+            ),
             Self::JobId(error) => error.fmt(formatter),
             Self::Unexpected(message) => formatter.write_str(message),
         }
@@ -358,7 +375,7 @@ impl Error for GenerationError {
             Self::Prompt(error) => Some(error),
             Self::Provider { source, .. } => Some(source.as_ref()),
             Self::JobId(error) => Some(error),
-            Self::NotConfigured | Self::Unexpected(_) => None,
+            Self::NotConfigured | Self::NeedsProviderCall | Self::Unexpected(_) => None,
         }
     }
 }
@@ -426,7 +443,7 @@ pub fn generate_with<G: CandidateGenerator>(
         return Err(GenerationError::NotConfigured);
     }
     let prompt = compile_prompt(project, shot, &generator)?;
-    complete_inner(project, shot, &plan, generator, prompt, hooks)
+    complete_inner(project, shot, &plan, generator, Some(prompt), hooks)
 }
 
 /// Drive a planned generation to the end from whatever it reached durably.
@@ -457,9 +474,8 @@ pub fn complete_with<G: CandidateGenerator>(
     generator: G,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
-    // A recovered generation compiles its prompt only if a candidate still
-    // has to be invoked; candidates that finished keep the prompt they were
-    // generated from.
+    // Recovery makes no paid call. Candidates that finished keep the prompt
+    // they were generated from; a free generator compiles one if needed.
     complete_inner(project, shot, plan, generator, None, hooks)
 }
 
@@ -481,20 +497,29 @@ fn compile_prompt<G: CandidateGenerator>(
     )?)))
 }
 
+/// `requested` holds the compiled prompt of a generation the director asked
+/// for, and is `None` when an interrupted generation is being recovered.
 fn complete_inner<G: CandidateGenerator>(
     project: &CanonicalProject,
     shot: &mut ShotWorkflow,
     plan: &GenerationPlan,
     mut generator: G,
-    mut prompt: Option<Arc<KeyframePrompt>>,
+    requested: Option<Option<Arc<KeyframePrompt>>>,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
     let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
     let mut requests = Vec::with_capacity(plan.candidate_ids().len());
     let mut states = Vec::with_capacity(plan.candidate_ids().len());
+    let recovering = requested.is_none();
+    let mut prompt = requested.flatten();
 
     for (index, candidate) in plan.candidate_ids().iter().enumerate() {
         let job_id = JobId::new(candidate.as_str())?;
+        if !recovering {
+            // Asking again is what retries a candidate whose call failed: its
+            // failed intent would otherwise refuse every new attempt.
+            runtime.retire_failed(&job_id)?;
+        }
         let state = match runtime.prepare(
             job_id.clone(),
             GENERATE_OPERATION,
@@ -537,6 +562,9 @@ fn complete_inner<G: CandidateGenerator>(
         .filter(|state| **state == Some(IntentState::Prepared))
         .count();
     if to_invoke > 0 {
+        if recovering && !generator.invokes_on_recovery() {
+            return Err(GenerationError::NeedsProviderCall);
+        }
         if !generator.can_invoke() {
             return Err(GenerationError::NotConfigured);
         }
@@ -683,6 +711,7 @@ pub fn unfinished_with<G: CandidateGenerator>(
 ) -> Result<Unfinished, JobRuntimeError> {
     let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
     let mut unfinished = Unfinished::default();
+    let mut awaiting_call = Vec::new();
     for outcome in runtime.reconcile_startup(&mut generator)? {
         match outcome {
             StartupOutcome::ResultReady { job_id, output } => {
@@ -695,12 +724,23 @@ pub fn unfinished_with<G: CandidateGenerator>(
                     None => unfinished.needs_attention += 1,
                 }
             }
+            // A candidate whose call never finished waits for the director to
+            // generate again; recovery does not pay for it.
+            StartupOutcome::RetryPrepared { job_id, .. } => awaiting_call.push(job_id),
             StartupOutcome::StillPending { .. }
-            | StartupOutcome::RetryPrepared { .. }
             | StartupOutcome::NeedsAttention { .. }
             | StartupOutcome::UnreadableIntent { .. }
             | StartupOutcome::ProviderError { .. } => unfinished.needs_attention += 1,
         }
+    }
+    if !generator.invokes_on_recovery() {
+        unfinished.plans.retain(|plan| {
+            !plan.candidate_ids().iter().any(|candidate| {
+                awaiting_call
+                    .iter()
+                    .any(|job| job.as_str() == candidate.as_str())
+            })
+        });
     }
     unfinished
         .plans
@@ -1182,7 +1222,7 @@ mod tests {
                 r#"{"base_resp":{"status_code":1026,"status_msg":"input new_sensitive"}}"#
                     .to_owned(),
             );
-            let (client, _calls) = client(fake);
+            let (client, calls) = client(fake);
 
             let error = generate_with(
                 &project,
@@ -1202,6 +1242,66 @@ mod tests {
             assert!(!shot.snapshot().unwrap().generated);
             assert_eq!(intent_states(&target), ["invoked", "invoked", "prepared"]);
             assert_eq!(receipts(&target), 2);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+            // Reopening completes nothing and pays for nothing: the refused
+            // candidate waits for the director.
+            let found =
+                unfinished_with(&project, MinimaxKeyframes::new(&project, Some(&client))).unwrap();
+            assert!(found.plans.is_empty());
+            assert_eq!(found.needs_attention, 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+            // Asking again pays only for the refused candidate.
+            let outcome = generate_with(
+                &project,
+                &mut shot,
+                MinimaxKeyframes::new(&project, Some(&client)),
+                &mut NoHooks,
+            )
+            .unwrap();
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert_eq!(shot.snapshot().unwrap().generation_revision, 1);
+            assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+            assert_eq!(receipts(&target), 0);
+        }
+
+        #[test]
+        fn recovery_never_makes_a_paid_call() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+            let plan = shot.plan_generation(&project).unwrap();
+            // A candidate prepared but never invoked, as after a crash.
+            let runtime = JobRuntime::new(
+                &project,
+                ProviderKey::new("minimax").unwrap(),
+                MinimaxKeyframes::new(&project, Some(&client)).policy(),
+            );
+            runtime
+                .prepare(
+                    JobId::new(plan.candidate_ids()[0].as_str()).unwrap(),
+                    GENERATE_OPERATION,
+                    plan.input_hash().clone(),
+                    plan.candidate_ids()[0].clone(),
+                )
+                .unwrap();
+            drop(runtime);
+
+            assert!(matches!(
+                complete_with(
+                    &project,
+                    &mut shot,
+                    &plan,
+                    MinimaxKeyframes::new(&project, Some(&client)),
+                    &mut NoHooks,
+                ),
+                Err(GenerationError::NeedsProviderCall)
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
 
         #[test]
