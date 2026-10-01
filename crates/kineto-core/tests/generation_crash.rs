@@ -60,7 +60,12 @@ fn crash_child() {
 
     let project = CanonicalProject::open(path).expect("child opens the project");
     let mut shot = ShotWorkflow::load(&project, 1).expect("child loads shot 1");
-    let _ = generation::generate(&project, &mut shot, &mut AbortAt(point));
+    let _ = generation::generate(
+        &project,
+        &mut shot,
+        &generation::ImageProvider::LocalDemo,
+        &mut AbortAt(point),
+    );
     panic!("the child must abort at {point:?}");
 }
 

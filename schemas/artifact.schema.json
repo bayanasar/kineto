@@ -13,10 +13,16 @@
     "input_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
     "provider": {"type": ["string", "null"]},
     "model": {"type": ["string", "null"]},
+    "media_path": {"type": ["string", "null"], "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
+    "media_state": {"enum": ["present", "evicted", null]},
     "compiler_version": {"type": ["string", "null"]},
     "compiled_prompt": {"type": ["string", "null"]},
     "prompt_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
     "degradation": {"enum": ["none", "cosmetic", "identity_affecting", null]},
+    "applied_constraints": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+    },
     "dropped_constraints": {
       "type": "array",
       "items": {

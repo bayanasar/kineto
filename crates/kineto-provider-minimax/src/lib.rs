@@ -107,7 +107,7 @@ pub struct HttpResponse {
 /// recorded responses.
 pub trait Transport {
     fn post_json(
-        &mut self,
+        &self,
         url: &str,
         api_key: &SecretString,
         body: &[u8],
@@ -150,7 +150,7 @@ impl fmt::Debug for HttpsTransport {
 
 impl Transport for HttpsTransport {
     fn post_json(
-        &mut self,
+        &self,
         url: &str,
         api_key: &SecretString,
         body: &[u8],
@@ -312,10 +312,7 @@ impl<T: Transport> MinimaxClient<T> {
     }
 
     /// Generate one image. This is a paid call.
-    pub fn generate_image(
-        &mut self,
-        request: &ImageRequest,
-    ) -> Result<GeneratedImage, MinimaxError> {
+    pub fn generate_image(&self, request: &ImageRequest) -> Result<GeneratedImage, MinimaxError> {
         let chars = request.prompt.chars().count();
         if request.prompt.trim().is_empty() || chars > MAX_PROMPT_CHARS {
             return Err(MinimaxError::InvalidPrompt);
@@ -412,27 +409,34 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{collections::VecDeque, sync::Mutex};
 
     const KEY: &str = "sk-test-secret-value-0123456789";
     const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
 
     #[derive(Default)]
     struct Recorded {
-        responses: VecDeque<Result<HttpResponse, TransportFailure>>,
-        requests: Vec<(String, String, Vec<u8>)>,
+        responses: Mutex<VecDeque<Result<HttpResponse, TransportFailure>>>,
+        requests: Mutex<Vec<(String, String, Vec<u8>)>>,
     }
 
     impl Transport for Recorded {
         fn post_json(
-            &mut self,
+            &self,
             url: &str,
             api_key: &SecretString,
             body: &[u8],
         ) -> Result<HttpResponse, TransportFailure> {
-            self.requests
-                .push((url.to_owned(), api_key.expose().to_owned(), body.to_vec()));
-            self.responses.pop_front().expect("a recorded response")
+            self.requests.lock().unwrap().push((
+                url.to_owned(),
+                api_key.expose().to_owned(),
+                body.to_vec(),
+            ));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a recorded response")
         }
     }
 
@@ -441,8 +445,8 @@ mod tests {
     ) -> MinimaxClient<Recorded> {
         MinimaxClient::with_transport(
             Recorded {
-                responses: responses.into_iter().collect(),
-                requests: Vec::new(),
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
             },
             SecretString::new(KEY.to_owned()).unwrap(),
             "https://example.test/",
@@ -478,13 +482,14 @@ mod tests {
 
     #[test]
     fn a_successful_answer_yields_the_decoded_image() {
-        let mut client = client([answer(200, &success(JPEG))]);
+        let client = client([answer(200, &success(JPEG))]);
         let image = client.generate_image(&request()).unwrap();
         assert_eq!(image.bytes, JPEG);
         assert_eq!(image.format, ImageFormat::Jpeg);
         assert_eq!(image.request_id, "070cfa8b");
 
-        let (url, key, body) = &client.transport.requests[0];
+        let requests = client.transport.requests.lock().unwrap();
+        let (url, key, body) = &requests[0];
         assert_eq!(url, "https://example.test/v1/image_generation");
         assert_eq!(key, KEY);
         let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
@@ -581,7 +586,7 @@ mod tests {
 
     #[test]
     fn an_invalid_prompt_is_refused_before_any_request() {
-        let mut client = client([]);
+        let client = client([]);
         for prompt in ["", "   ", &"x".repeat(MAX_PROMPT_CHARS + 1)] {
             let request = ImageRequest {
                 prompt: prompt.to_owned(),
@@ -592,7 +597,7 @@ mod tests {
                 Err(MinimaxError::InvalidPrompt)
             );
         }
-        assert!(client.transport.requests.is_empty());
+        assert!(client.transport.requests.lock().unwrap().is_empty());
     }
 
     #[test]

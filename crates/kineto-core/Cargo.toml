@@ -9,8 +9,14 @@ kineto-job-runtime = { path = "../kineto-job-runtime" }
 kineto-jobs = { path = "../kineto-jobs" }
 kineto-project = { path = "../kineto-project" }
 kineto-prompts = { path = "../kineto-prompts" }
+kineto-provider-minimax = { path = "../kineto-provider-minimax" }
+kineto-providers = { path = "../kineto-providers" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+base64 = "0.23"
 
 [lib]
 path = "src/lib.rs"

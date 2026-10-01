@@ -1,19 +1,29 @@
 //! Shot candidate generation as durable write-ahead jobs.
 //!
 //! Each planned candidate is one job: its artifact ID is the job ID and the
-//! target artifact, the operation is `image.generate`, and the provider is the
-//! deterministic local demo generator. A generation runs
+//! target artifact, and the operation is `image.generate`. A generation runs
 //!
 //! ```text
-//! prepare (write-ahead intent) -> invoke -> attach all candidates -> acknowledge
+//! prepare every intent (write-ahead) -> invoke all -> attach all candidates -> acknowledge
 //! ```
 //!
-//! and [`complete`] drives a plan to the end from whichever of those steps it
-//! last reached durably, so a normal run and the recovery of an interrupted
-//! one take the same path. Canonical state changes only in the attach step,
-//! which is idempotent.
+//! Candidates are invoked in parallel, one call each. [`complete`] drives a
+//! plan to the end from whichever step it last reached durably, so a normal
+//! run and the recovery of an interrupted one take the same path. Canonical
+//! state changes only in the attach step, which is idempotent.
+//!
+//! Who generates is a [`CandidateGenerator`]: the deterministic local demo
+//! generator or a real provider. Workflow code reaches them through
+//! [`ImageProvider`] and never names a vendor.
 
-use std::{error::Error, fmt, num::NonZeroU16};
+use std::{
+    error::Error,
+    fmt,
+    num::NonZeroU16,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use kineto_job_runtime::{
     DispatchOutcome, Invocation, InvokePreparedError, JobRuntime, JobRuntimeError,
@@ -27,9 +37,17 @@ use kineto_project::{
     ArtifactId, InputHash,
     manifest::CanonicalProject,
     shot::{
-        AttachOutcome, CandidateOutput, DEMO_PROVIDER, GenerationPlan, ShotWorkflow,
-        ShotWorkflowError, demo_candidate_output,
+        AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
+        GenerationPlan, PromptProvenance, ShotWorkflow, ShotWorkflowError, demo_candidate_output,
+        load_scene_intent,
     },
+};
+use kineto_prompts::DegradationLevel;
+use kineto_provider_minimax::MinimaxClient;
+
+use crate::{
+    keyframe_prompt::{self, KeyframePrompt, KeyframePromptError},
+    minimax::MinimaxKeyframes,
 };
 
 /// The capability a shot candidate is generated with.
@@ -40,6 +58,10 @@ pub const GENERATE_OPERATION: &str = "image.generate";
 pub struct CandidateRequest {
     pub artifact_id: ArtifactId,
     pub input_hash: InputHash,
+    pub shot_number: u32,
+    /// The compiled prompt, for generators that take one. Every candidate of
+    /// a generation shares it.
+    pub prompt: Option<Arc<KeyframePrompt>>,
 }
 
 /// A generated candidate together with the input it was generated for, so an
@@ -48,6 +70,109 @@ pub struct CandidateRequest {
 pub struct GeneratedCandidate {
     pub output: CandidateOutput,
     pub input_hash: InputHash,
+}
+
+/// A source of shot candidates behind the paid-job contract.
+pub trait CandidateGenerator:
+    PaidJobAdapter<Request = CandidateRequest, Output = GeneratedCandidate> + Clone + Send
+{
+    /// The provider key its jobs are recorded under.
+    fn provider(&self) -> ProviderKey;
+
+    fn policy(&self) -> JobRuntimePolicy;
+
+    /// Whether candidates need a compiled prompt.
+    fn needs_prompt(&self) -> bool;
+
+    /// The longest prompt the provider accepts, in characters.
+    fn prompt_limit(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Whether new provider calls can be made. A generator that cannot may
+    /// still complete calls that already finished.
+    fn can_invoke(&self) -> bool {
+        true
+    }
+
+    /// The result of a candidate whose provider call already finished,
+    /// without calling the provider again.
+    fn recover(&mut self, request: &CandidateRequest) -> Result<GeneratedCandidate, Self::Error>;
+
+    /// Forget runtime state kept for a candidate that is now acknowledged.
+    fn release(&mut self, _request: &CandidateRequest) {}
+}
+
+/// The image provider a session generates keyframes with.
+#[derive(Debug, Default)]
+pub enum ImageProvider {
+    /// Deterministic local candidates without media. Free.
+    #[default]
+    LocalDemo,
+    /// MiniMax `image-01`. Paid. Without a client, finished calls can still
+    /// be completed from their receipts but no new call is made.
+    Minimax(Option<MinimaxClient>),
+}
+
+/// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives
+/// candidate keys, back into its candidate and input hash.
+pub fn parse_candidate_key(key: &IdempotencyKey) -> Result<(ArtifactId, InputHash), KeyError> {
+    // Artifact IDs cannot contain ':', so the first separator after the
+    // operation ends the artifact ID.
+    let rest = key
+        .as_str()
+        .strip_prefix(GENERATE_OPERATION)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .ok_or(KeyError("idempotency key is not an image.generate key"))?;
+    let (artifact_id, input_hash) = rest
+        .split_once(':')
+        .ok_or(KeyError("idempotency key has no input hash"))?;
+    Ok((
+        ArtifactId::new(artifact_id)
+            .map_err(|_| KeyError("idempotency key names an invalid artifact"))?,
+        InputHash::new(input_hash)
+            .map_err(|_| KeyError("idempotency key has an invalid input hash"))?,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyError(&'static str);
+
+impl fmt::Display for KeyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl Error for KeyError {}
+
+/// The provenance an artifact records for a compiled keyframe prompt.
+#[must_use]
+pub fn provenance(prompt: &KeyframePrompt) -> PromptProvenance {
+    let compiled = &prompt.compiled;
+    PromptProvenance {
+        compiler_version: compiled.compiler_version().to_owned(),
+        compiled_prompt: compiled.prompt().to_owned(),
+        prompt_hash: prompt.prompt_hash.as_str().to_owned(),
+        applied_constraints: compiled
+            .applied_constraints()
+            .iter()
+            .map(|constraint| constraint.as_str().to_owned())
+            .collect(),
+        dropped_constraints: compiled
+            .dropped_constraints()
+            .iter()
+            .map(|dropped| DroppedConstraintRecord {
+                constraint: dropped.constraint.as_str().to_owned(),
+                reason: dropped.reason.clone(),
+                degradation: match dropped.degradation {
+                    DegradationLevel::None => Degradation::None,
+                    DegradationLevel::Cosmetic => Degradation::Cosmetic,
+                    DegradationLevel::IdentityAffecting => Degradation::IdentityAffecting,
+                },
+            })
+            .collect(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +192,7 @@ impl Error for LocalDemoError {}
 /// function of the candidate and input hash the key names. Reconciling by key
 /// therefore recomputes the result instead of looking anything up, and never
 /// reports a job as missing.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct LocalDemoAdapter;
 
 impl LocalDemoAdapter {
@@ -80,28 +205,6 @@ impl LocalDemoAdapter {
         Ok(GeneratedCandidate {
             output,
             input_hash: input_hash.clone(),
-        })
-    }
-
-    fn request_for_key(key: &IdempotencyKey) -> Result<CandidateRequest, LocalDemoError> {
-        // `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives it.
-        // Artifact IDs cannot contain ':', so the first separator after the
-        // operation ends the artifact ID.
-        let rest = key
-            .as_str()
-            .strip_prefix(GENERATE_OPERATION)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .ok_or(LocalDemoError(
-                "idempotency key is not an image.generate key",
-            ))?;
-        let (artifact_id, input_hash) = rest
-            .split_once(':')
-            .ok_or(LocalDemoError("idempotency key has no input hash"))?;
-        Ok(CandidateRequest {
-            artifact_id: ArtifactId::new(artifact_id)
-                .map_err(|_| LocalDemoError("idempotency key names an invalid artifact"))?,
-            input_hash: InputHash::new(input_hash)
-                .map_err(|_| LocalDemoError("idempotency key has an invalid input hash"))?,
         })
     }
 }
@@ -140,9 +243,10 @@ impl PaidJobAdapter for LocalDemoAdapter {
         &mut self,
         idempotency_key: &IdempotencyKey,
     ) -> Result<Reconciliation<GeneratedCandidate>, LocalDemoError> {
-        let request = Self::request_for_key(idempotency_key)?;
+        let (artifact_id, input_hash) =
+            parse_candidate_key(idempotency_key).map_err(|error| LocalDemoError(error.0))?;
         Ok(Reconciliation::Completed {
-            output: Self::generated(&request.artifact_id, &request.input_hash)?,
+            output: Self::generated(&artifact_id, &input_hash)?,
             provider_job_id: None,
         })
     }
@@ -150,6 +254,40 @@ impl PaidJobAdapter for LocalDemoAdapter {
     fn classify_error(&self, _error: &LocalDemoError) -> ErrorClass {
         // A deterministic local computation that failed once fails again.
         ErrorClass::Terminal
+    }
+}
+
+impl CandidateGenerator for LocalDemoAdapter {
+    fn provider(&self) -> ProviderKey {
+        ProviderKey::new(DEMO_PROVIDER).expect("static provider key is valid")
+    }
+
+    fn policy(&self) -> JobRuntimePolicy {
+        JobRuntimePolicy {
+            // A local deterministic computation has no provider-side
+            // concurrency limit.
+            execution: ProviderExecutionPolicy::new(
+                NonZeroU16::MAX,
+                BackoffPolicy::new(0, 0, 3).expect("static backoff policy is valid"),
+            ),
+            // The demo generator is free, and no paid fallback exists for it.
+            fallback_policy: FallbackPolicy {
+                paid_fallback: PaidFallback::Forbidden,
+                max_paid_amount_micros: Some(0),
+                require_user_approval: true,
+            },
+        }
+    }
+
+    fn needs_prompt(&self) -> bool {
+        false
+    }
+
+    fn recover(
+        &mut self,
+        request: &CandidateRequest,
+    ) -> Result<GeneratedCandidate, LocalDemoError> {
+        Self::generated(&request.artifact_id, &request.input_hash)
     }
 }
 
@@ -180,10 +318,19 @@ impl GenerationHooks for NoHooks {
 pub enum GenerationError {
     Shot(ShotWorkflowError),
     Runtime(JobRuntimeError),
-    Provider(LocalDemoError),
+    /// The shot's intent could not be compiled into a prompt.
+    Prompt(KeyframePromptError),
+    /// The provider refused or failed. `class` says whether trying again can
+    /// succeed.
+    Provider {
+        source: Box<dyn Error + Send + Sync>,
+        class: ErrorClass,
+    },
+    /// The chosen provider has no credentials, so no new call can be made.
+    NotConfigured,
     JobId(JobValueError),
-    /// The provider reported something the demo generator never does, such as
-    /// a pending remote job.
+    /// The provider reported something the generation path never expects,
+    /// such as a pending remote job for a synchronous image call.
     Unexpected(&'static str),
 }
 
@@ -192,7 +339,11 @@ impl fmt::Display for GenerationError {
         match self {
             Self::Shot(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
-            Self::Provider(error) => error.fmt(formatter),
+            Self::Prompt(error) => error.fmt(formatter),
+            Self::Provider { source, .. } => source.fmt(formatter),
+            Self::NotConfigured => {
+                formatter.write_str("the image provider has no credentials configured")
+            }
             Self::JobId(error) => error.fmt(formatter),
             Self::Unexpected(message) => formatter.write_str(message),
         }
@@ -204,9 +355,10 @@ impl Error for GenerationError {
         match self {
             Self::Shot(error) => Some(error),
             Self::Runtime(error) => Some(error),
-            Self::Provider(error) => Some(error),
+            Self::Prompt(error) => Some(error),
+            Self::Provider { source, .. } => Some(source.as_ref()),
             Self::JobId(error) => Some(error),
-            Self::Unexpected(_) => None,
+            Self::NotConfigured | Self::Unexpected(_) => None,
         }
     }
 }
@@ -229,39 +381,52 @@ impl From<JobValueError> for GenerationError {
     }
 }
 
-/// The job runtime for the local demo provider on one project.
-fn runtime(project: &CanonicalProject) -> JobRuntime<'_> {
-    let provider = ProviderKey::new(DEMO_PROVIDER).expect("static provider key is valid");
-    // A local deterministic computation has no provider-side concurrency
-    // limit. The runtime refuses, rather than waits, when a ceiling is reached,
-    // so a real provider will need a scheduler that waits for a permit.
-    let execution = ProviderExecutionPolicy::new(
-        NonZeroU16::MAX,
-        BackoffPolicy::new(0, 0, 3).expect("static backoff policy is valid"),
-    );
-    JobRuntime::new(
-        project,
-        provider,
-        JobRuntimePolicy {
-            execution,
-            // The demo generator is free, and no paid fallback exists for it.
-            fallback_policy: FallbackPolicy {
-                paid_fallback: PaidFallback::Forbidden,
-                max_paid_amount_micros: Some(0),
-                require_user_approval: true,
-            },
-        },
-    )
+impl From<KeyframePromptError> for GenerationError {
+    fn from(error: KeyframePromptError) -> Self {
+        Self::Prompt(error)
+    }
+}
+
+fn provider_error<G: CandidateGenerator>(generator: &G, source: G::Error) -> GenerationError {
+    GenerationError::Provider {
+        class: generator.classify_error(&source),
+        source: Box::new(source),
+    }
 }
 
 /// Generate the shot's next candidates as write-ahead jobs.
 pub fn generate(
     project: &CanonicalProject,
     shot: &mut ShotWorkflow,
+    provider: &ImageProvider,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    match provider {
+        ImageProvider::LocalDemo => generate_with(project, shot, LocalDemoAdapter, hooks),
+        ImageProvider::Minimax(client) => generate_with(
+            project,
+            shot,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+        ),
+    }
+}
+
+/// [`generate`] with an explicit generator.
+pub fn generate_with<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    generator: G,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
     let plan = shot.plan_generation(project)?;
-    complete(project, shot, &plan, hooks)
+    // Refuse before writing anything: a provider that cannot be called or a
+    // shot that cannot be compiled must not leave intents behind.
+    if !generator.can_invoke() {
+        return Err(GenerationError::NotConfigured);
+    }
+    let prompt = compile_prompt(project, shot, &generator)?;
+    complete_inner(project, shot, &plan, generator, prompt, hooks)
 }
 
 /// Drive a planned generation to the end from whatever it reached durably.
@@ -269,19 +434,67 @@ pub fn complete(
     project: &CanonicalProject,
     shot: &mut ShotWorkflow,
     plan: &GenerationPlan,
+    provider: &ImageProvider,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
-    let runtime = runtime(project);
-    let mut adapter = LocalDemoAdapter;
-    let mut job_ids = Vec::with_capacity(plan.candidate_ids().len());
-    let mut outputs = Vec::with_capacity(plan.candidate_ids().len());
+    match provider {
+        ImageProvider::LocalDemo => complete_with(project, shot, plan, LocalDemoAdapter, hooks),
+        ImageProvider::Minimax(client) => complete_with(
+            project,
+            shot,
+            plan,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+        ),
+    }
+}
+
+/// [`complete`] with an explicit generator.
+pub fn complete_with<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    plan: &GenerationPlan,
+    generator: G,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    // A recovered generation compiles its prompt only if a candidate still
+    // has to be invoked; candidates that finished keep the prompt they were
+    // generated from.
+    complete_inner(project, shot, plan, generator, None, hooks)
+}
+
+fn compile_prompt<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+    generator: &G,
+) -> Result<Option<Arc<KeyframePrompt>>, GenerationError> {
+    if !generator.needs_prompt() {
+        return Ok(None);
+    }
+    let scene = load_scene_intent(project)?;
+    let intent = shot.intent()?;
+    Ok(Some(Arc::new(keyframe_prompt::compile(
+        scene.as_ref(),
+        intent.as_ref(),
+        shot.direction(),
+        generator.prompt_limit(),
+    )?)))
+}
+
+fn complete_inner<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    plan: &GenerationPlan,
+    mut generator: G,
+    mut prompt: Option<Arc<KeyframePrompt>>,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
+    let mut requests = Vec::with_capacity(plan.candidate_ids().len());
+    let mut states = Vec::with_capacity(plan.candidate_ids().len());
 
     for (index, candidate) in plan.candidate_ids().iter().enumerate() {
         let job_id = JobId::new(candidate.as_str())?;
-        let request = CandidateRequest {
-            artifact_id: candidate.clone(),
-            input_hash: plan.input_hash().clone(),
-        };
         let state = match runtime.prepare(
             job_id.clone(),
             GENERATE_OPERATION,
@@ -296,45 +509,145 @@ pub fn complete(
             Err(error) => return Err(error.into()),
         };
         hooks.reached(GenerationPoint::Prepared { index });
-
-        let generated = match state {
-            Some(IntentState::Prepared) => {
-                match runtime.invoke_prepared(&job_id, &mut adapter, &request) {
-                    Ok(DispatchOutcome::Completed { output, .. }) => output,
-                    Ok(DispatchOutcome::Pending { .. }) => {
-                        return Err(GenerationError::Unexpected(
-                            "the demo generator returned a pending job",
-                        ));
-                    }
-                    Err(InvokePreparedError::Runtime(error)) => return Err(error.into()),
-                    Err(InvokePreparedError::Provider { source, .. }) => {
-                        return Err(GenerationError::Provider(source));
-                    }
-                }
-            }
-            // The provider call already happened; recover its result instead
-            // of calling again.
-            Some(IntentState::Invoked | IntentState::Reconciled) | None => {
-                LocalDemoAdapter::generated(&request.artifact_id, &request.input_hash)
-                    .map_err(GenerationError::Provider)?
-            }
-        };
-        if state.is_some() {
-            job_ids.push(job_id);
-        }
-        outputs.push(generated.output);
+        requests.push((
+            job_id,
+            CandidateRequest {
+                artifact_id: candidate.clone(),
+                input_hash: plan.input_hash().clone(),
+                shot_number: plan.shot_number(),
+                prompt: None,
+            },
+        ));
+        states.push(state);
     }
+
+    if shot.is_attached(plan) {
+        // Stopped after attaching: only the acknowledgements are missing. An
+        // attached candidate's intent can only be invoked or already gone.
+        let invoked = states
+            .iter()
+            .map(|state| matches!(state, Some(IntentState::Invoked | IntentState::Reconciled)))
+            .collect::<Vec<_>>();
+        acknowledge(&runtime, &mut generator, &requests, &invoked)?;
+        return Ok(AttachOutcome::AlreadyAttached);
+    }
+
+    let to_invoke = states
+        .iter()
+        .filter(|state| **state == Some(IntentState::Prepared))
+        .count();
+    if to_invoke > 0 {
+        if !generator.can_invoke() {
+            return Err(GenerationError::NotConfigured);
+        }
+        if prompt.is_none() {
+            prompt = compile_prompt(project, shot, &generator)?;
+        }
+    }
+    for (_, request) in &mut requests {
+        request.prompt.clone_from(&prompt);
+    }
+
+    // Every provider call runs on its own thread; recovering a finished call
+    // reads only local state.
+    let results = thread::scope(|scope| {
+        let runtime = &runtime;
+        let handles = requests
+            .iter()
+            .zip(&states)
+            .map(|((job_id, request), state)| {
+                let mut generator = generator.clone();
+                let invoke = *state == Some(IntentState::Prepared);
+                scope.spawn(move || {
+                    if !invoke {
+                        return generator
+                            .recover(request)
+                            .map_err(|source| provider_error(&generator, source));
+                    }
+                    match invoke_when_permitted(runtime, job_id, &mut generator, request) {
+                        Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
+                        Ok(DispatchOutcome::Pending { .. }) => Err(GenerationError::Unexpected(
+                            "an image provider returned a pending job",
+                        )),
+                        Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+                        Err(InvokePreparedError::Provider { source, class, .. }) => {
+                            Err(GenerationError::Provider {
+                                source: Box::new(source),
+                                class,
+                            })
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
+            })
+            .collect::<Vec<_>>()
+    });
+    // Candidates that finished stay invoked with their results kept; the
+    // next open completes the generation without paying for them again.
+    let outputs = results
+        .into_iter()
+        .map(|result| result.map(|generated| generated.output))
+        .collect::<Result<Vec<_>, _>>()?;
     hooks.reached(GenerationPoint::Invoked);
 
     let outcome = shot.attach_generation(project, plan, &outputs)?;
     hooks.reached(GenerationPoint::Attached);
 
-    for job_id in &job_ids {
-        // Retention warnings are housekeeping after the durable acknowledgement
-        // and do not change the result.
-        let _ = runtime.acknowledge_result(job_id)?;
-    }
+    let invoked = states.iter().map(Option::is_some).collect::<Vec<_>>();
+    acknowledge(&runtime, &mut generator, &requests, &invoked)?;
     Ok(outcome)
+}
+
+/// How long a candidate waits for a provider permit before giving up.
+const PERMIT_WAIT: Duration = Duration::from_secs(600);
+const PERMIT_POLL: Duration = Duration::from_millis(200);
+
+/// Invoke a prepared candidate, waiting while the provider's process-wide
+/// concurrency ceiling is reached. The runtime refuses rather than queues, and
+/// a refusal spends no attempt, so waiting here is the scheduler.
+fn invoke_when_permitted<G: CandidateGenerator>(
+    runtime: &JobRuntime<'_>,
+    job_id: &JobId,
+    generator: &mut G,
+    request: &CandidateRequest,
+) -> Result<DispatchOutcome<GeneratedCandidate>, InvokePreparedError<G::Error>> {
+    let deadline = Instant::now() + PERMIT_WAIT;
+    loop {
+        match runtime.invoke_prepared(job_id, generator, request) {
+            Err(InvokePreparedError::Runtime(JobRuntimeError::ConcurrencyLimitReached))
+                if Instant::now() < deadline =>
+            {
+                thread::sleep(PERMIT_POLL);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Acknowledge every candidate whose intent is invoked, now that the
+/// generation is in canonical state.
+fn acknowledge<G: CandidateGenerator>(
+    runtime: &JobRuntime<'_>,
+    generator: &mut G,
+    requests: &[(JobId, CandidateRequest)],
+    invoked: &[bool],
+) -> Result<(), GenerationError> {
+    for ((job_id, request), invoked) in requests.iter().zip(invoked) {
+        if *invoked {
+            // Retention warnings are housekeeping after the durable
+            // acknowledgement and do not change the result.
+            let _ = runtime.acknowledge_result(job_id)?;
+        }
+        generator.release(request);
+    }
+    Ok(())
 }
 
 /// Unfinished generations found in a project's job intents.
@@ -349,12 +662,28 @@ pub struct Unfinished {
 
 /// Find generations that stopped before they were acknowledged.
 ///
-/// Runs the job runtime's startup reconciliation for the demo provider, then
+/// Runs the job runtime's startup reconciliation for the provider, then
 /// regroups the candidates it reports into the plans they belong to.
-pub fn unfinished(project: &CanonicalProject) -> Result<Unfinished, JobRuntimeError> {
-    let runtime = runtime(project);
+pub fn unfinished(
+    project: &CanonicalProject,
+    provider: &ImageProvider,
+) -> Result<Unfinished, JobRuntimeError> {
+    match provider {
+        ImageProvider::LocalDemo => unfinished_with(project, LocalDemoAdapter),
+        ImageProvider::Minimax(client) => {
+            unfinished_with(project, MinimaxKeyframes::new(project, client.as_ref()))
+        }
+    }
+}
+
+/// [`unfinished`] with an explicit generator.
+pub fn unfinished_with<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    mut generator: G,
+) -> Result<Unfinished, JobRuntimeError> {
+    let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
     let mut unfinished = Unfinished::default();
-    for outcome in runtime.reconcile_startup(&mut LocalDemoAdapter)? {
+    for outcome in runtime.reconcile_startup(&mut generator)? {
         match outcome {
             StartupOutcome::ResultReady { job_id, output } => {
                 let plan = ArtifactId::new(job_id.as_str()).ok().and_then(|candidate| {
@@ -483,20 +812,37 @@ mod tests {
         let project = project(target);
         let mut shot = ShotWorkflow::load(&project, 1).unwrap();
         let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            generate(&project, &mut shot, &mut StopAt(point))
+            generate(
+                &project,
+                &mut shot,
+                &ImageProvider::LocalDemo,
+                &mut StopAt(point),
+            )
         }));
         assert!(stopped.is_err(), "generation should stop at {point:?}");
     }
 
     fn recover(target: &Path) -> (usize, AttachOutcome) {
         let project = CanonicalProject::open(target).unwrap();
-        let found = unfinished(&project).unwrap();
+        let found = unfinished(&project, &ImageProvider::LocalDemo).unwrap();
         assert_eq!(found.needs_attention, 0);
         assert_eq!(found.plans.len(), 1, "exactly one interrupted generation");
         let plan = &found.plans[0];
         let mut shot = ShotWorkflow::load(&project, plan.shot_number()).unwrap();
-        let outcome = complete(&project, &mut shot, plan, &mut NoHooks).unwrap();
-        assert!(unfinished(&project).unwrap().plans.is_empty());
+        let outcome = complete(
+            &project,
+            &mut shot,
+            plan,
+            &ImageProvider::LocalDemo,
+            &mut NoHooks,
+        )
+        .unwrap();
+        assert!(
+            unfinished(&project, &ImageProvider::LocalDemo)
+                .unwrap()
+                .plans
+                .is_empty()
+        );
         (found.plans.len(), outcome)
     }
 
@@ -518,14 +864,19 @@ mod tests {
         let mut shot = ShotWorkflow::load(&project, 1).unwrap();
 
         assert_eq!(
-            generate(&project, &mut shot, &mut NoHooks).unwrap(),
+            generate(&project, &mut shot, &ImageProvider::LocalDemo, &mut NoHooks).unwrap(),
             AttachOutcome::Attached
         );
         drop(project);
         assert_one_generation(&target);
 
         let project = CanonicalProject::open(&target).unwrap();
-        assert!(unfinished(&project).unwrap().plans.is_empty());
+        assert!(
+            unfinished(&project, &ImageProvider::LocalDemo)
+                .unwrap()
+                .plans
+                .is_empty()
+        );
     }
 
     #[test]
@@ -581,6 +932,8 @@ mod tests {
         let request = CandidateRequest {
             artifact_id: candidate,
             input_hash: input,
+            shot_number: 1,
+            prompt: None,
         };
 
         let Invocation::Completed(invoked) = adapter.invoke(&request, &key).unwrap() else {
@@ -597,5 +950,296 @@ mod tests {
                 .reconcile_by_idempotency_key(&IdempotencyKey::new("video.generate:x:y").unwrap())
                 .is_err()
         );
+    }
+
+    mod minimax {
+        use super::*;
+        use crate::minimax::MinimaxKeyframes;
+        use base64::Engine as _;
+        use kineto_project::ContentHash;
+        use kineto_provider_minimax::{HttpResponse, Transport, TransportFailure};
+        use kineto_providers::secret::SecretString;
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        };
+
+        /// Answers every image request with a distinct tiny JPEG, or with the
+        /// refusal it was given.
+        #[derive(Default)]
+        struct FakeMinimax {
+            calls: Arc<AtomicU32>,
+            refuse: Mutex<Option<String>>,
+        }
+
+        impl Transport for FakeMinimax {
+            fn post_json(
+                &self,
+                _url: &str,
+                _api_key: &SecretString,
+                body: &[u8],
+            ) -> Result<HttpResponse, TransportFailure> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert!(sent["prompt"].as_str().unwrap().contains("filmmaker"));
+                let body = match self.refuse.lock().unwrap().take() {
+                    Some(refusal) => refusal,
+                    None => {
+                        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x4b, u8::try_from(call).unwrap()];
+                        format!(
+                            r#"{{"id":"req-{call}","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0,"status_msg":"success"}}}}"#,
+                            base64::engine::general_purpose::STANDARD.encode(jpeg)
+                        )
+                    }
+                };
+                Ok(HttpResponse {
+                    status: 200,
+                    body: body.into_bytes(),
+                })
+            }
+        }
+
+        fn client(fake: FakeMinimax) -> (MinimaxClient<FakeMinimax>, Arc<AtomicU32>) {
+            let calls = Arc::clone(&fake.calls);
+            let client = MinimaxClient::with_transport(
+                fake,
+                SecretString::new("sk-test".to_owned()).unwrap(),
+                "https://example.test",
+            );
+            assert!(!format!("{client:?}").contains("sk-test"));
+            (client, calls)
+        }
+
+        fn bootstrap_project(target: &Path) -> CanonicalProject {
+            let project = project(target);
+            for (path, bytes) in crate::bootstrap::scene_files() {
+                project.root().write_atomic(&path, &bytes).unwrap();
+            }
+            project
+        }
+
+        fn artifacts(target: &Path) -> Vec<serde_json::Value> {
+            let bytes =
+                fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        fn receipts(target: &Path) -> usize {
+            fs::read_dir(target.join(".kineto/generation")).map_or(0, Iterator::count)
+        }
+
+        #[test]
+        fn keyframes_land_in_the_shot_with_their_provenance() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+
+            let outcome = generate_with(
+                &project,
+                &mut shot,
+                MinimaxKeyframes::new(&project, Some(&client)),
+                &mut NoHooks,
+            )
+            .unwrap();
+
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+            assert_eq!(receipts(&target), 0, "receipts go once acknowledged");
+            let media = shot.candidate_media().unwrap();
+            assert_eq!(media.len(), 3);
+            for (artifact, path) in artifacts(&target).iter().zip(&media) {
+                let path = path.as_ref().expect("every candidate has a keyframe");
+                let bytes = project.root().read(path).unwrap();
+                assert_eq!(
+                    artifact["content_hash"],
+                    ContentHash::of(&bytes).as_str(),
+                    "the content hash is the keyframe's own"
+                );
+                assert_eq!(artifact["provider"], "minimax");
+                assert_eq!(artifact["model"], "image-01");
+                assert_eq!(artifact["media_state"], "present");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/1");
+                assert_eq!(artifact["degradation"], "identity_affecting");
+                assert!(artifact["media_path"].as_str().unwrap().starts_with(
+                    "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"
+                ));
+                assert!(
+                    artifact["compiled_prompt"]
+                        .as_str()
+                        .unwrap()
+                        .contains("filmmaker")
+                );
+            }
+        }
+
+        #[test]
+        fn a_generation_stopped_after_its_calls_finishes_without_paying_again() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            {
+                let project = bootstrap_project(&target);
+                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let (client, calls) = client(FakeMinimax::default());
+                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    generate_with(
+                        &project,
+                        &mut shot,
+                        MinimaxKeyframes::new(&project, Some(&client)),
+                        &mut StopAt(GenerationPoint::Invoked),
+                    )
+                }));
+                assert!(stopped.is_err());
+                assert_eq!(calls.load(Ordering::SeqCst), 3);
+            }
+            assert_eq!(intent_states(&target), vec!["invoked"; 3]);
+            assert_eq!(receipts(&target), 3);
+
+            // No key at all: the finished calls complete from their receipts.
+            let project = CanonicalProject::open(&target).unwrap();
+            let found = unfinished_with(
+                &project,
+                MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+            )
+            .unwrap();
+            assert_eq!(found.needs_attention, 0);
+            assert_eq!(found.plans.len(), 1);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let outcome = complete_with(
+                &project,
+                &mut shot,
+                &found.plans[0],
+                MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+                &mut NoHooks,
+            )
+            .unwrap();
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+            assert_eq!(shot.snapshot().unwrap().candidate_count, 3);
+            assert_eq!(receipts(&target), 0);
+        }
+
+        #[test]
+        fn a_receipt_that_no_longer_matches_its_keyframe_is_not_attached() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            {
+                let project = bootstrap_project(&target);
+                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let (client, _calls) = client(FakeMinimax::default());
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    generate_with(
+                        &project,
+                        &mut shot,
+                        MinimaxKeyframes::new(&project, Some(&client)),
+                        &mut StopAt(GenerationPoint::Invoked),
+                    )
+                }));
+            }
+            let keyframes = target.join("scenes/scene_001/shots/shot_001/keyframes");
+            let tampered = fs::read_dir(&keyframes)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            fs::write(&tampered, b"other bytes").unwrap();
+
+            let project = CanonicalProject::open(&target).unwrap();
+            let found = unfinished_with(
+                &project,
+                MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+            )
+            .unwrap();
+            assert_eq!(
+                found.needs_attention, 1,
+                "the tampered candidate needs a person"
+            );
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            assert!(
+                complete_with(
+                    &project,
+                    &mut shot,
+                    &found.plans[0],
+                    MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+                    &mut NoHooks,
+                )
+                .is_err()
+            );
+            assert!(!shot.snapshot().unwrap().generated);
+        }
+
+        #[test]
+        fn a_refused_candidate_fails_the_generation_and_keeps_the_others() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let fake = FakeMinimax::default();
+            *fake.refuse.lock().unwrap() = Some(
+                r#"{"base_resp":{"status_code":1026,"status_msg":"input new_sensitive"}}"#
+                    .to_owned(),
+            );
+            let (client, _calls) = client(fake);
+
+            let error = generate_with(
+                &project,
+                &mut shot,
+                MinimaxKeyframes::new(&project, Some(&client)),
+                &mut NoHooks,
+            )
+            .unwrap_err();
+
+            assert!(matches!(
+                error,
+                GenerationError::Provider {
+                    class: ErrorClass::Terminal,
+                    ..
+                }
+            ));
+            assert!(!shot.snapshot().unwrap().generated);
+            assert_eq!(intent_states(&target), ["invoked", "invoked", "prepared"]);
+            assert_eq!(receipts(&target), 2);
+        }
+
+        #[test]
+        fn nothing_is_written_without_a_key_or_an_intent() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            assert!(matches!(
+                generate_with(
+                    &project,
+                    &mut shot,
+                    MinimaxKeyframes::<FakeMinimax>::new(&project, None),
+                    &mut NoHooks,
+                ),
+                Err(GenerationError::NotConfigured)
+            ));
+
+            let bare_target = temp.0.join("bare");
+            let bare = project_without_intent(&bare_target);
+            let mut shot = ShotWorkflow::load(&bare, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+            assert!(matches!(
+                generate_with(
+                    &bare,
+                    &mut shot,
+                    MinimaxKeyframes::new(&bare, Some(&client)),
+                    &mut NoHooks,
+                ),
+                Err(GenerationError::Prompt(KeyframePromptError::MissingIntent))
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(intent_states(&target).is_empty());
+            assert!(intent_states(&bare_target).is_empty());
+        }
+
+        fn project_without_intent(target: &Path) -> CanonicalProject {
+            project(target)
+        }
     }
 }

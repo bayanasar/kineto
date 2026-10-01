@@ -30,7 +30,7 @@ use kineto_project::{
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
-use crate::generation::{self, GenerationError, NoHooks, Unfinished};
+use crate::generation::{self, GenerationError, ImageProvider, NoHooks, Unfinished};
 
 /// Shots addressable in the bootstrap scene.
 pub const SHOT_COUNT: usize = 2;
@@ -357,6 +357,7 @@ fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
 
 struct Worker {
     project: CanonicalProject,
+    provider: ImageProvider,
     // Canonical JSON is loaded once per shot per session; reads then stay
     // typed and in memory rather than re-parsing project files.
     shots: [Option<ShotWorkflow>; SHOT_COUNT],
@@ -366,6 +367,7 @@ impl Worker {
     fn new(project: CanonicalProject) -> Self {
         Self {
             project,
+            provider: ImageProvider::LocalDemo,
             shots: [None, None],
         }
     }
@@ -375,15 +377,15 @@ impl Worker {
             // Generation runs as write-ahead jobs so an interruption is
             // recoverable; every other command is a single canonical update.
             ShotCommand::Generate => self
-                .with_shot(shot_index, |project, shot| {
-                    generation::generate(project, shot, &mut NoHooks).map(|_outcome| ())
+                .with_shot(shot_index, |project, provider, shot| {
+                    generation::generate(project, shot, provider, &mut NoHooks).map(|_outcome| ())
                 })
                 .map_err(|error| match error {
                     GenerationError::Shot(error) => SessionError::Shot(error),
                     error => SessionError::Generation(error),
                 }),
             command => self
-                .with_shot(shot_index, |project, shot| match command {
+                .with_shot(shot_index, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
                     ShotCommand::Select(candidate) => shot.select(project, candidate),
                     ShotCommand::Lock => shot.lock(project),
@@ -415,7 +417,7 @@ impl Worker {
         let Unfinished {
             plans,
             needs_attention,
-        } = match generation::unfinished(&self.project) {
+        } = match generation::unfinished(&self.project, &self.provider) {
             Ok(unfinished) => unfinished,
             Err(_) => return vec![Recovery::NeedsAttention { count: 1 }],
         };
@@ -430,8 +432,8 @@ impl Worker {
                 unplaced += 1;
                 continue;
             };
-            let result = self.with_shot(shot_index, |project, shot| {
-                generation::complete(project, shot, &plan, &mut NoHooks)
+            let result = self.with_shot(shot_index, |project, provider, shot| {
+                generation::complete(project, shot, &plan, provider, &mut NoHooks)
             });
             let shot_index = u32::try_from(shot_index).expect("shot index fits in u32");
             recoveries.push(match result {
@@ -460,7 +462,7 @@ impl Worker {
 
     fn publish(&mut self, view: &View, shot_index: usize) {
         let snapshot = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_shot(shot_index, |_, shot| shot.snapshot())
+            self.with_shot(shot_index, |_, _, shot| shot.snapshot())
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map_err(Arc::new);
@@ -470,7 +472,7 @@ impl Worker {
     fn with_shot<R, E: From<ShotWorkflowError>>(
         &mut self,
         shot_index: usize,
-        operation: impl FnOnce(&CanonicalProject, &mut ShotWorkflow) -> Result<R, E>,
+        operation: impl FnOnce(&CanonicalProject, &ImageProvider, &mut ShotWorkflow) -> Result<R, E>,
     ) -> Result<R, E> {
         if self.shots[shot_index].is_none() {
             let shot_number = u32::try_from(shot_index + 1).expect("shot count fits in u32");
@@ -479,7 +481,7 @@ impl Worker {
         let shot = self.shots[shot_index]
             .as_mut()
             .expect("shot is installed immediately above");
-        operation(&self.project, shot)
+        operation(&self.project, &self.provider, shot)
     }
 }
 

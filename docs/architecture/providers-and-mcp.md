@@ -198,6 +198,10 @@ Adapters declare:
 
 Batch generation has a dry-run/preflight path that can report call count and estimated cost before spend.
 
+A provider answer is only as durable as what is kept of it. For a synchronous provider without remote job handles, the adapter writes the result into the project and a receipt under `.kineto/generation/` before it returns, and the runtime marks the intent invoked only after that. Startup reconciliation completes such a job from its receipt, after checking the media bytes against the recorded hash, instead of calling the provider again; a receipt that no longer matches its media needs a person. Receipts are runtime state and are removed once the candidate is acknowledged. A crash before the receipt is written loses the answer, and the retry pays again.
+
+The runtime refuses, rather than queues, a call over the provider's process-wide concurrency ceiling. A refusal spends no attempt, so the generation path waits for a permit (bounded) before invoking.
+
 ## Deterministic fake providers
 
 The same provider interfaces must support offline deterministic fakes with configurable:

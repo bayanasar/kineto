@@ -66,6 +66,12 @@ impl ContentHash {
         canonical_sha256(value.into()).map(Self)
     }
 
+    /// The content hash of `bytes`.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
