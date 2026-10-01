@@ -73,6 +73,10 @@ recipe_version = 1
 
 Provider secrets must never be stored in `project.toml`.
 
+## Source revisions
+
+The source a project was created with is revision 1, at `[source].path`. Importing text again never overwrites it: the import is normalised (UTF-8 only, byte-order mark removed, `\n` line endings, trailing whitespace trimmed, one final newline; at most 8 MiB) and written as `source/revisions/rNNNN.txt` or `.md`, and `source/source.json` (`source.schema.json`) lists every revision with its format, content hash, character count and original file name. The latest revision is current. Importing the text of the current revision again changes nothing. Work derived from the source records the content hash of the revision it read, and a revision whose bytes no longer match its hash is refused rather than read.
+
 ## Canonical ownership
 
 Durable production state must survive deletion of `.kineto/`.

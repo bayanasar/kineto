@@ -102,8 +102,10 @@ fn ensure_supported_schema(schema: &Value, path: &str) -> Result<(), String> {
         "enum",
         "format",
         "items",
+        "maxItems",
         "maxLength",
         "maximum",
+        "minItems",
         "minLength",
         "minimum",
         "pattern",
@@ -164,7 +166,7 @@ fn ensure_supported_schema(schema: &Value, path: &str) -> Result<(), String> {
     {
         return Err(format!("{path}.enum must be an array"));
     }
-    for keyword in ["minLength", "maxLength"] {
+    for keyword in ["minLength", "maxLength", "minItems", "maxItems"] {
         if let Some(value) = object.get(keyword)
             && value.as_u64().is_none()
         {
@@ -338,6 +340,17 @@ fn validate_value(schema: &Value, instance: &Value, path: &str) -> Result<(), St
     }
 
     if let Some(instance_array) = instance.as_array() {
+        let length = instance_array.len() as u64;
+        if let Some(minimum) = object.get("minItems").and_then(Value::as_u64)
+            && length < minimum
+        {
+            return Err(format!("{path}: array is shorter than minItems {minimum}"));
+        }
+        if let Some(maximum) = object.get("maxItems").and_then(Value::as_u64)
+            && length > maximum
+        {
+            return Err(format!("{path}: array is longer than maxItems {maximum}"));
+        }
         if object.get("uniqueItems") == Some(&Value::Bool(true)) {
             for (index, value) in instance_array.iter().enumerate() {
                 if instance_array[..index].contains(value) {
@@ -634,6 +647,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "scene.schema.json",
             "selection.schema.json",
             "shot.schema.json",
+            "source.schema.json",
         ]
     );
 
@@ -833,6 +847,33 @@ fn shot_video_records_match_committed_schemas() {
         "shot.json with a video revision",
     );
     validate_artifact_array(&shot_root.join("artifacts.json"), &artifact_schema);
+}
+
+#[test]
+fn the_source_schema_rejects_an_empty_revision_list() {
+    let source_schema = schema("source.schema.json");
+    let empty = serde_json::json!({"schema_version": 1, "revisions": []});
+    assert!(validate_value(&source_schema, &empty, "$").is_err());
+}
+
+#[test]
+fn imported_source_revisions_match_committed_schema() {
+    let source_schema = schema("source.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_project::source::import(
+        &project,
+        b"# Imported\r\n\r\nA second draft.\r\n",
+        kineto_project::source::SourceFormat::Markdown,
+        Some("draft.md"),
+    )
+    .expect("the source should import");
+    validate(
+        &source_schema,
+        &json_file(&temp.0.join("source/source.json")),
+        "source/source.json",
+    );
 }
 
 #[test]

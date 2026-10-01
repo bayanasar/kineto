@@ -1,6 +1,7 @@
 pub mod fs;
 pub mod manifest;
 pub mod shot;
+pub mod source;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 

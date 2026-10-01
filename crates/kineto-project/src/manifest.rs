@@ -119,7 +119,7 @@ impl ProjectManifest {
         format_access(self.format_version, PROJECT_FORMAT_VERSION)
     }
 
-    fn source_relative_path(&self) -> Result<ProjectRelativePath, ProjectManifestError> {
+    pub(crate) fn source_relative_path(&self) -> Result<ProjectRelativePath, ProjectManifestError> {
         ProjectRelativePath::new(&self.source.path).map_err(ProjectManifestError::InvalidSourcePath)
     }
 }
