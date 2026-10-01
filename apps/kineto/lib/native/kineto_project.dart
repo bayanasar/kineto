@@ -179,6 +179,24 @@ external int _kinetoProjectImageProviderReady(Pointer<Void> session);
 )
 external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
 
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_media_copy')
+external int _kinetoProjectCandidateMediaCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
 /// Who generates a session's shot candidates. Chosen when Kineto starts, by
 /// `KINETO_IMAGE_PROVIDER`; a paid provider is never chosen implicitly.
 enum KinetoImageProviderKind {
@@ -411,6 +429,34 @@ final class KinetoProjectSession implements Finalizable {
   String get title {
     _ensureOpen();
     return _copyProjectUtf8(_handle, _kinetoProjectTitleCopy, 'project title');
+  }
+
+  /// Absolute path of the media file of the shot's candidate
+  /// [candidateIndex], or null for a candidate without media (a demo
+  /// candidate). Reads published state; never does I/O.
+  String? candidateMediaPath(int shotIndex, int candidateIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    if (candidateIndex < 0) {
+      throw RangeError.value(
+        candidateIndex,
+        'candidateIndex',
+        'Candidate index must be non-negative',
+      );
+    }
+    final path = _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) => _kinetoProjectCandidateMediaCopy(
+        session,
+        shotIndex,
+        candidateIndex,
+        buffer,
+        capacity,
+        length,
+      ),
+      'candidate media path',
+    );
+    return path.isEmpty ? null : path;
   }
 
   /// The image provider this session generates with. Fixed when it opened.

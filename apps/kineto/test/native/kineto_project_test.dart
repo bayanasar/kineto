@@ -354,6 +354,14 @@ void main() {
       expect(shotTwo.selectedIndex, 0);
       expect(shotTwo.locked, isTrue);
       expect(shotTwo.supersededCount, 3);
+      // Demo candidates have no media; a candidate past the last is refused.
+      expect(project.candidateMediaPath(0, 0), isNull);
+      expect(
+        () => project.candidateMediaPath(0, 3),
+        throwsA(
+          isA<KinetoProjectException>().having((error) => error.code, 'code', 110),
+        ),
+      );
       project.close();
     } finally {
       sandbox.deleteSync(recursive: true);

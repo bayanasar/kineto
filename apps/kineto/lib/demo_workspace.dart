@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
@@ -115,6 +117,7 @@ class DemoWorkspaceScreen extends StatefulWidget {
 
 class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late final KinetoEngineSnapshot _engineSnapshot;
+  late final KinetoImageProvider _imageProvider;
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
   bool _working = false;
@@ -126,6 +129,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   void initState() {
     super.initState();
     _engineSnapshot = widget.engine.snapshot;
+    _imageProvider = widget.project.imageProvider;
     _shotSnapshots = _readShotSnapshots();
     _recoveryNotes = describeRecoveries(widget.project.recoveries);
   }
@@ -136,6 +140,13 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
         widget.project.shotSnapshot,
         growable: false,
       );
+
+  List<String?> _candidateMedia(int shotIndex) => <String?>[
+        for (var candidate = 0;
+            candidate < _shotSnapshots[shotIndex].candidateCount;
+            candidate++)
+          widget.project.candidateMediaPath(shotIndex, candidate),
+      ];
 
   void _switchShot(int index) {
     setState(() {
@@ -176,6 +187,8 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     final snapshot = _shotSnapshots[_activeShotIndex];
     return DemoWorkspaceView(
       engineSnapshot: _engineSnapshot,
+      imageProvider: _imageProvider,
+      candidateMedia: _candidateMedia(_activeShotIndex),
       shotSnapshot: snapshot,
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
@@ -226,6 +239,12 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onLock,
     required this.onReset,
     this.onMigrate,
+    this.imageProvider = const KinetoImageProvider(
+      kind: KinetoImageProviderKind.localDemo,
+      ready: true,
+      generationCostMicros: 0,
+    ),
+    this.candidateMedia = const <String?>[],
     this.working = false,
     this.workingLabel = 'Working',
     this.recoveryNotes = const <String>[],
@@ -250,6 +269,13 @@ class DemoWorkspaceView extends StatelessWidget {
   final VoidCallback onReset;
   final VoidCallback? onMigrate;
 
+  /// Who generates candidates for this session, and what one generation costs.
+  final KinetoImageProvider imageProvider;
+
+  /// Absolute media path of each candidate of the active shot; null for a
+  /// candidate without media.
+  final List<String?> candidateMedia;
+
   /// A command is running on the project's worker; changes wait for it.
   final bool working;
 
@@ -265,6 +291,7 @@ class DemoWorkspaceView extends StatelessWidget {
   Widget build(BuildContext context) {
     final selectedIndex = shotSnapshot.selectedIndex;
     final blocked = shotSnapshot.changesBlocked || working;
+    final canGenerate = !blocked && imageProvider.ready;
     final canLock = !blocked &&
         shotSnapshot.generated &&
         selectedIndex != null &&
@@ -296,9 +323,13 @@ class DemoWorkspaceView extends StatelessWidget {
                 WabPanel(
                   title: 'Canonical demo project',
                   trailing: Text('Native ABI ${engineSnapshot.abiVersion}'),
-                  child: const Text(
-                    'A deterministic local vertical slice. Work through two independent shots, choose direction, '
-                    'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
+                  child: Text(
+                    imageProvider.isPaid
+                        ? 'Keyframe candidates come from ${imageProvider.kind.label}, compiled from each '
+                            "shot's written intent. Every generation is a paid call; choose, lock, then "
+                            'reopen Kineto to verify canonical project state.'
+                        : 'A deterministic local vertical slice. Work through two independent shots, choose direction, '
+                            'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
                   ),
                 ),
                 if (recoveryNotes.isNotEmpty) ...<Widget>[
@@ -442,10 +473,17 @@ class DemoWorkspaceView extends StatelessWidget {
                       const SizedBox(height: 8),
                       Text(shot.description),
                       const SizedBox(height: 16),
+                      if (!imageProvider.ready) ...<Widget>[
+                        Text(
+                          '${imageProvider.kind.label} is selected but has no API key; set '
+                          'KINETO_${imageProvider.kind.wireName.toUpperCase()}_API_KEY and reopen Kineto.',
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       if (!shotSnapshot.generated)
                         WabElevatedButton(
-                          text: const Text('Generate 3 deterministic candidates'),
-                          callback: blocked ? null : onGenerate,
+                          text: Text(_generateLabel(imageProvider)),
+                          callback: canGenerate ? onGenerate : null,
                         )
                       else
                         Row(
@@ -455,8 +493,12 @@ class DemoWorkspaceView extends StatelessWidget {
                             WabButton(
                               kind: WabMaterialKind.zhuwen,
                               onPressed:
-                                  shotSnapshot.locked || blocked ? null : onGenerate,
-                              child: const Text('Regenerate'),
+                                  shotSnapshot.locked || !canGenerate ? null : onGenerate,
+                              child: Text(
+                                imageProvider.isPaid
+                                    ? 'Regenerate · ≈ ${imageProvider.generationCostLabel}'
+                                    : 'Regenerate',
+                              ),
                             ),
                           ],
                         ),
@@ -473,21 +515,45 @@ class DemoWorkspaceView extends StatelessWidget {
                       children: List<Widget>.generate(
                         shotSnapshot.candidateCount,
                         (index) {
-                          final content = shot.candidates[index];
                           final selected = selectedIndex == index;
+                          final media =
+                              index < candidateMedia.length ? candidateMedia[index] : null;
+                          final buttonLabel = shotSnapshot.locked
+                              ? (selected ? 'Locked' : 'Candidate')
+                              : (selected ? 'Selected' : 'Select');
+                          final onPressed =
+                              shotSnapshot.locked || blocked ? null : () => onSelect(index);
+                          if (media == null) {
+                            final content = shot.candidates[index];
+                            return SizedBox(
+                              width: 300,
+                              child: WabCollectionCard(
+                                icon: Icon(content.icon, size: 34),
+                                title: content.title,
+                                description: content.description,
+                                buttonLabel: buttonLabel,
+                                highlighted: selected,
+                                onPressed: onPressed,
+                              ),
+                            );
+                          }
                           return SizedBox(
                             width: 300,
-                            child: WabCollectionCard(
-                              icon: Icon(content.icon, size: 34),
-                              title: content.title,
-                              description: content.description,
-                              buttonLabel: shotSnapshot.locked
-                                  ? (selected ? 'Locked' : 'Candidate')
-                                  : (selected ? 'Selected' : 'Select'),
-                              highlighted: selected,
-                              onPressed: shotSnapshot.locked || blocked
-                                  ? null
-                                  : () => onSelect(index),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: <Widget>[
+                                _Keyframe(path: media),
+                                const SizedBox(height: 8),
+                                WabCollectionCard(
+                                  icon: const Icon(Icons.photo_camera_back_outlined, size: 30),
+                                  title: 'Take ${String.fromCharCode(0x41 + index)}',
+                                  description:
+                                      '${imageProvider.kind.label} keyframe · ${_fileName(media)}',
+                                  buttonLabel: buttonLabel,
+                                  highlighted: selected,
+                                  onPressed: onPressed,
+                                ),
+                              ],
                             ),
                           );
                         },
@@ -538,6 +604,12 @@ class DemoWorkspaceView extends StatelessWidget {
     );
   }
 
+  static String _generateLabel(KinetoImageProvider provider) => provider.isPaid
+      ? 'Generate 3 keyframes · ${provider.kind.label} · ≈ ${provider.generationCostLabel}'
+      : 'Generate 3 deterministic candidates';
+
+  static String _fileName(String path) => path.split(Platform.pathSeparator).last;
+
   static String _generationStatus(KinetoShotSnapshot snapshot) {
     if (snapshot.locked) {
       return 'Generation ${snapshot.generation} locked · reopen the app to verify canonical persistence.';
@@ -561,4 +633,28 @@ class DemoWorkspaceView extends StatelessWidget {
     if (snapshot.generated) return WabBadgeKind.progress;
     return WabBadgeKind.neutral;
   }
+}
+
+/// One keyframe candidate, as a 16:9 still read from the project directory.
+class _Keyframe extends StatelessWidget {
+  const _Keyframe({required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Image.file(
+            File(path),
+            fit: BoxFit.cover,
+            // A keyframe that cannot be read says so instead of vanishing.
+            errorBuilder: (context, error, stackTrace) => const ColoredBox(
+              color: Colors.black26,
+              child: Center(child: Text('Keyframe unavailable')),
+            ),
+          ),
+        ),
+      );
 }

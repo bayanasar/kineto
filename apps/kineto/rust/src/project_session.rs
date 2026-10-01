@@ -505,10 +505,58 @@ pub unsafe extern "C" fn kineto_project_shot_state(
                 unsafe { ptr::write(out_state, encode_shot_snapshot(snapshot)) };
                 PROJECT_OK
             }
-            Err(SnapshotError::InvalidShot) => PROJECT_ERR_INVALID_SHOT,
-            Err(SnapshotError::NotOpen) => PROJECT_ERR_NOT_OPEN,
-            Err(SnapshotError::Failed(error)) => shot_error_code(&error),
+            Err(error) => snapshot_error_code(&error),
         }
+    })
+}
+
+fn snapshot_error_code(error: &SnapshotError) -> i32 {
+    match error {
+        SnapshotError::InvalidShot => PROJECT_ERR_INVALID_SHOT,
+        SnapshotError::InvalidCandidate => PROJECT_ERR_INVALID_CANDIDATE,
+        SnapshotError::NotOpen => PROJECT_ERR_NOT_OPEN,
+        SnapshotError::Failed(error) => shot_error_code(error),
+    }
+}
+
+/// Copy the absolute path of a candidate's media into caller-owned memory,
+/// with the same sizing contract as project metadata. A candidate without
+/// media, such as a demo candidate, copies an empty path. Reads published
+/// state only; never does I/O.
+///
+/// # Safety
+/// `session` must be live. `out_len` must point to writable `u64` storage. If
+/// `out_cap` is non-zero, `out_buf` must be writable for at least `out_cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_media_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let Ok(candidate_index) = usize::try_from(candidate_index) else {
+            return PROJECT_ERR_INVALID_CANDIDATE;
+        };
+        let media = match session.session.candidate_media(shot_index, candidate_index) {
+            Ok(media) => media,
+            Err(error) => return snapshot_error_code(&error),
+        };
+        let path = match &media {
+            None => "",
+            Some(path) => match path.to_str() {
+                Some(path) => path,
+                None => return PROJECT_ERR_INVALID_UTF8,
+            },
+        };
+        // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
+        unsafe { copy_utf8(path.as_bytes(), out_buf, out_cap, out_len) }
     })
 }
 

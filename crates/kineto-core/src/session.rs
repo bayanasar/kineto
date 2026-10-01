@@ -153,13 +153,35 @@ pub enum SubmitError {
 #[derive(Debug, Clone)]
 pub enum SnapshotError {
     InvalidShot,
+    /// The shot has no candidate at that index.
+    InvalidCandidate,
     /// The session has not finished opening, or its open failed.
     NotOpen,
     /// The shot's canonical state could not be loaded.
     Failed(Arc<ShotWorkflowError>),
 }
 
-type ShotSlot = Option<Result<ShotApprovalSnapshot, Arc<ShotWorkflowError>>>;
+impl fmt::Display for SnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidShot => formatter.write_str("shot index is out of range"),
+            Self::InvalidCandidate => formatter.write_str("candidate index is out of range"),
+            Self::NotOpen => formatter.write_str("project session is not open"),
+            Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for SnapshotError {}
+
+/// What the worker last published for a shot. Reads never do I/O.
+struct PublishedShot {
+    snapshot: ShotApprovalSnapshot,
+    /// Absolute path of each current candidate's media, in candidate order.
+    media: Vec<Option<PathBuf>>,
+}
+
+type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
 
 #[derive(Default)]
 struct View {
@@ -268,7 +290,28 @@ impl ProjectSession {
         }
         match &lock(&self.view.shots)[shot_index as usize] {
             None => Err(SnapshotError::NotOpen),
-            Some(Ok(snapshot)) => Ok(*snapshot),
+            Some(Ok(published)) => Ok(published.snapshot),
+            Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
+        }
+    }
+
+    /// Where the shot's candidate `candidate_index` keeps its media, or
+    /// `None` for a candidate without media. Never does I/O.
+    pub fn candidate_media(
+        &self,
+        shot_index: u32,
+        candidate_index: usize,
+    ) -> Result<Option<PathBuf>, SnapshotError> {
+        if !shot_index_is_valid(shot_index) {
+            return Err(SnapshotError::InvalidShot);
+        }
+        match &lock(&self.view.shots)[shot_index as usize] {
+            None => Err(SnapshotError::NotOpen),
+            Some(Ok(published)) => published
+                .media
+                .get(candidate_index)
+                .cloned()
+                .ok_or(SnapshotError::InvalidCandidate),
             Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
         }
     }
@@ -499,12 +542,21 @@ impl Worker {
     }
 
     fn publish(&mut self, view: &View, shot_index: usize) {
-        let snapshot = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_shot(shot_index, |_, _, shot| shot.snapshot())
+        let published = panic::catch_unwind(AssertUnwindSafe(|| {
+            self.with_shot(shot_index, |project, _, shot| {
+                Ok(PublishedShot {
+                    snapshot: shot.snapshot()?,
+                    media: shot
+                        .candidate_media()?
+                        .into_iter()
+                        .map(|path| path.map(|path| project.root().resolve(&path)))
+                        .collect(),
+                })
+            })
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map_err(Arc::new);
-        lock(&view.shots)[shot_index] = Some(snapshot);
+        lock(&view.shots)[shot_index] = Some(published);
     }
 
     fn with_shot<R, E: From<ShotWorkflowError>>(
@@ -800,6 +852,22 @@ mod tests {
         let snapshot = session.snapshot(0).unwrap();
         assert!(snapshot.generated);
         assert_eq!(snapshot.candidate_count, 3);
+        for candidate in 0..3 {
+            let media = session.candidate_media(0, candidate).unwrap().unwrap();
+            assert!(
+                media.is_absolute() && media.is_file(),
+                "{}",
+                media.display()
+            );
+        }
+        assert!(matches!(
+            session.candidate_media(0, 3),
+            Err(SnapshotError::InvalidCandidate)
+        ));
+        assert!(matches!(
+            session.candidate_media(2, 0),
+            Err(SnapshotError::InvalidShot)
+        ));
     }
 
     #[test]
