@@ -213,6 +213,9 @@ impl SessionSink for Sink {
     }
 
     fn completed(&self, _token: u64, _shot_index: u32, _result: &Result<(), SessionError>) {}
+
+    fn video_finished(&self, _shot_index: u32, _revision: u16, _result: &Result<(), SessionError>) {
+    }
 }
 
 /// Open the project as the app does; return what it recovered before opening.

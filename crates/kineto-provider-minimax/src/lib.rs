@@ -15,7 +15,7 @@
 //! been billed, so retrying it can pay twice; the job runtime's attempt limit
 //! bounds that.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
@@ -130,7 +130,33 @@ pub trait Transport {
     fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure>;
 }
 
-/// Blocking HTTPS with rustls and the bundled Mozilla roots.
+/// A transport shared between clients and threads. The workflow holds this
+/// so tests can stand a recorded MiniMax in for the network; dispatch through
+/// it costs nothing next to an HTTPS round trip.
+pub type SharedTransport = Arc<dyn Transport + Send + Sync>;
+
+impl Transport for SharedTransport {
+    fn post_json(
+        &self,
+        url: &str,
+        api_key: &SecretString,
+        body: &[u8],
+    ) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().post_json(url, api_key, body)
+    }
+
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().get(url, api_key)
+    }
+
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().download(url, max_bytes)
+    }
+}
+
+/// Blocking HTTPS with rustls and the bundled Mozilla roots. Cloning shares
+/// the connection pools.
+#[derive(Clone)]
 pub struct HttpsTransport {
     agent: ureq::Agent,
     downloads: ureq::Agent,
@@ -331,6 +357,7 @@ struct WireBaseResp {
 }
 
 /// A MiniMax client for one API key.
+#[derive(Clone)]
 pub struct MinimaxClient<T = HttpsTransport> {
     transport: T,
     api_key: SecretString,
@@ -341,6 +368,14 @@ impl MinimaxClient {
     #[must_use]
     pub fn new(api_key: SecretString) -> Self {
         Self::with_transport(HttpsTransport::new(), api_key, DEFAULT_BASE_URL)
+    }
+}
+
+impl MinimaxClient<SharedTransport> {
+    /// A client over HTTPS that can be shared between threads.
+    #[must_use]
+    pub fn shared(api_key: SecretString) -> Self {
+        Self::with_transport(Arc::new(HttpsTransport::new()), api_key, DEFAULT_BASE_URL)
     }
 }
 

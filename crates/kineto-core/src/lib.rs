@@ -3,6 +3,7 @@ pub mod generation;
 pub mod keyframe_prompt;
 pub mod minimax;
 pub mod session;
+pub mod video;
 pub mod video_prompt;
 
 /// Process-local engine state shared by all machine-local Kineto work.

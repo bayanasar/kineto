@@ -42,8 +42,10 @@ use kineto_project::{
         ShotWorkflowError, demo_candidate_output, load_scene_intent,
     },
 };
-use kineto_prompts::DegradationLevel;
-use kineto_provider_minimax::{IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER};
+use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
+use kineto_provider_minimax::{
+    IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport,
+};
 use kineto_providers::secret::{SecretError, SecretSource};
 
 use crate::{
@@ -119,7 +121,7 @@ pub enum ImageProvider {
     LocalDemo,
     /// MiniMax `image-01`. Paid. Without a client, finished calls can still
     /// be completed from their receipts but no new call is made.
-    Minimax(Option<MinimaxClient>),
+    Minimax(Option<MinimaxClient<SharedTransport>>),
 }
 
 /// Which image provider a session generates with.
@@ -173,7 +175,7 @@ impl ImageProvider {
                 secrets
                     .api_key(MINIMAX_PROVIDER)
                     .map_err(ProviderSelectionError::Secret)?
-                    .map(MinimaxClient::new),
+                    .map(MinimaxClient::shared),
             )),
             Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
         }
@@ -233,11 +235,16 @@ impl Error for KeyError {}
 /// The provenance an artifact records for a compiled keyframe prompt.
 #[must_use]
 pub fn provenance(prompt: &KeyframePrompt) -> PromptProvenance {
-    let compiled = &prompt.compiled;
+    provenance_of(&prompt.compiled, &prompt.prompt_hash)
+}
+
+/// The provenance an artifact records for a compiled prompt and its hash.
+#[must_use]
+pub fn provenance_of(compiled: &CompiledPrompt, prompt_hash: &PromptHash) -> PromptProvenance {
     PromptProvenance {
         compiler_version: compiled.compiler_version().to_owned(),
         compiled_prompt: compiled.prompt().to_owned(),
-        prompt_hash: prompt.prompt_hash.as_str().to_owned(),
+        prompt_hash: prompt_hash.as_str().to_owned(),
         applied_constraints: compiled
             .applied_constraints()
             .iter()
@@ -419,6 +426,9 @@ pub enum GenerationError {
     /// Completing the generation needs a paid provider call, which is made
     /// only when the director asks for a generation again.
     NeedsProviderCall,
+    /// The locked keyframe has no image to start a video from (a demo
+    /// keyframe).
+    NoFirstFrame,
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -434,6 +444,9 @@ impl fmt::Display for GenerationError {
             Self::Provider { source, .. } => source.fmt(formatter),
             Self::NotConfigured => {
                 formatter.write_str("the image provider has no credentials configured")
+            }
+            Self::NoFirstFrame => {
+                formatter.write_str("the locked keyframe has no image to start a video from")
             }
             Self::NeedsProviderCall => formatter.write_str(
                 "finishing this generation needs a paid provider call; generate again to make it",
@@ -452,7 +465,10 @@ impl Error for GenerationError {
             Self::Prompt(error) => Some(error),
             Self::Provider { source, .. } => Some(source.as_ref()),
             Self::JobId(error) => Some(error),
-            Self::NotConfigured | Self::NeedsProviderCall | Self::Unexpected(_) => None,
+            Self::NotConfigured
+            | Self::NeedsProviderCall
+            | Self::NoFirstFrame
+            | Self::Unexpected(_) => None,
         }
     }
 }

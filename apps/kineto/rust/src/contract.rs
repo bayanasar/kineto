@@ -39,10 +39,16 @@ pub(crate) const PROJECT_ERR_PROVIDER_UNKNOWN: i32 = 122;
 pub(crate) const PROJECT_ERR_PROVIDER_NOT_CONFIGURED: i32 = 123;
 pub(crate) const PROJECT_ERR_SHOT_INTENT_MISSING: i32 = 124;
 pub(crate) const PROJECT_ERR_PROVIDER_REFUSED: i32 = 125;
+pub(crate) const PROJECT_ERR_VIDEO_IN_FLIGHT: i32 = 126;
+pub(crate) const PROJECT_ERR_KEYFRAME_NOT_LOCKED: i32 = 127;
+pub(crate) const PROJECT_ERR_VIDEO_LOCKED: i32 = 128;
+pub(crate) const PROJECT_ERR_NO_VIDEO: i32 = 129;
+pub(crate) const PROJECT_ERR_STALE_VIDEO: i32 = 130;
+pub(crate) const PROJECT_ERR_NO_FIRST_FRAME: i32 = 131;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 28] = [
+const STATUSES: [(&str, i32); 34] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -73,6 +79,12 @@ const STATUSES: [(&str, i32); 28] = [
     ),
     ("shot_intent_missing", PROJECT_ERR_SHOT_INTENT_MISSING),
     ("provider_refused", PROJECT_ERR_PROVIDER_REFUSED),
+    ("video_in_flight", PROJECT_ERR_VIDEO_IN_FLIGHT),
+    ("keyframe_not_locked", PROJECT_ERR_KEYFRAME_NOT_LOCKED),
+    ("video_locked", PROJECT_ERR_VIDEO_LOCKED),
+    ("no_video", PROJECT_ERR_NO_VIDEO),
+    ("stale_video", PROJECT_ERR_STALE_VIDEO),
+    ("no_first_frame", PROJECT_ERR_NO_FIRST_FRAME),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -85,6 +97,15 @@ const DIRECTIONS: [(&str, ShotDirection); 4] = [
 
 pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
+
+/// Video state codes in the snapshot's `video_state` field.
+const VIDEO_STATES: [(&str, u8); 5] = [
+    ("none", 0),
+    ("generating", 1),
+    ("ready", 2),
+    ("locked", 3),
+    ("stale", 4),
+];
 
 /// Image provider codes returned by `kineto_project_image_provider`.
 const IMAGE_PROVIDERS: [(&str, u32); 2] = [
@@ -104,6 +125,8 @@ const LOCKED: Field = field("locked", 1, 1);
 const STALE: Field = field("stale", 2, 1);
 const MIGRATION_PENDING: Field = field("migration_pending", 3, 1);
 const INVALID_HASHES: Field = field("invalid_hashes", 4, 1);
+/// One of [`VIDEO_STATES`]; `generating` overrides the canonical state.
+const VIDEO_STATE: Field = field("video_state", 5, 3);
 const CANDIDATE_COUNT: Field = field("candidate_count", 8, 8);
 /// Selected candidate index + 1; 0 means no selection.
 const SELECTED_PLUS_ONE: Field = field("selected_plus_one", 16, 8);
@@ -112,12 +135,13 @@ const GENERATION_REVISION: Field = field("generation_revision", 32, 16);
 const SUPERSEDED_COUNT: Field = field("superseded_count", 48, 16);
 
 /// The packed `u64` shot snapshot. This is its only definition.
-const SNAPSHOT_FIELDS: [Field; 10] = [
+const SNAPSHOT_FIELDS: [Field; 11] = [
     GENERATED,
     LOCKED,
     STALE,
     MIGRATION_PENDING,
     INVALID_HASHES,
+    VIDEO_STATE,
     CANDIDATE_COUNT,
     SELECTED_PLUS_ONE,
     DIRECTION,
@@ -129,7 +153,19 @@ const fn field(name: &'static str, shift: u32, width: u32) -> Field {
     Field { name, shift, width }
 }
 
-pub(crate) fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
+/// Pack a shot snapshot. `video_in_flight` is runtime state the canonical
+/// snapshot does not carry.
+pub(crate) fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot, video_in_flight: bool) -> u64 {
+    let video = if video_in_flight {
+        1
+    } else {
+        match snapshot.video {
+            VideoState::None => 0,
+            VideoState::Ready => 2,
+            VideoState::Locked => 3,
+            VideoState::Stale => 4,
+        }
+    };
     let selected = snapshot
         .selected_index
         .map_or(0, |index| u64::from(index) + 1);
@@ -139,6 +175,7 @@ pub(crate) fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot) -> u64 {
         (STALE, u64::from(snapshot.stale)),
         (MIGRATION_PENDING, u64::from(snapshot.migration_pending)),
         (INVALID_HASHES, u64::from(snapshot.invalid_hash_count != 0)),
+        (VIDEO_STATE, video),
         (CANDIDATE_COUNT, u64::from(snapshot.candidate_count)),
         (SELECTED_PLUS_ONE, selected),
         (DIRECTION, u64::from(snapshot.direction.code())),
@@ -166,14 +203,15 @@ const SAMPLE: ShotApprovalSnapshot = ShotApprovalSnapshot {
     superseded_count: 18,
     migration_pending: true,
     invalid_hash_count: 2,
-    video: VideoState::None,
-    video_revision: 0,
+    video: VideoState::Stale,
+    video_revision: 3,
 };
 
 const ENTRY_STATUS: u32 = 1;
 const ENTRY_DIRECTION: u32 = 2;
 const ENTRY_SNAPSHOT_FIELD: u32 = 3;
 const ENTRY_IMAGE_PROVIDER: u32 = 4;
+const ENTRY_VIDEO_STATE: u32 = 5;
 
 /// `(kind, name, value, extra)` for contract entry `index`: a status (value =
 /// code), a direction (value = wire code), a snapshot field (value = shift,
@@ -182,6 +220,13 @@ fn entry(index: usize) -> Option<(u32, &'static str, i64, u32)> {
     let directions_start = STATUSES.len();
     let fields_start = directions_start + DIRECTIONS.len();
     let providers_start = fields_start + SNAPSHOT_FIELDS.len();
+    let video_states_start = providers_start + IMAGE_PROVIDERS.len();
+    if let Some((name, code)) = index
+        .checked_sub(video_states_start)
+        .and_then(|index| VIDEO_STATES.get(index))
+    {
+        return Some((ENTRY_VIDEO_STATE, name, i64::from(*code), 0));
+    }
     if let Some((name, code)) = index
         .checked_sub(providers_start)
         .and_then(|index| IMAGE_PROVIDERS.get(index))
@@ -210,8 +255,11 @@ fn entry(index: usize) -> Option<(u32, &'static str, i64, u32)> {
         })
 }
 
-const ENTRY_COUNT: usize =
-    STATUSES.len() + DIRECTIONS.len() + SNAPSHOT_FIELDS.len() + IMAGE_PROVIDERS.len();
+const ENTRY_COUNT: usize = STATUSES.len()
+    + DIRECTIONS.len()
+    + SNAPSHOT_FIELDS.len()
+    + IMAGE_PROVIDERS.len()
+    + VIDEO_STATES.len();
 
 /// Number of entries in the native contract table.
 #[unsafe(no_mangle)]
@@ -256,7 +304,7 @@ pub unsafe extern "C" fn kineto_contract_entry(
 /// The fixed sample snapshot, packed by the native encoder.
 #[unsafe(no_mangle)]
 pub extern "C" fn kineto_contract_snapshot_sample() -> u64 {
-    encode_shot_snapshot(SAMPLE)
+    encode_shot_snapshot(SAMPLE, false)
 }
 
 #[cfg(test)]
@@ -310,6 +358,7 @@ mod tests {
         assert_eq!(read(STALE), 1);
         assert_eq!(read(MIGRATION_PENDING), 1);
         assert_eq!(read(INVALID_HASHES), 1);
+        assert_eq!(read(VIDEO_STATE), 4);
         assert_eq!(read(CANDIDATE_COUNT), 3);
         assert_eq!(read(SELECTED_PLUS_ONE), 3);
         assert_eq!(read(DIRECTION), 4);
@@ -339,9 +388,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_IMAGE_PROVIDER);
-        assert_eq!(&name[..len as usize], b"minimax");
-        assert_eq!((value, extra), (2, 0));
+        assert_eq!(kind, ENTRY_VIDEO_STATE);
+        assert_eq!(&name[..len as usize], b"stale");
+        assert_eq!((value, extra), (4, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

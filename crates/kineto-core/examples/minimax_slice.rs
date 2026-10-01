@@ -1,15 +1,17 @@
-//! Manual end-to-end run of the keyframe slice against the live MiniMax API,
+//! Manual end-to-end run of the P0.5 slice against the live MiniMax API,
 //! through the same project session the desktop app uses. Paid (three
-//! `image-01` calls); never run by the test suite.
+//! `image-01` calls and one 6-second 768P Hailuo clip, about 0.29 USD);
+//! never run by the test suite.
 //!
 //! ```text
 //! KINETO_IMAGE_PROVIDER=minimax KINETO_MINIMAX_API_KEY=... \
 //!     cargo run -p kineto-core --example minimax_slice -- <new-project-dir>
 //! ```
 //!
-//! Creates the project, generates shot 1, selects take B and locks it, then
-//! reopens without credentials, deletes `.kineto/`, and reopens again to show
-//! the locked keyframe survives both.
+//! Creates the project, generates shot 1, selects take B and locks it,
+//! generates a video from it in the background and locks that, then reopens
+//! without credentials, deletes `.kineto/`, and reopens again to show the
+//! locked keyframe and video survive both.
 
 use std::{
     collections::BTreeMap,
@@ -33,6 +35,7 @@ enum Event {
     Opened(Result<(), String>),
     Completed(u64, Result<(), String>),
     Recovered(String),
+    VideoFinished(u16, Result<(), String>),
 }
 
 struct Sink(Mutex<mpsc::Sender<Event>>);
@@ -58,6 +61,13 @@ impl SessionSink for Sink {
             result.as_ref().map(|_| ()).map_err(ToString::to_string),
         ));
     }
+
+    fn video_finished(&self, _shot: u32, revision: u16, result: &Result<(), SessionError>) {
+        let _ = self.0.lock().unwrap().send(Event::VideoFinished(
+            revision,
+            result.as_ref().map(|_| ()).map_err(ToString::to_string),
+        ));
+    }
 }
 
 fn spawn(
@@ -73,7 +83,7 @@ fn spawn(
                 result?;
                 return Ok((session, events));
             }
-            Event::Completed(..) => {}
+            Event::Completed(..) | Event::VideoFinished(..) => {}
         }
     }
 }
@@ -87,9 +97,12 @@ fn run(
     session
         .submit(0, command, token)
         .map_err(|error| format!("{error:?}"))?;
-    match events.recv_timeout(WAIT)? {
-        Event::Completed(answered, result) if answered == token => Ok(result?),
-        _ => Err("unexpected session event".into()),
+    loop {
+        match events.recv_timeout(WAIT)? {
+            Event::Completed(answered, result) if answered == token => return Ok(result?),
+            Event::VideoFinished(..) => {}
+            _ => return Err("unexpected session event".into()),
+        }
     }
 }
 
@@ -152,6 +165,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     run(&session, &events, 2, ShotCommand::Select(1))?;
     run(&session, &events, 3, ShotCommand::Lock)?;
+
+    let started = Instant::now();
+    run(&session, &events, 4, ShotCommand::GenerateVideo)?;
+    println!("video submitted in {} ms", started.elapsed().as_millis());
+    loop {
+        match events.recv_timeout(Duration::from_secs(900))? {
+            Event::VideoFinished(revision, result) => {
+                result?;
+                println!(
+                    "video {revision} attached after {} s",
+                    started.elapsed().as_secs()
+                );
+                break;
+            }
+            _ => continue,
+        }
+    }
+    let video = session.video_media(0)?.ok_or("no video")?;
+    println!(
+        "  video: {} ({} bytes)",
+        video.display(),
+        std::fs::metadata(&video)?.len()
+    );
+    run(&session, &events, 5, ShotCommand::LockVideo)?;
     drop(session);
 
     // No credentials and no runtime state: the lock is canonical.
@@ -172,10 +209,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = rebuilt.snapshot(0)?;
     let media = rebuilt.candidate_media(0, 1)?.ok_or("no media")?;
     println!(
-        "after deleting .kineto: locked {}, selected {:?}, take B present {}",
+        "after deleting .kineto: locked {}, selected {:?}, take B present {}, video {:?} present {}",
         snapshot.locked,
         snapshot.selected_index,
-        media.is_file()
+        media.is_file(),
+        snapshot.video,
+        rebuilt.video_media(0)?.is_some_and(|video| video.is_file())
     );
     Ok(())
 }

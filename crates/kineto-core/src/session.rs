@@ -26,12 +26,14 @@ use std::{
 };
 
 use kineto_project::{
+    fs::ProjectRoot,
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
-use crate::generation::{
-    self, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
+use crate::{
+    generation::{self, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished},
+    video::{self, VideoClient, VideoDone, VideoJob},
 };
 
 /// Shots addressable in the bootstrap scene.
@@ -59,6 +61,11 @@ pub enum ShotCommand {
     Lock,
     Reset,
     MigrateLegacyHashes,
+    /// Submit a video from the locked keyframe. Completes once MiniMax has
+    /// accepted the task; the video arrives later through
+    /// [`SessionSink::video_finished`].
+    GenerateVideo,
+    LockVideo,
 }
 
 #[derive(Debug)]
@@ -72,6 +79,8 @@ pub enum SessionError {
     Generation(GenerationError),
     /// A command arrived for a session whose open had failed.
     NotOpen,
+    /// The shot already has a video being generated.
+    VideoInFlight,
     /// The worker caught a panic. The affected shot is reloaded from its
     /// canonical files before its next use.
     Panicked,
@@ -84,6 +93,9 @@ impl fmt::Display for SessionError {
             Self::Shot(error) => error.fmt(formatter),
             Self::Generation(error) => error.fmt(formatter),
             Self::NotOpen => formatter.write_str("project session is not open"),
+            Self::VideoInFlight => {
+                formatter.write_str("this shot's video is still being generated")
+            }
             Self::Panicked => formatter.write_str("project session worker panicked"),
         }
     }
@@ -95,7 +107,7 @@ impl Error for SessionError {
             Self::Open(error) => Some(error),
             Self::Shot(error) => Some(error),
             Self::Generation(error) => Some(error),
-            Self::NotOpen | Self::Panicked => None,
+            Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
 }
@@ -134,6 +146,10 @@ pub trait SessionSink: Send + 'static {
     /// A command finished. The shot's snapshot is published before this is
     /// called.
     fn completed(&self, token: u64, shot_index: u32, result: &Result<(), SessionError>);
+
+    /// A submitted video finished: attached, or failed and retired so it can
+    /// be asked for again. The shot's snapshot is published first.
+    fn video_finished(&self, shot_index: u32, revision: u16, result: &Result<(), SessionError>);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +195,10 @@ struct PublishedShot {
     snapshot: ShotApprovalSnapshot,
     /// Absolute path of each current candidate's media, in candidate order.
     media: Vec<Option<PathBuf>>,
+    /// Absolute path of the current video's media, if any.
+    video: Option<PathBuf>,
+    /// A video for this shot is being generated.
+    video_in_flight: bool,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -239,6 +259,16 @@ impl ProjectSession {
         provider: ImageProvider,
         sink: Box<dyn SessionSink>,
     ) -> std::io::Result<Self> {
+        Self::spawn_with(request, provider, sink, SessionOptions::default())
+    }
+
+    /// [`Self::spawn`] with explicit timing, for tests.
+    pub fn spawn_with(
+        request: OpenRequest,
+        provider: ImageProvider,
+        sink: Box<dyn SessionSink>,
+        options: SessionOptions,
+    ) -> std::io::Result<Self> {
         let image_provider = provider.info();
         let (commands, inbox) = mpsc::channel();
         let view = Arc::new(View::default());
@@ -251,7 +281,7 @@ impl ProjectSession {
             .spawn({
                 let view = Arc::clone(&view);
                 let gate = Arc::clone(&gate);
-                move || run(request, provider, &inbox, &view, &gate)
+                move || run(request, provider, options, &inbox, &view, &gate)
             })?;
         Ok(Self {
             commands: Some(commands),
@@ -316,6 +346,32 @@ impl ProjectSession {
         }
     }
 
+    /// Where the shot's current video keeps its media, if it has one. Never
+    /// does I/O.
+    pub fn video_media(&self, shot_index: u32) -> Result<Option<PathBuf>, SnapshotError> {
+        self.published(shot_index, |published| published.video.clone())
+    }
+
+    /// Whether a video for the shot is being generated. Never does I/O.
+    pub fn video_in_flight(&self, shot_index: u32) -> Result<bool, SnapshotError> {
+        self.published(shot_index, |published| published.video_in_flight)
+    }
+
+    fn published<R>(
+        &self,
+        shot_index: u32,
+        read: impl FnOnce(&PublishedShot) -> R,
+    ) -> Result<R, SnapshotError> {
+        if !shot_index_is_valid(shot_index) {
+            return Err(SnapshotError::InvalidShot);
+        }
+        match &lock(&self.view.shots)[shot_index as usize] {
+            None => Err(SnapshotError::NotOpen),
+            Some(Ok(published)) => Ok(read(published)),
+            Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
+        }
+    }
+
     /// The image provider this session generates with. Fixed at spawn.
     #[must_use]
     pub const fn image_provider(&self) -> ImageProviderInfo {
@@ -348,21 +404,28 @@ fn shot_index_is_valid(shot_index: u32) -> bool {
 fn run(
     request: OpenRequest,
     provider: ImageProvider,
+    options: SessionOptions,
     inbox: &mpsc::Receiver<Envelope>,
     view: &View,
-    gate: &Gate,
+    gate: &Arc<Gate>,
 ) {
     let opened = panic::catch_unwind(AssertUnwindSafe(|| open(request)))
         .unwrap_or(Err(SessionError::Panicked));
     let mut worker = match opened {
         Ok(project) => {
-            let mut worker = Worker::new(project, provider);
+            let mut worker = Worker::new(project, provider, Arc::clone(gate), options);
             // Finish what an earlier session left before accepting commands.
-            let recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
+            let mut recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
                 .unwrap_or_else(|_| {
                     worker.shots = [None, None];
                     vec![Recovery::NeedsAttention { count: 1 }]
                 });
+            // Videos submitted earlier are watched again, never resubmitted.
+            let unplaced =
+                panic::catch_unwind(AssertUnwindSafe(|| worker.resume_videos())).unwrap_or(1);
+            if unplaced > 0 {
+                recoveries.push(Recovery::NeedsAttention { count: unplaced });
+            }
             let project = &worker.project;
             let _ = view.metadata.set(ProjectMetadata {
                 project_id: project.manifest().project_id.clone(),
@@ -385,20 +448,106 @@ fn run(
         }
     };
 
-    for envelope in inbox {
+    loop {
+        // Wake regularly so videos that finished in the background are
+        // attached even while no command arrives.
+        let envelope = match inbox.recv_timeout(VIDEO_CHECK_INTERVAL) {
+            Ok(envelope) => Some(envelope),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         if gate.is_closed() {
             break;
         }
-        let shot_index = envelope.shot_index as usize;
-        let result = match worker.as_mut() {
-            None => Err(SessionError::NotOpen),
-            Some(worker) => {
-                let result = worker.apply(shot_index, envelope.command);
+        if let Some(envelope) = envelope {
+            let shot_index = envelope.shot_index as usize;
+            let result = match worker.as_mut() {
+                None => Err(SessionError::NotOpen),
+                Some(worker) => {
+                    let result = worker.apply(shot_index, envelope.command);
+                    worker.publish(view, shot_index);
+                    result
+                }
+            };
+            gate.deliver(|sink| sink.completed(envelope.token, envelope.shot_index, &result));
+        }
+        if let Some(worker) = worker.as_mut() {
+            for (shot_index, revision, result) in worker.finish_videos() {
                 worker.publish(view, shot_index);
-                result
+                let shot_index = u32::try_from(shot_index).expect("shot index fits in u32");
+                gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
             }
+        }
+    }
+    if let Some(worker) = worker {
+        // Watchers see the closed gate within their wake interval; the
+        // project and its writer lock outlive every one of them.
+        worker.videos.join();
+    }
+}
+
+/// Timing a session runs with.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionOptions {
+    /// How often a video's remote task is queried.
+    pub video_poll_interval: std::time::Duration,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            video_poll_interval: video::POLL_INTERVAL,
+        }
+    }
+}
+
+/// How often the worker collects videos finished in the background.
+const VIDEO_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Videos being generated for this session's shots.
+struct Videos {
+    client: Option<VideoClient>,
+    gate: Arc<Gate>,
+    in_flight: [Option<VideoJob>; SHOT_COUNT],
+    finished: Arc<Mutex<Vec<VideoDone>>>,
+    watchers: Vec<thread::JoinHandle<()>>,
+    poll_interval: std::time::Duration,
+}
+
+impl Videos {
+    /// Follow `job` on its own thread until its video is on disk or failed.
+    fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
+        let Some(client) = self.client.clone() else {
+            return;
         };
-        gate.deliver(|sink| sink.completed(envelope.token, envelope.shot_index, &result));
+        let Ok(shot_index) = usize::try_from(job.shot_number - 1) else {
+            return;
+        };
+        if shot_index >= SHOT_COUNT {
+            return;
+        }
+        self.in_flight[shot_index] = Some(job.clone());
+        let gate = Arc::clone(&self.gate);
+        let finished = Arc::clone(&self.finished);
+        let interval = self.poll_interval;
+        let spawned = thread::Builder::new()
+            .name("kineto-video-watch".to_owned())
+            .spawn(move || {
+                if let Some(done) = video::watch(&client, &root, job, &gate.closed, interval) {
+                    lock(&finished).push(done);
+                }
+            });
+        match spawned {
+            Ok(handle) => self.watchers.push(handle),
+            // Without a watcher the task is followed again on the next open.
+            Err(_) => self.in_flight[shot_index] = None,
+        }
+    }
+
+    fn join(self) {
+        for watcher in self.watchers {
+            let _ = watcher.join();
+        }
     }
 }
 
@@ -422,18 +571,71 @@ fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
 struct Worker {
     project: CanonicalProject,
     provider: ImageProvider,
+    videos: Videos,
     // Canonical JSON is loaded once per shot per session; reads then stay
     // typed and in memory rather than re-parsing project files.
     shots: [Option<ShotWorkflow>; SHOT_COUNT],
 }
 
 impl Worker {
-    fn new(project: CanonicalProject, provider: ImageProvider) -> Self {
+    fn new(
+        project: CanonicalProject,
+        provider: ImageProvider,
+        gate: Arc<Gate>,
+        options: SessionOptions,
+    ) -> Self {
+        // Video uses the MiniMax key the image provider was given.
+        let client = match &provider {
+            ImageProvider::Minimax(client) => client.clone(),
+            ImageProvider::LocalDemo => None,
+        };
         Self {
             project,
             provider,
+            videos: Videos {
+                client,
+                gate,
+                in_flight: [None, None],
+                finished: Arc::new(Mutex::new(Vec::new())),
+                watchers: Vec::new(),
+                poll_interval: options.video_poll_interval,
+            },
             shots: [None, None],
         }
+    }
+
+    /// Attach (or retire) every video whose watcher has finished.
+    fn finish_videos(&mut self) -> Vec<(usize, u16, Result<(), SessionError>)> {
+        let finished = std::mem::take(&mut *lock(&self.videos.finished));
+        let mut outcomes = Vec::with_capacity(finished.len());
+        for done in finished {
+            let Some(shot_index) = usize::try_from(done.job.shot_number)
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .filter(|index| *index < SHOT_COUNT)
+            else {
+                continue;
+            };
+            self.videos.in_flight[shot_index] = None;
+            let revision = done.job.revision;
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                self.with_shot(shot_index, |project, _, shot| {
+                    video::finish(project, shot, done)
+                })
+            }))
+            .unwrap_or(Err(GenerationError::Unexpected(
+                "attaching a video panicked",
+            )));
+            if result.is_err() {
+                self.shots[shot_index] = None;
+            }
+            outcomes.push((
+                shot_index,
+                revision,
+                result.map(|_| ()).map_err(generation_error),
+            ));
+        }
+        outcomes
     }
 
     fn apply(&mut self, shot_index: usize, command: ShotCommand) -> Result<(), SessionError> {
@@ -445,6 +647,7 @@ impl Worker {
                     generation::generate(project, shot, provider, &mut NoHooks).map(|_outcome| ())
                 })
                 .map_err(generation_error),
+            ShotCommand::GenerateVideo => self.start_video(shot_index),
             command => self
                 .with_shot(shot_index, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
@@ -454,7 +657,10 @@ impl Worker {
                     ShotCommand::MigrateLegacyHashes => {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
-                    ShotCommand::Generate => unreachable!("generation is handled above"),
+                    ShotCommand::LockVideo => shot.lock_video(project),
+                    ShotCommand::Generate | ShotCommand::GenerateVideo => {
+                        unreachable!("generation is handled above")
+                    }
                 })
                 .map_err(SessionError::Shot),
         }));
@@ -466,6 +672,41 @@ impl Worker {
                 self.shots[shot_index] = None;
                 Err(SessionError::Panicked)
             }
+        }
+    }
+
+    fn start_video(&mut self, shot_index: usize) -> Result<(), SessionError> {
+        if self.videos.in_flight[shot_index].is_some() {
+            return Err(SessionError::VideoInFlight);
+        }
+        let Some(client) = self.videos.client.clone() else {
+            return Err(SessionError::Generation(GenerationError::NotConfigured));
+        };
+        let job = self
+            .with_shot(shot_index, |project, _, shot| {
+                video::start(project, shot, &client)
+            })
+            .map_err(generation_error)?;
+        let root = self.project.root().clone();
+        self.videos.watch(job, root);
+        Ok(())
+    }
+
+    /// Watch again the videos an earlier session submitted. Nothing is
+    /// submitted; without a key they wait for a session that has one.
+    fn resume_videos(&mut self) -> usize {
+        if self.project.is_read_only() || self.videos.client.is_none() {
+            return 0;
+        }
+        match video::in_flight(&self.project) {
+            Ok(found) => {
+                for job in found.jobs {
+                    let root = self.project.root().clone();
+                    self.videos.watch(job, root);
+                }
+                found.needs_attention
+            }
+            Err(_) => 1,
         }
     }
 
@@ -485,6 +726,7 @@ impl Worker {
             project,
             provider,
             shots,
+            ..
         } = self;
         let minimax = match provider {
             ImageProvider::Minimax(_) => &*provider,
@@ -551,10 +793,18 @@ impl Worker {
                         .into_iter()
                         .map(|path| path.map(|path| project.root().resolve(&path)))
                         .collect(),
+                    video: shot
+                        .video_media()?
+                        .map(|path| project.root().resolve(&path)),
+                    video_in_flight: false,
                 })
             })
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
+        .map(|mut published| {
+            published.video_in_flight = self.videos.in_flight[shot_index].is_some();
+            published
+        })
         .map_err(Arc::new);
         lock(&view.shots)[shot_index] = Some(published);
     }
@@ -653,6 +903,11 @@ mod tests {
             result: Result<(), String>,
             thread: String,
         },
+        VideoFinished {
+            shot_index: u32,
+            revision: u16,
+            result: Result<(), String>,
+        },
     }
 
     struct ChannelSink(Mutex<mpsc::Sender<Event>>);
@@ -679,6 +934,19 @@ mod tests {
                 shot_index,
                 result: describe(result),
                 thread: thread::current().name().unwrap_or_default().to_owned(),
+            });
+        }
+
+        fn video_finished(
+            &self,
+            shot_index: u32,
+            revision: u16,
+            result: &Result<(), SessionError>,
+        ) {
+            let _ = lock(&self.0).send(Event::VideoFinished {
+                shot_index,
+                revision,
+                result: describe(result),
             });
         }
     }
@@ -886,6 +1154,245 @@ mod tests {
         ));
     }
 
+    mod video_flow {
+        use super::*;
+        use kineto_provider_minimax::{
+            HttpResponse, MinimaxClient, SharedTransport, Transport, TransportFailure,
+        };
+        use kineto_providers::secret::SecretString;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+
+        const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isommp41-video";
+
+        /// MiniMax for images and Hailuo video, offline. A video task stays
+        /// processing until `finish` is set.
+        #[derive(Default)]
+        struct FakeMinimax {
+            images: AtomicU32,
+            submits: AtomicU32,
+            finish: AtomicBool,
+        }
+
+        fn answer(body: impl Into<Vec<u8>>) -> Result<HttpResponse, TransportFailure> {
+            Ok(HttpResponse {
+                status: 200,
+                body: body.into(),
+            })
+        }
+
+        impl Transport for FakeMinimax {
+            fn post_json(
+                &self,
+                url: &str,
+                _api_key: &SecretString,
+                body: &[u8],
+            ) -> Result<HttpResponse, TransportFailure> {
+                if url.ends_with("/v1/video_generation") {
+                    self.submits.fetch_add(1, Ordering::SeqCst);
+                    let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    assert!(
+                        sent["first_frame_image"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("data:image/jpeg;base64,")
+                    );
+                    assert!(sent["prompt"].as_str().unwrap().contains("[Push in]"));
+                    return answer(r#"{"task_id":"777","base_resp":{"status_code":0}}"#);
+                }
+                let call = self.images.fetch_add(1, Ordering::SeqCst);
+                let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x51, u8::try_from(call).unwrap()];
+                use base64::Engine as _;
+                answer(format!(
+                    r#"{{"id":"i","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0}}}}"#,
+                    base64::engine::general_purpose::STANDARD.encode(jpeg)
+                ))
+            }
+
+            fn get(
+                &self,
+                url: &str,
+                _api_key: &SecretString,
+            ) -> Result<HttpResponse, TransportFailure> {
+                if url.contains("/v1/query/video_generation?task_id=777") {
+                    return answer(if self.finish.load(Ordering::SeqCst) {
+                        r#"{"status":"Success","file_id":"999","base_resp":{"status_code":0}}"#
+                    } else {
+                        r#"{"status":"Processing","file_id":"","base_resp":{"status_code":0}}"#
+                    });
+                }
+                assert!(url.ends_with("/v1/files/retrieve?file_id=999"), "{url}");
+                answer(
+                    r#"{"file":{"download_url":"https://cdn.example.test/v.mp4"},"base_resp":{"status_code":0}}"#,
+                )
+            }
+
+            fn download(
+                &self,
+                url: &str,
+                _max_bytes: u64,
+            ) -> Result<HttpResponse, TransportFailure> {
+                assert_eq!(url, "https://cdn.example.test/v.mp4");
+                answer(MP4)
+            }
+        }
+
+        fn minimax(fake: &Arc<FakeMinimax>) -> ImageProvider {
+            let transport: SharedTransport = Arc::clone(fake) as SharedTransport;
+            ImageProvider::Minimax(Some(MinimaxClient::with_transport(
+                transport,
+                SecretString::new("sk-test".to_owned()).unwrap(),
+                "https://example.test",
+            )))
+        }
+
+        fn options() -> SessionOptions {
+            SessionOptions {
+                video_poll_interval: Duration::from_millis(20),
+            }
+        }
+
+        fn spawn(
+            request: OpenRequest,
+            fake: &Arc<FakeMinimax>,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let (sink, events) = sink();
+            let session =
+                ProjectSession::spawn_with(request, minimax(fake), sink, options()).unwrap();
+            (session, events)
+        }
+
+        fn command(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            token: u64,
+            command: ShotCommand,
+        ) -> Result<(), String> {
+            session.submit(0, command, token).unwrap();
+            completion(events, token)
+        }
+
+        fn locked_keyframe(
+            target: &std::path::Path,
+            fake: &Arc<FakeMinimax>,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let (session, events) = spawn(
+                OpenRequest::CreateText {
+                    path: target.to_path_buf(),
+                    manifest: Box::new(manifest()),
+                    source: b"A filmmaker waits.\n".to_vec(),
+                },
+                fake,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            command(&session, &events, 1, ShotCommand::Generate).unwrap();
+            command(&session, &events, 2, ShotCommand::Select(1)).unwrap();
+            command(&session, &events, 3, ShotCommand::Lock).unwrap();
+            (session, events)
+        }
+
+        #[test]
+        fn a_video_is_generated_in_the_background_and_can_be_locked() {
+            let temp = TempDir::new();
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = locked_keyframe(&temp.0.join("film"), &fake);
+
+            command(&session, &events, 4, ShotCommand::GenerateVideo).unwrap();
+            assert!(session.video_in_flight(0).unwrap());
+            // Other work goes on while the video is generated.
+            assert_eq!(
+                command(&session, &events, 5, ShotCommand::GenerateVideo),
+                Err("VideoInFlight".to_owned())
+            );
+            session.submit(1, ShotCommand::Generate, 6).unwrap();
+            assert_eq!(completion(&events, 6), Ok(()));
+
+            fake.finish.store(true, Ordering::SeqCst);
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+            assert!(!session.video_in_flight(0).unwrap());
+            assert_eq!(
+                session.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Ready
+            );
+            let media = session.video_media(0).unwrap().unwrap();
+            assert_eq!(fs::read(&media).unwrap(), MP4);
+
+            command(&session, &events, 7, ShotCommand::LockVideo).unwrap();
+            assert_eq!(
+                session.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Locked
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_reopened_project_finishes_its_video_without_submitting_again() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = locked_keyframe(&target, &fake);
+            command(&session, &events, 4, ShotCommand::GenerateVideo).unwrap();
+            drop(session);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+
+            fake.finish.store(true, Ordering::SeqCst);
+            let (reopened, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+            assert_eq!(
+                reopened.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Ready
+            );
+            assert_eq!(
+                fake.submits.load(Ordering::SeqCst),
+                1,
+                "never submitted again"
+            );
+        }
+
+        #[test]
+        fn a_video_needs_a_real_locked_keyframe() {
+            let temp = TempDir::new();
+            let (session, events) = create(&temp.0.join("film"));
+            // The demo session has no video provider.
+            assert!(
+                command(&session, &events, 1, ShotCommand::GenerateVideo)
+                    .unwrap_err()
+                    .contains("NotConfigured")
+            );
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = spawn(
+                OpenRequest::CreateText {
+                    path: temp.0.join("second"),
+                    manifest: Box::new(manifest()),
+                    source: b"source\n".to_vec(),
+                },
+                &fake,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert!(
+                command(&session, &events, 1, ShotCommand::GenerateVideo)
+                    .unwrap_err()
+                    .contains("KeyframeNotLocked")
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 0);
+            drop(session);
+        }
+    }
+
     #[test]
     fn session_handle_is_shareable_across_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -938,6 +1445,8 @@ mod tests {
                     thread: thread::current().name().unwrap_or_default().to_owned(),
                 });
             }
+
+            fn video_finished(&self, _: u32, _: u16, _: &Result<(), SessionError>) {}
         }
 
         let temp = TempDir::new();

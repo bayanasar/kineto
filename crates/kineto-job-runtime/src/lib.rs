@@ -515,6 +515,17 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// The intent recorded for `job_id`, if any, read without changing it.
+    pub fn load(&self, job_id: &JobId) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
+        let store = IntentStore::new(self.project);
+        let _guard = lock_intent_store();
+        let record = store.load_optional(job_id)?;
+        if let Some(record) = &record {
+            self.ensure_provider(record)?;
+        }
+        Ok(record)
+    }
+
     /// Give up on a prepared intent whose last provider call failed, so the
     /// same job can be prepared afresh.
     ///
@@ -526,6 +537,29 @@ impl<'project> JobRuntime<'project> {
     /// crash after the second leaves a `Reserved` mapping without an intent,
     /// which the next lookup clears.
     pub fn retire_failed(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.last_error_class.is_some()
+        })
+    }
+
+    /// Give up on an invoked intent whose remote job the provider reports as
+    /// failed, so the same job can be prepared and submitted afresh.
+    ///
+    /// Only an `Invoked` intent with a remote job handle is retired; the
+    /// caller asserts the provider reported that job as failed, so there is
+    /// no result to lose. The removal order is that of [`Self::retire_failed`].
+    pub fn retire_remote_failure(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Invoked
+                && record.intent.provider_job_id().is_some()
+        })
+    }
+
+    fn retire_where(
+        &self,
+        job_id: &JobId,
+        eligible: impl FnOnce(&RuntimeIntent) -> bool,
+    ) -> Result<bool, JobRuntimeError> {
         self.ensure_writable()?;
         let operation_lock = job_operation_lock(self.project, job_id);
         let _operation_guard = lock_unpoisoned(&operation_lock);
@@ -535,7 +569,7 @@ impl<'project> JobRuntime<'project> {
             return Ok(false);
         };
         self.ensure_provider(&record)?;
-        if record.intent.state() != IntentState::Prepared || record.last_error_class.is_none() {
+        if !eligible(&record) {
             return Ok(false);
         }
         let key = record.intent.idempotency_key();
@@ -2548,6 +2582,48 @@ mod tests {
             !runtime.retire_failed(&job_id).unwrap(),
             "an invoked intent is never retired"
         );
+    }
+
+    #[test]
+    fn a_failed_remote_job_can_be_retired_and_submitted_afresh() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-video-retire").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_video_retire").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "video.generate",
+                input_hash('5'),
+                artifact("video_candidate_retire"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_remote_failure(&job_id).unwrap(),
+            "not invoked yet"
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Ok(Invocation::Pending(ProviderJobId::new("task-1").unwrap()));
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+        assert_eq!(
+            runtime
+                .load(&job_id)
+                .unwrap()
+                .unwrap()
+                .intent()
+                .provider_job_id()
+                .map(ProviderJobId::as_str),
+            Some("task-1")
+        );
+
+        assert!(runtime.retire_remote_failure(&job_id).unwrap());
+        assert!(runtime.load(&job_id).unwrap().is_none());
+        assert_eq!(created(prepare().unwrap()).attempts(), 0);
     }
 
     #[test]

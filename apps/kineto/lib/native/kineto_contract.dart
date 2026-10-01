@@ -38,6 +38,7 @@ final class KinetoNativeContract {
     this.directions,
     this._fields,
     this.imageProviders,
+    this.videoStates,
     this.snapshotSample,
   );
 
@@ -54,6 +55,17 @@ final class KinetoNativeContract {
 
   /// Image provider code by name, for example `minimax` → 2.
   final Map<String, int> imageProviders;
+
+  /// Snapshot video state code by name, for example `ready` → 2.
+  final Map<String, int> videoStates;
+
+  /// The video state a snapshot's `video_state` code names.
+  KinetoVideoState videoState(int code) {
+    for (final state in KinetoVideoState.values) {
+      if (videoStates[state.wireName] == code) return state;
+    }
+    throw StateError('Kineto native snapshot has unknown video state $code');
+  }
 
   /// A fixed snapshot packed by the native encoder, for contract tests.
   final int snapshotSample;
@@ -77,8 +89,10 @@ final class KinetoNativeContract {
     const directionKind = 2;
     const fieldKind = 3;
     const imageProviderKind = 4;
+    const videoStateKind = 5;
     final statuses = <String, int>{};
     final imageProviders = <String, int>{};
+    final videoStates = <String, int>{};
     final directions = <String, int>{};
     final fields = <String, (int, int)>{};
     final arena = Arena();
@@ -103,6 +117,8 @@ final class KinetoNativeContract {
             fields[entryName] = (value.value, extra.value);
           case imageProviderKind:
             imageProviders[entryName] = value.value;
+          case videoStateKind:
+            videoStates[entryName] = value.value;
         }
       }
     } finally {
@@ -113,6 +129,7 @@ final class KinetoNativeContract {
       Map.unmodifiable(directions),
       Map.unmodifiable(fields),
       Map.unmodifiable(imageProviders),
+      Map.unmodifiable(videoStates),
       _kinetoContractSnapshotSample(),
     );
   }

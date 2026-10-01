@@ -161,6 +161,35 @@ external int _kinetoProjectShotMigrateLegacyHashes(
   int token,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_generate_video',
+)
+external int _kinetoProjectShotGenerateVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_lock_video',
+)
+external int _kinetoProjectShotLockVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>, Uint64, Pointer<Uint64>)>(
+  symbol: 'kineto_project_video_media_copy',
+)
+external int _kinetoProjectVideoMediaCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
 @Native<Uint32 Function(Pointer<Void>)>(
   symbol: 'kineto_project_image_provider',
   isLeaf: true,
@@ -274,6 +303,9 @@ final class KinetoProjectException implements Exception {
   /// The image provider refused the request; asking again unchanged will not
   /// help (for example a content or account refusal).
   static const int providerRefused = 125;
+
+  /// The shot's video is still being generated.
+  static const int videoInFlight = 126;
 
   final int code;
   final String message;
@@ -459,6 +491,36 @@ final class KinetoProjectSession implements Finalizable {
     return path.isEmpty ? null : path;
   }
 
+  /// Absolute path of the shot's current video, or null when it has none.
+  /// Reads published state; never does I/O.
+  String? videoMediaPath(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final path = _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) =>
+          _kinetoProjectVideoMediaCopy(session, shotIndex, buffer, capacity, length),
+      'video media path',
+    );
+    return path.isEmpty ? null : path;
+  }
+
+  /// Videos generated in the background as they finish: attached, or failed
+  /// and ready to be asked for again.
+  Stream<KinetoVideoEvent> get videoEvents => _port.videoEvents;
+
+  /// Submit a video from the shot's locked keyframe. Completes once MiniMax
+  /// has accepted the task; the video arrives on [videoEvents].
+  Future<void> generateShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotGenerateVideo(_handle, shotIndex, token),
+      );
+
+  Future<void> lockShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotLockVideo(_handle, shotIndex, token),
+      );
+
   /// The image provider this session generates with. Fixed when it opened.
   KinetoImageProvider get imageProvider {
     _ensureOpen();
@@ -584,6 +646,12 @@ final class _SessionPort {
   static const int _opened = 1;
   static const int _completed = 2;
   static const int _recovered = 3;
+  static const int _video = 4;
+
+  final StreamController<KinetoVideoEvent> _videoEvents =
+      StreamController<KinetoVideoEvent>.broadcast(sync: false);
+
+  Stream<KinetoVideoEvent> get videoEvents => _videoEvents.stream;
 
   late final RawReceivePort _raw;
   final Completer<void> _openCompleter = Completer<void>();
@@ -621,6 +689,7 @@ final class _SessionPort {
     _closed = true;
     _owner = null;
     _raw.close();
+    unawaited(_videoEvents.close());
     const error = KinetoProjectSessionClosedException();
     if (!_openCompleter.isCompleted) _openCompleter.completeError(error);
     for (final completer in _pending.values) {
@@ -649,6 +718,14 @@ final class _SessionPort {
             errorCode: status,
           ),
         );
+      case _video:
+        _videoEvents.add(
+          KinetoVideoEvent(
+            shotIndex: values[3],
+            revision: values[1],
+            errorCode: status,
+          ),
+        );
       case _completed:
         final completer = _pending.remove(values[1]);
         if (completer == null) break;
@@ -668,6 +745,24 @@ final class _SessionPort {
     _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
     if (_pending.isEmpty) _owner = null;
   }
+}
+
+/// A video generated in the background finished.
+final class KinetoVideoEvent {
+  const KinetoVideoEvent({
+    required this.shotIndex,
+    required this.revision,
+    required this.errorCode,
+  });
+
+  final int shotIndex;
+  final int revision;
+
+  /// 0 when the video was attached; otherwise why it was not.
+  final int errorCode;
+
+  KinetoProjectException? get error =>
+      errorCode == 0 ? null : _projectException(errorCode);
 }
 
 /// Unfinished work from an earlier session that an open dealt with.
@@ -795,6 +890,12 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'provider_not_configured': 123,
   'shot_intent_missing': 124,
   'provider_refused': 125,
+  'video_in_flight': 126,
+  'keyframe_not_locked': 127,
+  'video_locked': 128,
+  'no_video': 129,
+  'stale_video': 130,
+  'no_first_frame': 131,
   'panic': 199,
 };
 
@@ -825,7 +926,13 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   122: 'KINETO_IMAGE_PROVIDER names an image provider this Kineto build does not have',
   123: 'The image provider has no API key configured',
   124: 'This shot has no written intent to generate from',
-  125: 'The image provider refused the request; it will not succeed unchanged',
+  125: 'The provider refused the request; it will not succeed unchanged',
+  126: "This shot's video is still being generated",
+  127: 'Lock a keyframe before generating video',
+  128: "This shot's video is locked",
+  129: 'Generate a video before locking it',
+  130: 'The video was made from a keyframe that is no longer locked; regenerate it',
+  131: 'The locked keyframe has no image to start a video from',
   199: 'Native project call failed unexpectedly',
 };
 

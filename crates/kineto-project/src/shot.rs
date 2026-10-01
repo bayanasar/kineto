@@ -1231,28 +1231,15 @@ impl ShotWorkflow {
         })
     }
 
-    /// Decide the next video generation without writing anything. It starts
-    /// from the locked keyframe.
-    pub fn plan_video(
+    /// The locked keyframe a video would start from, as the dependency the
+    /// video records and the keyframe's media, if it has any.
+    #[allow(clippy::type_complexity)]
+    pub fn first_frame(
         &self,
-        project: &CanonicalProject,
-        spec: VideoGenerationSpec<'_>,
-    ) -> Result<VideoPlan, ShotWorkflowError> {
-        self.ensure_mutation_allowed()?;
-        project
-            .validate_for_write()
-            .map_err(ShotWorkflowError::Manifest)?;
-        let keyframe = self
-            .locked_keyframe()
-            .ok_or(ShotWorkflowError::KeyframeNotLocked)?;
-        if self.video_state()? == VideoState::Locked {
-            return Err(ShotWorkflowError::VideoLocked);
-        }
-        let revision = self
-            .shot
-            .video_revision
-            .checked_add(1)
-            .ok_or(ShotWorkflowError::GenerationOverflow)?;
+    ) -> Result<Option<(ArtifactDependency, Option<ProjectRelativePath>)>, ShotWorkflowError> {
+        let Some(keyframe) = self.locked_keyframe() else {
+            return Ok(None);
+        };
         let dependency = ArtifactDependency {
             artifact_id: ArtifactId::new(keyframe.artifact_id.clone())?,
             content_hash: ContentHash::new(keyframe.content_hash.clone())?,
@@ -1264,6 +1251,31 @@ impl ShotWorkflow {
             .as_ref()
             .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
             .transpose()?;
+        Ok(Some((dependency, media)))
+    }
+
+    /// Decide the next video generation without writing anything. It starts
+    /// from the locked keyframe.
+    pub fn plan_video(
+        &self,
+        project: &CanonicalProject,
+        spec: VideoGenerationSpec<'_>,
+    ) -> Result<VideoPlan, ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
+        project
+            .validate_for_write()
+            .map_err(ShotWorkflowError::Manifest)?;
+        let (dependency, media) = self
+            .first_frame()?
+            .ok_or(ShotWorkflowError::KeyframeNotLocked)?;
+        if self.video_state()? == VideoState::Locked {
+            return Err(ShotWorkflowError::VideoLocked);
+        }
+        let revision = self
+            .shot
+            .video_revision
+            .checked_add(1)
+            .ok_or(ShotWorkflowError::GenerationOverflow)?;
         let mut intent = Vec::with_capacity(self.shot.shot_id.len() + 1);
         intent.extend_from_slice(self.shot.shot_id.as_bytes());
         intent.push(self.shot.direction.code());
