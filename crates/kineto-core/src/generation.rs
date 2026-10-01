@@ -140,6 +140,9 @@ pub struct ImageProviderInfo {
     pub ready: bool,
     /// Estimated cost of one generation (every candidate), in USD micros.
     pub generation_cost_micros: u64,
+    /// Estimated cost of one shot video, in USD micros; 0 when the provider
+    /// cannot generate video.
+    pub video_cost_micros: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +191,7 @@ impl ImageProvider {
                 kind: ImageProviderKind::LocalDemo,
                 ready: true,
                 generation_cost_micros: 0,
+                video_cost_micros: 0,
             },
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
@@ -195,6 +199,7 @@ impl ImageProvider {
                 generation_cost_micros: IMAGE_PRICE_MICROS
                     * u64::try_from(GENERATED_CANDIDATE_COUNT)
                         .expect("candidate count fits in u64"),
+                video_cost_micros: crate::video::estimated_cost_micros(),
             },
         }
     }

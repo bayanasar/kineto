@@ -208,6 +208,12 @@ external int _kinetoProjectImageProviderReady(Pointer<Void> session);
 )
 external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
 
+@Native<Uint64 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_cost_micros',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoCostMicros(Pointer<Void> session);
+
 @Native<
     Int32 Function(
       Pointer<Void>,
@@ -253,6 +259,7 @@ final class KinetoImageProvider {
     required this.kind,
     required this.ready,
     required this.generationCostMicros,
+    this.videoCostMicros = 0,
   });
 
   final KinetoImageProviderKind kind;
@@ -263,12 +270,24 @@ final class KinetoImageProvider {
   /// Estimated cost of one generation (every candidate), in USD micros.
   final int generationCostMicros;
 
+  /// Estimated cost of one shot video, in USD micros; 0 when this provider
+  /// cannot generate video.
+  final int videoCostMicros;
+
   bool get isPaid => kind != KinetoImageProviderKind.localDemo;
 
-  /// The estimate in US dollars, for example `$0.0105`.
-  String get generationCostLabel {
-    final dollars = generationCostMicros ~/ 1000000;
-    final micros = (generationCostMicros % 1000000).toString().padLeft(6, '0');
+  /// Whether this session can generate a shot video at all.
+  bool get canGenerateVideo => ready && videoCostMicros > 0;
+
+  /// The generation estimate in US dollars, for example `$0.0105`.
+  String get generationCostLabel => _dollars(generationCostMicros);
+
+  /// The video estimate in US dollars, for example `$0.28`.
+  String get videoCostLabel => _dollars(videoCostMicros);
+
+  static String _dollars(int amountMicros) {
+    final dollars = amountMicros ~/ 1000000;
+    final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
     final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
     return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
   }
@@ -530,6 +549,7 @@ final class KinetoProjectSession implements Finalizable {
       ),
       ready: _kinetoProjectImageProviderReady(_handle) != 0,
       generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
+      videoCostMicros: _kinetoProjectVideoCostMicros(_handle),
     );
   }
 

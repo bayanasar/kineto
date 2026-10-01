@@ -78,6 +78,8 @@ The P0 interactive checkpoint proves local approval-state ergonomics before prov
 
 Profile the slice on Apple Silicon and at least one x86_64 desktop before adding extra process boundaries, worker pools, bulk bridge copies, or caches.
 
+Status: the slice runs end to end with MiniMax as the one provider chain — `image-01` keyframes (three takes per generation, invoked in parallel) and a Hailuo image-to-video clip from the locked keyframe, generated in the background and attached when it finishes. Both are write-ahead jobs that survive restarts without paying twice, select/lock UX is unchanged, and the provider is chosen explicitly with `KINETO_IMAGE_PROVIDER=minimax` (development credentials from `KINETO_MINIMAX_API_KEY`). The app opens a finished clip in the system player; in-app playback is not built. Apple Silicon profiling of the provider path is still open.
+
 ## P1 — Source to screenplay
 
 Deliverables:

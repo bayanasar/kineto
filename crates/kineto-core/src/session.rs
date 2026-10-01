@@ -1026,6 +1026,7 @@ mod tests {
                     kind: ImageProviderKind::LocalDemo,
                     ready: true,
                     generation_cost_micros: 0,
+                    video_cost_micros: 0,
                 }
             );
         }
@@ -1036,6 +1037,7 @@ mod tests {
                 kind: ImageProviderKind::Minimax,
                 ready: true,
                 generation_cost_micros: 10_500,
+                video_cost_micros: 280_000,
             }
         );
         assert!(!format!("{minimax:?}").contains("sk-test"));

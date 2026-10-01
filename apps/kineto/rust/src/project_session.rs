@@ -427,6 +427,24 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
     })
 }
 
+/// Estimated cost of one shot video with the session's provider, in USD
+/// micros; 0 when it cannot generate video, or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_cost_micros(
+    session: *const KinetoProjectSession,
+) -> u64 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        session.session.image_provider().video_cost_micros
+    })
+}
+
 fn image_provider_code(kind: ImageProviderKind) -> u32 {
     match kind {
         ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,

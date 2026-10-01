@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -124,6 +125,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   String _workingLabel = 'Working';
   String? _error;
   late List<String> _recoveryNotes;
+  StreamSubscription<KinetoVideoEvent>? _videoEvents;
 
   @override
   void initState() {
@@ -132,6 +134,21 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     _imageProvider = widget.project.imageProvider;
     _shotSnapshots = _readShotSnapshots();
     _recoveryNotes = describeRecoveries(widget.project.recoveries);
+    // Videos finish in the background, whatever the director is doing.
+    _videoEvents = widget.project.videoEvents.listen((event) {
+      if (!mounted) return;
+      setState(() {
+        _shotSnapshots = _readShotSnapshots();
+        final error = event.error;
+        if (error != null) _error = error.toString();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_videoEvents?.cancel());
+    super.dispose();
   }
 
   List<KinetoShotSnapshot> _readShotSnapshots() =>
@@ -222,6 +239,15 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onMigrate: () => _run(
         () => widget.project.migrateLegacyHashes(_activeShotIndex),
       ),
+      videoMedia: widget.project.videoMediaPath(_activeShotIndex),
+      onGenerateVideo: () => _run(
+        () => widget.project.generateShotVideo(_activeShotIndex),
+        label: 'Submitting video',
+      ),
+      onLockVideo: () => _run(
+        () => widget.project.lockShotVideo(_activeShotIndex),
+      ),
+      onOpenVideo: openInSystemPlayer,
     );
   }
 }
@@ -245,6 +271,10 @@ class DemoWorkspaceView extends StatelessWidget {
       generationCostMicros: 0,
     ),
     this.candidateMedia = const <String?>[],
+    this.videoMedia,
+    this.onGenerateVideo,
+    this.onLockVideo,
+    this.onOpenVideo,
     this.working = false,
     this.workingLabel = 'Working',
     this.recoveryNotes = const <String>[],
@@ -275,6 +305,12 @@ class DemoWorkspaceView extends StatelessWidget {
   /// Absolute media path of each candidate of the active shot; null for a
   /// candidate without media.
   final List<String?> candidateMedia;
+
+  /// Absolute path of the active shot's current video, if it has one.
+  final String? videoMedia;
+  final VoidCallback? onGenerateVideo;
+  final VoidCallback? onLockVideo;
+  final ValueChanged<String>? onOpenVideo;
 
   /// A command is running on the project's worker; changes wait for it.
   final bool working;
@@ -589,6 +625,21 @@ class DemoWorkspaceView extends StatelessWidget {
                     ],
                   ),
                 ],
+                if (shotSnapshot.locked) ...<Widget>[
+                  const SizedBox(height: 20),
+                  _VideoPanel(
+                    snapshot: shotSnapshot,
+                    provider: imageProvider,
+                    poster: selectedIndex != null && selectedIndex < candidateMedia.length
+                        ? candidateMedia[selectedIndex]
+                        : null,
+                    video: videoMedia,
+                    blocked: blocked,
+                    onGenerate: onGenerateVideo,
+                    onLock: onLockVideo,
+                    onOpen: onOpenVideo,
+                  ),
+                ],
                 if (error != null) ...<Widget>[
                   const SizedBox(height: 20),
                   WabPanel(
@@ -657,4 +708,125 @@ class _Keyframe extends StatelessWidget {
           ),
         ),
       );
+}
+
+/// Open a video in the platform's default player. Kineto has no video
+/// playback of its own yet.
+Future<void> openInSystemPlayer(String path) async {
+  final (executable, arguments) = Platform.isMacOS
+      ? ('open', <String>[path])
+      : Platform.isWindows
+          ? ('cmd', <String>['/c', 'start', '', path])
+          : ('xdg-open', <String>[path]);
+  await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+}
+
+/// The shot's video, once its keyframe is locked.
+class _VideoPanel extends StatelessWidget {
+  const _VideoPanel({
+    required this.snapshot,
+    required this.provider,
+    required this.poster,
+    required this.video,
+    required this.blocked,
+    this.onGenerate,
+    this.onLock,
+    this.onOpen,
+  });
+
+  final KinetoShotSnapshot snapshot;
+  final KinetoImageProvider provider;
+  final String? poster;
+  final String? video;
+  final bool blocked;
+  final VoidCallback? onGenerate;
+  final VoidCallback? onLock;
+  final ValueChanged<String>? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = snapshot.videoState;
+    final canGenerate = provider.canGenerateVideo &&
+        poster != null &&
+        !blocked &&
+        state != KinetoVideoState.generating &&
+        state != KinetoVideoState.locked;
+    final generateLabel = state == KinetoVideoState.none
+        ? 'Generate video · 6 s · ≈ ${provider.videoCostLabel}'
+        : 'Regenerate video · ≈ ${provider.videoCostLabel}';
+    return WabPanel(
+      title: 'Video',
+      trailing: WabStatusBadge(
+        _label(state),
+        kind: switch (state) {
+          KinetoVideoState.locked => WabBadgeKind.done,
+          KinetoVideoState.none => WabBadgeKind.neutral,
+          _ => WabBadgeKind.progress,
+        },
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(_explanation(state)),
+          if (poster != null && video != null) ...<Widget>[
+            const SizedBox(height: 12),
+            SizedBox(width: 480, child: _Keyframe(path: poster!)),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: <Widget>[
+              if (video != null && onOpen != null)
+                WabButton(
+                  kind: WabMaterialKind.seal,
+                  onPressed: () => onOpen!(video!),
+                  child: const Text('Open video'),
+                ),
+              if (state == KinetoVideoState.ready)
+                WabButton(
+                  kind: WabMaterialKind.seal,
+                  onPressed: blocked ? null : onLock,
+                  child: const Text('Lock video'),
+                ),
+              if (provider.canGenerateVideo && state != KinetoVideoState.locked)
+                WabButton(
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: canGenerate ? onGenerate : null,
+                  child: Text(generateLabel),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _label(KinetoVideoState state) => switch (state) {
+        KinetoVideoState.none => 'No video',
+        KinetoVideoState.generating => 'Generating',
+        KinetoVideoState.ready => 'Ready',
+        KinetoVideoState.locked => 'Locked',
+        KinetoVideoState.stale => 'Stale',
+      };
+
+  String _explanation(KinetoVideoState state) {
+    if (!provider.canGenerateVideo) {
+      return 'Video starts from a generated keyframe; select MiniMax to generate one.';
+    }
+    if (poster == null) {
+      return 'The locked keyframe has no image to start a video from; regenerate the keyframes.';
+    }
+    return switch (state) {
+      KinetoVideoState.none =>
+        'The locked keyframe becomes the first frame of a 6-second clip, generated in the background.',
+      KinetoVideoState.generating =>
+        'MiniMax is generating the video. It usually takes a few minutes; you can keep working, '
+            'and closing Kineto does not lose it.',
+      KinetoVideoState.ready => 'The video is ready. Open it, then lock it or generate another.',
+      KinetoVideoState.locked => 'The video is locked as production truth.',
+      KinetoVideoState.stale =>
+        'The video was made from a keyframe that is no longer locked; regenerate it.',
+    };
+  }
 }
