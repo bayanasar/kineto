@@ -28,9 +28,10 @@ use kineto_jobs::{
     ProviderExecutionPolicy, ProviderJobId,
 };
 use kineto_project::{
-    ArtifactId, ContentHash, InputHash, cast,
+    ArtifactDependency, ArtifactId, ContentHash, InputHash, cast,
     fs::{ProjectFsError, ProjectRelativePath},
     manifest::CanonicalProject,
+    revisions::DependencyRecord,
     shot::{CandidateOutput, PromptProvenance, keyframe_media_path},
     style,
 };
@@ -107,6 +108,9 @@ struct Receipt {
     media_path: String,
     content_hash: String,
     provenance: PromptProvenance,
+    /// What the prompt was compiled from; older receipts have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dependencies: Vec<DependencyRecord>,
 }
 
 /// Proof that MiniMax certainly did not accept a candidate's latest call.
@@ -262,6 +266,23 @@ impl<'a, T: Transport> MinimaxKeyframes<'a, T> {
                 model: receipt.model,
                 media_path: Some(media_path),
                 provenance: Some(receipt.provenance),
+                dependencies: receipt
+                    .dependencies
+                    .iter()
+                    .map(|dependency| {
+                        Ok(ArtifactDependency {
+                            artifact_id: ArtifactId::new(dependency.artifact_id.clone()).map_err(
+                                |_| MinimaxKeyframeError::Receipt("a dependency is invalid"),
+                            )?,
+                            content_hash: ContentHash::new(dependency.content_hash.clone())
+                                .map_err(|_| {
+                                    MinimaxKeyframeError::Receipt("a dependency is invalid")
+                                })?,
+                            impact: dependency.impact,
+                            field: dependency.field.clone(),
+                        })
+                    })
+                    .collect::<Result<_, MinimaxKeyframeError>>()?,
             },
             input_hash: input_hash.clone(),
         })
@@ -366,6 +387,11 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
             media_path: media_path.as_path().to_string_lossy().into_owned(),
             content_hash: ContentHash::of(&image.bytes).as_str().to_owned(),
             provenance: crate::generation::provenance(prompt),
+            dependencies: prompt
+                .dependencies
+                .iter()
+                .map(DependencyRecord::from)
+                .collect(),
         };
         let mut encoded = serde_json::to_vec_pretty(&receipt)
             .map_err(|_| MinimaxKeyframeError::Receipt("receipt did not encode"))?;

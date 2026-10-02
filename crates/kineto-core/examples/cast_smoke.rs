@@ -10,7 +10,8 @@
 //!
 //! Makes the portraits, selects the first, makes its reference pack, locks
 //! the character and prints what was kept; with `--portraits-only`, stops
-//! after the portraits.
+//! after the portraits. With `0` portraits, the first portrait already made
+//! is used.
 
 use std::{path::PathBuf, time::Instant};
 
@@ -50,14 +51,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let started = Instant::now();
-    let made = cast::audition(
-        &project,
-        &provider,
-        &character,
-        portraits,
-        Submission::Once,
-        &mut NoHooks,
-    )?;
+    let made = if portraits == 0 {
+        document::images(&project, &character)?
+            .into_iter()
+            .filter(|image| image.kind == document::CastImageKind::Portrait)
+            .take(1)
+            .collect()
+    } else {
+        cast::audition(
+            &project,
+            &provider,
+            &character,
+            portraits,
+            Submission::Once,
+            &mut NoHooks,
+        )?
+    };
     for image in &made {
         println!(
             "{} {} ({} chars, dropped {:?})",

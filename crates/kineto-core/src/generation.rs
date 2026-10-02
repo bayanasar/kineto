@@ -34,14 +34,17 @@ use kineto_jobs::{
     IntentState, JobId, JobValueError, PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
 use kineto_project::{
-    ArtifactId, InputHash,
-    cast::CastImageKind,
+    ArtifactId, ContentHash, InputHash,
+    cast::{self, CastError, CastImageKind, CharacterLock, LockedImage},
+    fs::ProjectRelativePath,
     manifest::CanonicalProject,
+    revisions::DependencyRecord,
     shot::{
         AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
-        GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotWorkflow,
+        GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotIntent, ShotWorkflow,
         ShotWorkflowError, demo_candidate_output, load_scene_intent,
     },
+    style::StyleLock,
 };
 use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
 use kineto_provider_minimax::{MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport};
@@ -51,7 +54,8 @@ use kineto_providers::{
 };
 
 use crate::{
-    keyframe_prompt::{self, KeyframePrompt, KeyframePromptError},
+    documents::document_error,
+    keyframe_prompt::{self, KeyframePrompt, KeyframePromptError, Locks},
     minimax::MinimaxKeyframes,
 };
 
@@ -567,6 +571,9 @@ pub enum GenerationError {
     /// The last paid submission may have been accepted but left no record of
     /// it, so submitting again may pay twice. Only the director decides that.
     UnresolvedSubmission,
+    /// The keyframe would lose these identity constraints, and the project's
+    /// policy asks for the director's consent first.
+    IdentityDrift(Vec<String>),
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -589,6 +596,12 @@ impl fmt::Display for GenerationError {
             Self::UnresolvedSubmission => formatter.write_str(
                 "the last submission may already have been accepted and charged; submitting \
                  again may pay twice",
+            ),
+            Self::IdentityDrift(constraints) => write!(
+                formatter,
+                "the keyframe would show {} without a reference and they could look different \
+                 in every take; the project asks for the director's consent first",
+                constraints.join(", ")
             ),
             Self::NeedsProviderCall => formatter.write_str(
                 "finishing this generation needs a paid provider call; generate again to make it",
@@ -617,6 +630,7 @@ impl Error for GenerationError {
             | Self::Prerequisite(_)
             | Self::ModelNotConfigured
             | Self::UnresolvedSubmission
+            | Self::IdentityDrift(_)
             | Self::Unexpected(_) => None,
         }
     }
@@ -737,15 +751,86 @@ pub fn resubmit(
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
     match provider {
-        ImageProvider::LocalDemo => {
-            generate_requested(project, shot, LocalDemoAdapter, hooks, true)
-        }
-        ImageProvider::Minimax(client) => generate_requested(
+        ImageProvider::LocalDemo => generate_consenting(
+            project,
+            shot,
+            LocalDemoAdapter,
+            hooks,
+            Consent::RISK_PAYING_TWICE,
+        ),
+        ImageProvider::Minimax(client) => generate_consenting(
             project,
             shot,
             MinimaxKeyframes::new(project, client.as_ref()),
             hooks,
-            true,
+            Consent::RISK_PAYING_TWICE,
+        ),
+    }
+}
+
+/// What the director has explicitly accepted for one generation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Consent {
+    /// The last paid call may have been charged without its result; ask
+    /// again anyway.
+    pub risk_paying_twice: bool,
+    /// Characters may be shown without an identity reference, though the
+    /// project's policy blocks that.
+    pub identity_drift: bool,
+}
+
+impl Consent {
+    pub const RISK_PAYING_TWICE: Self = Self {
+        risk_paying_twice: true,
+        identity_drift: false,
+    };
+}
+
+/// What a generation does when a keyframe would show a character without an
+/// identity reference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IdentityPolicy {
+    /// Generate, and report it on the candidates.
+    #[default]
+    Report,
+    /// Refuse until the director consents for the generation.
+    Block,
+}
+
+/// The project's identity policy: `identity_policy = "block"` under
+/// `[workflow]` in `project.toml` blocks; anything else reports.
+#[must_use]
+pub fn identity_policy(project: &CanonicalProject) -> IdentityPolicy {
+    match project
+        .manifest()
+        .workflow
+        .extra
+        .get("identity_policy")
+        .and_then(|value| value.as_str())
+    {
+        Some("block") => IdentityPolicy::Block,
+        _ => IdentityPolicy::Report,
+    }
+}
+
+/// [`generate`] with what the director has consented to.
+pub fn generate_with_consent(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    provider: &ImageProvider,
+    hooks: &mut dyn GenerationHooks,
+    consent: Consent,
+) -> Result<AttachOutcome, GenerationError> {
+    match provider {
+        ImageProvider::LocalDemo => {
+            generate_consenting(project, shot, LocalDemoAdapter, hooks, consent)
+        }
+        ImageProvider::Minimax(client) => generate_consenting(
+            project,
+            shot,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+            consent,
         ),
     }
 }
@@ -757,7 +842,7 @@ pub fn generate_with<G: CandidateGenerator>(
     generator: G,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
-    generate_requested(project, shot, generator, hooks, false)
+    generate_consenting(project, shot, generator, hooks, Consent::default())
 }
 
 /// [`resubmit`] with an explicit generator.
@@ -767,17 +852,19 @@ pub fn resubmit_with<G: CandidateGenerator>(
     generator: G,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<AttachOutcome, GenerationError> {
-    generate_requested(project, shot, generator, hooks, true)
+    generate_consenting(project, shot, generator, hooks, Consent::RISK_PAYING_TWICE)
 }
 
-fn generate_requested<G: CandidateGenerator>(
+/// [`generate_with_consent`] with an explicit generator.
+pub fn generate_consenting<G: CandidateGenerator>(
     project: &CanonicalProject,
     shot: &mut ShotWorkflow,
     generator: G,
     hooks: &mut dyn GenerationHooks,
-    risk_paying_twice: bool,
+    consent: Consent,
 ) -> Result<AttachOutcome, GenerationError> {
-    let plan = shot.plan_generation(project)?;
+    let risk_paying_twice = consent.risk_paying_twice;
+    shot.plan_generation(project)?;
     // Refuse before writing anything: a provider that cannot be called or a
     // shot that cannot be compiled must not leave intents behind.
     if !generator.can_invoke() {
@@ -785,6 +872,28 @@ fn generate_requested<G: CandidateGenerator>(
     }
     require_synchronous(&generator.capabilities())?;
     let prompt = compile_prompt(project, shot, &generator)?;
+    if let Some(prompt) = &prompt
+        && !consent.identity_drift
+        && identity_policy(project) == IdentityPolicy::Block
+    {
+        let lost: Vec<String> = prompt
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .filter(|dropped| dropped.degradation == DegradationLevel::IdentityAffecting)
+            .map(|dropped| dropped.constraint.as_str().to_owned())
+            .collect();
+        if !lost.is_empty() {
+            return Err(GenerationError::IdentityDrift(lost));
+        }
+    }
+    // The candidates depend on the locks their prompt follows.
+    let plan = shot.plan_generation_from(
+        project,
+        prompt
+            .as_ref()
+            .map_or(&[][..], |prompt| prompt.dependencies.as_slice()),
+    )?;
     let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
     // A candidate whose last call may have been accepted without leaving its
     // result is never called again unasked: that could pay twice. Checked
@@ -860,12 +969,86 @@ fn compile_prompt<G: CandidateGenerator>(
     }
     let scene = load_scene_intent(project)?;
     let intent = shot.intent()?;
+    let (style, characters) = locks_of(project, intent.as_ref())?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
         intent.as_ref(),
         shot.direction(),
+        Locks {
+            style: style.as_ref(),
+            characters: &characters,
+        },
         &generator.capabilities(),
     )?)))
+}
+
+/// The locked style and the locked casts of the shot's characters.
+fn locks_of(
+    project: &CanonicalProject,
+    intent: Option<&ShotIntent>,
+) -> Result<(Option<StyleLock>, Vec<CharacterLock>), GenerationError> {
+    let style = kineto_project::style::locked(project).map_err(document_error)?;
+    let mut characters = Vec::new();
+    for character in intent.map_or(&[][..], |intent| intent.characters.as_slice()) {
+        match cast::locked(project, character) {
+            Ok(Some(lock)) => characters.push(lock),
+            // An ID that cannot name a cast is never cast.
+            Ok(None) | Err(CastError::InvalidCharacter(_)) => {}
+            Err(error) => return Err(document_error(error)),
+        }
+    }
+    Ok((style, characters))
+}
+
+/// The canonical portrait `locked` names, read and checked against its
+/// hash, to send as the identity reference.
+fn identity_reference(
+    project: &CanonicalProject,
+    locked: &LockedImage,
+) -> Result<IdentityReference, GenerationError> {
+    let path = ProjectRelativePath::new(&locked.media_path).map_err(document_error)?;
+    let bytes = project.root().read(&path).map_err(document_error)?;
+    if ContentHash::of(&bytes).as_str() != locked.content_hash {
+        return Err(document_error(CastError::Mismatch(
+            locked.media_path.clone(),
+        )));
+    }
+    Ok(IdentityReference {
+        artifact_id: ArtifactId::new(locked.artifact_id.clone())
+            .map_err(|_| GenerationError::Unexpected("a locked portrait has an invalid ID"))?,
+        bytes: Arc::from(bytes),
+    })
+}
+
+/// What makes each current candidate of `shot` stale, in candidate order:
+/// each lock its prompt followed that changed or went, and each lock made
+/// since that it did not follow, by artifact ID. Empty for a fresh
+/// candidate and for a demo candidate, which follows no lock.
+pub fn keyframe_staleness(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+) -> Result<Vec<Vec<String>>, GenerationError> {
+    let intent = shot.intent()?;
+    let (style, characters) = locks_of(project, intent.as_ref())?;
+    let mut current: Vec<_> = style
+        .as_ref()
+        .and_then(kineto_project::style::lock_dependency)
+        .into_iter()
+        .collect();
+    current.extend(characters.iter().filter_map(cast::lock_dependency));
+    Ok(shot
+        .candidate_dependencies()?
+        .iter()
+        .zip(shot.candidate_origins()?)
+        .map(|(recorded, origin)| {
+            if origin.provider == DEMO_PROVIDER {
+                return Vec::new();
+            }
+            let recorded: Vec<DependencyRecord> =
+                recorded.iter().map(DependencyRecord::from).collect();
+            cast::stale_parents(&recorded, &current)
+        })
+        .collect())
 }
 
 /// `requested` holds the compiled prompt of a generation the director asked
@@ -957,8 +1140,13 @@ fn complete_inner<G: CandidateGenerator>(
             prompt = compile_prompt(project, shot, &generator)?;
         }
     }
+    let identity = match prompt.as_ref().and_then(|prompt| prompt.identity.as_ref()) {
+        Some(locked) if to_invoke > 0 => Some(identity_reference(project, locked)?),
+        _ => None,
+    };
     for (_, request) in &mut requests {
         request.prompt.clone_from(&prompt);
+        request.identity.clone_from(&identity);
     }
 
     // Every provider call runs on its own thread; recovering a finished call
@@ -1729,7 +1917,7 @@ mod tests {
                 assert_eq!(artifact["provider"], "minimax");
                 assert_eq!(artifact["model"], "image-01");
                 assert_eq!(artifact["media_state"], "present");
-                assert_eq!(artifact["compiler_version"], "keyframe-prompt/1");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/2");
                 assert_eq!(artifact["degradation"], "identity_affecting");
                 assert!(artifact["media_path"].as_str().unwrap().starts_with(
                     "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"

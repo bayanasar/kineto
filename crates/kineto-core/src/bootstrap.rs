@@ -86,7 +86,7 @@ pub fn scene_files() -> Vec<(ProjectRelativePath, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyframe_prompt;
+    use crate::keyframe_prompt::{self, Locks};
     use kineto_project::{
         manifest::{
             CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest,
@@ -143,6 +143,7 @@ mod tests {
                 Some(&scene),
                 Some(&intent),
                 shot.direction(),
+                Locks::default(),
                 &kineto_provider_minimax::image_capabilities(),
             )
             .unwrap();

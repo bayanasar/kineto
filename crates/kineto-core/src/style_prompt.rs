@@ -302,6 +302,8 @@ pub(crate) fn fit(
                     .map(|(part, _)| part),
             )
             .map(|part| part.text.as_str())
+            // A part may carry a constraint said in another part's text.
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -340,6 +342,8 @@ pub(crate) fn fit(
     Ok(KeyframePrompt {
         compiled,
         prompt_hash,
+        dependencies: Vec::new(),
+        identity: None,
     })
 }
 

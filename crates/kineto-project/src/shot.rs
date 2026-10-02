@@ -207,6 +207,9 @@ pub struct CandidateOutput {
     pub media_path: Option<ProjectRelativePath>,
     /// How the provider input was compiled, for providers that took a prompt.
     pub provenance: Option<PromptProvenance>,
+    /// What the prompt was compiled from, such as the locked style and the
+    /// locked casts of the shot's characters.
+    pub dependencies: Vec<ArtifactDependency>,
 }
 
 /// The provider and model recorded on a candidate's artifact. Each is empty
@@ -479,6 +482,7 @@ pub fn demo_candidate_output(
         model: DEMO_MODEL.to_owned(),
         media_path: None,
         provenance: None,
+        dependencies: Vec::new(),
     })
 }
 
@@ -884,6 +888,35 @@ impl ShotWorkflow {
             .collect()
     }
 
+    /// What each current candidate was compiled from, in candidate order,
+    /// as its artifact records it.
+    pub fn candidate_dependencies(
+        &self,
+    ) -> Result<Vec<Vec<ArtifactDependency>>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                self.artifact(candidate)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?
+                    .dependencies
+                    .iter()
+                    .map(|dependency| {
+                        Ok(ArtifactDependency {
+                            artifact_id: ArtifactId::new(dependency.artifact_id.clone())
+                                .map_err(ShotWorkflowError::ArtifactId)?,
+                            content_hash: ContentHash::new(dependency.content_hash.clone())
+                                .map_err(ShotWorkflowError::Hash)?,
+                            impact: dependency.impact.into(),
+                            field: dependency.field.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Who made each current candidate, in candidate order, as its artifact
     /// records it. This is not the session's provider: a project generated
     /// with one provider may be reopened with another.
@@ -977,6 +1010,16 @@ impl ShotWorkflow {
         &self,
         project: &CanonicalProject,
     ) -> Result<GenerationPlan, ShotWorkflowError> {
+        self.plan_generation_from(project, &[])
+    }
+
+    /// [`Self::plan_generation`] for candidates compiled from `parents`, such
+    /// as the locked style and casts, which the plan's input hash covers.
+    pub fn plan_generation_from(
+        &self,
+        project: &CanonicalProject,
+        parents: &[ArtifactDependency],
+    ) -> Result<GenerationPlan, ShotWorkflowError> {
         self.ensure_mutation_allowed()?;
         if self.snapshot()?.locked {
             return Err(ShotWorkflowError::Locked);
@@ -989,10 +1032,23 @@ impl ShotWorkflow {
             .generation_revision
             .checked_add(1)
             .ok_or(ShotWorkflowError::GenerationOverflow)?;
+        let intent = input_hash(&self.shot)?;
+        let input_hash = if parents.is_empty() {
+            intent
+        } else {
+            InputHash::derive(InputHashMaterial {
+                dependencies: parents,
+                canonical_intent: intent.as_str().as_bytes(),
+                provider: "",
+                model: "",
+                canonical_params: b"",
+                compiler_version: "",
+            })
+        };
         Ok(GenerationPlan {
             shot_number: self.shot_number,
             revision,
-            input_hash: input_hash(&self.shot)?,
+            input_hash,
             candidate_ids: candidate_ids(&self.shot.shot_id, revision)?,
         })
     }
@@ -1080,7 +1136,17 @@ impl ShotWorkflow {
                 applied_constraints: provenance.map(|p| p.applied_constraints.clone()),
                 dropped_constraints: provenance.map(|p| p.dropped_constraints.clone()),
                 degradation: provenance.map(PromptProvenance::degradation),
-                dependencies: Vec::new(),
+                dependencies: output
+                    .dependencies
+                    .iter()
+                    .map(|dependency| StoredArtifactDependency {
+                        artifact_id: dependency.artifact_id.as_str().to_owned(),
+                        content_hash: dependency.content_hash.as_str().to_owned(),
+                        impact: dependency.impact.into(),
+                        field: dependency.field.clone(),
+                        extra: BTreeMap::new(),
+                    })
+                    .collect(),
                 extra: BTreeMap::new(),
             });
             candidate_artifact_ids.push(output.artifact_id.as_str().to_owned());

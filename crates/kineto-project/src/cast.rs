@@ -558,6 +558,19 @@ pub fn lock(
     Ok(lock)
 }
 
+/// The dependency work showing a cast character records on its lock: the
+/// locked portrait, and the hash of the lock, which changes with the
+/// portrait, the pack and the forbidden changes.
+#[must_use]
+pub fn lock_dependency(lock: &CharacterLock) -> Option<ArtifactDependency> {
+    Some(ArtifactDependency {
+        artifact_id: ArtifactId::new(lock.portrait.artifact_id.clone()).ok()?,
+        content_hash: ContentHash::of(&serde_json::to_vec(lock).ok()?),
+        impact: crate::DependencyImpact::Semantic,
+        field: Some(format!("character.{}", lock.character_id)),
+    })
+}
+
 /// The lock of `character_id`, if it is cast.
 pub fn locked(
     project: &CanonicalProject,

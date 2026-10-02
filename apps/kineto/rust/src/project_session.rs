@@ -1054,6 +1054,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         }
         GenerationError::Prompt(_) => PROJECT_ERR_INVALID_SHOT_STATE,
         GenerationError::UnresolvedSubmission => PROJECT_ERR_PAID_CALL_UNRESOLVED,
+        GenerationError::IdentityDrift(_) => PROJECT_ERR_INVALID_SHOT_STATE,
         GenerationError::Provider {
             class: ErrorClass::Terminal,
             ..
