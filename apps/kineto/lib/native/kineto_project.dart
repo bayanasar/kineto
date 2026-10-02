@@ -197,6 +197,42 @@ external int _kinetoProjectCandidateMediaCopy(
   Pointer<Uint64> outLength,
 );
 
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_provider_copy')
+external int _kinetoProjectCandidateProviderCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_model_copy')
+external int _kinetoProjectCandidateModelCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
 /// Who generates a session's shot candidates. Chosen when Kineto starts, by
 /// `KINETO_IMAGE_PROVIDER`; a paid provider is never chosen implicitly.
 enum KinetoImageProviderKind {
@@ -214,6 +250,30 @@ enum KinetoImageProviderKind {
       if (kind.wireValue == value) return kind;
     }
     throw StateError('Unknown Kineto image provider code $value');
+  }
+}
+
+/// Who made a candidate: the provider and model recorded on its artifact.
+/// Not the session's provider, which may have changed since.
+final class KinetoCandidateOrigin {
+  const KinetoCandidateOrigin({required this.provider, required this.model});
+
+  /// The recorded provider, for example `minimax`; empty when none is recorded.
+  final String provider;
+
+  /// The recorded model, for example `image-01`; empty when none is recorded.
+  final String model;
+
+  static const Map<String, String> _providerNames = <String, String>{
+    'local-demo': 'Local demo',
+    'minimax': 'MiniMax',
+  };
+
+  /// For example `MiniMax image-01`; null when no provider is recorded.
+  String? get label {
+    if (provider.isEmpty) return null;
+    final name = _providerNames[provider] ?? provider;
+    return model.isEmpty ? name : '$name $model';
   }
 }
 
@@ -457,6 +517,46 @@ final class KinetoProjectSession implements Finalizable {
       'candidate media path',
     );
     return path.isEmpty ? null : path;
+  }
+
+  /// The provider and model recorded on the shot's candidate
+  /// [candidateIndex]. Reads published state; never does I/O.
+  KinetoCandidateOrigin candidateOrigin(int shotIndex, int candidateIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    if (candidateIndex < 0) {
+      throw RangeError.value(
+        candidateIndex,
+        'candidateIndex',
+        'Candidate index must be non-negative',
+      );
+    }
+    return KinetoCandidateOrigin(
+      provider: _copyProjectUtf8(
+        _handle,
+        (session, buffer, capacity, length) => _kinetoProjectCandidateProviderCopy(
+          session,
+          shotIndex,
+          candidateIndex,
+          buffer,
+          capacity,
+          length,
+        ),
+        'candidate provider',
+      ),
+      model: _copyProjectUtf8(
+        _handle,
+        (session, buffer, capacity, length) => _kinetoProjectCandidateModelCopy(
+          session,
+          shotIndex,
+          candidateIndex,
+          buffer,
+          capacity,
+          length,
+        ),
+        'candidate model',
+      ),
+    );
   }
 
   /// The image provider this session generates with. Fixed when it opened.

@@ -37,14 +37,16 @@ Widget _workspace({
   required KinetoShotSnapshot shot,
   required KinetoImageProvider provider,
   List<String?> media = const <String?>[],
+  List<KinetoCandidateOrigin> origins = const <KinetoCandidateOrigin>[],
   VoidCallback? onGenerate,
 }) =>
     MaterialApp(
       theme: WabTheme.materialTheme(lightTheme: false),
       home: DemoWorkspaceView(
-        engineSnapshot: const KinetoEngineSnapshot(abiVersion: 18),
+        engineSnapshot: const KinetoEngineSnapshot(abiVersion: 19),
         imageProvider: provider,
         candidateMedia: media,
+        candidateOrigins: origins,
         shotSnapshot: shot,
         shotSnapshots: <KinetoShotSnapshot>[shot, _empty],
         activeShotIndex: 0,
@@ -57,6 +59,27 @@ Widget _workspace({
       ),
     );
 
+const KinetoCandidateOrigin _madeByMinimax =
+    KinetoCandidateOrigin(provider: 'minimax', model: 'image-01');
+
+const KinetoShotSnapshot _threeTakes = KinetoShotSnapshot(
+  direction: KinetoShotDirection.reaction,
+  generated: true,
+  stale: false,
+  selectedIndex: 1,
+  locked: false,
+  candidateCount: 3,
+  generation: 1,
+  supersededCount: 0,
+);
+
+List<String?> _keyframes(Directory sandbox) => <String?>[
+      for (final take in <String>['a', 'b', 'c'])
+        (File('${sandbox.path}${Platform.pathSeparator}shot_001_g0001_candidate_$take.png')
+              ..writeAsBytesSync(_png))
+            .path,
+    ];
+
 void main() {
   setUp(() {
     final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -67,25 +90,14 @@ void main() {
   testWidgets('provider keyframes are shown as takes from their files', (tester) async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-keyframes-');
     addTearDown(() => sandbox.deleteSync(recursive: true));
-    final media = <String?>[
-      for (final take in <String>['a', 'b', 'c'])
-        (File('${sandbox.path}${Platform.pathSeparator}shot_001_g0001_candidate_$take.png')
-              ..writeAsBytesSync(_png))
-            .path,
-    ];
-    const generated = KinetoShotSnapshot(
-      direction: KinetoShotDirection.reaction,
-      generated: true,
-      stale: false,
-      selectedIndex: 1,
-      locked: false,
-      candidateCount: 3,
-      generation: 1,
-      supersededCount: 0,
-    );
 
     await tester.pumpWidget(
-      _workspace(shot: generated, provider: _minimax, media: media),
+      _workspace(
+        shot: _threeTakes,
+        provider: _minimax,
+        media: _keyframes(sandbox),
+        origins: List<KinetoCandidateOrigin>.filled(3, _madeByMinimax),
+      ),
     );
 
     expect(find.byType(Image), findsNWidgets(3));
@@ -99,6 +111,42 @@ void main() {
     expect(find.text('Wide master'), findsNothing);
     expect(find.text(r'Regenerate · ≈ $0.0105'), findsOneWidget);
     expect(find.text('Selected'), findsWidgets);
+  });
+
+  testWidgets('keyframes name who made them, not the session provider', (tester) async {
+    // Generated with MiniMax, then reopened with the default local demo.
+    final sandbox = Directory.systemTemp.createTempSync('kineto-keyframes-');
+    addTearDown(() => sandbox.deleteSync(recursive: true));
+
+    await tester.pumpWidget(
+      _workspace(
+        shot: _threeTakes,
+        provider: const KinetoImageProvider(
+          kind: KinetoImageProviderKind.localDemo,
+          ready: true,
+          generationCostMicros: 0,
+        ),
+        media: _keyframes(sandbox),
+        origins: const <KinetoCandidateOrigin>[
+          _madeByMinimax,
+          _madeByMinimax,
+          KinetoCandidateOrigin(provider: '', model: ''),
+        ],
+      ),
+    );
+
+    expect(find.byType(Image), findsNWidgets(3));
+    expect(
+      find.text('MiniMax image-01 keyframe · shot_001_g0001_candidate_a.png'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('MiniMax image-01 keyframe · shot_001_g0001_candidate_b.png'),
+      findsOneWidget,
+    );
+    // A record that names no provider is not attributed to anyone.
+    expect(find.text('Keyframe · shot_001_g0001_candidate_c.png'), findsOneWidget);
+    expect(find.textContaining('Local demo keyframe'), findsNothing);
   });
 
   testWidgets('demo candidates keep their cards when there is no media', (tester) async {

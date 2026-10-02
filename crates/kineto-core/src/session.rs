@@ -27,7 +27,7 @@ use std::{
 
 use kineto_project::{
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
-    shot::{ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
+    shot::{CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
 };
 
 use crate::generation::{
@@ -179,6 +179,8 @@ struct PublishedShot {
     snapshot: ShotApprovalSnapshot,
     /// Absolute path of each current candidate's media, in candidate order.
     media: Vec<Option<PathBuf>>,
+    /// Who made each current candidate, in candidate order.
+    origins: Vec<CandidateOrigin>,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -302,16 +304,35 @@ impl ProjectSession {
         shot_index: u32,
         candidate_index: usize,
     ) -> Result<Option<PathBuf>, SnapshotError> {
+        self.published_candidate(shot_index, |published| {
+            published.media.get(candidate_index).cloned()
+        })
+    }
+
+    /// The provider and model recorded on the shot's candidate
+    /// `candidate_index`. Never does I/O, and never answers with the session's
+    /// own provider: the candidate may have been made by another.
+    pub fn candidate_origin(
+        &self,
+        shot_index: u32,
+        candidate_index: usize,
+    ) -> Result<CandidateOrigin, SnapshotError> {
+        self.published_candidate(shot_index, |published| {
+            published.origins.get(candidate_index).cloned()
+        })
+    }
+
+    fn published_candidate<T>(
+        &self,
+        shot_index: u32,
+        read: impl FnOnce(&PublishedShot) -> Option<T>,
+    ) -> Result<T, SnapshotError> {
         if !shot_index_is_valid(shot_index) {
             return Err(SnapshotError::InvalidShot);
         }
         match &lock(&self.view.shots)[shot_index as usize] {
             None => Err(SnapshotError::NotOpen),
-            Some(Ok(published)) => published
-                .media
-                .get(candidate_index)
-                .cloned()
-                .ok_or(SnapshotError::InvalidCandidate),
+            Some(Ok(published)) => read(published).ok_or(SnapshotError::InvalidCandidate),
             Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
         }
     }
@@ -551,6 +572,7 @@ impl Worker {
                         .into_iter()
                         .map(|path| path.map(|path| project.root().resolve(&path)))
                         .collect(),
+                    origins: shot.candidate_origins()?,
                 })
             })
         }))
@@ -852,6 +874,7 @@ mod tests {
         let snapshot = session.snapshot(0).unwrap();
         assert!(snapshot.generated);
         assert_eq!(snapshot.candidate_count, 3);
+        assert_eq!(session.image_provider().kind, ImageProviderKind::LocalDemo);
         for candidate in 0..3 {
             let media = session.candidate_media(0, candidate).unwrap().unwrap();
             assert!(
@@ -859,9 +882,21 @@ mod tests {
                 "{}",
                 media.display()
             );
+            // The candidates were made by MiniMax, whoever the session uses now.
+            assert_eq!(
+                session.candidate_origin(0, candidate).unwrap(),
+                CandidateOrigin {
+                    provider: "minimax".to_owned(),
+                    model: "image-01".to_owned(),
+                }
+            );
         }
         assert!(matches!(
             session.candidate_media(0, 3),
+            Err(SnapshotError::InvalidCandidate)
+        ));
+        assert!(matches!(
+            session.candidate_origin(0, 3),
             Err(SnapshotError::InvalidCandidate)
         ));
         assert!(matches!(

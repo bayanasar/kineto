@@ -362,6 +362,17 @@ void main() {
           isA<KinetoProjectException>().having((error) => error.code, 'code', 110),
         ),
       );
+      // Each candidate names the provider and model its record holds.
+      final origin = project.candidateOrigin(1, 2);
+      expect(origin.provider, 'local-demo');
+      expect(origin.model, 'deterministic-demo-v1');
+      expect(origin.label, 'Local demo deterministic-demo-v1');
+      expect(
+        () => project.candidateOrigin(0, 3),
+        throwsA(
+          isA<KinetoProjectException>().having((error) => error.code, 'code', 110),
+        ),
+      );
       project.close();
     } finally {
       sandbox.deleteSync(recursive: true);

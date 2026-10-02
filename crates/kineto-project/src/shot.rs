@@ -184,6 +184,14 @@ pub struct CandidateOutput {
     pub provenance: Option<PromptProvenance>,
 }
 
+/// The provider and model recorded on a candidate's artifact. Each is empty
+/// when the record names none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateOrigin {
+    pub provider: String,
+    pub model: String,
+}
+
 /// How much a compilation lost, derived from its dropped constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -746,6 +754,26 @@ impl ShotWorkflow {
                     .as_ref()
                     .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
                     .transpose()
+            })
+            .collect()
+    }
+
+    /// Who made each current candidate, in candidate order, as its artifact
+    /// records it. This is not the session's provider: a project generated
+    /// with one provider may be reopened with another.
+    pub fn candidate_origins(&self) -> Result<Vec<CandidateOrigin>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                let artifact = self
+                    .artifact(candidate)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+                Ok(CandidateOrigin {
+                    provider: artifact.provider.clone().unwrap_or_default(),
+                    model: artifact.model.clone().unwrap_or_default(),
+                })
             })
             .collect()
     }

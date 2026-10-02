@@ -148,6 +148,14 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
           widget.project.candidateMediaPath(shotIndex, candidate),
       ];
 
+  List<KinetoCandidateOrigin> _candidateOrigins(int shotIndex) =>
+      <KinetoCandidateOrigin>[
+        for (var candidate = 0;
+            candidate < _shotSnapshots[shotIndex].candidateCount;
+            candidate++)
+          widget.project.candidateOrigin(shotIndex, candidate),
+      ];
+
   void _switchShot(int index) {
     setState(() {
       _activeShotIndex = index;
@@ -189,6 +197,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       engineSnapshot: _engineSnapshot,
       imageProvider: _imageProvider,
       candidateMedia: _candidateMedia(_activeShotIndex),
+      candidateOrigins: _candidateOrigins(_activeShotIndex),
       shotSnapshot: snapshot,
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
@@ -245,6 +254,7 @@ class DemoWorkspaceView extends StatelessWidget {
       generationCostMicros: 0,
     ),
     this.candidateMedia = const <String?>[],
+    this.candidateOrigins = const <KinetoCandidateOrigin>[],
     this.working = false,
     this.workingLabel = 'Working',
     this.recoveryNotes = const <String>[],
@@ -275,6 +285,11 @@ class DemoWorkspaceView extends StatelessWidget {
   /// Absolute media path of each candidate of the active shot; null for a
   /// candidate without media.
   final List<String?> candidateMedia;
+
+  /// Who made each candidate of the active shot, as its artifact records it.
+  /// Candidate cards name this, never [imageProvider]: a project reopened
+  /// with another provider still shows who made its existing candidates.
+  final List<KinetoCandidateOrigin> candidateOrigins;
 
   /// A command is running on the project's worker; changes wait for it.
   final bool working;
@@ -518,6 +533,8 @@ class DemoWorkspaceView extends StatelessWidget {
                           final selected = selectedIndex == index;
                           final media =
                               index < candidateMedia.length ? candidateMedia[index] : null;
+                          final origin =
+                              index < candidateOrigins.length ? candidateOrigins[index].label : null;
                           final buttonLabel = shotSnapshot.locked
                               ? (selected ? 'Locked' : 'Candidate')
                               : (selected ? 'Selected' : 'Select');
@@ -547,8 +564,9 @@ class DemoWorkspaceView extends StatelessWidget {
                                 WabCollectionCard(
                                   icon: const Icon(Icons.photo_camera_back_outlined, size: 30),
                                   title: 'Take ${String.fromCharCode(0x41 + index)}',
-                                  description:
-                                      '${imageProvider.kind.label} keyframe · ${_fileName(media)}',
+                                  description: origin == null
+                                      ? 'Keyframe · ${_fileName(media)}'
+                                      : '$origin keyframe · ${_fileName(media)}',
                                   buttonLabel: buttonLabel,
                                   highlighted: selected,
                                   onPressed: onPressed,
