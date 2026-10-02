@@ -233,6 +233,39 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_only_the_schema_refuses_is_asked_for_again() {
+        let temp = TempDir::new();
+        let project = project(&temp.0.join("film"));
+        // An empty theme parses and passes every Rust check; the schema
+        // requires each theme to be non-empty.
+        let mut empty_theme: serde_json::Value =
+            serde_json::from_str(SAMPLE_ANALYSIS_JSON).unwrap();
+        empty_theme["themes"][0] = "".into();
+        assert!(serde_json::from_value::<StoryAnalysis>(empty_theme.clone()).is_ok());
+        let empty_theme = empty_theme.to_string();
+
+        let backend = FakeLlm::answering([empty_theme.clone(), SAMPLE_ANALYSIS_JSON.to_owned()]);
+        let record = analyze(&project, &backend).unwrap();
+        let stored: StoryAnalysis = revisions::read(&project, &record).unwrap();
+        assert_eq!(stored.themes, ["what goes unsaid"]);
+        assert!(
+            backend.requests()[1].messages[3]
+                .content
+                .contains("$.themes[0]: string is shorter than minLength 1")
+        );
+
+        let backend = FakeLlm::answering([empty_theme.clone(), empty_theme]);
+        assert!(analyze(&project, &backend).is_err());
+        assert_eq!(
+            revisions::revisions(&project, DocumentKind::StoryAnalysis)
+                .unwrap()
+                .len(),
+            1,
+            "a refused answer writes no revision"
+        );
+    }
+
+    #[test]
     fn a_retryable_failure_leaves_nothing_and_can_be_asked_again() {
         let temp = TempDir::new();
         let project = project(&temp.0.join("film"));
@@ -249,6 +282,82 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert_eq!(
+            analyze(&project, &FakeLlm::answering([SAMPLE_ANALYSIS_JSON]))
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[test]
+    fn a_metered_call_that_may_have_been_answered_is_never_asked_again_unasked() {
+        let temp = TempDir::new();
+        let project = project(&temp.0.join("film"));
+        // The connection is lost after the request went out: the model may
+        // have answered, and charged for it.
+        let lost = FakeLlm::failing(FakeLlmError::Retryable).metered();
+        assert!(analyze(&project, &lost).is_err());
+
+        let backend = FakeLlm::answering([SAMPLE_ANALYSIS_JSON]).metered();
+        assert!(matches!(
+            analyze(&project, &backend),
+            Err(GenerationError::UnresolvedSubmission)
+        ));
+        assert!(backend.requests().is_empty(), "never paid twice unasked");
+
+        // The director decides to risk it.
+        assert!(
+            documents::risk_paying_twice(&project, "fake-llm", DocumentKind::StoryAnalysis)
+                .unwrap()
+        );
+        assert_eq!(analyze(&project, &backend).unwrap().revision, 1);
+        assert_eq!(backend.requests().len(), 1);
+        assert!(
+            !documents::risk_paying_twice(&project, "fake-llm", DocumentKind::StoryAnalysis)
+                .unwrap(),
+            "nothing is left to give up on"
+        );
+    }
+
+    #[test]
+    fn a_metered_call_that_certainly_left_no_answer_can_be_asked_again() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        // Refused before the model ran.
+        assert!(
+            analyze(
+                &project,
+                &FakeLlm::failing(FakeLlmError::Terminal).metered()
+            )
+            .is_err()
+        );
+        assert!(
+            target
+                .join(".kineto/generation/story_analysis_r0001.refused.json")
+                .exists()
+        );
+        // Answered twice, and both answers refused.
+        let backend = FakeLlm::answering(["prose", "more prose"]).metered();
+        assert!(analyze(&project, &backend).is_err());
+        assert_eq!(backend.requests().len(), 2);
+
+        let backend = FakeLlm::answering([SAMPLE_ANALYSIS_JSON]).metered();
+        assert_eq!(analyze(&project, &backend).unwrap().revision, 1);
+        assert!(
+            !target
+                .join(".kineto/generation/story_analysis_r0001.refused.json")
+                .exists(),
+            "the refusal explained an attempt that is retired"
+        );
+    }
+
+    #[test]
+    fn a_model_not_charged_per_call_is_asked_again_after_a_lost_answer() {
+        let temp = TempDir::new();
+        let project = project(&temp.0.join("film"));
+        assert!(analyze(&project, &FakeLlm::failing(FakeLlmError::Retryable)).is_err());
         assert_eq!(
             analyze(&project, &FakeLlm::answering([SAMPLE_ANALYSIS_JSON]))
                 .unwrap()

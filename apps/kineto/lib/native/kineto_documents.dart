@@ -21,15 +21,15 @@ external int _kinetoProjectImportSource(
   int token,
 );
 
-@Native<Int32 Function(Pointer<Void>, Uint64)>(
+@Native<Int32 Function(Pointer<Void>, Bool, Uint64)>(
   symbol: 'kineto_project_analyze_story',
 )
-external int _kinetoProjectAnalyzeStory(Pointer<Void> session, int token);
+external int _kinetoProjectAnalyzeStory(Pointer<Void> session, bool resubmit, int token);
 
-@Native<Int32 Function(Pointer<Void>, Uint64)>(
+@Native<Int32 Function(Pointer<Void>, Bool, Uint64)>(
   symbol: 'kineto_project_write_screenplay',
 )
-external int _kinetoProjectWriteScreenplay(Pointer<Void> session, int token);
+external int _kinetoProjectWriteScreenplay(Pointer<Void> session, bool resubmit, int token);
 
 @Native<
   Int32 Function(
@@ -38,6 +38,7 @@ external int _kinetoProjectWriteScreenplay(Pointer<Void> session, int token);
     Uint64,
     Pointer<Uint8>,
     Uint64,
+    Bool,
     Uint64,
   )
 >(symbol: 'kineto_project_rewrite_scene')
@@ -47,6 +48,7 @@ external int _kinetoProjectRewriteScene(
   int sceneIdLength,
   Pointer<Uint8> direction,
   int directionLength,
+  bool resubmit,
   int token,
 );
 
@@ -501,16 +503,22 @@ extension KinetoProjectDocuments on KinetoProjectSession {
   }
 
   /// Analyse the current source with the session's language model.
-  Future<void> analyzeStory() =>
-      _submitDocument((token) => _kinetoProjectAnalyzeStory(_handle, token));
+  ///
+  /// When the last paid request for the analysis may have been answered,
+  /// and charged for, without its answer being kept, this fails with
+  /// [KinetoProjectException.paidCallUnresolved] unless [resubmit] is the
+  /// director's decision to risk paying twice. The same holds for
+  /// [writeScreenplay] and [rewriteScene].
+  Future<void> analyzeStory({bool resubmit = false}) =>
+      _submitDocument((token) => _kinetoProjectAnalyzeStory(_handle, resubmit, token));
 
   /// Write a screenplay of the current story analysis.
-  Future<void> writeScreenplay() =>
-      _submitDocument((token) => _kinetoProjectWriteScreenplay(_handle, token));
+  Future<void> writeScreenplay({bool resubmit = false}) =>
+      _submitDocument((token) => _kinetoProjectWriteScreenplay(_handle, resubmit, token));
 
   /// Write scene [sceneId] of the latest screenplay again, as [direction]
   /// asks.
-  Future<void> rewriteScene(String sceneId, {String? direction}) =>
+  Future<void> rewriteScene(String sceneId, {String? direction, bool resubmit = false}) =>
       _submitDocument((token) {
         final arena = Arena();
         try {
@@ -522,6 +530,7 @@ extension KinetoProjectDocuments on KinetoProjectSession {
             idBytes.length,
             directionBytes.pointer,
             directionBytes.length,
+            resubmit,
             token,
           );
         } finally {

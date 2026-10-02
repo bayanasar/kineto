@@ -362,7 +362,11 @@ enum Work {
         shot_index: u32,
         command: ShotCommand,
     },
-    Document(DocumentCommand),
+    Document {
+        command: DocumentCommand,
+        /// The director chose to risk paying twice.
+        resubmit: bool,
+    },
 }
 
 struct Envelope {
@@ -462,7 +466,29 @@ impl ProjectSession {
     pub fn submit_document(&self, command: DocumentCommand, token: u64) -> Result<(), SubmitError> {
         self.send(Envelope {
             token,
-            work: Work::Document(command),
+            work: Work::Document {
+                command,
+                resubmit: false,
+            },
+        })
+    }
+
+    /// Queue a command that asks a model for a document although the last
+    /// request for that document may have been answered, and charged for,
+    /// without its answer being kept, so this one may pay twice. Only on the
+    /// director's explicit decision; for any other command it is
+    /// [`Self::submit_document`].
+    pub fn resubmit_document(
+        &self,
+        command: DocumentCommand,
+        token: u64,
+    ) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Document {
+                command,
+                resubmit: true,
+            },
         })
     }
 
@@ -681,12 +707,12 @@ fn run(
             }
             Some(Envelope {
                 token,
-                work: Work::Document(command),
+                work: Work::Document { command, resubmit },
             }) => {
                 let result = match worker.as_mut() {
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
-                        let result = worker.apply_document(command);
+                        let result = worker.apply_document(command, resubmit);
                         worker.publish_documents(view);
                         result
                     }
@@ -1067,19 +1093,27 @@ impl Worker {
         recoveries
     }
 
-    fn apply_document(&mut self, command: DocumentCommand) -> Result<(), SessionError> {
+    fn apply_document(
+        &mut self,
+        command: DocumentCommand,
+        resubmit: bool,
+    ) -> Result<(), SessionError> {
         let ready = self.model.describe().ready;
         let project = &self.project;
         let model = &self.model;
-        let ask = |generate: &dyn Fn() -> Result<RevisionRecord, GenerationError>| {
-            if ready {
+        let ask =
+            |kind: DocumentKind, generate: &dyn Fn() -> Result<RevisionRecord, GenerationError>| {
+                if !ready {
+                    return Err(SessionError::Generation(
+                        GenerationError::ModelNotConfigured,
+                    ));
+                }
+                if resubmit {
+                    documents::risk_paying_twice(project, &model.info().provider, kind)
+                        .map_err(generation_error)?;
+                }
                 generate().map(|_| ()).map_err(generation_error)
-            } else {
-                Err(SessionError::Generation(
-                    GenerationError::ModelNotConfigured,
-                ))
-            }
-        };
+            };
         let revision_error = |error| SessionError::Document(DocumentError::Revision(error));
         panic::catch_unwind(AssertUnwindSafe(|| match command {
             DocumentCommand::ImportSource {
@@ -1089,14 +1123,18 @@ impl Worker {
             } => source::import(project, text.as_bytes(), format, original_name.as_deref())
                 .map(|_| ())
                 .map_err(|error| SessionError::Document(DocumentError::Source(error))),
-            DocumentCommand::AnalyzeStory => ask(&|| story::analyze(project, model)),
-            DocumentCommand::WriteScreenplay => ask(&|| screenplay::write(project, model)),
+            DocumentCommand::AnalyzeStory => ask(DocumentKind::StoryAnalysis, &|| {
+                story::analyze(project, model)
+            }),
+            DocumentCommand::WriteScreenplay => ask(DocumentKind::Screenplay, &|| {
+                screenplay::write(project, model)
+            }),
             DocumentCommand::RewriteScene {
                 scene_id,
                 direction,
-            } => {
-                ask(&|| screenplay::rewrite_scene(project, model, &scene_id, direction.as_deref()))
-            }
+            } => ask(DocumentKind::Screenplay, &|| {
+                screenplay::rewrite_scene(project, model, &scene_id, direction.as_deref())
+            }),
             DocumentCommand::SaveScene { based_on, edit } => {
                 let latest = revisions::latest(project, DocumentKind::Screenplay)
                     .map_err(revision_error)?
@@ -2302,7 +2340,7 @@ mod tests {
 
     mod documents {
         use super::*;
-        use kineto_llm::fake::FakeLlm;
+        use kineto_llm::fake::{FakeLlm, FakeLlmError};
         use kineto_project::{
             revisions::Origin,
             screenplay::{Block, BlockKind, SAMPLE_SCREENPLAY_JSON},
@@ -2348,9 +2386,22 @@ mod tests {
             events: &Receiver<Event>,
             command: DocumentCommand,
         ) -> Result<(), String> {
+            send(session, events, command, false)
+        }
+
+        fn send(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: DocumentCommand,
+            resubmit: bool,
+        ) -> Result<(), String> {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            session.submit_document(command, token).unwrap();
+            if resubmit {
+                session.resubmit_document(command, token).unwrap();
+            } else {
+                session.submit_document(command, token).unwrap();
+            }
             match events.recv_timeout(WAIT).unwrap() {
                 Event::DocumentCompleted {
                     token: actual,
@@ -2379,6 +2430,36 @@ mod tests {
                     }],
                 },
             }
+        }
+
+        #[test]
+        fn an_unresolved_paid_request_waits_for_the_director_to_resubmit() {
+            let temp = TempDir::new();
+            let model = DocumentModel::Fake(
+                FakeLlm::scripted([
+                    Err(FakeLlmError::Retryable),
+                    Ok(SAMPLE_ANALYSIS_JSON.to_owned()),
+                ])
+                .metered(),
+            );
+            let (session, events) = create_with(&temp.0.join("film"), model);
+            assert!(run(&session, &events, DocumentCommand::AnalyzeStory).is_err());
+            assert_eq!(
+                run(&session, &events, DocumentCommand::AnalyzeStory),
+                Err("Generation(UnresolvedSubmission)".to_owned())
+            );
+            assert!(session.documents().unwrap().analysis.is_none());
+            send(&session, &events, DocumentCommand::AnalyzeStory, true).unwrap();
+            assert_eq!(
+                session
+                    .documents()
+                    .unwrap()
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .revision,
+                1
+            );
         }
 
         #[test]

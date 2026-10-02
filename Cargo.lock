@@ -174,10 +174,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kineto-json-schema"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "kineto-llm"
 version = "0.1.0"
 dependencies = [
  "kineto-jobs",
+ "kineto-json-schema",
  "kineto-providers",
  "serde",
  "serde_json",
@@ -237,6 +245,7 @@ dependencies = [
  "kineto-core",
  "kineto-job-runtime",
  "kineto-jobs",
+ "kineto-json-schema",
  "kineto-llm",
  "kineto-project",
  "kineto-provider-minimax",

@@ -54,13 +54,19 @@ unsafe fn session_ref<'a>(session: *const KinetoProjectSession) -> Option<&'a Pr
 unsafe fn submit(
     session: *const KinetoProjectSession,
     command: DocumentCommand,
+    resubmit: bool,
     token: u64,
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     let Some(session) = (unsafe { session_ref(session) }) else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    match session.submit_document(command, token) {
+    let submitted = if resubmit {
+        session.resubmit_document(command, token)
+    } else {
+        session.submit_document(command, token)
+    };
+    match submitted {
         Ok(()) => PROJECT_OK,
         Err(SubmitError::Closed | SubmitError::InvalidShot) => PROJECT_ERR_NOT_OPEN,
     }
@@ -114,22 +120,27 @@ pub unsafe extern "C" fn kineto_project_import_source(
             original_name,
         };
         // SAFETY: forwarded caller contract.
-        unsafe { submit(session, command, token) }
+        unsafe { submit(session, command, false, token) }
     })
 }
 
 /// Queue analysing the current source with the session's language model.
+/// When the last paid request for the analysis may have been answered
+/// without its answer being kept, it completes with `paid_call_unresolved`
+/// unless `resubmit` is the director's decision to risk paying twice; the
+/// same holds for the other model commands.
 ///
 /// # Safety
 /// `session` must be a live project-session handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_analyze_story(
     session: *const KinetoProjectSession,
+    resubmit: bool,
     token: u64,
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, DocumentCommand::AnalyzeStory, token)
+        submit(session, DocumentCommand::AnalyzeStory, resubmit, token)
     })
 }
 
@@ -140,11 +151,12 @@ pub unsafe extern "C" fn kineto_project_analyze_story(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kineto_project_write_screenplay(
     session: *const KinetoProjectSession,
+    resubmit: bool,
     token: u64,
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, DocumentCommand::WriteScreenplay, token)
+        submit(session, DocumentCommand::WriteScreenplay, resubmit, token)
     })
 }
 
@@ -161,6 +173,7 @@ pub unsafe extern "C" fn kineto_project_rewrite_scene(
     scene_id_len: u64,
     direction_ptr: *const u8,
     direction_len: u64,
+    resubmit: bool,
     token: u64,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
@@ -180,7 +193,7 @@ pub unsafe extern "C" fn kineto_project_rewrite_scene(
             direction,
         };
         // SAFETY: forwarded caller contract.
-        unsafe { submit(session, command, token) }
+        unsafe { submit(session, command, resubmit, token) }
     })
 }
 
@@ -272,7 +285,7 @@ pub unsafe extern "C" fn kineto_project_save_scene(
             },
         };
         // SAFETY: forwarded caller contract.
-        unsafe { submit(session, command, token) }
+        unsafe { submit(session, command, false, token) }
     })
 }
 
@@ -289,7 +302,12 @@ pub unsafe extern "C" fn kineto_project_lock_screenplay(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, DocumentCommand::LockScreenplay { revision }, token)
+        submit(
+            session,
+            DocumentCommand::LockScreenplay { revision },
+            false,
+            token,
+        )
     })
 }
 

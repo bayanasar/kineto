@@ -410,6 +410,11 @@ final class KinetoProjectException implements Exception {
   /// help (for example a content or account refusal).
   static const int providerRefused = 125;
 
+  /// A paid call may already have been accepted, and charged for, without
+  /// its result being kept; asking again waits for the director's explicit
+  /// decision to risk paying twice.
+  static const int paidCallUnresolved = 126;
+
   /// The shot's video is still being generated.
   static const int videoInFlight = 127;
 

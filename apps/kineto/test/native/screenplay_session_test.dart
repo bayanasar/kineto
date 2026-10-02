@@ -59,6 +59,14 @@ void main() {
       expect(session.languageModel.ready, isFalse);
       expect(session.documentCostMicros(KinetoDocumentKind.storyAnalysis), isNull);
       await expectLater(session.analyzeStory(), _refusedWith(KinetoProjectException.modelNotConfigured));
+      await expectLater(
+        session.analyzeStory(resubmit: true),
+        _refusedWith(KinetoProjectException.modelNotConfigured),
+      );
+      await expectLater(
+        session.rewriteScene(night.id, resubmit: true),
+        _refusedWith(KinetoProjectException.modelNotConfigured),
+      );
 
       final edited = <KinetoScreenplayBlock>[
         ...night.blocks.take(2),

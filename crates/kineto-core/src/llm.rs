@@ -186,6 +186,7 @@ impl DocumentModel {
 pub struct ModelError {
     message: String,
     class: ErrorClass,
+    lost_answer: bool,
 }
 
 impl fmt::Display for ModelError {
@@ -202,6 +203,7 @@ where
 {
     backend.complete(request).map_err(|error| ModelError {
         class: backend.classify(&error),
+        lost_answer: backend.may_have_lost_an_answer(&error),
         message: error.to_string(),
     })
 }
@@ -228,12 +230,17 @@ impl LlmBackend for DocumentModel {
             _ => Err(ModelError {
                 message: "no language model is configured".to_owned(),
                 class: ErrorClass::Terminal,
+                lost_answer: false,
             }),
         }
     }
 
     fn classify(&self, error: &ModelError) -> ErrorClass {
         error.class
+    }
+
+    fn may_have_lost_an_answer(&self, error: &ModelError) -> bool {
+        error.lost_answer
     }
 }
 

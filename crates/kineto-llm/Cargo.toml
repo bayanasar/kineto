@@ -9,6 +9,7 @@ testing = []
 
 [dependencies]
 kineto-jobs = { path = "../kineto-jobs" }
+kineto-json-schema = { path = "../kineto-json-schema" }
 kineto-providers = { path = "../kineto-providers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
