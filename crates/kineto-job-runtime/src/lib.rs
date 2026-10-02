@@ -542,6 +542,19 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// Give up on an invoked intent whose remote job the provider reports as
+    /// failed, so the same job can be prepared and submitted afresh.
+    ///
+    /// Only an `Invoked` intent with a remote job handle is retired; the
+    /// caller asserts the provider reported that job as failed, so there is
+    /// no result to lose. The removal order is that of [`Self::retire_failed`].
+    pub fn retire_remote_failure(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Invoked
+                && record.intent.provider_job_id().is_some()
+        })
+    }
+
     /// Give up on a prepared intent whose provider call was attempted but
     /// whose outcome was never established, so the same job can be prepared
     /// and invoked afresh.
@@ -2584,6 +2597,48 @@ mod tests {
             !runtime.retire_failed(&job_id).unwrap(),
             "an invoked intent is never retired"
         );
+    }
+
+    #[test]
+    fn a_failed_remote_job_can_be_retired_and_submitted_afresh() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-video-retire").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_video_retire").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "video.generate",
+                input_hash('5'),
+                artifact("video_candidate_retire"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_remote_failure(&job_id).unwrap(),
+            "not invoked yet"
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Ok(Invocation::Pending(ProviderJobId::new("task-1").unwrap()));
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+        assert_eq!(
+            runtime
+                .load(&job_id)
+                .unwrap()
+                .unwrap()
+                .intent()
+                .provider_job_id()
+                .map(ProviderJobId::as_str),
+            Some("task-1")
+        );
+
+        assert!(runtime.retire_remote_failure(&job_id).unwrap());
+        assert!(runtime.load(&job_id).unwrap().is_none());
+        assert_eq!(created(prepare().unwrap()).attempts(), 0);
     }
 
     #[test]

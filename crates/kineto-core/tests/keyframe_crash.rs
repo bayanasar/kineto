@@ -64,6 +64,14 @@ impl Transport for FakeMinimax {
             .into_bytes(),
         })
     }
+
+    fn get(&self, url: &str, _api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("keyframes make no GET request: {url}")
+    }
+
+    fn download(&self, url: &str, _max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("keyframes download nothing: {url}")
+    }
 }
 
 fn client() -> (MinimaxClient<FakeMinimax>, Arc<AtomicU32>) {
@@ -152,6 +160,9 @@ impl SessionSink for Sink {
     }
 
     fn completed(&self, _token: u64, _shot_index: u32, _result: &Result<(), SessionError>) {}
+
+    fn video_finished(&self, _shot_index: u32, _revision: u16, _result: &Result<(), SessionError>) {
+    }
 }
 
 /// Open the project as the app does, here without a MiniMax key.

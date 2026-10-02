@@ -179,6 +179,44 @@ external int _kinetoProjectShotMigrateLegacyHashes(
   int token,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_generate_video',
+)
+external int _kinetoProjectShotGenerateVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_video',
+)
+external int _kinetoProjectShotResubmitVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_lock_video',
+)
+external int _kinetoProjectShotLockVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>, Uint64, Pointer<Uint64>)>(
+  symbol: 'kineto_project_video_media_copy',
+)
+external int _kinetoProjectVideoMediaCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
 @Native<Uint32 Function(Pointer<Void>)>(
   symbol: 'kineto_project_image_provider',
   isLeaf: true,
@@ -196,6 +234,12 @@ external int _kinetoProjectImageProviderReady(Pointer<Void> session);
   isLeaf: true,
 )
 external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
+
+@Native<Uint64 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_cost_micros',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoCostMicros(Pointer<Void> session);
 
 @Native<
     Int32 Function(
@@ -302,6 +346,7 @@ final class KinetoImageProvider {
     required this.kind,
     required this.ready,
     required this.generationCostMicros,
+    this.videoCostMicros = 0,
   });
 
   final KinetoImageProviderKind kind;
@@ -312,12 +357,24 @@ final class KinetoImageProvider {
   /// Estimated cost of one generation (every candidate), in USD micros.
   final int generationCostMicros;
 
+  /// Estimated cost of one shot video, in USD micros; 0 when this provider
+  /// cannot generate video.
+  final int videoCostMicros;
+
   bool get isPaid => kind != KinetoImageProviderKind.localDemo;
 
-  /// The estimate in US dollars, for example `$0.0105`.
-  String get generationCostLabel {
-    final dollars = generationCostMicros ~/ 1000000;
-    final micros = (generationCostMicros % 1000000).toString().padLeft(6, '0');
+  /// Whether this session can generate a shot video at all.
+  bool get canGenerateVideo => ready && videoCostMicros > 0;
+
+  /// The generation estimate in US dollars, for example `$0.0105`.
+  String get generationCostLabel => _dollars(generationCostMicros);
+
+  /// The video estimate in US dollars, for example `$0.28`.
+  String get videoCostLabel => _dollars(videoCostMicros);
+
+  static String _dollars(int amountMicros) {
+    final dollars = amountMicros ~/ 1000000;
+    final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
     final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
     return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
   }
@@ -352,6 +409,9 @@ final class KinetoProjectException implements Exception {
   /// The image provider refused the request; asking again unchanged will not
   /// help (for example a content or account refusal).
   static const int providerRefused = 125;
+
+  /// The shot's video is still being generated.
+  static const int videoInFlight = 127;
 
   final int code;
   final String message;
@@ -537,6 +597,44 @@ final class KinetoProjectSession implements Finalizable {
     return path.isEmpty ? null : path;
   }
 
+  /// Absolute path of the shot's current video, or null when it has none.
+  /// Reads published state; never does I/O.
+  String? videoMediaPath(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final path = _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) =>
+          _kinetoProjectVideoMediaCopy(session, shotIndex, buffer, capacity, length),
+      'video media path',
+    );
+    return path.isEmpty ? null : path;
+  }
+
+  /// Videos generated in the background as they finish: attached, or failed
+  /// and ready to be asked for again.
+  Stream<KinetoVideoEvent> get videoEvents => _port.videoEvents;
+
+  /// Submit a video from the shot's locked keyframe. Completes once MiniMax
+  /// has accepted the task; the video arrives on [videoEvents].
+  Future<void> generateShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotGenerateVideo(_handle, shotIndex, token),
+      );
+
+  /// Submit the shot's video again although its last submission is
+  /// unresolved: MiniMax may already have accepted, and charged for, it.
+  /// Only on the director's explicit decision to risk paying twice.
+  Future<void> resubmitShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitVideo(_handle, shotIndex, token),
+      );
+
+  Future<void> lockShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotLockVideo(_handle, shotIndex, token),
+      );
+
   /// The provider and model recorded on the shot's candidate
   /// [candidateIndex]. Reads published state; never does I/O.
   KinetoCandidateOrigin candidateOrigin(int shotIndex, int candidateIndex) {
@@ -586,6 +684,7 @@ final class KinetoProjectSession implements Finalizable {
       ),
       ready: _kinetoProjectImageProviderReady(_handle) != 0,
       generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
+      videoCostMicros: _kinetoProjectVideoCostMicros(_handle),
     );
   }
 
@@ -730,6 +829,12 @@ final class _SessionPort {
   static const int _opened = 1;
   static const int _completed = 2;
   static const int _recovered = 3;
+  static const int _video = 4;
+
+  final StreamController<KinetoVideoEvent> _videoEvents =
+      StreamController<KinetoVideoEvent>.broadcast(sync: false);
+
+  Stream<KinetoVideoEvent> get videoEvents => _videoEvents.stream;
 
   late final RawReceivePort _raw;
   final Completer<void> _openCompleter = Completer<void>();
@@ -767,6 +872,7 @@ final class _SessionPort {
     _closed = true;
     _owner = null;
     _raw.close();
+    unawaited(_videoEvents.close());
     const error = KinetoProjectSessionClosedException();
     if (!_openCompleter.isCompleted) _openCompleter.completeError(error);
     for (final completer in _pending.values) {
@@ -795,6 +901,14 @@ final class _SessionPort {
             errorCode: status,
           ),
         );
+      case _video:
+        _videoEvents.add(
+          KinetoVideoEvent(
+            shotIndex: values[3],
+            revision: values[1],
+            errorCode: status,
+          ),
+        );
       case _completed:
         final completer = _pending.remove(values[1]);
         if (completer == null) break;
@@ -814,6 +928,24 @@ final class _SessionPort {
     _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
     if (_pending.isEmpty) _owner = null;
   }
+}
+
+/// A video generated in the background finished.
+final class KinetoVideoEvent {
+  const KinetoVideoEvent({
+    required this.shotIndex,
+    required this.revision,
+    required this.errorCode,
+  });
+
+  final int shotIndex;
+  final int revision;
+
+  /// 0 when the video was attached; otherwise why it was not.
+  final int errorCode;
+
+  KinetoProjectException? get error =>
+      errorCode == 0 ? null : _projectException(errorCode);
 }
 
 /// Unfinished work from an earlier session that an open dealt with.
@@ -942,6 +1074,12 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'shot_intent_missing': 124,
   'provider_refused': 125,
   'paid_call_unresolved': 126,
+  'video_in_flight': 127,
+  'keyframe_not_locked': 128,
+  'video_locked': 129,
+  'no_video': 130,
+  'stale_video': 131,
+  'no_first_frame': 132,
   'panic': 199,
 };
 
@@ -972,9 +1110,15 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   122: 'KINETO_IMAGE_PROVIDER names an image provider this Kineto build does not have',
   123: 'The image provider has no API key configured',
   124: 'This shot has no written intent to generate from',
-  125: 'The image provider refused the request; it will not succeed unchanged',
+  125: 'The provider refused the request; it will not succeed unchanged',
   126: 'A paid call may already have been accepted and charged without its result being kept; '
       'asking again may pay twice',
+  127: "This shot's video is still being generated",
+  128: 'Lock a keyframe before generating video',
+  129: "This shot's video is locked",
+  130: 'Generate a video before locking it',
+  131: 'The video was made from a keyframe that is no longer locked; regenerate it',
+  132: 'The locked keyframe has no image to start a video from',
   199: 'Native project call failed unexpectedly',
 };
 

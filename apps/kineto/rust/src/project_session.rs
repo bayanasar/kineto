@@ -39,6 +39,9 @@ const MESSAGE_COMPLETED: i64 = 2;
 /// `[RECOVERED, revision or record count, status, shot or -1]`, posted before
 /// `OPENED` for each piece of unfinished work an earlier session left.
 const MESSAGE_RECOVERED: i64 = 3;
+/// `[VIDEO, video revision, status, shot]`, posted when a video generated in
+/// the background was attached, or failed and was retired.
+const MESSAGE_VIDEO: i64 = 4;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -132,6 +135,15 @@ impl SessionSink for DartPort {
         self.post([
             MESSAGE_COMPLETED,
             i64::from_ne_bytes(token.to_ne_bytes()),
+            i64::from(session_status(result)),
+            i64::from(shot_index),
+        ]);
+    }
+
+    fn video_finished(&self, shot_index: u32, revision: u16, result: &Result<(), SessionError>) {
+        self.post([
+            MESSAGE_VIDEO,
+            i64::from(revision),
             i64::from(session_status(result)),
             i64::from(shot_index),
         ]);
@@ -415,6 +427,24 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
     })
 }
 
+/// Estimated cost of one shot video with the session's provider, in USD
+/// micros; 0 when it cannot generate video, or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_cost_micros(
+    session: *const KinetoProjectSession,
+) -> u64 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        session.session.image_provider().video_cost_micros
+    })
+}
+
 fn image_provider_code(kind: ImageProviderKind) -> u32 {
     match kind {
         ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
@@ -499,10 +529,17 @@ pub unsafe extern "C" fn kineto_project_shot_state(
         if out_state.is_null() {
             return PROJECT_ERR_INVALID_ARGUMENT;
         }
+        let in_flight = session.session.video_in_flight(shot_index);
+        let unresolved = session.session.video_unresolved(shot_index);
         match session.session.snapshot(shot_index) {
             Ok(snapshot) => {
+                let bits = encode_shot_snapshot(
+                    snapshot,
+                    in_flight.unwrap_or(false),
+                    unresolved.unwrap_or(false),
+                );
                 // SAFETY: caller guarantees writable storage for one u64.
-                unsafe { ptr::write(out_state, encode_shot_snapshot(snapshot)) };
+                unsafe { ptr::write(out_state, bits) };
                 PROJECT_OK
             }
             Err(error) => snapshot_error_code(&error),
@@ -807,6 +844,95 @@ pub unsafe extern "C" fn kineto_project_shot_lock(
     })
 }
 
+/// Queue submitting a video from the shot's locked keyframe. Returns once
+/// queued; the `COMPLETED` message arrives once MiniMax accepted the task, and
+/// a `VIDEO` message once the video is attached or failed.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_generate_video(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::GenerateVideo, token)
+    })
+}
+
+/// Queue submitting the shot's video again although its last submission is
+/// unresolved (status `126`): MiniMax may already have accepted, and charged
+/// for, that submission. Only on the director's explicit decision to risk
+/// paying twice. Otherwise as [`kineto_project_shot_generate_video`].
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_resubmit_video(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::ResubmitVideo, token)
+    })
+}
+
+/// Queue locking the shot's current video. Returns once queued.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_lock_video(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::LockVideo, token)
+    })
+}
+
+/// Copy the absolute path of the shot's current video into caller-owned
+/// memory, with the same sizing contract as project metadata; an empty path
+/// when the shot has no video. Reads published state only.
+///
+/// # Safety
+/// `session` must be live. `out_len` must point to writable `u64` storage. If
+/// `out_cap` is non-zero, `out_buf` must be writable for at least `out_cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_media_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let media = match session.session.video_media(shot_index) {
+            Ok(media) => media,
+            Err(error) => return snapshot_error_code(&error),
+        };
+        let path = match &media {
+            None => "",
+            Some(path) => match path.to_str() {
+                Some(path) => path,
+                None => return PROJECT_ERR_INVALID_UTF8,
+            },
+        };
+        // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
+        unsafe { copy_utf8(path.as_bytes(), out_buf, out_cap, out_len) }
+    })
+}
+
 /// Queue an explicit reset of this shot's active approval state, retaining
 /// superseded lineage. This is never triggered implicitly by an upstream edit.
 ///
@@ -856,6 +982,7 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Shot(error) => shot_error_code(error),
         SessionError::Generation(error) => generation_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
+        SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
     }
 }
@@ -864,6 +991,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
     match error {
         GenerationError::Shot(error) => shot_error_code(error),
         GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
+        GenerationError::NoFirstFrame => PROJECT_ERR_NO_FIRST_FRAME,
         GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
             PROJECT_ERR_SHOT_INTENT_MISSING
         }
@@ -892,6 +1020,10 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         ShotWorkflowError::StaleSelection => PROJECT_ERR_STALE_SELECTION,
         ShotWorkflowError::GenerationOverflow => PROJECT_ERR_GENERATION_OVERFLOW,
         ShotWorkflowError::MigrationRequired => PROJECT_ERR_MIGRATION_REQUIRED,
+        ShotWorkflowError::KeyframeNotLocked => PROJECT_ERR_KEYFRAME_NOT_LOCKED,
+        ShotWorkflowError::VideoLocked => PROJECT_ERR_VIDEO_LOCKED,
+        ShotWorkflowError::NoVideo => PROJECT_ERR_NO_VIDEO,
+        ShotWorkflowError::StaleVideo => PROJECT_ERR_STALE_VIDEO,
         ShotWorkflowError::Manifest(ProjectManifestError::ReadOnlyFormatVersion(_)) => {
             PROJECT_ERR_READ_ONLY
         }
@@ -1429,18 +1561,24 @@ mod tests {
 
     #[test]
     fn snapshot_packing_includes_stale_lineage_and_migration_fields() {
-        let bits = encode_shot_snapshot(ShotApprovalSnapshot {
-            generated: true,
-            stale: true,
-            selected_index: Some(2),
-            locked: false,
-            candidate_count: 3,
-            direction: ShotDirection::Tension,
-            generation_revision: 7,
-            superseded_count: 18,
-            migration_pending: true,
-            invalid_hash_count: 2,
-        });
+        let bits = encode_shot_snapshot(
+            ShotApprovalSnapshot {
+                generated: true,
+                stale: true,
+                selected_index: Some(2),
+                locked: false,
+                candidate_count: 3,
+                direction: ShotDirection::Tension,
+                generation_revision: 7,
+                superseded_count: 18,
+                migration_pending: true,
+                invalid_hash_count: 2,
+                video: kineto_project::shot::VideoState::None,
+                video_revision: 0,
+            },
+            false,
+            false,
+        );
         assert_eq!(bits & 1, 1);
         assert_eq!((bits >> 1) & 1, 0);
         assert_eq!((bits >> 2) & 1, 1);

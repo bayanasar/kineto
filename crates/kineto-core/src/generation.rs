@@ -42,8 +42,10 @@ use kineto_project::{
         ShotWorkflowError, demo_candidate_output, load_scene_intent,
     },
 };
-use kineto_prompts::DegradationLevel;
-use kineto_provider_minimax::{IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER};
+use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
+use kineto_provider_minimax::{
+    IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport,
+};
 use kineto_providers::secret::{SecretError, SecretSource};
 
 use crate::{
@@ -133,7 +135,7 @@ pub enum ImageProvider {
     LocalDemo,
     /// MiniMax `image-01`. Paid. Without a client, finished calls can still
     /// be completed from their receipts but no new call is made.
-    Minimax(Option<MinimaxClient>),
+    Minimax(Option<MinimaxClient<SharedTransport>>),
 }
 
 /// Which image provider a session generates with.
@@ -152,6 +154,9 @@ pub struct ImageProviderInfo {
     pub ready: bool,
     /// Estimated cost of one generation (every candidate), in USD micros.
     pub generation_cost_micros: u64,
+    /// Estimated cost of one shot video, in USD micros; 0 when the provider
+    /// cannot generate video.
+    pub video_cost_micros: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +192,7 @@ impl ImageProvider {
                 secrets
                     .api_key(MINIMAX_PROVIDER)
                     .map_err(ProviderSelectionError::Secret)?
-                    .map(MinimaxClient::new),
+                    .map(MinimaxClient::shared),
             )),
             Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
         }
@@ -200,6 +205,7 @@ impl ImageProvider {
                 kind: ImageProviderKind::LocalDemo,
                 ready: true,
                 generation_cost_micros: 0,
+                video_cost_micros: 0,
             },
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
@@ -207,6 +213,7 @@ impl ImageProvider {
                 generation_cost_micros: IMAGE_PRICE_MICROS
                     * u64::try_from(GENERATED_CANDIDATE_COUNT)
                         .expect("candidate count fits in u64"),
+                video_cost_micros: crate::video::estimated_cost_micros(),
             },
         }
     }
@@ -215,13 +222,22 @@ impl ImageProvider {
 /// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives
 /// candidate keys, back into its candidate and input hash.
 pub fn parse_candidate_key(key: &IdempotencyKey) -> Result<(ArtifactId, InputHash), KeyError> {
+    parse_job_key(GENERATE_OPERATION, key)
+}
+
+/// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives
+/// idempotency keys, back into its artifact and input hash.
+pub fn parse_job_key(
+    operation: &str,
+    key: &IdempotencyKey,
+) -> Result<(ArtifactId, InputHash), KeyError> {
     // Artifact IDs cannot contain ':', so the first separator after the
     // operation ends the artifact ID.
     let rest = key
         .as_str()
-        .strip_prefix(GENERATE_OPERATION)
+        .strip_prefix(operation)
         .and_then(|rest| rest.strip_prefix(':'))
-        .ok_or(KeyError("idempotency key is not an image.generate key"))?;
+        .ok_or(KeyError("idempotency key is for another operation"))?;
     let (artifact_id, input_hash) = rest
         .split_once(':')
         .ok_or(KeyError("idempotency key has no input hash"))?;
@@ -247,11 +263,16 @@ impl Error for KeyError {}
 /// The provenance an artifact records for a compiled keyframe prompt.
 #[must_use]
 pub fn provenance(prompt: &KeyframePrompt) -> PromptProvenance {
-    let compiled = &prompt.compiled;
+    provenance_of(&prompt.compiled, &prompt.prompt_hash)
+}
+
+/// The provenance an artifact records for a compiled prompt and its hash.
+#[must_use]
+pub fn provenance_of(compiled: &CompiledPrompt, prompt_hash: &PromptHash) -> PromptProvenance {
     PromptProvenance {
         compiler_version: compiled.compiler_version().to_owned(),
         compiled_prompt: compiled.prompt().to_owned(),
-        prompt_hash: prompt.prompt_hash.as_str().to_owned(),
+        prompt_hash: prompt_hash.as_str().to_owned(),
         applied_constraints: compiled
             .applied_constraints()
             .iter()
@@ -433,6 +454,9 @@ pub enum GenerationError {
     /// Completing the generation needs a paid provider call, which is made
     /// only when the director asks for a generation again.
     NeedsProviderCall,
+    /// The locked keyframe has no image to start a video from (a demo
+    /// keyframe).
+    NoFirstFrame,
     /// The last paid submission may have been accepted but left no record of
     /// it, so submitting again may pay twice. Only the director decides that.
     UnresolvedSubmission,
@@ -452,12 +476,15 @@ impl fmt::Display for GenerationError {
             Self::NotConfigured => {
                 formatter.write_str("the image provider has no credentials configured")
             }
-            Self::NeedsProviderCall => formatter.write_str(
-                "finishing this generation needs a paid provider call; generate again to make it",
-            ),
+            Self::NoFirstFrame => {
+                formatter.write_str("the locked keyframe has no image to start a video from")
+            }
             Self::UnresolvedSubmission => formatter.write_str(
                 "the last submission may already have been accepted and charged; submitting \
                  again may pay twice",
+            ),
+            Self::NeedsProviderCall => formatter.write_str(
+                "finishing this generation needs a paid provider call; generate again to make it",
             ),
             Self::JobId(error) => error.fmt(formatter),
             Self::Unexpected(message) => formatter.write_str(message),
@@ -475,6 +502,7 @@ impl Error for GenerationError {
             Self::JobId(error) => Some(error),
             Self::NotConfigured
             | Self::NeedsProviderCall
+            | Self::NoFirstFrame
             | Self::UnresolvedSubmission
             | Self::Unexpected(_) => None,
         }
@@ -1309,6 +1337,22 @@ mod tests {
                     status: 200,
                     body: body.into_bytes(),
                 })
+            }
+
+            fn get(
+                &self,
+                _url: &str,
+                _api_key: &SecretString,
+            ) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("image generation makes no GET request")
+            }
+
+            fn download(
+                &self,
+                _url: &str,
+                _max_bytes: u64,
+            ) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("image generation downloads nothing")
             }
         }
 

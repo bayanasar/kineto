@@ -32,6 +32,14 @@ void main() {
     expect(KinetoProjectException.providerRefused, contract.statuses['provider_refused']);
   });
 
+  test('video state codes match the native table', () {
+    expect(
+      <String>{for (final state in KinetoVideoState.values) state.wireName},
+      contract.videoStates.keys.toSet(),
+    );
+    expect(KinetoProjectException.videoInFlight, contract.statuses['video_in_flight']);
+  });
+
   test('image provider codes match the native table', () {
     expect(
       <String, int>{
@@ -64,6 +72,7 @@ void main() {
     expect(sample.direction, KinetoShotDirection.tension);
     expect(sample.generation, 7);
     expect(sample.supersededCount, 18);
+    expect(sample.videoState, KinetoVideoState.stale);
     expect(
       contract.snapshotFields,
       containsAll(<String>[
@@ -77,6 +86,7 @@ void main() {
         'direction',
         'generation_revision',
         'superseded_count',
+        'video_state',
       ]),
     );
   });

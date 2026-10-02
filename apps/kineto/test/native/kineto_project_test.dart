@@ -354,6 +354,23 @@ void main() {
       expect(shotTwo.selectedIndex, 0);
       expect(shotTwo.locked, isTrue);
       expect(shotTwo.supersededCount, 3);
+      // A demo session has no video provider; nothing is submitted.
+      expect(shotOne.videoState, KinetoVideoState.none);
+      expect(project.videoMediaPath(0), isNull);
+      await expectLater(
+        project.generateShotVideo(0),
+        throwsA(
+          isA<KinetoProjectException>().having(
+            (error) => error.code,
+            'code',
+            KinetoProjectException.providerNotConfigured,
+          ),
+        ),
+      );
+      await expectLater(
+        project.lockShotVideo(0),
+        throwsA(isA<KinetoProjectException>().having((error) => error.code, 'code', 130)),
+      );
       // Demo candidates have no media; a candidate past the last is refused.
       expect(project.candidateMediaPath(0, 0), isNull);
       expect(

@@ -15,12 +15,19 @@
 //! been billed, so retrying it can pay twice; the job runtime's attempt limit
 //! bounds that.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
 use kineto_providers::{ImageFormat, secret::SecretString};
 use serde::{Deserialize, Serialize};
+
+mod video;
+
+pub use video::{
+    MAX_VIDEO_BYTES, VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask,
+    VideoTaskState,
+};
 
 /// The provider key MiniMax jobs are recorded under.
 pub const PROVIDER: &str = "minimax";
@@ -38,6 +45,7 @@ pub const IMAGE_PRICE_MICROS: u64 = 3_500;
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_STATUS_MESSAGE_CHARS: usize = 200;
 
 /// Aspect ratios `image-01` accepts.
@@ -112,11 +120,46 @@ pub trait Transport {
         api_key: &SecretString,
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure>;
+
+    /// An authenticated GET to the MiniMax API.
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure>;
+
+    /// An unauthenticated GET of a file the API pointed to, at most
+    /// `max_bytes` long. It never carries the API key: the file lives on a
+    /// content host, not on the API.
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure>;
 }
 
-/// Blocking HTTPS with rustls and the bundled Mozilla roots.
+/// A transport shared between clients and threads. The workflow holds this
+/// so tests can stand a recorded MiniMax in for the network; dispatch through
+/// it costs nothing next to an HTTPS round trip.
+pub type SharedTransport = Arc<dyn Transport + Send + Sync>;
+
+impl Transport for SharedTransport {
+    fn post_json(
+        &self,
+        url: &str,
+        api_key: &SecretString,
+        body: &[u8],
+    ) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().post_json(url, api_key, body)
+    }
+
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().get(url, api_key)
+    }
+
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        self.as_ref().download(url, max_bytes)
+    }
+}
+
+/// Blocking HTTPS with rustls and the bundled Mozilla roots. Cloning shares
+/// the connection pools.
+#[derive(Clone)]
 pub struct HttpsTransport {
     agent: ureq::Agent,
+    downloads: ureq::Agent,
 }
 
 impl HttpsTransport {
@@ -132,7 +175,17 @@ impl HttpsTransport {
             .user_agent(concat!("kineto/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        Self { agent }
+        // Downloads carry no credentials, so a content host may redirect.
+        let downloads = ureq::Agent::config_builder()
+            .https_only(true)
+            .max_redirects(3)
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .user_agent(concat!("kineto/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .into();
+        Self { agent, downloads }
     }
 }
 
@@ -155,22 +208,44 @@ impl Transport for HttpsTransport {
         api_key: &SecretString,
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
-        let mut response = self
+        let response = self
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", api_key.expose()))
             .header("Content-Type", "application/json")
             .send(body)
             .map_err(failure)?;
-        let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(failure)?;
-        Ok(HttpResponse { status, body })
+        read(response, MAX_RESPONSE_BYTES)
     }
+
+    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        let response = self
+            .agent
+            .get(url)
+            .header("Authorization", format!("Bearer {}", api_key.expose()))
+            .call()
+            .map_err(failure)?;
+        read(response, MAX_RESPONSE_BYTES)
+    }
+
+    fn download(&self, url: &str, max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        let response = self.downloads.get(url).call().map_err(failure)?;
+        read(response, max_bytes)
+    }
+}
+
+fn read(
+    mut response: ureq::http::Response<ureq::Body>,
+    max_bytes: u64,
+) -> Result<HttpResponse, TransportFailure> {
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(max_bytes)
+        .read_to_vec()
+        .map_err(failure)?;
+    Ok(HttpResponse { status, body })
 }
 
 fn failure(error: ureq::Error) -> TransportFailure {
@@ -194,12 +269,15 @@ pub enum MinimaxError {
     Api { code: i64, message: String },
     /// The answer was well-formed but held no image.
     NoImage,
-    /// The answer could not be read as an `image-01` response.
+    /// The answer could not be read as the response it should be.
     Malformed(&'static str),
-    /// The prompt is empty or longer than [`MAX_PROMPT_CHARS`].
+    /// The prompt is empty or longer than the model accepts.
     InvalidPrompt,
-    /// The request was refused before it was sent.
+    /// The request was refused before it was sent, for example a first
+    /// frame that is empty or too large.
     InvalidRequest(&'static str),
+    /// A remote task ended in failure.
+    TaskFailed,
 }
 
 impl MinimaxError {
@@ -222,7 +300,8 @@ impl MinimaxError {
             | Self::NoImage
             | Self::Malformed(_)
             | Self::InvalidPrompt
-            | Self::InvalidRequest(_) => ErrorClass::Terminal,
+            | Self::InvalidRequest(_)
+            | Self::TaskFailed => ErrorClass::Terminal,
         }
     }
 
@@ -237,7 +316,7 @@ impl MinimaxError {
             | Self::Api { .. }
             | Self::Transport(TransportFailure::Connect) => true,
             Self::Http { status } => (400..500).contains(status),
-            Self::Transport(_) | Self::NoImage | Self::Malformed(_) => false,
+            Self::Transport(_) | Self::NoImage | Self::Malformed(_) | Self::TaskFailed => false,
         }
     }
 }
@@ -254,11 +333,11 @@ impl fmt::Display for MinimaxError {
             }
             Self::NoImage => formatter.write_str("MiniMax returned no image"),
             Self::Malformed(what) => write!(formatter, "MiniMax response is malformed: {what}"),
-            Self::InvalidPrompt => write!(
-                formatter,
-                "prompt must be 1..={MAX_PROMPT_CHARS} characters"
-            ),
+            Self::InvalidPrompt => {
+                formatter.write_str("prompt is empty or longer than the model accepts")
+            }
             Self::InvalidRequest(what) => write!(formatter, "MiniMax request is invalid: {what}"),
+            Self::TaskFailed => formatter.write_str("MiniMax reported the task as failed"),
         }
     }
 }
@@ -298,6 +377,7 @@ struct WireBaseResp {
 }
 
 /// A MiniMax client for one API key.
+#[derive(Clone)]
 pub struct MinimaxClient<T = HttpsTransport> {
     transport: T,
     api_key: SecretString,
@@ -308,6 +388,14 @@ impl MinimaxClient {
     #[must_use]
     pub fn new(api_key: SecretString) -> Self {
         Self::with_transport(HttpsTransport::new(), api_key, DEFAULT_BASE_URL)
+    }
+}
+
+impl MinimaxClient<SharedTransport> {
+    /// A client over HTTPS that can be shared between threads.
+    #[must_use]
+    pub fn shared(api_key: SecretString) -> Self {
+        Self::with_transport(Arc::new(HttpsTransport::new()), api_key, DEFAULT_BASE_URL)
     }
 }
 
@@ -457,6 +545,18 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .expect("a recorded response")
+        }
+
+        fn get(
+            &self,
+            _url: &str,
+            _api_key: &SecretString,
+        ) -> Result<HttpResponse, TransportFailure> {
+            unreachable!("image generation makes no GET request")
+        }
+
+        fn download(&self, _url: &str, _max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+            unreachable!("image generation downloads nothing")
         }
     }
 

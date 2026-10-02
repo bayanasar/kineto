@@ -27,7 +27,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 20;
+const int kinetoExpectedNativeAbiVersion = 23;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);
@@ -77,6 +77,26 @@ enum KinetoShotDirection {
   final String label;
 }
 
+/// Where a shot's video stands.
+enum KinetoVideoState {
+  none('none'),
+  /// Submitted; MiniMax is generating it in the background.
+  generating('generating'),
+  /// Generated from the locked keyframe and awaiting approval.
+  ready('ready'),
+  locked('locked'),
+  /// Made from a keyframe that is no longer the locked one.
+  stale('stale'),
+  /// The last submission may have been accepted, and charged, by MiniMax
+  /// without leaving its task; generating again waits for the director.
+  unresolved('unresolved');
+
+  const KinetoVideoState(this.wireName);
+
+  /// The name the native contract gives this state.
+  final String wireName;
+}
+
 final class KinetoShotSnapshot {
   const KinetoShotSnapshot({
     required this.direction,
@@ -89,6 +109,7 @@ final class KinetoShotSnapshot {
     required this.supersededCount,
     this.migrationPending = false,
     this.hasInvalidHashes = false,
+    this.videoState = KinetoVideoState.none,
   });
 
   /// Decode a packed native snapshot with the layout the native library
@@ -108,6 +129,7 @@ final class KinetoShotSnapshot {
       supersededCount: field('superseded_count'),
       migrationPending: field('migration_pending') != 0,
       hasInvalidHashes: field('invalid_hashes') != 0,
+      videoState: contract.videoState(field('video_state')),
     );
   }
 
@@ -129,6 +151,8 @@ final class KinetoShotSnapshot {
   final bool hasInvalidHashes;
 
   bool get changesBlocked => migrationPending || hasInvalidHashes;
+
+  final KinetoVideoState videoState;
 
   /// Native migration refuses while any hash is unrecognised, so it is only
   /// offered for a shot whose sole problem is the known legacy form.
