@@ -81,6 +81,10 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
   bool _working = false;
   String _workingLabel = 'Working';
   String? _error;
+
+  /// Asks again for what the last command asked for although its paid
+  /// request may already have been charged; offered only after that refusal.
+  VoidCallback? _resubmit;
   String? _editingScene;
 
   @override
@@ -98,19 +102,33 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
 
   // Documents are written on the project's worker; this isolate only waits.
   // One command at a time keeps the page honest about what it shows.
-  Future<void> _run(Future<void> Function() action, String label, {VoidCallback? onDone}) async {
+  //
+  // [resubmit] asks for the same document at the risk of paying twice; it is
+  // offered when [action] is refused because its last paid request is
+  // unresolved.
+  Future<void> _run(
+    Future<void> Function() action,
+    String label, {
+    VoidCallback? onDone,
+    Future<void> Function()? resubmit,
+  }) async {
     if (_working) return;
     setState(() {
       _working = true;
       _workingLabel = label;
       _error = null;
+      _resubmit = null;
     });
     String? error;
+    VoidCallback? offer;
     try {
       await action();
       onDone?.call();
     } on KinetoProjectException catch (failure) {
       error = failure.message;
+      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
+        offer = () => _run(resubmit, label, onDone: onDone);
+      }
     } on Object catch (failure) {
       error = failure.toString();
     }
@@ -119,6 +137,7 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
       _working = false;
       _read();
       _error = error;
+      _resubmit = offer;
     });
   }
 
@@ -133,20 +152,31 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
       working: _working,
       workingLabel: _workingLabel,
       error: _error,
+      onResubmit: _resubmit,
       editingSceneId: _editingScene,
       navigation: widget.navigation,
       isDarkMode: widget.isDarkMode,
       onThemeToggle: widget.onThemeToggle,
       onImport: (text) => _run(() => widget.project.importSource(text), 'Importing'),
-      onAnalyze: () => _run(widget.project.analyzeStory, 'Analysing the story $asking'),
-      onWrite: () => _run(widget.project.writeScreenplay, 'Writing the screenplay $asking'),
+      onAnalyze: () => _run(
+        widget.project.analyzeStory,
+        'Analysing the story $asking',
+        resubmit: () => widget.project.analyzeStory(resubmit: true),
+      ),
+      onWrite: () => _run(
+        widget.project.writeScreenplay,
+        'Writing the screenplay $asking',
+        resubmit: () => widget.project.writeScreenplay(resubmit: true),
+      ),
       onRewrite: (sceneId, direction) => _run(
         () => widget.project.rewriteScene(sceneId, direction: direction),
         'Rewriting the scene $asking',
+        resubmit: () => widget.project.rewriteScene(sceneId, direction: direction, resubmit: true),
       ),
       onEdit: (sceneId) => setState(() {
         _editingScene = sceneId;
         _error = null;
+        _resubmit = null;
       }),
       onSave: (draft) => _run(
         () => widget.project.saveScene(
@@ -181,6 +211,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
     this.working = false,
     this.workingLabel = 'Working',
     this.error,
+    this.onResubmit,
     this.editingSceneId,
     this.navigation,
     this.isDarkMode = true,
@@ -197,6 +228,10 @@ class ScreenplayWorkspaceView extends StatelessWidget {
   final bool working;
   final String workingLabel;
   final String? error;
+
+  /// Asks again at the risk of paying twice; set only when [error] says the
+  /// last paid request may have been charged without its answer being kept.
+  final VoidCallback? onResubmit;
 
   /// The scene being edited, if any.
   final String? editingSceneId;
@@ -249,7 +284,30 @@ class ScreenplayWorkspaceView extends StatelessWidget {
                   const SizedBox(height: 12),
                 ],
                 if (error != null) ...<Widget>[
-                  WabPanel(title: 'That did not work', child: Text(error!)),
+                  WabPanel(
+                    title: 'That did not work',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(error!),
+                        if (onResubmit != null) ...<Widget>[
+                          const SizedBox(height: 12),
+                          const Text(
+                            'The model may have answered the last request, and charged for it, '
+                            'without the answer reaching Kineto. Check your account before asking '
+                            'again.',
+                          ),
+                          const SizedBox(height: 12),
+                          WabButton(
+                            key: const ValueKey<String>('resubmit-document'),
+                            kind: WabMaterialKind.zhuwen,
+                            onPressed: working ? null : onResubmit,
+                            child: const Text('Ask again · may pay twice'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                   const SizedBox(height: 20),
                 ],
                 if (documents.damaged) ...<Widget>[

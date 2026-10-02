@@ -32,6 +32,7 @@ pub struct FakeLlm {
     script: Mutex<VecDeque<Result<String, FakeLlmError>>>,
     requests: Mutex<Vec<LlmRequest>>,
     latency: Duration,
+    billing: Billing,
 }
 
 impl FakeLlm {
@@ -60,7 +61,18 @@ impl FakeLlm {
             script: Mutex::new(script.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
             latency: Duration::ZERO,
+            billing: Billing::Free,
         }
+    }
+
+    /// Bill every call, as a metered API does. Free otherwise.
+    #[must_use]
+    pub const fn metered(mut self) -> Self {
+        self.billing = Billing::PerToken {
+            input_micros_per_million: 1_000_000,
+            output_micros_per_million: 2_000_000,
+        };
+        self
     }
 
     #[must_use]
@@ -89,7 +101,7 @@ impl LlmBackend for FakeLlm {
                 structured_output: true,
                 vision_input: false,
             },
-            billing: Billing::Free,
+            billing: self.billing,
         }
     }
 
@@ -123,6 +135,12 @@ impl LlmBackend for FakeLlm {
             FakeLlmError::Retryable => ErrorClass::Retryable,
             FakeLlmError::Terminal => ErrorClass::Terminal,
         }
+    }
+
+    /// A retryable failure stands for a lost connection, which may have
+    /// lost an answer; a terminal one for a refusal, which did not.
+    fn may_have_lost_an_answer(&self, error: &FakeLlmError) -> bool {
+        *error == FakeLlmError::Retryable
     }
 }
 

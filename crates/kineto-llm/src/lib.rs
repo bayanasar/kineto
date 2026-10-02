@@ -125,6 +125,15 @@ pub enum Billing {
     Unpriced,
 }
 
+impl Billing {
+    /// Whether each call is charged for, so that asking twice for one answer
+    /// pays twice.
+    #[must_use]
+    pub const fn charged_per_call(self) -> bool {
+        matches!(self, Self::PerToken { .. } | Self::Unpriced)
+    }
+}
+
 /// What the director needs to know about a backend before asking it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmBackendInfo {
@@ -147,6 +156,14 @@ pub trait LlmBackend {
 
     /// Whether asking again unchanged can succeed.
     fn classify(&self, error: &Self::Error) -> ErrorClass;
+
+    /// Whether a failed call may have produced an answer, and its charge,
+    /// that never arrived: the request may have reached the model before the
+    /// connection was lost. A call refused before the model ran, or one
+    /// whose answer arrived and was refused, did not. Unknown failures may.
+    fn may_have_lost_an_answer(&self, _error: &Self::Error) -> bool {
+        true
+    }
 }
 
 /// A rough token count: about four characters per token for the scripts the
@@ -215,6 +232,8 @@ pub enum StructuredError<E> {
     Schema {
         detail: String,
     },
+    /// The request's schema cannot be checked, so nothing was asked.
+    UnsupportedSchema(String),
 }
 
 impl<E: fmt::Display> fmt::Display for StructuredError<E> {
@@ -224,6 +243,12 @@ impl<E: fmt::Display> fmt::Display for StructuredError<E> {
             Self::Schema { detail } => {
                 write!(formatter, "the model's answer was not accepted: {detail}")
             }
+            Self::UnsupportedSchema(detail) => {
+                write!(
+                    formatter,
+                    "the requested schema cannot be checked: {detail}"
+                )
+            }
         }
     }
 }
@@ -232,18 +257,19 @@ impl<E: Error + 'static> Error for StructuredError<E> {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Backend { source, .. } => Some(source),
-            Self::Schema { .. } => None,
+            Self::Schema { .. } | Self::UnsupportedSchema(_) => None,
         }
     }
 }
 
 impl<E> StructuredError<E> {
-    /// A schema failure is terminal: the same request already failed twice.
+    /// A schema failure is terminal: the same request already failed twice,
+    /// or its schema cannot be checked at all.
     #[must_use]
     pub const fn class(&self) -> ErrorClass {
         match self {
             Self::Backend { class, .. } => *class,
-            Self::Schema { .. } => ErrorClass::Terminal,
+            Self::Schema { .. } | Self::UnsupportedSchema(_) => ErrorClass::Terminal,
         }
     }
 }
@@ -271,14 +297,30 @@ pub fn complete_structured<B: LlmBackend, T: DeserializeOwned>(
 }
 
 /// Like [`complete_structured`], with a further `check` the parsed answer
-/// must pass, such as references into another document. An answer that
-/// fails to parse or fails the check is asked for once more with the
-/// reason, then refused.
+/// must pass, such as references into another document. An answer must
+/// satisfy the request's JSON Schema, then parse as `T`, then pass the
+/// check; one that fails any of them is asked for once more with the
+/// reason, then refused. A schema this build cannot check is refused before
+/// anything is asked.
 pub fn complete_checked<B: LlmBackend, T: DeserializeOwned, U>(
     backend: &B,
     request: &LlmRequest,
     check: impl Fn(T) -> Result<U, String>,
 ) -> Result<Structured<U>, StructuredError<B::Error>> {
+    let schema = request
+        .schema
+        .as_ref()
+        .map(|schema| {
+            let value: serde_json::Value = serde_json::from_str(&schema.schema_json)
+                .map_err(|error| format!("{:?} is not JSON ({error})", schema.name))?;
+            kineto_json_schema::ensure_supported_schema(&value, "$")
+                .map_err(|error| format!("{:?}: {error}", schema.name))?;
+            Ok(value)
+        })
+        .transpose()
+        .map_err(StructuredError::UnsupportedSchema)?;
+    let unfitting =
+        |error: String| format!("it does not satisfy the required JSON Schema ({error})");
     let mut request = request.clone();
     let mut attempts = 0;
     loop {
@@ -289,8 +331,17 @@ pub fn complete_checked<B: LlmBackend, T: DeserializeOwned, U>(
                 class: backend.classify(&source),
                 source,
             })?;
-        let checked = serde_json::from_str::<T>(json_body(&response.text))
-            .map_err(|error| format!("it does not satisfy the required JSON Schema ({error})"))
+        let checked = serde_json::from_str::<serde_json::Value>(json_body(&response.text))
+            .map_err(|error| unfitting(error.to_string()))
+            .and_then(|value| match &schema {
+                Some(schema) => kineto_json_schema::validate_value(schema, &value, "$")
+                    .map(|()| value)
+                    .map_err(unfitting),
+                None => Ok(value),
+            })
+            .and_then(|value| {
+                serde_json::from_value::<T>(value).map_err(|error| unfitting(error.to_string()))
+            })
             .and_then(|value| {
                 check(value).map_err(|reason| format!("it is not consistent ({reason})"))
             });
@@ -367,7 +418,11 @@ mod tests {
         let retry = &backend.requests()[1];
         assert_eq!(retry.messages.len(), 4);
         assert_eq!(retry.messages[2], Message::assistant(r#"{"name":"wrong"}"#));
-        assert!(retry.messages[3].content.contains("unknown field `name`"));
+        assert!(
+            retry.messages[3]
+                .content
+                .contains("missing required property \"title\"")
+        );
 
         let backend = FakeLlm::answering(["prose", "more prose"]);
         let error = complete_structured::<_, Title>(&backend, &request()).unwrap_err();
@@ -398,6 +453,43 @@ mod tests {
         let error = complete_checked(&backend, &request(), check).unwrap_err();
         assert!(matches!(error, StructuredError::Schema { .. }));
         assert!(error.to_string().contains("\"Still\" does not start"));
+    }
+
+    #[test]
+    fn an_answer_the_schema_refuses_is_asked_for_again_though_it_parses() {
+        let mut request = request();
+        request.schema.as_mut().unwrap().schema_json = r#"{
+            "type": "object",
+            "required": ["title"],
+            "properties": {"title": {"type": "string", "minLength": 3}}
+        }"#
+        .to_owned();
+        // `{"title":"ab"}` is a valid `Title`; only the schema refuses it.
+        let backend = FakeLlm::answering([r#"{"title":"ab"}"#, r#"{"title":"abc"}"#]);
+        let structured: Structured<Title> = complete_structured(&backend, &request).unwrap();
+        assert_eq!(structured.value.title, "abc");
+        assert!(
+            backend.requests()[1].messages[3]
+                .content
+                .contains("$.title: string is shorter than minLength 3")
+        );
+
+        let backend = FakeLlm::answering([r#"{"title":"ab"}"#, r#"{"title":"a"}"#]);
+        let error = complete_structured::<_, Title>(&backend, &request).unwrap_err();
+        assert!(matches!(error, StructuredError::Schema { .. }));
+        assert!(error.to_string().contains("minLength 3"));
+    }
+
+    #[test]
+    fn a_schema_that_cannot_be_checked_asks_nothing() {
+        let mut request = request();
+        request.schema.as_mut().unwrap().schema_json =
+            r#"{"type":"object","oneOf":[{"required":["title"]}]}"#.to_owned();
+        let backend = FakeLlm::answering([r#"{"title":"The Last Line"}"#]);
+        let error = complete_structured::<_, Title>(&backend, &request).unwrap_err();
+        assert!(matches!(error, StructuredError::UnsupportedSchema(_)));
+        assert_eq!(error.class(), ErrorClass::Terminal);
+        assert!(backend.requests().is_empty());
     }
 
     #[test]

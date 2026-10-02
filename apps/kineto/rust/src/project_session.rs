@@ -1905,12 +1905,12 @@ mod tests {
             assert_eq!(cost(session, "screenplay"), Err(PROJECT_ERR_NEEDS_ANALYSIS));
 
             assert_eq!(
-                unsafe { kineto_project_write_screenplay(session, 1) },
+                unsafe { kineto_project_write_screenplay(session, false, 1) },
                 PROJECT_OK
             );
             assert_eq!(port.completed(1), PROJECT_ERR_NEEDS_ANALYSIS);
             assert_eq!(
-                unsafe { kineto_project_analyze_story(session, 2) },
+                unsafe { kineto_project_analyze_story(session, false, 2) },
                 PROJECT_OK
             );
             assert_eq!(port.completed(2), PROJECT_OK);
@@ -1921,7 +1921,7 @@ mod tests {
                 "The Interviewer"
             );
             assert_eq!(
-                unsafe { kineto_project_write_screenplay(session, 3) },
+                unsafe { kineto_project_write_screenplay(session, false, 3) },
                 PROJECT_OK
             );
             assert_eq!(port.completed(3), PROJECT_OK);
@@ -2016,6 +2016,7 @@ mod tests {
                         scene.len() as u64,
                         ptr::null(),
                         0,
+                        false,
                         9,
                     )
                 },
@@ -2039,7 +2040,7 @@ mod tests {
                 Err(PROJECT_ERR_MODEL_NOT_CONFIGURED)
             );
             assert_eq!(
-                unsafe { kineto_project_analyze_story(session, 1) },
+                unsafe { kineto_project_analyze_story(session, false, 1) },
                 PROJECT_OK
             );
             assert_eq!(port.completed(1), PROJECT_ERR_MODEL_NOT_CONFIGURED);

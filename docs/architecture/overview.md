@@ -64,6 +64,7 @@ kineto/
 │   ├── kineto-project/          # artifact identity/lifecycle/dependency model
 │   ├── kineto-prompts/          # prompt degradation/compiler contract
 │   ├── kineto-jobs/             # paid-job intent/cost/retry policy model
+│   ├── kineto-json-schema/      # executable JSON Schema subset for canonical files and model answers
 │   ├── kineto-job-runtime/      # write-ahead persistence/executor/reconciliation
 │   ├── kineto-llm/              # llm.complete: backends, structured output, offline fakes
 │   ├── kineto-providers/        # provider capability/routing model

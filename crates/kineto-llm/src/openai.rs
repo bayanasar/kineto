@@ -78,6 +78,23 @@ impl fmt::Display for ApiError {
 impl Error for ApiError {}
 
 impl ApiError {
+    /// Whether the request may have reached the model and been answered,
+    /// and charged for, without the answer arriving: the connection broke
+    /// or timed out after sending, or the server failed. A connection never
+    /// made, an API refusal (4xx), and an answer that arrived cut off,
+    /// filtered or malformed leave no answer behind.
+    #[must_use]
+    pub const fn may_have_lost_an_answer(&self) -> bool {
+        match self {
+            Self::Transport(failure) => matches!(
+                failure,
+                TransportFailure::Timeout | TransportFailure::Io | TransportFailure::Protocol
+            ),
+            Self::Http { status, .. } => *status >= 500,
+            Self::Truncated | Self::Filtered | Self::Malformed(_) => false,
+        }
+    }
+
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self {
@@ -342,6 +359,10 @@ impl<T: Transport> LlmBackend for OpenAiCompatible<T> {
     fn classify(&self, error: &ApiError) -> ErrorClass {
         error.class()
     }
+
+    fn may_have_lost_an_answer(&self, error: &ApiError) -> bool {
+        error.may_have_lost_an_answer()
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +429,34 @@ mod tests {
                 schema_json: r#"{"type":"object"}"#.to_owned(),
             }),
             max_output_tokens: Some(4096),
+        }
+    }
+
+    #[test]
+    fn only_a_call_that_may_have_reached_the_model_may_have_lost_an_answer() {
+        let http = |status| ApiError::Http {
+            status,
+            kind: None,
+            message: String::new(),
+        };
+        for lost in [
+            ApiError::Transport(TransportFailure::Timeout),
+            ApiError::Transport(TransportFailure::Io),
+            http(500),
+            http(504),
+        ] {
+            assert!(lost.may_have_lost_an_answer(), "{lost}");
+        }
+        for kept in [
+            ApiError::Transport(TransportFailure::Connect),
+            ApiError::Transport(TransportFailure::Insecure),
+            http(400),
+            http(401),
+            http(429),
+            ApiError::Truncated,
+            ApiError::Filtered,
+        ] {
+            assert!(!kept.may_have_lost_an_answer(), "{kept}");
         }
     }
 

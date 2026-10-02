@@ -7,6 +7,13 @@
 //! before the job is marked invoked. A restart completes the revision from
 //! its receipt and never asks the model again.
 //!
+//! A model whose calls are charged one by one is never asked twice for one
+//! answer unasked. The attempt is recorded before the call; a call that
+//! failed without an answer leaves a refusal record beside the receipts. An
+//! attempt with neither, such as one cut off by a crash after the model
+//! answered, is unresolved: the next request is refused until the director
+//! chooses to risk paying twice ([`risk_paying_twice`]).
+//!
 //! ```text
 //! prepare -> ask (llm.complete) -> document file + receipt -> invoked -> attach revision -> acknowledge
 //! ```
@@ -21,7 +28,10 @@ use kineto_jobs::{
     BackoffPolicy, CostEstimate, ErrorClass, FallbackPolicy, IdempotencyKey, IntentState, JobId,
     PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
-use kineto_llm::{LlmBackend, LlmBackendInfo, LlmRequest, Message, OutputSchema, complete_checked};
+use kineto_llm::{
+    Billing, LlmBackend, LlmBackendInfo, LlmRequest, Message, OutputSchema, StructuredError,
+    complete_checked,
+};
 use kineto_project::{
     ArtifactDependency, ArtifactId, ContentHash, InputHash, InputHashMaterial,
     fs::{ProjectFsError, ProjectRelativePath},
@@ -30,7 +40,7 @@ use kineto_project::{
     shot::PromptProvenance,
 };
 use kineto_prompts::CompiledPrompt;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use crate::generation::{GenerationError, invoke_when_permitted, provenance_of};
@@ -64,6 +74,9 @@ pub struct DocumentSpec {
 pub struct DocumentJobError {
     message: String,
     class: ErrorClass,
+    /// The model may have answered, and charged for it, without the answer
+    /// arriving.
+    answer_lost: bool,
 }
 
 impl fmt::Display for DocumentJobError {
@@ -79,6 +92,15 @@ impl DocumentJobError {
         Self {
             message: message.into(),
             class: ErrorClass::Terminal,
+            answer_lost: false,
+        }
+    }
+
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            class: ErrorClass::Retryable,
+            answer_lost: false,
         }
     }
 }
@@ -97,12 +119,7 @@ fn read_receipt(
         Err(ProjectFsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None);
         }
-        Err(error) => {
-            return Err(DocumentJobError {
-                message: error.to_string(),
-                class: ErrorClass::Retryable,
-            });
-        }
+        Err(error) => return Err(DocumentJobError::retryable(error.to_string())),
     };
     let (kind, record): (DocumentKind, RevisionRecord) = serde_json::from_slice(&bytes)
         .map_err(|_| DocumentJobError::terminal("document receipt is not readable"))?;
@@ -129,6 +146,67 @@ fn read_receipt(
 fn remove_receipt(project: &CanonicalProject, artifact_id: &ArtifactId) {
     if let Ok(path) = receipt_path(artifact_id) {
         let _ = std::fs::remove_file(project.root().resolve(&path));
+    }
+}
+
+/// Proof that the latest call of a document job left no answer behind: it
+/// failed before the model answered, or its answer arrived and was refused.
+#[derive(Debug, Serialize, Deserialize)]
+struct Refusal {
+    schema_version: u32,
+    artifact_id: String,
+    input_hash: String,
+}
+
+fn refusal_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, DocumentJobError> {
+    ProjectRelativePath::new(format!(
+        ".kineto/generation/{}.refused.json",
+        artifact_id.as_str()
+    ))
+    .map_err(|_| DocumentJobError::terminal("artifact ID is not a valid file name"))
+}
+
+fn write_refusal(project: &CanonicalProject, planned: &Planned) -> Result<(), DocumentJobError> {
+    let mut bytes = serde_json::to_vec_pretty(&Refusal {
+        schema_version: 1,
+        artifact_id: planned.artifact_id.as_str().to_owned(),
+        input_hash: planned.input_hash.as_str().to_owned(),
+    })
+    .map_err(|_| DocumentJobError::terminal("refusal did not encode"))?;
+    bytes.push(b'\n');
+    project
+        .root()
+        .write_atomic(&refusal_path(&planned.artifact_id)?, &bytes)
+        .map_err(|error| DocumentJobError::retryable(error.to_string()))
+}
+
+/// Whether the latest call for `artifact_id` at `input_hash` certainly left
+/// no answer behind.
+fn refused(project: &CanonicalProject, artifact_id: &ArtifactId, input_hash: &InputHash) -> bool {
+    refusal_path(artifact_id)
+        .ok()
+        .and_then(|path| project.root().read(&path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Refusal>(&bytes).ok())
+        .is_some_and(|refusal| {
+            refusal.artifact_id == artifact_id.as_str() && refusal.input_hash == input_hash.as_str()
+        })
+}
+
+/// Remove the refusal record of `artifact_id`, which explained an attempt
+/// that is now retired or about to be made again. Failing to remove it is
+/// an error: a stale record could later pass an unresolved call as refused.
+fn forget_refusal(
+    project: &CanonicalProject,
+    artifact_id: &ArtifactId,
+) -> Result<(), GenerationError> {
+    let path = refusal_path(artifact_id).map_err(document_error)?;
+    match std::fs::remove_file(project.root().resolve(&path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(GenerationError::Provider {
+            source: Box::new(error),
+            class: ErrorClass::Retryable,
+        }),
     }
 }
 
@@ -207,17 +285,22 @@ impl PaidJobAdapter for DocumentAdapter<'_> {
             return Err(DocumentJobError::terminal("no model is configured"));
         };
         let planned = asker.planned;
-        let answer = (asker.ask)(request)?;
+        let answer = match (asker.ask)(request) {
+            Ok(answer) => answer,
+            Err(error) => {
+                // A failure that left no answer can be asked again without
+                // paying twice; without this record it counts as unresolved.
+                if !error.answer_lost {
+                    let _ = write_refusal(self.project, planned);
+                }
+                return Err(error);
+            }
+        };
         let bytes = answer.bytes;
         let next = revisions::revision_at(planned.kind, planned.revision)
             .map_err(|error| DocumentJobError::terminal(error.to_string()))?;
-        let content_hash =
-            revisions::write_document(self.project, &next, &bytes).map_err(|error| {
-                DocumentJobError {
-                    message: error.to_string(),
-                    class: ErrorClass::Retryable,
-                }
-            })?;
+        let content_hash = revisions::write_document(self.project, &next, &bytes)
+            .map_err(|error| DocumentJobError::retryable(error.to_string()))?;
         let record = RevisionRecord {
             revision: planned.revision,
             artifact_id: planned.artifact_id.as_str().to_owned(),
@@ -246,10 +329,7 @@ impl PaidJobAdapter for DocumentAdapter<'_> {
         self.project
             .root()
             .write_atomic(&receipt_path(&planned.artifact_id)?, &receipt)
-            .map_err(|error| DocumentJobError {
-                message: error.to_string(),
-                class: ErrorClass::Retryable,
-            })?;
+            .map_err(|error| DocumentJobError::retryable(error.to_string()))?;
         Ok(Invocation::Completed((planned.kind, record)))
     }
 
@@ -396,8 +476,7 @@ pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
 
     let runtime = JobRuntime::new(project, provider, policy());
     let job_id = JobId::new(next.artifact_id.as_str())?;
-    // Asking again is what retries a request that failed.
-    runtime.retire_failed(&job_id)?;
+    settle_earlier_attempt(project, &runtime, &job_id, &next.artifact_id, info.billing)?;
     let state = match runtime.prepare(
         job_id.clone(),
         LLM_OPERATION,
@@ -414,6 +493,14 @@ pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
             complete_checked::<B, T, D>(backend, request, &accept).map_err(|error| {
                 DocumentJobError {
                     class: error.class(),
+                    answer_lost: match &error {
+                        StructuredError::Backend { source, .. } => {
+                            backend.may_have_lost_an_answer(source)
+                        }
+                        StructuredError::Schema { .. } | StructuredError::UnsupportedSchema(_) => {
+                            false
+                        }
+                    },
                     message: error.to_string(),
                 }
             })?;
@@ -462,6 +549,48 @@ pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
         }
     };
     attach_and_acknowledge(project, &runtime, &job_id, kind, record)
+}
+
+/// Make way for asking for `job_id` again. An earlier attempt that may have
+/// been answered, and charged for, without its answer being kept is refused
+/// as unresolved; one that failed is retired.
+fn settle_earlier_attempt(
+    project: &CanonicalProject,
+    runtime: &JobRuntime<'_>,
+    job_id: &JobId,
+    artifact_id: &ArtifactId,
+    billing: Billing,
+) -> Result<(), GenerationError> {
+    if billing.charged_per_call()
+        && let Some(record) = runtime.load(job_id)?
+        && record.intent().state() == IntentState::Prepared
+        && record.attempts() > 0
+        && !refused(project, artifact_id, record.intent().input_hash())
+    {
+        return Err(GenerationError::UnresolvedSubmission);
+    }
+    // Asking again is what retries a request that failed.
+    runtime.retire_failed(job_id)?;
+    forget_refusal(project, artifact_id)
+}
+
+/// Give up on the last request for the next revision of `kind`, made with
+/// `provider`, although the model may have answered it, and charged for it,
+/// without the answer being kept: asking again may pay twice. Only on the
+/// director's explicit decision. Returns whether there was such a request.
+pub fn risk_paying_twice(
+    project: &CanonicalProject,
+    provider: &str,
+    kind: DocumentKind,
+) -> Result<bool, GenerationError> {
+    let Ok(key) = ProviderKey::new(provider) else {
+        return Ok(false);
+    };
+    let next = revisions::next(project, kind).map_err(document_error)?;
+    let job_id = JobId::new(next.artifact_id.as_str())?;
+    let retired = JobRuntime::new(project, key, policy()).retire_unresolved(&job_id)?;
+    forget_refusal(project, &next.artifact_id)?;
+    Ok(retired)
 }
 
 /// Complete documents whose answers arrived before an interruption. Never

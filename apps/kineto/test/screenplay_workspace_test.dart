@@ -72,6 +72,8 @@ Future<_Calls> _pump(
   KinetoLanguageModel model = _kimiCode,
   bool working = false,
   String? editing,
+  String? error,
+  bool offerResubmit = false,
 }) async {
   tester.view.physicalSize = const Size(1280, 2400);
   tester.view.devicePixelRatio = 1.0;
@@ -87,6 +89,8 @@ Future<_Calls> _pump(
         working: working,
         workingLabel: 'Writing the screenplay with Kimi Code',
         editingSceneId: editing,
+        error: error,
+        onResubmit: offerResubmit ? () => calls.log.add('resubmit') : null,
         onImport: (text) => calls.log.add('import $text'),
         onAnalyze: () => calls.log.add('analyse'),
         onWrite: () => calls.log.add('write'),
@@ -178,6 +182,18 @@ void main() {
       await _tap(tester, find.byKey(ValueKey<String>(key)));
     }
     expect(calls.log, isEmpty);
+  });
+
+  testWidgets('asking again at the risk of paying twice is offered only after that refusal', (tester) async {
+    var calls = await _pump(tester, error: 'The model failed.');
+    expect(find.text('The model failed.'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('resubmit-document')), findsNothing);
+
+    calls = await _pump(tester, error: 'A paid call may already have been accepted.', offerResubmit: true);
+    expect(find.textContaining('without the answer reaching Kineto'), findsOneWidget);
+    expect(find.text('Ask again · may pay twice'), findsOneWidget);
+    await _tap(tester, find.byKey(const ValueKey<String>('resubmit-document')));
+    expect(calls.log, <String>['resubmit']);
   });
 
   testWidgets('a locked revision says so and offers no lock', (tester) async {
