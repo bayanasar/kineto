@@ -21,6 +21,10 @@ my-film/
 │   ├── revisions.json
 │   ├── bible_r0001.json
 │   └── style.json
+├── style/
+│   ├── samples.json
+│   └── samples/
+│       └── style_s0001.jpg
 ├── characters/
 │   └── alice/
 │       ├── character.json
@@ -71,6 +75,19 @@ The bible (`bible/bible_rNNNN.json`, `bible.schema.json`) is the production memo
 Character IDs are screenplay cast IDs; location IDs are story analysis location IDs, so a place that is seen without a scene being set in it can be described too; scene IDs are screenplay scene IDs. A model's bible is checked against all of that before it is kept, and asked for once more with the reason when it fails. Entry IDs are at most 112 characters, so an entry can later be depended on as `bible_character.<id>` and the like.
 
 A bible depends on the story analysis and source the locked screenplay was made from, on each of that screenplay's scenes (`screenplay_scene.<id>`, semantic), and on the screenplay revision itself as a cosmetic dependency that only records where the scenes were read. It is stale when the locked screenplay changes a scene it read, removes one, adds one, or is made from another analysis or source; formatting changes and locking a revision whose scenes say the same thing leave it fresh. Staleness names each cause. Edits and locks follow the screenplay's rules (a new revision, `based_on`, refused when not started from the latest; one locked revision). A stale bible can still be locked, since the director decides whether it holds, and staleness keeps saying why it may not.
+
+## Style exploration
+
+A style direction is explored with sample images. Each sample is one paid image call on a scene of the locked screenplay (the director's choice, or the scene with the most people), described from the bible when there is one, in one of a few tested presets compiled by Rust (`style-sample/1`), optionally with the director's note. `style/samples.json` (`style-samples.schema.json`) records every sample as `style_sNNNN` in order:
+
+- its preset, the preset's version and directives verbatim, the note, and the sample it refines;
+- the scene it shows, and its image under `style/samples/`;
+- its content and input hashes, provider, model and prompt provenance with applied and dropped constraints;
+- its dependencies (the scene's `screenplay_scene.<id>` and the bible revision).
+
+A sample is a `candidate`, the one `selected`, or `rejected`; nothing is deleted. Locking the selected sample writes `bible/style.json` (`style.schema.json`): the sample's stable artifact ID and image hash, and the style itself (preset, version, directives and note) verbatim, so later visual work reads the locked style without the preset table of whichever build it runs on. Every change is one atomic file write, and deleting `.kineto/` changes no sample and no lock.
+
+Samples are write-ahead jobs under their own runtime partition, `minimax-style`, with the receipt, refusal and fail-closed rules of keyframes. What the sample record needs beyond the receipt is kept beside it as a plan before the call, so an interrupted sample is completed from disk when the project opens or before the next sample, never by calling again; a sample whose call may have been accepted without its result being kept makes the next one wait for the director to risk paying twice.
 
 ## `project.toml`
 

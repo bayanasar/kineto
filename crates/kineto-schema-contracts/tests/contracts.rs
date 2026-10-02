@@ -189,6 +189,8 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "shot.schema.json",
             "source.schema.json",
             "story-analysis.schema.json",
+            "style-samples.schema.json",
+            "style.schema.json",
         ]
     );
 
@@ -615,6 +617,70 @@ fn the_bible_schema_rejects_drift() {
         edit(&mut value);
         assert!(validate_value(&bible_schema, &value, "$").is_err());
     }
+}
+
+#[test]
+fn style_samples_and_the_locked_style_match_committed_schemas() {
+    let samples_schema = schema("style-samples.schema.json");
+    let lock_schema = schema("style.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    kineto_core::bible::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    let client = kineto_provider_minimax::MinimaxClient::with_transport(
+        RecordedMinimax,
+        kineto_providers::secret::SecretString::new("sk-contract".to_owned())
+            .expect("test key is not blank"),
+        "https://example.test",
+    );
+    let sample = |note| {
+        kineto_core::style::sample_with(
+            &project,
+            kineto_core::minimax::MinimaxKeyframes::new(&project, Some(&client)),
+            kineto_core::style::SampleRequest {
+                preset: "film_noir",
+                note,
+                scene_id: None,
+            },
+            kineto_core::style::Submission::Once,
+            &mut NoHooks,
+        )
+        .expect("the sample should be recorded")
+    };
+    sample(None);
+    let refined = sample(Some("colder"));
+    kineto_project::style::select(&project, &refined.artifact_id).expect("select");
+    kineto_project::style::reject(&project, "style_s0001").expect("reject");
+    kineto_project::style::lock(&project, &refined.artifact_id).expect("lock");
+    validate(
+        &samples_schema,
+        &json_file(&temp.0.join("style/samples.json")),
+        "style samples",
+    );
+    let lock = json_file(&temp.0.join("bible/style.json"));
+    validate(&lock_schema, &lock, "locked style");
+
+    let mut drifted = lock.clone();
+    drifted["directives"] = "".into();
+    assert!(validate_value(&lock_schema, &drifted, "$").is_err());
+    let mut drifted = json_file(&temp.0.join("style/samples.json"));
+    drifted["samples"][0]["status"] = "locked".into();
+    assert!(validate_value(&samples_schema, &drifted, "$").is_err());
 }
 
 #[test]

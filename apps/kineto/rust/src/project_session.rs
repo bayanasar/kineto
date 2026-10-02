@@ -1062,6 +1062,12 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(
             Prerequisite::Screenplay | Prerequisite::LockedScreenplay,
         ) => PROJECT_ERR_NEEDS_SCREENPLAY,
+        GenerationError::Prerequisite(Prerequisite::RealImageProvider) => {
+            PROJECT_ERR_PROVIDER_NOT_CONFIGURED
+        }
+        GenerationError::Prerequisite(Prerequisite::StylePreset | Prerequisite::StyleSample) => {
+            PROJECT_ERR_INVALID_ARGUMENT
+        }
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }

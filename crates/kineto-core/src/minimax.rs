@@ -32,6 +32,7 @@ use kineto_project::{
     fs::{ProjectFsError, ProjectRelativePath},
     manifest::CanonicalProject,
     shot::{CandidateOutput, PromptProvenance, keyframe_media_path},
+    style,
 };
 use kineto_provider_minimax::{
     AspectRatio, HttpsTransport, IMAGE_MODEL, ImageRequest, MinimaxClient, MinimaxError, PROVIDER,
@@ -41,7 +42,7 @@ use kineto_providers::{ImageCapabilities, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::generation::{
-    CandidateGenerator, CandidateRequest, GeneratedCandidate, parse_candidate_key,
+    CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate, parse_candidate_key,
 };
 
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
@@ -316,12 +317,16 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
             answered();
         }
 
-        let media_path = keyframe_media_path(
-            request.shot_number,
-            &request.artifact_id,
-            extension(image.format),
-        )
-        .map_err(|_| MinimaxKeyframeError::Receipt("keyframe path is invalid"))?;
+        let media_path = match request.owner {
+            CandidateOwner::Shot(shot_number) => {
+                keyframe_media_path(shot_number, &request.artifact_id, extension(image.format))
+                    .map_err(|_| MinimaxKeyframeError::Receipt("keyframe path is invalid"))?
+            }
+            CandidateOwner::Style => {
+                style::sample_media_path(&request.artifact_id, extension(image.format))
+                    .map_err(|_| MinimaxKeyframeError::Receipt("style sample path is invalid"))?
+            }
+        };
         let root = self.project.root();
         root.write_atomic(&media_path, &image.bytes)
             .map_err(MinimaxKeyframeError::Fs)?;

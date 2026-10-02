@@ -59,12 +59,21 @@ use crate::{
 /// The capability a shot candidate is generated with.
 pub const GENERATE_OPERATION: &str = "image.generate";
 
+/// What a generated image belongs to, which decides where it is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateOwner {
+    /// A keyframe candidate of the shot with this 1-based number.
+    Shot(u32),
+    /// A sample of a style direction.
+    Style,
+}
+
 /// One candidate to generate, as the adapter receives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateRequest {
     pub artifact_id: ArtifactId,
     pub input_hash: InputHash,
-    pub shot_number: u32,
+    pub owner: CandidateOwner,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -534,6 +543,12 @@ pub enum Prerequisite {
     Scene,
     /// The bible is written from the locked screenplay.
     LockedScreenplay,
+    /// Style samples need a real image provider, not the local demo.
+    RealImageProvider,
+    /// There is no style preset with the ID asked for.
+    StylePreset,
+    /// There is no style sample with the ID asked for.
+    StyleSample,
 }
 
 impl fmt::Display for Prerequisite {
@@ -542,7 +557,10 @@ impl fmt::Display for Prerequisite {
             Self::StoryAnalysis => "analyse the story before writing the screenplay",
             Self::Screenplay => "write the screenplay before rewriting a scene",
             Self::Scene => "the screenplay has no scene with that id",
-            Self::LockedScreenplay => "lock the screenplay before writing the bible",
+            Self::LockedScreenplay => "lock the screenplay first",
+            Self::RealImageProvider => "style samples need an image provider such as MiniMax",
+            Self::StylePreset => "there is no style preset with that id",
+            Self::StyleSample => "there is no style sample with that id",
         })
     }
 }
@@ -666,7 +684,7 @@ fn generate_requested<G: CandidateGenerator>(
             && !generator.may_call_again(&CandidateRequest {
                 artifact_id: candidate.clone(),
                 input_hash: record.intent().input_hash().clone(),
-                shot_number: plan.shot_number(),
+                owner: CandidateOwner::Shot(plan.shot_number()),
                 prompt: None,
             })
         {
@@ -776,7 +794,7 @@ fn complete_inner<G: CandidateGenerator>(
             CandidateRequest {
                 artifact_id: candidate.clone(),
                 input_hash: plan.input_hash().clone(),
-                shot_number: plan.shot_number(),
+                owner: CandidateOwner::Shot(plan.shot_number()),
                 prompt: None,
             },
         ));
@@ -1015,7 +1033,7 @@ pub fn unfinished_with<G: CandidateGenerator>(
             && !generator.may_call_again(&CandidateRequest {
                 artifact_id: candidate,
                 input_hash,
-                shot_number: plan.shot_number(),
+                owner: CandidateOwner::Shot(plan.shot_number()),
                 prompt: None,
             })
             && !unfinished.unresolved.contains(&plan.shot_number())
@@ -1306,7 +1324,7 @@ mod tests {
         let request = CandidateRequest {
             artifact_id: candidate,
             input_hash: input,
-            shot_number: 1,
+            owner: CandidateOwner::Shot(1),
             prompt: None,
         };
 

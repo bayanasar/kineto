@@ -6,6 +6,7 @@ pub mod screenplay;
 pub mod shot;
 pub mod source;
 pub mod story;
+pub mod style;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
