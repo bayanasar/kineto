@@ -626,6 +626,7 @@ mod tests {
                 minimum_seed_support: SeedSupport::Deterministic,
                 requires_negative_prompt: true,
                 requires_mask: false,
+                requires_synchronous: true,
             },
             adapter.capabilities(),
         );

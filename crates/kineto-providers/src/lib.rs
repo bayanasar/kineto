@@ -66,6 +66,29 @@ pub struct LlmCapabilities {
     pub vision_input: bool,
 }
 
+/// What something costs, in millionths of a currency unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Price {
+    pub amount_micros: u64,
+    /// ISO 4217 code, such as `USD`.
+    pub currency: [u8; 3],
+}
+
+impl Price {
+    #[must_use]
+    pub const fn usd(amount_micros: u64) -> Self {
+        Self {
+            amount_micros,
+            currency: *b"USD",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_free(self) -> bool {
+        self.amount_micros == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImageCapabilities {
     pub aspect_ratios: BTreeSet<AspectRatio>,
@@ -85,6 +108,11 @@ pub struct ImageCapabilities {
     /// Longest prompt the provider accepts, in characters; `None` when it
     /// sets no limit.
     pub max_prompt_chars: Option<usize>,
+    /// Whether an image arrives as a remote job to follow, rather than in
+    /// the provider's answer to the request.
+    pub async_jobs: bool,
+    /// What one image costs; `None` when it is not known.
+    pub price_per_image: Option<Price>,
 }
 
 impl ImageCapabilities {
@@ -242,6 +270,9 @@ pub struct ImageRequirements {
     pub minimum_seed_support: SeedSupport,
     pub requires_negative_prompt: bool,
     pub requires_mask: bool,
+    /// The workflow keeps the image the provider answers with and follows
+    /// no remote job.
+    pub requires_synchronous: bool,
 }
 
 #[must_use]
@@ -274,6 +305,12 @@ pub fn evaluate_image(
     if requirements.requires_mask && !capabilities.masks {
         gaps.push(CapabilityGap {
             capability: "image.mask",
+            severity: GapSeverity::Incompatible,
+        });
+    }
+    if requirements.requires_synchronous && capabilities.async_jobs {
+        gaps.push(CapabilityGap {
+            capability: "image.async_jobs",
             severity: GapSeverity::Incompatible,
         });
     }
@@ -311,6 +348,8 @@ pub mod fake {
             masks: true,
             output_formats: [ImageFormat::Png].into_iter().collect(),
             max_prompt_chars: None,
+            async_jobs: true,
+            price_per_image: Some(Price::usd(40_000)),
         }
     }
 
@@ -409,11 +448,39 @@ mod tests {
             minimum_seed_support: SeedSupport::None,
             requires_negative_prompt: false,
             requires_mask: false,
+            requires_synchronous: false,
         };
 
         let report = evaluate_image(requirements, &fake::image_text_only());
 
         assert!(!report.is_compatible());
+    }
+
+    #[test]
+    fn a_workflow_that_keeps_the_answer_rejects_an_image_provider_of_remote_jobs() {
+        let requirements = ImageRequirements {
+            required_reference_role: None,
+            minimum_seed_support: SeedSupport::None,
+            requires_negative_prompt: false,
+            requires_mask: false,
+            requires_synchronous: true,
+        };
+        let report = evaluate_image(requirements, &fake::image_full());
+        assert_eq!(
+            report.gaps,
+            [CapabilityGap {
+                capability: "image.async_jobs",
+                severity: GapSeverity::Incompatible,
+            }]
+        );
+        assert!(evaluate_image(requirements, &fake::image_text_only()).is_compatible());
+        assert_eq!(
+            fake::image_full()
+                .price_per_image
+                .map(|price| price.currency),
+            Some(*b"USD")
+        );
+        assert!(Price::usd(0).is_free());
     }
 
     #[test]

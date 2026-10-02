@@ -22,7 +22,7 @@ use std::sync::Arc;
 use kineto_job_runtime::{
     DispatchOutcome, InvokePreparedError, JobRuntime, PrepareOutcome, ProviderKey, StartupOutcome,
 };
-use kineto_jobs::{CostEstimate, IntentState, JobId};
+use kineto_jobs::{IntentState, JobId};
 use kineto_project::{
     ArtifactId, DependencyImpact, InputHash, InputHashMaterial,
     bible::{self, Bible},
@@ -32,6 +32,7 @@ use kineto_project::{
     style::{self as document, SampleStatus, StyleSample},
 };
 use kineto_provider_minimax::{IMAGE_MODEL, MinimaxClient, PROVIDER, Transport};
+use kineto_providers::Price;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,7 +40,7 @@ use crate::{
     generation::{
         CandidateGenerator, CandidateOwner, CandidateRequest, GENERATE_OPERATION,
         GeneratedCandidate, GenerationError, GenerationHooks, GenerationPoint, ImageProvider,
-        Prerequisite, invoke_when_permitted,
+        Prerequisite, invoke_when_permitted, require_synchronous,
     },
     minimax::MinimaxKeyframes,
     style_prompt::{self, StylePreset},
@@ -279,12 +280,12 @@ fn settle<T: Transport + Sync>(
     Ok(())
 }
 
-/// What one sample costs and how many calls it makes, when the provider
-/// can say.
+/// What one sample, one call, costs with `provider`, as it declares; `None`
+/// when it cannot sample or does not say.
 #[must_use]
-pub fn sample_cost(provider: &ImageProvider) -> Option<CostEstimate> {
+pub fn sample_cost(provider: &ImageProvider) -> Option<Price> {
     match provider {
-        ImageProvider::Minimax(Some(client)) => Some(client.estimate_image_cost()),
+        ImageProvider::Minimax(Some(_)) => provider.capabilities().price_per_image,
         ImageProvider::Minimax(None) | ImageProvider::LocalDemo => None,
     }
 }
@@ -420,6 +421,7 @@ fn ask<T: Transport + Sync>(
     if !adapter.can_invoke() {
         return Err(GenerationError::NotConfigured);
     }
+    require_synchronous(&adapter.capabilities())?;
     let note = note.map(str::trim).filter(|note| !note.is_empty());
     let prompt = style_prompt::compile(
         preset,

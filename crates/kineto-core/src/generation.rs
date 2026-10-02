@@ -43,11 +43,9 @@ use kineto_project::{
     },
 };
 use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
-use kineto_provider_minimax::{
-    IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport,
-};
+use kineto_provider_minimax::{MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport};
 use kineto_providers::{
-    ImageCapabilities,
+    ImageCapabilities, ImageRequirements, Price, SeedSupport, evaluate_image,
     secret::{SecretError, SecretSource},
 };
 
@@ -211,24 +209,71 @@ impl ImageProvider {
         }
     }
 
+    /// What the provider declares it can do; workflow code reads this, never
+    /// the provider's name.
+    #[must_use]
+    pub fn capabilities(&self) -> ImageCapabilities {
+        match self {
+            Self::LocalDemo => local_demo_capabilities(),
+            Self::Minimax(_) => kineto_provider_minimax::image_capabilities(),
+        }
+    }
+
     #[must_use]
     pub fn info(&self) -> ImageProviderInfo {
+        let candidates =
+            u64::try_from(GENERATED_CANDIDATE_COUNT).expect("candidate count fits in u64");
+        let generation_cost_micros = self
+            .capabilities()
+            .price_per_image
+            .map_or(0, |price| price.amount_micros * candidates);
         match self {
             Self::LocalDemo => ImageProviderInfo {
                 kind: ImageProviderKind::LocalDemo,
                 ready: true,
-                generation_cost_micros: 0,
+                generation_cost_micros,
                 video_cost_micros: 0,
             },
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
                 ready: client.is_some(),
-                generation_cost_micros: IMAGE_PRICE_MICROS
-                    * u64::try_from(GENERATED_CANDIDATE_COUNT)
-                        .expect("candidate count fits in u64"),
+                generation_cost_micros,
                 video_cost_micros: crate::video::estimated_cost_micros(),
             },
         }
+    }
+}
+
+/// The local demo generator: no prompt, no references, an answer at once,
+/// free.
+#[must_use]
+pub fn local_demo_capabilities() -> ImageCapabilities {
+    ImageCapabilities {
+        async_jobs: false,
+        price_per_image: Some(Price::usd(0)),
+        ..ImageCapabilities::default()
+    }
+}
+
+/// Refuse a provider whose images arrive as remote jobs: candidates and
+/// samples keep the image the provider answers with and follow no job.
+pub(crate) fn require_synchronous(capabilities: &ImageCapabilities) -> Result<(), GenerationError> {
+    let report = evaluate_image(
+        ImageRequirements {
+            required_reference_role: None,
+            minimum_seed_support: SeedSupport::None,
+            requires_negative_prompt: false,
+            requires_mask: false,
+            requires_synchronous: true,
+        },
+        capabilities,
+    );
+    if report.is_compatible() {
+        Ok(())
+    } else {
+        Err(GenerationError::Prerequisite(
+            Prerequisite::SynchronousImageProvider,
+        ))
     }
 }
 
@@ -415,6 +460,10 @@ impl CandidateGenerator for LocalDemoAdapter {
         false
     }
 
+    fn capabilities(&self) -> ImageCapabilities {
+        local_demo_capabilities()
+    }
+
     fn invokes_on_recovery(&self) -> bool {
         true
     }
@@ -549,6 +598,9 @@ pub enum Prerequisite {
     StylePreset,
     /// There is no style sample with the ID asked for.
     StyleSample,
+    /// The image provider delivers through remote jobs, which keyframes and
+    /// style samples do not follow.
+    SynchronousImageProvider,
 }
 
 impl fmt::Display for Prerequisite {
@@ -561,6 +613,9 @@ impl fmt::Display for Prerequisite {
             Self::RealImageProvider => "style samples need an image provider such as MiniMax",
             Self::StylePreset => "there is no style preset with that id",
             Self::StyleSample => "there is no style sample with that id",
+            Self::SynchronousImageProvider => {
+                "the image provider delivers images as remote jobs, which this step does not follow"
+            }
         })
     }
 }
@@ -670,6 +725,7 @@ fn generate_requested<G: CandidateGenerator>(
     if !generator.can_invoke() {
         return Err(GenerationError::NotConfigured);
     }
+    require_synchronous(&generator.capabilities())?;
     let prompt = compile_prompt(project, shot, &generator)?;
     let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
     // A candidate whose last call may have been accepted without leaving its
@@ -1341,6 +1397,120 @@ mod tests {
             adapter
                 .reconcile_by_idempotency_key(&IdempotencyKey::new("video.generate:x:y").unwrap())
                 .is_err()
+        );
+    }
+
+    /// The demo generator, declaring that its images arrive as remote jobs.
+    #[derive(Clone)]
+    struct RemoteJobs;
+
+    impl PaidJobAdapter for RemoteJobs {
+        type Request = CandidateRequest;
+        type Output = GeneratedCandidate;
+        type Error = LocalDemoError;
+
+        fn estimate_cost(
+            &self,
+            request: &CandidateRequest,
+        ) -> Result<CostEstimate, LocalDemoError> {
+            LocalDemoAdapter.estimate_cost(request)
+        }
+
+        fn invoke(
+            &mut self,
+            request: &CandidateRequest,
+            key: &IdempotencyKey,
+        ) -> Result<Invocation<GeneratedCandidate>, LocalDemoError> {
+            LocalDemoAdapter.invoke(request, key)
+        }
+
+        fn reconcile(
+            &mut self,
+            id: &ProviderJobId,
+        ) -> Result<Reconciliation<GeneratedCandidate>, LocalDemoError> {
+            LocalDemoAdapter.reconcile(id)
+        }
+
+        fn reconcile_by_idempotency_key(
+            &mut self,
+            key: &IdempotencyKey,
+        ) -> Result<Reconciliation<GeneratedCandidate>, LocalDemoError> {
+            LocalDemoAdapter.reconcile_by_idempotency_key(key)
+        }
+
+        fn classify_error(&self, error: &LocalDemoError) -> ErrorClass {
+            LocalDemoAdapter.classify_error(error)
+        }
+    }
+
+    impl CandidateGenerator for RemoteJobs {
+        fn provider(&self) -> ProviderKey {
+            ProviderKey::new("fake-remote-images").unwrap()
+        }
+
+        fn policy(&self) -> JobRuntimePolicy {
+            LocalDemoAdapter.policy()
+        }
+
+        fn needs_prompt(&self) -> bool {
+            false
+        }
+
+        fn capabilities(&self) -> ImageCapabilities {
+            ImageCapabilities {
+                async_jobs: true,
+                ..local_demo_capabilities()
+            }
+        }
+
+        fn recover(
+            &mut self,
+            request: &CandidateRequest,
+        ) -> Result<GeneratedCandidate, LocalDemoError> {
+            LocalDemoAdapter.recover(request)
+        }
+    }
+
+    #[test]
+    fn providers_declare_how_images_arrive_and_what_one_costs() {
+        for capabilities in [
+            LocalDemoAdapter.capabilities(),
+            ImageProvider::LocalDemo.capabilities(),
+        ] {
+            assert!(!capabilities.async_jobs);
+            assert_eq!(capabilities.price_per_image, Some(Price::usd(0)));
+            assert_eq!(capabilities.max_reference_images, 0, "no references");
+        }
+        let minimax = ImageProvider::Minimax(None).capabilities();
+        assert!(!minimax.async_jobs);
+        let price = minimax.price_per_image.unwrap();
+        assert_eq!(price, Price::usd(3_500));
+        // What the director is shown comes from the declared price.
+        assert_eq!(ImageProvider::LocalDemo.info().generation_cost_micros, 0);
+        assert_eq!(
+            ImageProvider::Minimax(None).info().generation_cost_micros,
+            price.amount_micros * u64::try_from(GENERATED_CANDIDATE_COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_image_provider_of_remote_jobs_is_refused_before_anything_is_written() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        assert!(matches!(
+            generate_with(&project, &mut shot, RemoteJobs, &mut NoHooks),
+            Err(GenerationError::Prerequisite(
+                Prerequisite::SynchronousImageProvider
+            ))
+        ));
+        assert!(intent_states(&target).is_empty());
+        assert!(!shot.snapshot().unwrap().generated);
+        // The same project generates with a provider that answers at once.
+        assert_eq!(
+            generate_with(&project, &mut shot, LocalDemoAdapter, &mut NoHooks).unwrap(),
+            AttachOutcome::Attached
         );
     }
 

@@ -45,11 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project = CanonicalProject::open(&target)?;
     let recovery = style::recover(&project)?;
     println!("recovered before sampling: {recovery:?}");
-    if let Some(cost) = style::sample_cost(&provider) {
+    if let Some(price) = style::sample_cost(&provider) {
         println!(
-            "{} call(s), about {} USD micros",
+            "{} call(s), about {} {} micros",
             presets.len(),
-            cost.amount_micros * presets.len() as u64
+            price.amount_micros * presets.len() as u64,
+            String::from_utf8_lossy(&price.currency)
         );
     }
     let mut last = None;

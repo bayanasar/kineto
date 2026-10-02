@@ -19,7 +19,9 @@ use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
-use kineto_providers::{ImageCapabilities, ImageFormat, ReferenceRole, secret::SecretString};
+use kineto_providers::{
+    ImageCapabilities, ImageFormat, Price, ReferenceRole, secret::SecretString,
+};
 use serde::{Deserialize, Serialize};
 
 mod video;
@@ -66,6 +68,9 @@ pub fn image_capabilities() -> ImageCapabilities {
         max_reference_bytes: Some(10 * 1024 * 1024 - 1),
         output_formats: [ImageFormat::Jpeg].into_iter().collect(),
         max_prompt_chars: Some(MAX_PROMPT_CHARS),
+        // The image comes back base64 in the answer to the request.
+        async_jobs: false,
+        price_per_image: Some(Price::usd(IMAGE_PRICE_MICROS)),
         ..ImageCapabilities::default()
     }
 }
@@ -767,9 +772,20 @@ mod tests {
             minimum_seed_support: SeedSupport::None,
             requires_negative_prompt: false,
             requires_mask: false,
+            requires_synchronous: true,
         };
         assert!(evaluate_image(needs(ReferenceRole::Identity), &capabilities).is_compatible());
         assert!(!evaluate_image(needs(ReferenceRole::Style), &capabilities).is_compatible());
+        // The client returns the image itself, at the price it estimates.
+        assert!(!capabilities.async_jobs);
+        let estimate = client([]).estimate_image_cost();
+        assert_eq!(
+            capabilities.price_per_image,
+            Some(Price {
+                amount_micros: estimate.amount_micros,
+                currency: estimate.currency.bytes(),
+            })
+        );
     }
 
     #[test]
