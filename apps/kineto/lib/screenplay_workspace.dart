@@ -474,68 +474,101 @@ class ScreenplayWorkspaceView extends StatelessWidget {
       );
 
   Future<void> _importDialog(BuildContext context) async {
-    final controller = TextEditingController();
     final text = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Import story text'),
-        content: SizedBox(
-          width: 640,
-          child: TextField(
-            key: const ValueKey<String>('import-text'),
-            controller: controller,
-            minLines: 10,
-            maxLines: 20,
-            decoration: wabInputDecoration(hintText: 'Paste the story to adapt'),
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            key: const ValueKey<String>('import-confirm'),
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Import as a new source revision'),
-          ),
-        ],
+      builder: (context) => const _TextDialog(
+        title: 'Import story text',
+        width: 640,
+        fieldKey: 'import-text',
+        minLines: 10,
+        maxLines: 20,
+        hint: 'Paste the story to adapt',
+        confirmKey: 'import-confirm',
+        confirmLabel: 'Import as a new source revision',
       ),
     );
-    controller.dispose();
     if (text != null && text.trim().isNotEmpty) onImport(text);
   }
 
   Future<void> _rewriteDialog(BuildContext context, KinetoScene scene) async {
-    final controller = TextEditingController();
     final direction = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Rewrite “${scene.heading}”'),
+      builder: (context) => _TextDialog(
+        title: 'Rewrite “${scene.heading}”',
+        width: 560,
+        fieldKey: 'rewrite-direction',
+        minLines: 2,
+        maxLines: 5,
+        hint: 'What should change? Leave empty for a fresh take.',
+        confirmKey: 'rewrite-confirm',
+        confirmLabel: 'Rewrite · ${documentCostLabel(model, null)}',
+      ),
+    );
+    if (direction == null) return;
+    final trimmed = direction.trim();
+    onRewrite(scene.id, trimmed.isEmpty ? null : trimmed);
+  }
+}
+
+/// A dialog asking for one piece of text. It owns its controller: the field
+/// is still built while the dialog animates out, so the controller may only
+/// be disposed with the dialog itself.
+class _TextDialog extends StatefulWidget {
+  const _TextDialog({
+    required this.title,
+    required this.width,
+    required this.fieldKey,
+    required this.minLines,
+    required this.maxLines,
+    required this.hint,
+    required this.confirmKey,
+    required this.confirmLabel,
+  });
+
+  final String title;
+  final double width;
+  final String fieldKey;
+  final int minLines;
+  final int maxLines;
+  final String hint;
+  final String confirmKey;
+  final String confirmLabel;
+
+  @override
+  State<_TextDialog> createState() => _TextDialogState();
+}
+
+class _TextDialogState extends State<_TextDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
         content: SizedBox(
-          width: 560,
+          width: widget.width,
           child: TextField(
-            key: const ValueKey<String>('rewrite-direction'),
-            controller: controller,
-            minLines: 2,
-            maxLines: 5,
-            decoration: wabInputDecoration(
-              hintText: 'What should change? Leave empty for a fresh take.',
-            ),
+            key: ValueKey<String>(widget.fieldKey),
+            controller: _controller,
+            minLines: widget.minLines,
+            maxLines: widget.maxLines,
+            decoration: wabInputDecoration(hintText: widget.hint),
           ),
         ),
         actions: <Widget>[
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           TextButton(
-            key: const ValueKey<String>('rewrite-confirm'),
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: Text('Rewrite · ${documentCostLabel(model, null)}'),
+            key: ValueKey<String>(widget.confirmKey),
+            onPressed: () => Navigator.pop(context, _controller.text),
+            child: Text(widget.confirmLabel),
           ),
         ],
-      ),
-    );
-    controller.dispose();
-    if (direction == null) return;
-    final trimmed = direction.trim();
-    onRewrite(scene.id, trimmed.isEmpty ? null : trimmed);
-  }
+      );
 }
 
 /// One line of the revision history.

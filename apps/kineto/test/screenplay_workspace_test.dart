@@ -193,4 +193,27 @@ void main() {
     expect(find.text('Locked'), findsOneWidget);
     expect(find.byKey(const ValueKey<String>('lock')), findsNothing);
   });
+
+  testWidgets('imported text reaches the project once the dialog has closed', (tester) async {
+    final calls = await _pump(tester);
+    await _tap(tester, find.text('Import text'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey<String>('import-text')), 'A new draft of the story.');
+    await _tap(tester, find.byKey(const ValueKey<String>('import-confirm')));
+    // The dialog animates out with its text field still built.
+    await tester.pumpAndSettle();
+    expect(find.text('Import story text'), findsNothing);
+    expect(calls.log, <String>['import A new draft of the story.']);
+  });
+
+  testWidgets('a rewrite direction reaches the project once the dialog has closed', (tester) async {
+    final calls = await _pump(tester);
+    await _tap(tester, find.byKey(const ValueKey<String>('rewrite-office_night')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey<String>('rewrite-direction')), '  Make it colder.  ');
+    await _tap(tester, find.byKey(const ValueKey<String>('rewrite-confirm')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('rewrite-direction')), findsNothing);
+    expect(calls.log, <String>['rewrite office_night Make it colder.']);
+  });
 }
