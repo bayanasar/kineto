@@ -109,6 +109,20 @@ pub trait CandidateGenerator:
     /// without calling the provider again.
     fn recover(&mut self, request: &CandidateRequest) -> Result<GeneratedCandidate, Self::Error>;
 
+    /// Whether a candidate whose provider call was attempted but left no
+    /// result may be called again without risking a second charge: its
+    /// result is kept, or the provider certainly did not accept the attempt.
+    /// A free generator always may.
+    fn may_call_again(&self, _request: &CandidateRequest) -> bool {
+        true
+    }
+
+    /// Whether a failed call certainly cost nothing: it never reached the
+    /// provider, or the provider refused it. A free generator's never cost.
+    fn certainly_not_charged(&self, _error: &Self::Error) -> bool {
+        true
+    }
+
     /// Forget runtime state kept for a candidate that is now acknowledged.
     fn release(&mut self, _request: &CandidateRequest) {}
 }
@@ -575,12 +589,55 @@ pub fn generate(
     }
 }
 
+/// Generate the shot's candidates again although a paid call of the last
+/// attempt may have been accepted, and charged for, without leaving its
+/// result. Only on the director's explicit decision to risk paying twice.
+pub fn resubmit(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    provider: &ImageProvider,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    match provider {
+        ImageProvider::LocalDemo => {
+            generate_requested(project, shot, LocalDemoAdapter, hooks, true)
+        }
+        ImageProvider::Minimax(client) => generate_requested(
+            project,
+            shot,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+            true,
+        ),
+    }
+}
+
 /// [`generate`] with an explicit generator.
 pub fn generate_with<G: CandidateGenerator>(
     project: &CanonicalProject,
     shot: &mut ShotWorkflow,
     generator: G,
     hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    generate_requested(project, shot, generator, hooks, false)
+}
+
+/// [`resubmit`] with an explicit generator.
+pub fn resubmit_with<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    generator: G,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<AttachOutcome, GenerationError> {
+    generate_requested(project, shot, generator, hooks, true)
+}
+
+fn generate_requested<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    generator: G,
+    hooks: &mut dyn GenerationHooks,
+    risk_paying_twice: bool,
 ) -> Result<AttachOutcome, GenerationError> {
     let plan = shot.plan_generation(project)?;
     // Refuse before writing anything: a provider that cannot be called or a
@@ -589,6 +646,33 @@ pub fn generate_with<G: CandidateGenerator>(
         return Err(GenerationError::NotConfigured);
     }
     let prompt = compile_prompt(project, shot, &generator)?;
+    let runtime = JobRuntime::new(project, generator.provider(), generator.policy());
+    // A candidate whose last call may have been accepted without leaving its
+    // result is never called again unasked: that could pay twice. Checked
+    // for every candidate before anything is written or called.
+    let mut unresolved = Vec::new();
+    for candidate in plan.candidate_ids() {
+        let job_id = JobId::new(candidate.as_str())?;
+        if let Some(record) = runtime.load(&job_id)?
+            && record.intent().state() == IntentState::Prepared
+            && record.attempts() > 0
+            && !generator.may_call_again(&CandidateRequest {
+                artifact_id: candidate.clone(),
+                input_hash: record.intent().input_hash().clone(),
+                shot_number: plan.shot_number(),
+                prompt: None,
+            })
+        {
+            unresolved.push(job_id);
+        }
+    }
+    if !unresolved.is_empty() && !risk_paying_twice {
+        return Err(GenerationError::UnresolvedSubmission);
+    }
+    for job_id in &unresolved {
+        runtime.retire_unresolved(job_id)?;
+    }
+    drop(runtime);
     complete_inner(project, shot, &plan, generator, Some(prompt), hooks)
 }
 
@@ -756,6 +840,13 @@ fn complete_inner<G: CandidateGenerator>(
                             "an image provider returned a pending job",
                         )),
                         Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+                        // A failure that may have reached the provider may
+                        // have been charged.
+                        Err(InvokePreparedError::Provider { source, .. })
+                            if !generator.certainly_not_charged(&source) =>
+                        {
+                            Err(GenerationError::UnresolvedSubmission)
+                        }
                         Err(InvokePreparedError::Provider { source, class, .. }) => {
                             Err(GenerationError::Provider {
                                 source: Box::new(source),
@@ -777,6 +868,12 @@ fn complete_inner<G: CandidateGenerator>(
     });
     // Candidates that finished stay invoked with their results kept; the
     // next open completes the generation without paying for them again.
+    if results
+        .iter()
+        .any(|result| matches!(result, Err(GenerationError::UnresolvedSubmission)))
+    {
+        return Err(GenerationError::UnresolvedSubmission);
+    }
     let outputs = results
         .into_iter()
         .map(|result| result.map(|generated| generated.output))
@@ -844,6 +941,9 @@ pub struct Unfinished {
     /// Intents this build cannot read or cannot place; they are left alone and
     /// need a person to look at them.
     pub needs_attention: usize,
+    /// Shots with a candidate whose paid call may have been accepted without
+    /// leaving its result; see [`resubmit`].
+    pub unresolved: Vec<u32>,
 }
 
 /// Find generations that stopped before they were acknowledged.
@@ -889,6 +989,31 @@ pub fn unfinished_with<G: CandidateGenerator>(
             | StartupOutcome::NeedsAttention { .. }
             | StartupOutcome::UnreadableIntent { .. }
             | StartupOutcome::ProviderError { .. } => unfinished.needs_attention += 1,
+        }
+    }
+    for job_id in &awaiting_call {
+        let Some(record) = runtime.load(job_id)? else {
+            continue;
+        };
+        let Ok(candidate) = ArtifactId::new(job_id.as_str()) else {
+            unfinished.needs_attention += 1;
+            continue;
+        };
+        let input_hash = record.intent().input_hash().clone();
+        let Ok(plan) = GenerationPlan::for_candidate(&candidate, input_hash.clone()) else {
+            unfinished.needs_attention += 1;
+            continue;
+        };
+        if record.attempts() > 0
+            && !generator.may_call_again(&CandidateRequest {
+                artifact_id: candidate,
+                input_hash,
+                shot_number: plan.shot_number(),
+                prompt: None,
+            })
+            && !unfinished.unresolved.contains(&plan.shot_number())
+        {
+            unfinished.unresolved.push(plan.shot_number());
         }
     }
     if !generator.invokes_on_recovery() {
@@ -1212,6 +1337,8 @@ mod tests {
         struct FakeMinimax {
             calls: Arc<AtomicU32>,
             refuse: Mutex<Option<String>>,
+            /// A call that goes out and gets no answer.
+            lose: Mutex<Option<TransportFailure>>,
         }
 
         impl Transport for FakeMinimax {
@@ -1224,6 +1351,9 @@ mod tests {
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
                 assert!(sent["prompt"].as_str().unwrap().contains("filmmaker"));
+                if let Some(failure) = self.lose.lock().unwrap().take() {
+                    return Err(failure);
+                }
                 let body = match self.refuse.lock().unwrap().take() {
                     Some(refusal) => refusal,
                     None => {
@@ -1282,8 +1412,27 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         }
 
+        /// Names of the files under `.kineto/generation/`.
+        fn generation_files(target: &Path) -> Vec<String> {
+            fs::read_dir(target.join(".kineto/generation")).map_or(Vec::new(), |entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+        }
+
         fn receipts(target: &Path) -> usize {
-            fs::read_dir(target.join(".kineto/generation")).map_or(0, Iterator::count)
+            generation_files(target)
+                .iter()
+                .filter(|name| !name.ends_with(".refused.json"))
+                .count()
+        }
+
+        fn refusals(target: &Path) -> usize {
+            generation_files(target)
+                .iter()
+                .filter(|name| name.ends_with(".refused.json"))
+                .count()
         }
 
         #[test]
@@ -1528,6 +1677,8 @@ mod tests {
             assert!(!shot.snapshot().unwrap().generated);
             assert_eq!(intent_states(&target), ["invoked", "invoked", "prepared"]);
             assert_eq!(receipts(&target), 2);
+            // MiniMax answered with a refusal, so nothing was charged for it.
+            assert_eq!(refusals(&target), 1);
             assert_eq!(calls.load(Ordering::SeqCst), 3);
 
             // Reopening completes nothing and pays for nothing: the refused
@@ -1551,6 +1702,121 @@ mod tests {
             assert_eq!(shot.snapshot().unwrap().generation_revision, 1);
             assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
             assert_eq!(receipts(&target), 0);
+            assert_eq!(refusals(&target), 0);
+        }
+
+        #[test]
+        fn a_call_answered_before_anything_was_written_is_never_paid_for_again_unasked() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+            let crash = || panic!("the process dies as MiniMax answers");
+
+            let error = generate_with(
+                &project,
+                &mut shot,
+                MinimaxKeyframes::new(&project, Some(&client)).when_answered(&crash),
+                &mut NoHooks,
+            )
+            .unwrap_err();
+            assert!(matches!(error, GenerationError::Unexpected(_)), "{error}");
+            // Charged three times, and nothing written down.
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(intent_states(&target), vec!["prepared"; 3]);
+            assert_eq!((receipts(&target), refusals(&target)), (0, 0));
+
+            let minimax = || MinimaxKeyframes::new(&project, Some(&client));
+            assert!(matches!(
+                generate_with(&project, &mut shot, minimax(), &mut NoHooks),
+                Err(GenerationError::UnresolvedSubmission)
+            ));
+            let found = unfinished_with(&project, minimax()).unwrap();
+            assert_eq!((found.plans.len(), found.unresolved), (0, vec![1]));
+            assert_eq!(calls.load(Ordering::SeqCst), 3, "never paid twice unasked");
+
+            // The director decides to risk it.
+            let outcome = resubmit_with(&project, &mut shot, minimax(), &mut NoHooks).unwrap();
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(calls.load(Ordering::SeqCst), 6);
+            assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+        }
+
+        #[test]
+        fn a_kept_answer_is_used_even_if_its_intent_never_said_so() {
+            struct StopAfterCalls;
+            impl GenerationHooks for StopAfterCalls {
+                fn reached(&mut self, point: GenerationPoint) {
+                    if point == GenerationPoint::Invoked {
+                        panic!("stopped after the calls");
+                    }
+                }
+            }
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+            let minimax = || MinimaxKeyframes::new(&project, Some(&client));
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_with(&project, &mut shot, minimax(), &mut StopAfterCalls)
+            }));
+            assert!(stopped.is_err());
+            assert_eq!(receipts(&target), 3);
+            // The state a failed intent save after the receipt leaves.
+            for entry in fs::read_dir(target.join(".kineto/jobs/intents")).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    let mut intent: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    intent["state"] = "prepared".into();
+                    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+                }
+            }
+
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let outcome = generate_with(&project, &mut shot, minimax(), &mut NoHooks).unwrap();
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                3,
+                "the kept answers were used"
+            );
+            assert_eq!(intent_states(&target), vec!["reconciled"; 3]);
+        }
+
+        #[test]
+        fn a_call_lost_after_it_was_sent_waits_for_the_director() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let fake = FakeMinimax::default();
+            *fake.lose.lock().unwrap() = Some(TransportFailure::Timeout);
+            let (client, calls) = client(fake);
+            let minimax = || MinimaxKeyframes::new(&project, Some(&client));
+
+            for _ in 0..2 {
+                assert!(matches!(
+                    generate_with(&project, &mut shot, minimax(), &mut NoHooks),
+                    Err(GenerationError::UnresolvedSubmission)
+                ));
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                3,
+                "the second ask paid nothing"
+            );
+            assert_eq!(intent_states(&target), ["invoked", "invoked", "prepared"]);
+            assert_eq!(refusals(&target), 0);
+
+            let outcome = resubmit_with(&project, &mut shot, minimax(), &mut NoHooks).unwrap();
+            assert_eq!(outcome, AttachOutcome::Attached);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
         }
 
         #[test]

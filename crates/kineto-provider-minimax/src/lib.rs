@@ -690,6 +690,37 @@ mod tests {
     }
 
     #[test]
+    fn a_call_is_known_unaccepted_only_if_it_never_arrived_or_was_refused() {
+        let cases = [
+            (answer(200, &refused(1002, "rate limit")), true),
+            (answer(401, &refused(1004, "auth failed")), true),
+            (answer(404, "not found"), true),
+            (Err(TransportFailure::Connect), true),
+            // Each of these may have reached MiniMax and been charged.
+            (Err(TransportFailure::Timeout), false),
+            (Err(TransportFailure::Io), false),
+            (Err(TransportFailure::Tls), false),
+            (answer(503, "<html>"), false),
+            (answer(200, "not json"), false),
+            (answer(200, &success(b"not an image")), false),
+        ];
+        for (response, refused) in cases {
+            let error = client([response]).generate_image(&request()).unwrap_err();
+            assert_eq!(error.certainly_not_accepted(), refused, "{error}");
+        }
+        let unsent = ImageRequest {
+            prompt: String::new(),
+            aspect_ratio: AspectRatio::Square,
+        };
+        assert!(
+            client([])
+                .generate_image(&unsent)
+                .unwrap_err()
+                .certainly_not_accepted()
+        );
+    }
+
+    #[test]
     fn api_refusals_keep_the_vendor_message_bounded_and_printable() {
         // A JSON-escaped control character, decoded by the parser.
         let message = format!("bad\\u0007{}", "x".repeat(500));

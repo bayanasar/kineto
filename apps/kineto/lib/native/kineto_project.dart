@@ -105,6 +105,15 @@ external int _kinetoProjectShotState(
   Pointer<Uint64> outState,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>)>(
+  symbol: 'kineto_project_shot_keyframes_unresolved',
+)
+external int _kinetoProjectShotKeyframesUnresolved(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint8> outUnresolved,
+);
+
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_set_direction',
 )
@@ -119,6 +128,15 @@ external int _kinetoProjectShotSetDirection(
   symbol: 'kineto_project_shot_generate',
 )
 external int _kinetoProjectShotGenerate(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_keyframes',
+)
+external int _kinetoProjectShotResubmitKeyframes(
   Pointer<Void> session,
   int shotIndex,
   int token,
@@ -393,7 +411,7 @@ final class KinetoProjectException implements Exception {
   static const int providerRefused = 125;
 
   /// The shot's video is still being generated.
-  static const int videoInFlight = 126;
+  static const int videoInFlight = 127;
 
   /// A screenplay is written from a story analysis, which does not exist yet.
   static const int needsAnalysis = 133;
@@ -700,6 +718,26 @@ final class KinetoProjectSession implements Finalizable {
     }
   }
 
+  /// Whether a paid keyframe call of the shot's last generation may have
+  /// been accepted, and charged, without leaving its result. Generating is
+  /// refused until [resubmitShotKeyframes]. Reads published state; never
+  /// does I/O.
+  bool keyframesUnresolved(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final arena = Arena();
+    try {
+      final outUnresolved = arena<Uint8>();
+      outUnresolved.value = 0;
+      _checkProjectResult(
+        _kinetoProjectShotKeyframesUnresolved(_handle, shotIndex, outUnresolved),
+      );
+      return outUnresolved.value != 0;
+    } finally {
+      arena.releaseAll();
+    }
+  }
+
   Future<void> setShotDirection(int shotIndex, KinetoShotDirection direction) =>
       _submit(
         shotIndex,
@@ -714,6 +752,14 @@ final class KinetoProjectSession implements Finalizable {
   Future<void> generateShotCandidates(int shotIndex) => _submit(
         shotIndex,
         (token) => _kinetoProjectShotGenerate(_handle, shotIndex, token),
+      );
+
+  /// Generate the shot's candidates again although a paid call of the last
+  /// attempt may already have been accepted, and charged for. Only on the
+  /// director's explicit decision to risk paying twice.
+  Future<void> resubmitShotKeyframes(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitKeyframes(_handle, shotIndex, token),
       );
 
   Future<void> selectShotCandidate(int shotIndex, int candidateIndex) {
@@ -1056,13 +1102,13 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'provider_not_configured': 123,
   'shot_intent_missing': 124,
   'provider_refused': 125,
-  'video_in_flight': 126,
-  'keyframe_not_locked': 127,
-  'video_locked': 128,
-  'no_video': 129,
-  'stale_video': 130,
-  'no_first_frame': 131,
-  'video_unresolved': 132,
+  'paid_call_unresolved': 126,
+  'video_in_flight': 127,
+  'keyframe_not_locked': 128,
+  'video_locked': 129,
+  'no_video': 130,
+  'stale_video': 131,
+  'no_first_frame': 132,
   'needs_analysis': 133,
   'needs_screenplay': 134,
   'no_such_scene': 135,
@@ -1105,14 +1151,14 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   123: 'The image provider has no API key configured',
   124: 'This shot has no written intent to generate from',
   125: 'The provider refused the request; it will not succeed unchanged',
-  126: "This shot's video is still being generated",
-  127: 'Lock a keyframe before generating video',
-  128: "This shot's video is locked",
-  129: 'Generate a video before locking it',
-  130: 'The video was made from a keyframe that is no longer locked; regenerate it',
-  131: 'The locked keyframe has no image to start a video from',
-  132: 'MiniMax may already have accepted, and charged for, the last video submission; '
-      'submit again only if you accept paying twice',
+  126: 'A paid call may already have been accepted and charged without its result being kept; '
+      'asking again may pay twice',
+  127: "This shot's video is still being generated",
+  128: 'Lock a keyframe before generating video',
+  129: "This shot's video is locked",
+  130: 'Generate a video before locking it',
+  131: 'The video was made from a keyframe that is no longer locked; regenerate it',
+  132: 'The locked keyframe has no image to start a video from',
   133: 'Analyse the story before writing the screenplay',
   134: 'Write the screenplay before rewriting a scene',
   135: 'The screenplay has no scene with that id',
