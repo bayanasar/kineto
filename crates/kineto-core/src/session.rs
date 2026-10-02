@@ -1388,6 +1388,115 @@ mod tests {
         }
 
         #[test]
+        fn an_accepted_submission_whose_intent_was_not_saved_is_never_submitted_again() {
+            struct FailAfterAccept;
+            impl video::VideoHooks for FailAfterAccept {
+                fn reached(&mut self, point: video::VideoPoint) {
+                    assert_eq!(point, video::VideoPoint::Accepted);
+                    panic!("the intent save fails after MiniMax accepted the task");
+                }
+            }
+
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            drop(locked_keyframe(&target, &fake));
+
+            let project = CanonicalProject::open(&target).unwrap();
+            let shot = ShotWorkflow::load(&project, 1).unwrap();
+            let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
+                unreachable!();
+            };
+            let failed = panic::catch_unwind(AssertUnwindSafe(|| {
+                video::start_with(&project, &shot, &client, &mut FailAfterAccept)
+            }));
+            assert!(failed.is_err());
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+            assert_eq!(video_intent(&target)["state"], "prepared");
+            assert_eq!(video_receipt(&target)["task_id"], "777");
+
+            // Asking again follows the accepted task.
+            let job = video::start(&project, &shot, &client).unwrap();
+            assert_eq!(job.task.as_str(), "777");
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1, "never paid twice");
+            let intent = video_intent(&target);
+            assert_eq!(intent["state"], "invoked");
+            assert_eq!(intent["provider_job_id"], "777");
+        }
+
+        #[test]
+        fn a_reopened_project_follows_a_task_its_intent_never_recorded() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            drop(locked_keyframe(&target, &fake));
+            {
+                let project = CanonicalProject::open(&target).unwrap();
+                let shot = ShotWorkflow::load(&project, 1).unwrap();
+                let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
+                    unreachable!();
+                };
+                video::start(&project, &shot, &client).unwrap();
+            }
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+            // The state a crash between acceptance and the intent save leaves.
+            let path = video_intent_path(&target);
+            let mut intent = video_intent(&target);
+            intent["state"] = "prepared".into();
+            intent["provider_job_id"] = serde_json::Value::Null;
+            fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+
+            fake.finish.store(true, Ordering::SeqCst);
+            let (reopened, events) = spawn(
+                OpenRequest::Open {
+                    path: target.clone(),
+                },
+                &fake,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+            assert_eq!(
+                reopened.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Ready
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1, "never paid twice");
+        }
+
+        fn video_intent_path(target: &std::path::Path) -> PathBuf {
+            fs::read_dir(target.join(".kineto/jobs/intents"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    let intent: serde_json::Value =
+                        serde_json::from_slice(&fs::read(path).unwrap()).unwrap_or_default();
+                    intent["provider"] == video::VIDEO_PROVIDER
+                })
+                .expect("a video intent exists")
+        }
+
+        fn video_intent(target: &std::path::Path) -> serde_json::Value {
+            serde_json::from_slice(&fs::read(video_intent_path(target)).unwrap()).unwrap()
+        }
+
+        fn video_receipt(target: &std::path::Path) -> serde_json::Value {
+            let artifact = video_intent(target)["artifact_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            serde_json::from_slice(
+                &fs::read(target.join(format!(".kineto/generation/{artifact}.json"))).unwrap(),
+            )
+            .unwrap()
+        }
+
+        #[test]
         fn a_video_needs_a_real_locked_keyframe() {
             let temp = TempDir::new();
             let (session, events) = create(&temp.0.join("film"));
