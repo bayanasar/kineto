@@ -31,7 +31,7 @@ use kineto_project::{
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
     revisions::{DocumentKind, RevisionError},
-    shot::{ShotDirection, ShotWorkflowError},
+    shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
     source::SourceError,
 };
 use kineto_providers::secret::EnvSecretSource;
@@ -642,6 +642,95 @@ pub unsafe extern "C" fn kineto_project_candidate_media_copy(
         // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
         unsafe { copy_utf8(path.as_bytes(), out_buf, out_cap, out_len) }
     })
+}
+
+/// Copy the provider recorded on a candidate's artifact, for example
+/// `minimax`, with the same sizing contract as project metadata. This is who
+/// made the candidate, not the session's provider. Empty when the record names
+/// none. Reads published state only; never does I/O.
+///
+/// # Safety
+/// Same contract as [`kineto_project_candidate_media_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_provider_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            copy_candidate_origin(
+                session,
+                shot_index,
+                candidate_index,
+                |origin| origin.provider,
+                out_buf,
+                out_cap,
+                out_len,
+            )
+        }
+    })
+}
+
+/// Copy the model recorded on a candidate's artifact, for example
+/// `image-01`. Otherwise as [`kineto_project_candidate_provider_copy`].
+///
+/// # Safety
+/// Same contract as [`kineto_project_candidate_media_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_model_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            copy_candidate_origin(
+                session,
+                shot_index,
+                candidate_index,
+                |origin| origin.model,
+                out_buf,
+                out_cap,
+                out_len,
+            )
+        }
+    })
+}
+
+unsafe fn copy_candidate_origin(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    field: impl FnOnce(CandidateOrigin) -> String,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    // SAFETY: the caller guarantees a live handle or null.
+    let Some(session) = (unsafe { session.as_ref() }) else {
+        return PROJECT_ERR_INVALID_ARGUMENT;
+    };
+    let Ok(candidate_index) = usize::try_from(candidate_index) else {
+        return PROJECT_ERR_INVALID_CANDIDATE;
+    };
+    let origin = match session
+        .session
+        .candidate_origin(shot_index, candidate_index)
+    {
+        Ok(origin) => origin,
+        Err(error) => return snapshot_error_code(&error),
+    };
+    // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
+    unsafe { copy_utf8(field(origin).as_bytes(), out_buf, out_cap, out_len) }
 }
 
 unsafe fn submit(

@@ -208,13 +208,22 @@ impl ImageProvider {
 /// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives
 /// candidate keys, back into its candidate and input hash.
 pub fn parse_candidate_key(key: &IdempotencyKey) -> Result<(ArtifactId, InputHash), KeyError> {
+    parse_job_key(GENERATE_OPERATION, key)
+}
+
+/// Split `{operation}:{artifact_id}:{input_hash}`, as the job runtime derives
+/// idempotency keys, back into its artifact and input hash.
+pub fn parse_job_key(
+    operation: &str,
+    key: &IdempotencyKey,
+) -> Result<(ArtifactId, InputHash), KeyError> {
     // Artifact IDs cannot contain ':', so the first separator after the
     // operation ends the artifact ID.
     let rest = key
         .as_str()
-        .strip_prefix(GENERATE_OPERATION)
+        .strip_prefix(operation)
         .and_then(|rest| rest.strip_prefix(':'))
-        .ok_or(KeyError("idempotency key is not an image.generate key"))?;
+        .ok_or(KeyError("idempotency key is for another operation"))?;
     let (artifact_id, input_hash) = rest
         .split_once(':')
         .ok_or(KeyError("idempotency key has no input hash"))?;
