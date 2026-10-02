@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kineto-job-runtime = { path = "../kineto-job-runtime" }
+kineto-jobs = { path = "../kineto-jobs" }
 kineto-project = { path = "../kineto-project" }
+
+[dev-dependencies]
+serde_json = "1"
 
 [lib]
 path = "src/lib.rs"

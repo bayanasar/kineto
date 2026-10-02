@@ -177,6 +177,10 @@ final class KinetoProjectException implements Exception {
   /// filesystem cannot lock files), so the project is not opened for writing.
   static const int lockUnavailable = 119;
 
+  /// A generation job stopped before it finished. Its write-ahead intents are
+  /// kept and the generation is completed when the project is next opened.
+  static const int generationJob = 121;
+
   final int code;
   final String message;
 
@@ -308,6 +312,10 @@ final class KinetoProjectSession implements Finalizable {
     }
     return session;
   }
+
+  /// Work an earlier session left unfinished and this open dealt with, in
+  /// the order the engine reported it. Known once the open has completed.
+  List<KinetoRecovery> get recoveries => List.unmodifiable(_port.recoveries);
 
   int get formatVersion {
     _ensureOpen();
@@ -441,6 +449,7 @@ final class _SessionPort {
 
   static const int _opened = 1;
   static const int _completed = 2;
+  static const int _recovered = 3;
 
   late final RawReceivePort _raw;
   final Completer<void> _openCompleter = Completer<void>();
@@ -451,6 +460,7 @@ final class _SessionPort {
   // ignore: unused_field
   Object? _owner;
   final Map<int, Completer<void>> _pending = <int, Completer<void>>{};
+  final List<KinetoRecovery> recoveries = <KinetoRecovery>[];
   int _nextToken = 1;
   bool _closed = false;
 
@@ -496,6 +506,15 @@ final class _SessionPort {
         } else {
           _openCompleter.completeError(_projectException(status));
         }
+      case _recovered:
+        // Posted before OPENED, so recoveries are complete when open returns.
+        recoveries.add(
+          KinetoRecovery(
+            shotIndex: values[3] < 0 ? null : values[3],
+            revisionOrCount: values[1],
+            errorCode: status,
+          ),
+        );
       case _completed:
         final completer = _pending.remove(values[1]);
         if (completer == null) break;
@@ -515,6 +534,35 @@ final class _SessionPort {
     _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
     if (_pending.isEmpty) _owner = null;
   }
+}
+
+/// Unfinished work from an earlier session that an open dealt with.
+final class KinetoRecovery {
+  const KinetoRecovery({
+    required this.shotIndex,
+    required this.revisionOrCount,
+    required this.errorCode,
+  });
+
+  /// The shot whose interrupted generation this was; null for job records the
+  /// engine could not read or place.
+  final int? shotIndex;
+
+  /// The generation revision for a shot, or the number of unplaced records.
+  final int revisionOrCount;
+
+  /// 0 when the generation was completed; otherwise why it was not.
+  final int errorCode;
+
+  /// The interrupted generation was completed when the project opened.
+  bool get completed => shotIndex != null && errorCode == 0;
+
+  /// Job records that could not be read or placed; nothing was changed.
+  bool get needsAttention => shotIndex == null;
+
+  /// Why the recovery did not complete, when it did not.
+  KinetoProjectException? get error =>
+      errorCode == 0 ? null : _projectException(errorCode);
 }
 
 /// A queued operation was abandoned because its session was closed first.
@@ -605,6 +653,7 @@ KinetoProjectException _projectException(int code) {
     118 => 'Legacy shot hashes need migration before this shot can change',
     119 => 'Project cannot be locked for single-writer access on this filesystem',
     120 => 'Project session is not open',
+    121 => 'Generation did not finish; it resumes when the project reopens',
     199 => 'Native project call failed unexpectedly',
     _ => 'Unknown native project error',
   });

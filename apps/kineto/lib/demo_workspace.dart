@@ -78,6 +78,23 @@ const List<DemoShotContent> demoShots = <DemoShotContent>[
   ),
 ];
 
+/// Plain-language notes for the work an open recovered, one per recovery.
+List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
+      for (final recovery in recoveries)
+        if (recovery.needsAttention)
+          '${recovery.revisionOrCount} job record(s) could not be read and were left untouched.'
+        else if (recovery.completed)
+          'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '
+              'and has been completed.'
+        else
+          'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '
+              'and could not be completed (${recovery.error!.message}). Kineto tries again the next '
+              'time the project opens.',
+    ];
+
+String _shotLabel(int shotIndex) =>
+    shotIndex < demoShots.length ? demoShots[shotIndex].label : 'Shot ${shotIndex + 1}';
+
 class DemoWorkspaceScreen extends StatefulWidget {
   const DemoWorkspaceScreen({
     required this.engine,
@@ -101,13 +118,16 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
   bool _working = false;
+  String _workingLabel = 'Working';
   String? _error;
+  late List<String> _recoveryNotes;
 
   @override
   void initState() {
     super.initState();
     _engineSnapshot = widget.engine.snapshot;
     _shotSnapshots = _readShotSnapshots();
+    _recoveryNotes = describeRecoveries(widget.project.recoveries);
   }
 
   List<KinetoShotSnapshot> _readShotSnapshots() =>
@@ -127,10 +147,14 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   // Native work runs on the project's worker thread; this isolate only waits
   // for the answer. One command at a time keeps the UI honest about which
   // state the director is looking at.
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _run(
+    Future<void> Function() action, {
+    String label = 'Working',
+  }) async {
     if (_working) return;
     setState(() {
       _working = true;
+      _workingLabel = label;
       _error = null;
     });
     String? error;
@@ -157,6 +181,9 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       activeShotIndex: _activeShotIndex,
       isDarkMode: widget.isDarkMode,
       working: _working,
+      workingLabel: _workingLabel,
+      recoveryNotes: _recoveryNotes,
+      onDismissRecovery: () => setState(() => _recoveryNotes = const <String>[]),
       error: _error,
       onThemeToggle: widget.onThemeToggle,
       onShotChanged: _switchShot,
@@ -165,6 +192,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       ),
       onGenerate: () => _run(
         () => widget.project.generateShotCandidates(_activeShotIndex),
+        label: 'Generating',
       ),
       onSelect: (candidateIndex) => _run(
         () => widget.project.selectShotCandidate(
@@ -199,6 +227,9 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onReset,
     this.onMigrate,
     this.working = false,
+    this.workingLabel = 'Working',
+    this.recoveryNotes = const <String>[],
+    this.onDismissRecovery,
     this.isDarkMode = true,
     this.onThemeToggle,
     this.error,
@@ -221,6 +252,13 @@ class DemoWorkspaceView extends StatelessWidget {
 
   /// A command is running on the project's worker; changes wait for it.
   final bool working;
+
+  /// What the running command is, for example 'Generating'.
+  final String workingLabel;
+
+  /// What the last open recovered from an interrupted session.
+  final List<String> recoveryNotes;
+  final VoidCallback? onDismissRecovery;
   final String? error;
 
   @override
@@ -263,11 +301,32 @@ class DemoWorkspaceView extends StatelessWidget {
                     'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
                   ),
                 ),
+                if (recoveryNotes.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 20),
+                  WabPanel(
+                    title: 'Recovered interrupted work',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        for (final note in recoveryNotes) ...<Widget>[
+                          Text(note),
+                          const SizedBox(height: 8),
+                        ],
+                        const SizedBox(height: 4),
+                        WabButton(
+                          kind: WabMaterialKind.zhuwen,
+                          onPressed: onDismissRecovery,
+                          child: const Text('Dismiss'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
                 WabPanel(
                   title: 'Scene 001',
                   trailing: working
-                      ? const WabStatusBadge('Working', kind: WabBadgeKind.progress)
+                      ? WabStatusBadge(workingLabel, kind: WabBadgeKind.progress)
                       : WabStatusBadge(
                           sceneReady ? 'Ready' : 'In progress',
                           kind: sceneReady ? WabBadgeKind.done : WabBadgeKind.progress,

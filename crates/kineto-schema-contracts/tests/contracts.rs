@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use kineto_core::generation::{self, NoHooks};
 use kineto_job_runtime::{JobRuntime, JobRuntimePolicy, ProviderKey};
 use kineto_jobs::{BackoffPolicy, FallbackPolicy, JobId, PaidFallback, ProviderExecutionPolicy};
 use kineto_project::{
@@ -758,6 +759,44 @@ fn real_job_runtime_intent_matches_committed_schema() {
         ),
         "production job intent",
     );
+}
+
+#[test]
+fn production_generation_jobs_and_candidates_match_committed_schemas() {
+    let job_schema = schema("job.schema.json");
+    let artifact_schema = schema("artifact.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+
+    generation::generate(&project, &mut shot, &mut NoHooks)
+        .expect("generation should run as write-ahead jobs");
+
+    let mut intents = fs::read_dir(temp.0.join(".kineto/jobs/intents"))
+        .expect("generation should record intents")
+        .map(|entry| entry.expect("intent entry should be readable").path())
+        .collect::<Vec<_>>();
+    intents.sort();
+    assert_eq!(intents.len(), 3, "one intent per candidate");
+    for intent in &intents {
+        let value = json_file(intent);
+        validate(&job_schema, &value, "production generation job intent");
+        assert_eq!(value["state"], "reconciled");
+        assert_eq!(value["operation"], "image.generate");
+    }
+
+    let artifacts_path = temp
+        .0
+        .join("scenes/scene_001/shots/shot_001/artifacts.json");
+    validate_artifact_array(&artifacts_path, &artifact_schema);
+    for artifact in json_file(&artifacts_path)
+        .as_array()
+        .expect("artifacts.json is an array")
+    {
+        assert_eq!(artifact["provider"], "local-demo");
+        assert_eq!(artifact["model"], "deterministic-demo-v1");
+    }
 }
 
 #[test]
