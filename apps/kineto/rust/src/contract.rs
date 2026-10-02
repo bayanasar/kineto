@@ -45,21 +45,22 @@ pub(crate) const PROJECT_ERR_VIDEO_LOCKED: i32 = 128;
 pub(crate) const PROJECT_ERR_NO_VIDEO: i32 = 129;
 pub(crate) const PROJECT_ERR_STALE_VIDEO: i32 = 130;
 pub(crate) const PROJECT_ERR_NO_FIRST_FRAME: i32 = 131;
-pub(crate) const PROJECT_ERR_NEEDS_ANALYSIS: i32 = 132;
-pub(crate) const PROJECT_ERR_NEEDS_SCREENPLAY: i32 = 133;
-pub(crate) const PROJECT_ERR_NO_SUCH_SCENE: i32 = 134;
-pub(crate) const PROJECT_ERR_NOT_LATEST: i32 = 135;
-pub(crate) const PROJECT_ERR_INVALID_DOCUMENT: i32 = 136;
-pub(crate) const PROJECT_ERR_INVALID_REVISION: i32 = 137;
-pub(crate) const PROJECT_ERR_INVALID_SOURCE: i32 = 138;
-pub(crate) const PROJECT_ERR_MODEL_NOT_CONFIGURED: i32 = 139;
-pub(crate) const PROJECT_ERR_MODEL_UNKNOWN: i32 = 140;
-pub(crate) const PROJECT_ERR_DOCUMENT_DAMAGED: i32 = 141;
-pub(crate) const PROJECT_ERR_COST_UNKNOWN: i32 = 142;
+pub(crate) const PROJECT_ERR_VIDEO_UNRESOLVED: i32 = 132;
+pub(crate) const PROJECT_ERR_NEEDS_ANALYSIS: i32 = 133;
+pub(crate) const PROJECT_ERR_NEEDS_SCREENPLAY: i32 = 134;
+pub(crate) const PROJECT_ERR_NO_SUCH_SCENE: i32 = 135;
+pub(crate) const PROJECT_ERR_NOT_LATEST: i32 = 136;
+pub(crate) const PROJECT_ERR_INVALID_DOCUMENT: i32 = 137;
+pub(crate) const PROJECT_ERR_INVALID_REVISION: i32 = 138;
+pub(crate) const PROJECT_ERR_INVALID_SOURCE: i32 = 139;
+pub(crate) const PROJECT_ERR_MODEL_NOT_CONFIGURED: i32 = 140;
+pub(crate) const PROJECT_ERR_MODEL_UNKNOWN: i32 = 141;
+pub(crate) const PROJECT_ERR_DOCUMENT_DAMAGED: i32 = 142;
+pub(crate) const PROJECT_ERR_COST_UNKNOWN: i32 = 143;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 45] = [
+const STATUSES: [(&str, i32); 46] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -96,6 +97,7 @@ const STATUSES: [(&str, i32); 45] = [
     ("no_video", PROJECT_ERR_NO_VIDEO),
     ("stale_video", PROJECT_ERR_STALE_VIDEO),
     ("no_first_frame", PROJECT_ERR_NO_FIRST_FRAME),
+    ("video_unresolved", PROJECT_ERR_VIDEO_UNRESOLVED),
     ("needs_analysis", PROJECT_ERR_NEEDS_ANALYSIS),
     ("needs_screenplay", PROJECT_ERR_NEEDS_SCREENPLAY),
     ("no_such_scene", PROJECT_ERR_NO_SUCH_SCENE),
@@ -121,12 +123,13 @@ pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
 
 /// Video state codes in the snapshot's `video_state` field.
-const VIDEO_STATES: [(&str, u8); 5] = [
+const VIDEO_STATES: [(&str, u8); 6] = [
     ("none", 0),
     ("generating", 1),
     ("ready", 2),
     ("locked", 3),
     ("stale", 4),
+    ("unresolved", 5),
 ];
 
 /// Image provider codes returned by `kineto_project_image_provider`.
@@ -225,7 +228,8 @@ const LOCKED: Field = field("locked", 1, 1);
 const STALE: Field = field("stale", 2, 1);
 const MIGRATION_PENDING: Field = field("migration_pending", 3, 1);
 const INVALID_HASHES: Field = field("invalid_hashes", 4, 1);
-/// One of [`VIDEO_STATES`]; `generating` overrides the canonical state.
+/// One of [`VIDEO_STATES`]; `generating` and then `unresolved` override the
+/// canonical state.
 const VIDEO_STATE: Field = field("video_state", 5, 3);
 const CANDIDATE_COUNT: Field = field("candidate_count", 8, 8);
 /// Selected candidate index + 1; 0 means no selection.
@@ -282,11 +286,17 @@ pub(crate) fn pack(values: &[(Field, u64)]) -> u64 {
     })
 }
 
-/// Pack a shot snapshot. `video_in_flight` is runtime state the canonical
-/// snapshot does not carry.
-pub(crate) fn encode_shot_snapshot(snapshot: ShotApprovalSnapshot, video_in_flight: bool) -> u64 {
+/// Pack a shot snapshot. `video_in_flight` and `video_unresolved` are runtime
+/// state the canonical snapshot does not carry.
+pub(crate) fn encode_shot_snapshot(
+    snapshot: ShotApprovalSnapshot,
+    video_in_flight: bool,
+    video_unresolved: bool,
+) -> u64 {
     let video = if video_in_flight {
         1
+    } else if video_unresolved {
+        5
     } else {
         match snapshot.video {
             VideoState::None => 0,
@@ -448,7 +458,7 @@ pub unsafe extern "C" fn kineto_contract_entry(
 /// The fixed sample snapshot, packed by the native encoder.
 #[unsafe(no_mangle)]
 pub extern "C" fn kineto_contract_snapshot_sample() -> u64 {
-    encode_shot_snapshot(SAMPLE, false)
+    encode_shot_snapshot(SAMPLE, false, false)
 }
 
 #[cfg(test)]

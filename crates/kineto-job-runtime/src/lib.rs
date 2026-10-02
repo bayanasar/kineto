@@ -555,6 +555,21 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// Give up on a prepared intent whose provider call was attempted but
+    /// whose outcome was never established, so the same job can be prepared
+    /// and invoked afresh.
+    ///
+    /// The provider may have accepted, and charged for, that attempt. Only a
+    /// caller acting on a person's explicit decision to risk paying twice
+    /// may retire it. An intent that was never attempted, or that has a
+    /// result, is not retired. The removal order is that of
+    /// [`Self::retire_failed`].
+    pub fn retire_unresolved(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.attempts > 0
+        })
+    }
+
     fn retire_where(
         &self,
         job_id: &JobId,
@@ -2624,6 +2639,45 @@ mod tests {
         assert!(runtime.retire_remote_failure(&job_id).unwrap());
         assert!(runtime.load(&job_id).unwrap().is_none());
         assert_eq!(created(prepare().unwrap()).attempts(), 0);
+    }
+
+    #[test]
+    fn an_attempted_intent_is_retired_only_on_an_explicit_decision() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-video-unresolved").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_video_unresolved").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "video.generate",
+                input_hash('4'),
+                artifact("video_candidate_unresolved"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "never attempted"
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Retryable);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+        assert_eq!(runtime.load(&job_id).unwrap().unwrap().attempts(), 1);
+
+        assert!(runtime.retire_unresolved(&job_id).unwrap());
+        assert!(runtime.load(&job_id).unwrap().is_none());
+        created(prepare().unwrap());
+        adapter.invocation = Ok(Invocation::Pending(ProviderJobId::new("task-2").unwrap()));
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "an invoked intent has a result to follow"
+        );
     }
 
     #[test]

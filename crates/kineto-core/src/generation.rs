@@ -447,6 +447,9 @@ pub enum GenerationError {
     Prerequisite(Prerequisite),
     /// No language model is configured, so no document can be asked for.
     ModelNotConfigured,
+    /// The last paid submission may have been accepted but left no record of
+    /// it, so submitting again may pay twice. Only the director decides that.
+    UnresolvedSubmission,
     JobId(JobValueError),
     /// The provider reported something the generation path never expects,
     /// such as a pending remote job for a synchronous image call.
@@ -466,6 +469,10 @@ impl fmt::Display for GenerationError {
             Self::NoFirstFrame => {
                 formatter.write_str("the locked keyframe has no image to start a video from")
             }
+            Self::UnresolvedSubmission => formatter.write_str(
+                "the last submission may already have been accepted and charged; submitting \
+                 again may pay twice",
+            ),
             Self::NeedsProviderCall => formatter.write_str(
                 "finishing this generation needs a paid provider call; generate again to make it",
             ),
@@ -492,6 +499,7 @@ impl Error for GenerationError {
             | Self::NoFirstFrame
             | Self::Prerequisite(_)
             | Self::ModelNotConfigured
+            | Self::UnresolvedSubmission
             | Self::Unexpected(_) => None,
         }
     }

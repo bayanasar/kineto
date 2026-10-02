@@ -582,9 +582,14 @@ pub unsafe extern "C" fn kineto_project_shot_state(
             return PROJECT_ERR_INVALID_ARGUMENT;
         }
         let in_flight = session.session.video_in_flight(shot_index);
+        let unresolved = session.session.video_unresolved(shot_index);
         match session.session.snapshot(shot_index) {
             Ok(snapshot) => {
-                let bits = encode_shot_snapshot(snapshot, in_flight.unwrap_or(false));
+                let bits = encode_shot_snapshot(
+                    snapshot,
+                    in_flight.unwrap_or(false),
+                    unresolved.unwrap_or(false),
+                );
                 // SAFETY: caller guarantees writable storage for one u64.
                 unsafe { ptr::write(out_state, bits) };
                 PROJECT_OK
@@ -857,6 +862,25 @@ pub unsafe extern "C" fn kineto_project_shot_generate_video(
     })
 }
 
+/// Queue submitting the shot's video again although its last submission is
+/// unresolved (status `132`): MiniMax may already have accepted, and charged
+/// for, that submission. Only on the director's explicit decision to risk
+/// paying twice. Otherwise as [`kineto_project_shot_generate_video`].
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_resubmit_video(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::ResubmitVideo, token)
+    })
+}
+
 /// Queue locking the shot's current video. Returns once queued.
 ///
 /// # Safety
@@ -970,6 +994,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Shot(error) => shot_error_code(error),
         GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
         GenerationError::NoFirstFrame => PROJECT_ERR_NO_FIRST_FRAME,
+        GenerationError::UnresolvedSubmission => PROJECT_ERR_VIDEO_UNRESOLVED,
         GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
             PROJECT_ERR_SHOT_INTENT_MISSING
         }
@@ -1595,6 +1620,7 @@ mod tests {
                 video: kineto_project::shot::VideoState::None,
                 video_revision: 0,
             },
+            false,
             false,
         );
         assert_eq!(bits & 1, 1);

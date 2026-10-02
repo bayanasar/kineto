@@ -59,6 +59,7 @@ void main() {
     KinetoImageProvider provider = _minimax,
     String? video,
     VoidCallback? onGenerateVideo,
+    VoidCallback? onResubmitVideo,
     VoidCallback? onLockVideo,
     ValueChanged<String>? onOpenVideo,
   }) async {
@@ -81,6 +82,7 @@ void main() {
           onLock: () {},
           onReset: () {},
           onGenerateVideo: onGenerateVideo,
+          onResubmitVideo: onResubmitVideo,
           onLockVideo: onLockVideo,
           onOpenVideo: onOpenVideo,
         ),
@@ -112,6 +114,22 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(regenerate, warnIfMissed: false);
     expect(asked, 0);
+  });
+
+  testWidgets('an unresolved submission is sent again only as an explicit risk', (tester) async {
+    var generated = 0;
+    var resubmitted = 0;
+    await pump(
+      tester,
+      state: KinetoVideoState.unresolved,
+      onGenerateVideo: () => generated++,
+      onResubmitVideo: () => resubmitted++,
+    );
+    expect(find.text('Unresolved'), findsOneWidget);
+    expect(find.textContaining('may already have accepted and charged for it'), findsOneWidget);
+    expect(find.text(r'Regenerate video · ≈ $0.28'), findsNothing);
+    await tap(tester, find.text(r'Submit again · may pay twice · ≈ $0.28'));
+    expect((generated, resubmitted), (0, 1));
   });
 
   testWidgets('a ready video opens, locks, and shows its first frame', (tester) async {

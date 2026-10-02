@@ -171,6 +171,15 @@ external int _kinetoProjectShotGenerateVideo(
 );
 
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_video',
+)
+external int _kinetoProjectShotResubmitVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_lock_video',
 )
 external int _kinetoProjectShotLockVideo(
@@ -387,17 +396,17 @@ final class KinetoProjectException implements Exception {
   static const int videoInFlight = 126;
 
   /// A screenplay is written from a story analysis, which does not exist yet.
-  static const int needsAnalysis = 132;
+  static const int needsAnalysis = 133;
 
   /// A newer screenplay revision exists than the one the edit started from.
-  static const int notLatest = 135;
+  static const int notLatest = 136;
 
   /// No language model is configured for documents.
-  static const int modelNotConfigured = 139;
+  static const int modelNotConfigured = 140;
 
   /// The language model's cost is not known, as for an agent on a
   /// subscription.
-  static const int costUnknown = 142;
+  static const int costUnknown = 143;
 
   final int code;
   final String message;
@@ -606,6 +615,14 @@ final class KinetoProjectSession implements Finalizable {
   Future<void> generateShotVideo(int shotIndex) => _submit(
         shotIndex,
         (token) => _kinetoProjectShotGenerateVideo(_handle, shotIndex, token),
+      );
+
+  /// Submit the shot's video again although its last submission is
+  /// unresolved: MiniMax may already have accepted, and charged for, it.
+  /// Only on the director's explicit decision to risk paying twice.
+  Future<void> resubmitShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitVideo(_handle, shotIndex, token),
       );
 
   Future<void> lockShotVideo(int shotIndex) => _submit(
@@ -1045,17 +1062,18 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'no_video': 129,
   'stale_video': 130,
   'no_first_frame': 131,
-  'needs_analysis': 132,
-  'needs_screenplay': 133,
-  'no_such_scene': 134,
-  'not_latest': 135,
-  'invalid_document': 136,
-  'invalid_revision': 137,
-  'invalid_source': 138,
-  'model_not_configured': 139,
-  'model_unknown': 140,
-  'document_damaged': 141,
-  'cost_unknown': 142,
+  'video_unresolved': 132,
+  'needs_analysis': 133,
+  'needs_screenplay': 134,
+  'no_such_scene': 135,
+  'not_latest': 136,
+  'invalid_document': 137,
+  'invalid_revision': 138,
+  'invalid_source': 139,
+  'model_not_configured': 140,
+  'model_unknown': 141,
+  'document_damaged': 142,
+  'cost_unknown': 143,
   'panic': 199,
 };
 
@@ -1093,17 +1111,19 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   129: 'Generate a video before locking it',
   130: 'The video was made from a keyframe that is no longer locked; regenerate it',
   131: 'The locked keyframe has no image to start a video from',
-  132: 'Analyse the story before writing the screenplay',
-  133: 'Write the screenplay before rewriting a scene',
-  134: 'The screenplay has no scene with that id',
-  135: 'A newer screenplay revision exists; review it before saving',
-  136: 'The edit breaks the screenplay: every line of dialogue needs a cast member, and no block may be empty',
-  137: 'Only the latest screenplay revision can be locked',
-  138: 'The source must be non-empty text of at most 8 MiB',
-  139: 'No language model is configured; set KINETO_LLM_PROVIDER',
-  140: 'KINETO_LLM_PROVIDER names a language model this Kineto build does not have',
-  141: 'A stored document no longer matches its record',
-  142: "This model's cost is not known",
+  132: 'MiniMax may already have accepted, and charged for, the last video submission; '
+      'submit again only if you accept paying twice',
+  133: 'Analyse the story before writing the screenplay',
+  134: 'Write the screenplay before rewriting a scene',
+  135: 'The screenplay has no scene with that id',
+  136: 'A newer screenplay revision exists; review it before saving',
+  137: 'The edit breaks the screenplay: every line of dialogue needs a cast member, and no block may be empty',
+  138: 'Only the latest screenplay revision can be locked',
+  139: 'The source must be non-empty text of at most 8 MiB',
+  140: 'No language model is configured; set KINETO_LLM_PROVIDER',
+  141: 'KINETO_LLM_PROVIDER names a language model this Kineto build does not have',
+  142: 'A stored document no longer matches its record',
+  143: "This model's cost is not known",
   199: 'Native project call failed unexpectedly',
 };
 
