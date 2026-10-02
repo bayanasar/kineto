@@ -27,7 +27,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 21;
+const int kinetoExpectedNativeAbiVersion = 22;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);
@@ -86,7 +86,10 @@ enum KinetoVideoState {
   ready('ready'),
   locked('locked'),
   /// Made from a keyframe that is no longer the locked one.
-  stale('stale');
+  stale('stale'),
+  /// The last submission may have been accepted, and charged, by MiniMax
+  /// without leaving its task; generating again waits for the director.
+  unresolved('unresolved');
 
   const KinetoVideoState(this.wireName);
 

@@ -1,11 +1,12 @@
-//! Kill the process the moment MiniMax has accepted a video, before the job's
-//! intent records the task, then prove that the next session follows that
-//! task and never submits (pays for) the video again.
+//! Kill the process just after MiniMax has accepted a video, then prove that
+//! the next session never submits (pays for) it again unasked: a task that
+//! was written down is followed, and one that was not leaves the video
+//! unresolved until the director chooses to risk paying twice.
 //!
 //! The test binary re-runs itself as a child with `KINETO_VIDEO_CRASH` set.
 //! The child submits the shot's video and calls `std::process::abort()` at
-//! `VideoPoint::Accepted`: no destructors, no rollback. The parent then opens
-//! the project the way the app does.
+//! the requested `VideoPoint`: no destructors, no rollback. The parent then
+//! opens the project the way the app does.
 
 use std::{
     collections::BTreeMap,
@@ -106,24 +107,30 @@ fn client(fake: &Arc<FakeMinimax>) -> MinimaxClient<SharedTransport> {
 /// The child half. A no-op unless the parent asked for a crash.
 #[test]
 fn crash_child() {
-    let Ok(path) = env::var(CHILD) else {
+    let Ok(spec) = env::var(CHILD) else {
         return;
     };
+    let (point, path) = spec.split_once('|').expect("crash spec is point|path");
+    let point = match point {
+        "accepted" => VideoPoint::Accepted,
+        "recorded" => VideoPoint::Recorded,
+        other => panic!("unknown crash point {other}"),
+    };
 
-    struct AbortWhenAccepted;
-    impl VideoHooks for AbortWhenAccepted {
+    struct AbortAt(VideoPoint);
+    impl VideoHooks for AbortAt {
         fn reached(&mut self, point: VideoPoint) {
-            if point == VideoPoint::Accepted {
+            if point == self.0 {
                 std::process::abort();
             }
         }
     }
 
-    let project = CanonicalProject::open(&path).expect("child opens the project");
+    let project = CanonicalProject::open(path).expect("child opens the project");
     let shot = ShotWorkflow::load(&project, 1).expect("child loads shot 1");
     let fake = Arc::new(FakeMinimax::default());
-    let _ = video::start_with(&project, &shot, &client(&fake), &mut AbortWhenAccepted);
-    panic!("the child must abort once the video is accepted");
+    let _ = video::start_with(&project, &shot, &client(&fake), &mut AbortAt(point));
+    panic!("the child must abort at {point:?}");
 }
 
 struct TempDir(PathBuf);
@@ -274,15 +281,12 @@ fn video_intent(target: &Path) -> serde_json::Value {
         .expect("a video intent exists")
 }
 
-#[test]
-fn killed_after_minimax_accepted_the_video_the_task_is_followed_not_resubmitted() {
-    let temp = TempDir::new();
-    let target = temp.0.join("film");
-    locked_keyframe(&target);
-
+/// Submit the shot's video in a child that aborts at `point`; return the
+/// video intent and receipt it left.
+fn crash_at(point: &str, temp: &TempDir, target: &Path) -> (serde_json::Value, serde_json::Value) {
     let status = Command::new(env::current_exe().unwrap())
         .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD, &target)
+        .env(CHILD, format!("{point}|{}", target.display()))
         // An aborted child may write `core*` into its working directory.
         .current_dir(&temp.0)
         .status()
@@ -293,16 +297,24 @@ fn killed_after_minimax_accepted_the_video_the_task_is_followed_not_resubmitted(
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(6), "the child must die by SIGABRT");
     }
-
-    // The window under test: accepted and written down, intent not updated.
-    let intent = video_intent(&target);
+    let intent = video_intent(target);
     assert_eq!(intent["state"], "prepared");
+    assert_eq!(intent["attempts"], 1);
     assert!(intent["provider_job_id"].is_null(), "{intent}");
     let artifact = intent["artifact_id"].as_str().unwrap();
-    let receipt: serde_json::Value = serde_json::from_slice(
+    let receipt = serde_json::from_slice(
         &fs::read(target.join(format!(".kineto/generation/{artifact}.json"))).unwrap(),
     )
     .unwrap();
+    (intent, receipt)
+}
+
+#[test]
+fn killed_after_the_task_was_written_down_the_task_is_followed_not_resubmitted() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    locked_keyframe(&target);
+    let (_, receipt) = crash_at("recorded", &temp, &target);
     assert_eq!(receipt["task_id"], "777");
 
     let fake = Arc::new(FakeMinimax::default());
@@ -325,4 +337,37 @@ fn killed_after_minimax_accepted_the_video_the_task_is_followed_not_resubmitted(
     assert_eq!(fake.submits.load(Ordering::SeqCst), 0, "never paid twice");
     drop(session);
     assert_eq!(video_intent(&target)["state"], "reconciled");
+}
+
+#[test]
+fn killed_before_the_task_was_written_down_the_video_waits_for_the_director() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    locked_keyframe(&target);
+    let (_, receipt) = crash_at("accepted", &temp, &target);
+    assert!(receipt["task_id"].is_null(), "{receipt}");
+
+    let fake = Arc::new(FakeMinimax::default());
+    let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+    assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+    assert!(session.video_unresolved(0).unwrap());
+    session.submit(0, ShotCommand::GenerateVideo, 1).unwrap();
+    assert_eq!(
+        events.recv_timeout(WAIT).unwrap(),
+        Event::Completed(Err("Generation(UnresolvedSubmission)".to_owned()))
+    );
+    assert_eq!(
+        fake.submits.load(Ordering::SeqCst),
+        0,
+        "never paid twice unasked"
+    );
+
+    session.submit(0, ShotCommand::ResubmitVideo, 2).unwrap();
+    assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Completed(Ok(())));
+    assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events.recv_timeout(WAIT).unwrap(),
+        Event::VideoFinished(Ok(()))
+    );
+    assert_eq!(session.snapshot(0).unwrap().video, VideoState::Ready);
 }

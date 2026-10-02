@@ -65,6 +65,10 @@ pub enum ShotCommand {
     /// accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
     GenerateVideo,
+    /// Submit the video again although MiniMax may already have accepted,
+    /// and charged for, the last submission that left no record. The
+    /// director's explicit decision to risk paying twice.
+    ResubmitVideo,
     LockVideo,
 }
 
@@ -199,6 +203,8 @@ struct PublishedShot {
     video: Option<PathBuf>,
     /// A video for this shot is being generated.
     video_in_flight: bool,
+    /// The last video submission may have been accepted but left no task.
+    video_unresolved: bool,
     /// Who made each current candidate, in candidate order.
     origins: Vec<CandidateOrigin>,
 }
@@ -365,6 +371,13 @@ impl ProjectSession {
         self.published(shot_index, |published| published.video_in_flight)
     }
 
+    /// Whether the shot's last video submission may have been accepted, and
+    /// charged, without leaving its task. Generating is refused until the
+    /// director resubmits. Never does I/O.
+    pub fn video_unresolved(&self, shot_index: u32) -> Result<bool, SnapshotError> {
+        self.published(shot_index, |published| published.video_unresolved)
+    }
+
     fn published<R>(
         &self,
         shot_index: u32,
@@ -517,6 +530,8 @@ struct Videos {
     client: Option<VideoClient>,
     gate: Arc<Gate>,
     in_flight: [Option<VideoJob>; SHOT_COUNT],
+    /// Shots whose last submission is unresolved; see [`ShotCommand::ResubmitVideo`].
+    unresolved: [bool; SHOT_COUNT],
     finished: Arc<Mutex<Vec<VideoDone>>>,
     watchers: Vec<thread::JoinHandle<()>>,
     poll_interval: std::time::Duration,
@@ -604,6 +619,7 @@ impl Worker {
                 client,
                 gate,
                 in_flight: [None, None],
+                unresolved: [false, false],
                 finished: Arc::new(Mutex::new(Vec::new())),
                 watchers: Vec::new(),
                 poll_interval: options.video_poll_interval,
@@ -655,7 +671,8 @@ impl Worker {
                     generation::generate(project, shot, provider, &mut NoHooks).map(|_outcome| ())
                 })
                 .map_err(generation_error),
-            ShotCommand::GenerateVideo => self.start_video(shot_index),
+            ShotCommand::GenerateVideo => self.start_video(shot_index, false),
+            ShotCommand::ResubmitVideo => self.start_video(shot_index, true),
             command => self
                 .with_shot(shot_index, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
@@ -666,7 +683,9 @@ impl Worker {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
                     ShotCommand::LockVideo => shot.lock_video(project),
-                    ShotCommand::Generate | ShotCommand::GenerateVideo => {
+                    ShotCommand::Generate
+                    | ShotCommand::GenerateVideo
+                    | ShotCommand::ResubmitVideo => {
                         unreachable!("generation is handled above")
                     }
                 })
@@ -683,18 +702,30 @@ impl Worker {
         }
     }
 
-    fn start_video(&mut self, shot_index: usize) -> Result<(), SessionError> {
+    fn start_video(
+        &mut self,
+        shot_index: usize,
+        risk_paying_twice: bool,
+    ) -> Result<(), SessionError> {
         if self.videos.in_flight[shot_index].is_some() {
             return Err(SessionError::VideoInFlight);
         }
         let Some(client) = self.videos.client.clone() else {
             return Err(SessionError::Generation(GenerationError::NotConfigured));
         };
-        let job = self
-            .with_shot(shot_index, |project, _, shot| {
+        let started = self.with_shot(shot_index, |project, _, shot| {
+            if risk_paying_twice {
+                video::resubmit(project, shot, &client)
+            } else {
                 video::start(project, shot, &client)
-            })
-            .map_err(generation_error)?;
+            }
+        });
+        match &started {
+            Ok(_) => self.videos.unresolved[shot_index] = false,
+            Err(GenerationError::UnresolvedSubmission) => self.videos.unresolved[shot_index] = true,
+            Err(_) => {}
+        }
+        let job = started.map_err(generation_error)?;
         let root = self.project.root().clone();
         self.videos.watch(job, root);
         Ok(())
@@ -711,6 +742,15 @@ impl Worker {
                 for job in found.jobs {
                     let root = self.project.root().clone();
                     self.videos.watch(job, root);
+                }
+                for shot_number in found.unresolved {
+                    if let Some(unresolved) = usize::try_from(shot_number)
+                        .ok()
+                        .and_then(|number| number.checked_sub(1))
+                        .and_then(|index| self.videos.unresolved.get_mut(index))
+                    {
+                        *unresolved = true;
+                    }
                 }
                 found.needs_attention
             }
@@ -805,6 +845,7 @@ impl Worker {
                         .video_media()?
                         .map(|path| project.root().resolve(&path)),
                     video_in_flight: false,
+                    video_unresolved: false,
                     origins: shot.candidate_origins()?,
                 })
             })
@@ -812,6 +853,7 @@ impl Worker {
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map(|mut published| {
             published.video_in_flight = self.videos.in_flight[shot_index].is_some();
+            published.video_unresolved = self.videos.unresolved[shot_index];
             published
         })
         .map_err(Arc::new);
@@ -1195,6 +1237,10 @@ mod tests {
             images: AtomicU32,
             submits: AtomicU32,
             finish: AtomicBool,
+            /// Submissions to refuse with a rate-limit answer before accepting.
+            refuse: AtomicU32,
+            /// Submissions to time out after sending before accepting.
+            time_out: AtomicU32,
         }
 
         fn answer(body: impl Into<Vec<u8>>) -> Result<HttpResponse, TransportFailure> {
@@ -1213,6 +1259,19 @@ mod tests {
             ) -> Result<HttpResponse, TransportFailure> {
                 if url.ends_with("/v1/video_generation") {
                     self.submits.fetch_add(1, Ordering::SeqCst);
+                    let take = |count: &AtomicU32| {
+                        count
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok()
+                    };
+                    if take(&self.refuse) {
+                        return answer(
+                            r#"{"task_id":"","base_resp":{"status_code":1002,"status_msg":"rate limit"}}"#,
+                        );
+                    }
+                    if take(&self.time_out) {
+                        return Err(TransportFailure::Timeout);
+                    }
                     let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
                     assert!(
                         sent["first_frame_image"]
@@ -1392,8 +1451,9 @@ mod tests {
             struct FailAfterAccept;
             impl video::VideoHooks for FailAfterAccept {
                 fn reached(&mut self, point: video::VideoPoint) {
-                    assert_eq!(point, video::VideoPoint::Accepted);
-                    panic!("the intent save fails after MiniMax accepted the task");
+                    if point == video::VideoPoint::Recorded {
+                        panic!("the intent save fails after MiniMax accepted the task");
+                    }
                 }
             }
 
@@ -1467,6 +1527,101 @@ mod tests {
                 kineto_project::shot::VideoState::Ready
             );
             assert_eq!(fake.submits.load(Ordering::SeqCst), 1, "never paid twice");
+        }
+
+        #[test]
+        fn a_submission_accepted_before_anything_was_written_is_never_submitted_again_unasked() {
+            struct CrashOnAccept;
+            impl video::VideoHooks for CrashOnAccept {
+                fn reached(&mut self, point: video::VideoPoint) {
+                    if point == video::VideoPoint::Accepted {
+                        panic!("the process dies as MiniMax accepts the task");
+                    }
+                }
+            }
+
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            drop(locked_keyframe(&target, &fake));
+            {
+                let project = CanonicalProject::open(&target).unwrap();
+                let shot = ShotWorkflow::load(&project, 1).unwrap();
+                let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
+                    unreachable!();
+                };
+                let crashed = panic::catch_unwind(AssertUnwindSafe(|| {
+                    video::start_with(&project, &shot, &client, &mut CrashOnAccept)
+                }));
+                assert!(crashed.is_err());
+            }
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+            let intent = video_intent(&target);
+            assert_eq!(
+                (intent["state"].as_str(), intent["attempts"].as_u64()),
+                (Some("prepared"), Some(1))
+            );
+            assert!(video_receipt(&target)["task_id"].is_null());
+
+            // The reopened session cannot know whether MiniMax charged.
+            let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert!(session.video_unresolved(0).unwrap());
+            assert!(!session.video_in_flight(0).unwrap());
+            assert_eq!(
+                command(&session, &events, 1, ShotCommand::GenerateVideo),
+                Err("Generation(UnresolvedSubmission)".to_owned())
+            );
+            assert_eq!(
+                fake.submits.load(Ordering::SeqCst),
+                1,
+                "never paid twice unasked"
+            );
+
+            // The director decides to risk it.
+            command(&session, &events, 2, ShotCommand::ResubmitVideo).unwrap();
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 2);
+            assert!(!session.video_unresolved(0).unwrap());
+            assert!(session.video_in_flight(0).unwrap());
+            fake.finish.store(true, Ordering::SeqCst);
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+        }
+
+        #[test]
+        fn a_refused_submission_is_asked_for_again_and_a_timed_out_one_is_not() {
+            let temp = TempDir::new();
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = locked_keyframe(&temp.0.join("film"), &fake);
+
+            // MiniMax answered with a refusal: nothing was charged.
+            fake.refuse.store(1, Ordering::SeqCst);
+            let refused = command(&session, &events, 4, ShotCommand::GenerateVideo).unwrap_err();
+            assert!(refused.contains("Provider"), "{refused}");
+            assert!(!session.video_unresolved(0).unwrap());
+
+            // The request went out and no answer came back: it may have been.
+            fake.time_out.store(1, Ordering::SeqCst);
+            assert_eq!(
+                command(&session, &events, 5, ShotCommand::GenerateVideo),
+                Err("Generation(UnresolvedSubmission)".to_owned())
+            );
+            assert!(session.video_unresolved(0).unwrap());
+            assert_eq!(
+                command(&session, &events, 6, ShotCommand::GenerateVideo),
+                Err("Generation(UnresolvedSubmission)".to_owned())
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 2);
+
+            command(&session, &events, 7, ShotCommand::ResubmitVideo).unwrap();
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+            assert!(session.video_in_flight(0).unwrap());
         }
 
         fn video_intent_path(target: &std::path::Path) -> PathBuf {

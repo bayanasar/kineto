@@ -273,6 +273,9 @@ pub enum MinimaxError {
     Malformed(&'static str),
     /// The prompt is empty or longer than the model accepts.
     InvalidPrompt,
+    /// The request was refused before it was sent, for example a first
+    /// frame that is empty or too large.
+    InvalidRequest(&'static str),
     /// A remote task ended in failure.
     TaskFailed,
 }
@@ -297,7 +300,23 @@ impl MinimaxError {
             | Self::NoImage
             | Self::Malformed(_)
             | Self::InvalidPrompt
+            | Self::InvalidRequest(_)
             | Self::TaskFailed => ErrorClass::Terminal,
+        }
+    }
+
+    /// Whether MiniMax certainly did not accept the request: it was never
+    /// sent, no connection was made, or MiniMax answered with a refusal. Any
+    /// other failure may have reached MiniMax and been accepted, and charged.
+    #[must_use]
+    pub fn certainly_not_accepted(&self) -> bool {
+        match self {
+            Self::InvalidPrompt
+            | Self::InvalidRequest(_)
+            | Self::Api { .. }
+            | Self::Transport(TransportFailure::Connect) => true,
+            Self::Http { status } => (400..500).contains(status),
+            Self::Transport(_) | Self::NoImage | Self::Malformed(_) | Self::TaskFailed => false,
         }
     }
 }
@@ -317,6 +336,7 @@ impl fmt::Display for MinimaxError {
             Self::InvalidPrompt => {
                 formatter.write_str("prompt is empty or longer than the model accepts")
             }
+            Self::InvalidRequest(what) => write!(formatter, "MiniMax request is invalid: {what}"),
             Self::TaskFailed => formatter.write_str("MiniMax reported the task as failed"),
         }
     }
@@ -415,7 +435,7 @@ impl<T: Transport> MinimaxClient<T> {
             n: 1,
             prompt_optimizer: false,
         })
-        .map_err(|_| MinimaxError::Malformed("request did not encode"))?;
+        .map_err(|_| MinimaxError::InvalidRequest("request did not encode"))?;
         let response = self
             .transport
             .post_json(

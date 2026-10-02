@@ -253,6 +253,10 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
         () => widget.project.generateShotVideo(_activeShotIndex),
         label: 'Submitting video',
       ),
+      onResubmitVideo: () => _run(
+        () => widget.project.resubmitShotVideo(_activeShotIndex),
+        label: 'Submitting video',
+      ),
       onLockVideo: () => _run(
         () => widget.project.lockShotVideo(_activeShotIndex),
       ),
@@ -282,6 +286,7 @@ class DemoWorkspaceView extends StatelessWidget {
     this.candidateMedia = const <String?>[],
     this.videoMedia,
     this.onGenerateVideo,
+    this.onResubmitVideo,
     this.onLockVideo,
     this.onOpenVideo,
     this.candidateOrigins = const <KinetoCandidateOrigin>[],
@@ -319,6 +324,10 @@ class DemoWorkspaceView extends StatelessWidget {
   /// Absolute path of the active shot's current video, if it has one.
   final String? videoMedia;
   final VoidCallback? onGenerateVideo;
+
+  /// Submit the video again after an unresolved submission, risking a second
+  /// charge.
+  final VoidCallback? onResubmitVideo;
   final VoidCallback? onLockVideo;
   final ValueChanged<String>? onOpenVideo;
   /// Who made each candidate of the active shot, as its artifact records it.
@@ -653,6 +662,7 @@ class DemoWorkspaceView extends StatelessWidget {
                     video: videoMedia,
                     blocked: blocked,
                     onGenerate: onGenerateVideo,
+                    onResubmit: onResubmitVideo,
                     onLock: onLockVideo,
                     onOpen: onOpenVideo,
                   ),
@@ -747,6 +757,7 @@ class _VideoPanel extends StatelessWidget {
     required this.video,
     required this.blocked,
     this.onGenerate,
+    this.onResubmit,
     this.onLock,
     this.onOpen,
   });
@@ -757,6 +768,7 @@ class _VideoPanel extends StatelessWidget {
   final String? video;
   final bool blocked;
   final VoidCallback? onGenerate;
+  final VoidCallback? onResubmit;
   final VoidCallback? onLock;
   final ValueChanged<String>? onOpen;
 
@@ -767,7 +779,8 @@ class _VideoPanel extends StatelessWidget {
         poster != null &&
         !blocked &&
         state != KinetoVideoState.generating &&
-        state != KinetoVideoState.locked;
+        state != KinetoVideoState.locked &&
+        state != KinetoVideoState.unresolved;
     final generateLabel = state == KinetoVideoState.none
         ? 'Generate video · 6 s · ≈ ${provider.videoCostLabel}'
         : 'Regenerate video · ≈ ${provider.videoCostLabel}';
@@ -778,6 +791,7 @@ class _VideoPanel extends StatelessWidget {
         kind: switch (state) {
           KinetoVideoState.locked => WabBadgeKind.done,
           KinetoVideoState.none => WabBadgeKind.neutral,
+          KinetoVideoState.unresolved => WabBadgeKind.warning,
           _ => WabBadgeKind.progress,
         },
       ),
@@ -806,7 +820,15 @@ class _VideoPanel extends StatelessWidget {
                   onPressed: blocked ? null : onLock,
                   child: const Text('Lock video'),
                 ),
-              if (provider.canGenerateVideo && state != KinetoVideoState.locked)
+              if (provider.canGenerateVideo && state == KinetoVideoState.unresolved)
+                WabButton(
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: blocked || poster == null ? null : onResubmit,
+                  child: Text('Submit again · may pay twice · ≈ ${provider.videoCostLabel}'),
+                ),
+              if (provider.canGenerateVideo &&
+                  state != KinetoVideoState.locked &&
+                  state != KinetoVideoState.unresolved)
                 WabButton(
                   kind: WabMaterialKind.zhuwen,
                   onPressed: canGenerate ? onGenerate : null,
@@ -825,6 +847,7 @@ class _VideoPanel extends StatelessWidget {
         KinetoVideoState.ready => 'Ready',
         KinetoVideoState.locked => 'Locked',
         KinetoVideoState.stale => 'Stale',
+        KinetoVideoState.unresolved => 'Unresolved',
       };
 
   String _explanation(KinetoVideoState state) {
@@ -844,6 +867,10 @@ class _VideoPanel extends StatelessWidget {
       KinetoVideoState.locked => 'The video is locked as production truth.',
       KinetoVideoState.stale =>
         'The video was made from a keyframe that is no longer locked; regenerate it.',
+      KinetoVideoState.unresolved =>
+        'The last submission did not finish cleanly, and MiniMax may already have accepted and '
+            'charged for it. Kineto has no record of its task, so it cannot follow it. Check your '
+            'MiniMax account; submit again only if you accept paying twice.',
     };
   }
 }

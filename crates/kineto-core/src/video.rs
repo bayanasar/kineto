@@ -21,6 +21,13 @@
 //! before the intent could say so: the restart marks it invoked and watches
 //! that task, and asking again in a live session follows it too. A task
 //! MiniMax reports as failed is retired, so asking again submits afresh.
+//!
+//! An attempted submission with no task recorded is submitted again only if
+//! its receipt shows MiniMax certainly did not accept it. Otherwise MiniMax
+//! may have accepted and charged for it (a crash before the task was written
+//! down, or a timeout after the request was sent), so it is unresolved:
+//! asking again is refused until the director chooses to [`resubmit`],
+//! accepting that the video may be paid for twice.
 
 use std::{
     error::Error,
@@ -33,7 +40,8 @@ use std::{
 
 use kineto_job_runtime::{
     DispatchOutcome, Invocation, InvokePreparedError, JobRuntime, JobRuntimeError,
-    JobRuntimePolicy, PaidJobAdapter, PrepareOutcome, ProviderKey, Reconciliation, StartupOutcome,
+    JobRuntimePolicy, PaidJobAdapter, PrepareOutcome, ProviderKey, Reconciliation, RuntimeIntent,
+    StartupOutcome,
 };
 use kineto_jobs::{
     BackoffPolicy, CostEstimate, ErrorClass, FallbackPolicy, IdempotencyKey, IntentState, JobId,
@@ -77,9 +85,10 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(200);
 /// Where a submission can be stopped by a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoPoint {
-    /// MiniMax accepted the task and its ID is in the receipt; the intent
-    /// does not say so yet.
+    /// MiniMax accepted the task; nothing about it is written down yet.
     Accepted,
+    /// The task is in the receipt; the intent does not say so yet.
+    Recorded,
 }
 
 pub trait VideoHooks {
@@ -138,6 +147,10 @@ struct Receipt {
     /// then on the video is paid for and is never submitted again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    /// The attempt MiniMax certainly did not accept: it was never sent or
+    /// was refused. Any other attempt without a task may have been charged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refused_attempt: Option<u16>,
     /// Set by the watcher once the video is on disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_hash: Option<String>,
@@ -196,6 +209,46 @@ fn record_task(
     write_receipt(root, artifact_id, &receipt)
 }
 
+fn record_refusal(
+    root: &ProjectRoot,
+    artifact_id: &ArtifactId,
+    attempt: u16,
+) -> Result<(), VideoError> {
+    let mut receipt = read_receipt(root, artifact_id)?;
+    receipt.refused_attempt = Some(attempt);
+    write_receipt(root, artifact_id, &receipt)
+}
+
+/// How the last submission of a prepared video ended, as far as the project
+/// can prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastAttempt {
+    /// Nothing was submitted.
+    None,
+    /// MiniMax accepted it; its task is in the receipt.
+    Accepted,
+    /// MiniMax certainly did not accept it.
+    Refused,
+    /// MiniMax may have accepted it.
+    Unresolved,
+}
+
+fn last_attempt(root: &ProjectRoot, record: &RuntimeIntent) -> LastAttempt {
+    if record.attempts() == 0 {
+        return LastAttempt::None;
+    }
+    let intent = record.intent();
+    let receipt = intent
+        .artifact_id()
+        .and_then(|artifact_id| read_receipt(root, artifact_id).ok())
+        .filter(|receipt| receipt.input_hash == intent.input_hash().as_str());
+    match receipt {
+        Some(receipt) if receipt.task_id.is_some() => LastAttempt::Accepted,
+        Some(receipt) if receipt.refused_attempt == Some(record.attempts()) => LastAttempt::Refused,
+        _ => LastAttempt::Unresolved,
+    }
+}
+
 fn task_handle(task: &str) -> Result<ProviderJobId, MinimaxError> {
     ProviderJobId::new(task).map_err(|_| MinimaxError::Malformed("task ID is not a job handle"))
 }
@@ -252,6 +305,8 @@ struct Submit<'a, T, H> {
     root: &'a ProjectRoot,
     artifact_id: &'a ArtifactId,
     input_hash: &'a InputHash,
+    /// The attempt this submission is, as the intent will count it.
+    attempt: u16,
     hooks: &'a mut H,
 }
 
@@ -276,13 +331,25 @@ impl<T: Transport, H: VideoHooks> PaidJobAdapter for Submit<'_, T, H> {
         if let Some(task) = accepted_task(self.root, self.artifact_id, self.input_hash) {
             return task_handle(&task).map(Invocation::Pending);
         }
-        let task = self.client.submit_video(request)?;
+        let task = match self.client.submit_video(request) {
+            Ok(task) => task,
+            Err(error) => {
+                // Only a proven refusal lets this video be submitted again
+                // without the director's say; if it cannot be written down
+                // the attempt stays unresolved, which fails closed.
+                if error.certainly_not_accepted() {
+                    let _ = record_refusal(self.root, self.artifact_id, self.attempt);
+                }
+                return Err(error);
+            }
+        };
         // MiniMax may have charged from here on. The task goes into the
         // receipt before anything else can fail. If that write fails the
-        // runtime's intent save is the remaining record, so the task is still
-        // returned: an error here would let the next request submit again.
-        let _ = record_task(self.root, self.artifact_id, &task);
+        // runtime's intent save is the remaining record, so the task is
+        // still returned for it to keep.
         self.hooks.reached(VideoPoint::Accepted);
+        let _ = record_task(self.root, self.artifact_id, &task);
+        self.hooks.reached(VideoPoint::Recorded);
         task_handle(task.as_str()).map(Invocation::Pending)
     }
 
@@ -392,6 +459,27 @@ pub fn start_with<T: Transport>(
     client: &MinimaxClient<T>,
     hooks: &mut impl VideoHooks,
 ) -> Result<VideoJob, GenerationError> {
+    submit(project, shot, client, hooks, false)
+}
+
+/// Submit the shot's video again although its last submission is
+/// unresolved: MiniMax may already have accepted, and charged for, that
+/// one. Only on the director's explicit decision to risk paying twice.
+pub fn resubmit<T: Transport>(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+    client: &MinimaxClient<T>,
+) -> Result<VideoJob, GenerationError> {
+    submit(project, shot, client, &mut NoHooks, true)
+}
+
+fn submit<T: Transport>(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+    client: &MinimaxClient<T>,
+    hooks: &mut impl VideoHooks,
+    risk_paying_twice: bool,
+) -> Result<VideoJob, GenerationError> {
     let (keyframe, first_frame) = shot.first_frame()?.ok_or(GenerationError::Shot(
         kineto_project::shot::ShotWorkflowError::KeyframeNotLocked,
     ))?;
@@ -428,9 +516,23 @@ pub fn start_with<T: Transport>(
 
     let runtime = runtime(project);
     let job_id = JobId::new(plan.artifact_id().as_str())?;
-    // Asking again is what retries a submission that failed.
-    if runtime.retire_failed(&job_id)? {
-        remove_receipt(project.root(), plan.artifact_id());
+    if let Some(record) = runtime.load(&job_id)?
+        && record.intent().state() == IntentState::Prepared
+    {
+        match last_attempt(project.root(), &record) {
+            LastAttempt::None | LastAttempt::Accepted => {}
+            // Asking again is what retries a submission MiniMax refused.
+            LastAttempt::Refused => {
+                if runtime.retire_failed(&job_id)? {
+                    remove_receipt(project.root(), plan.artifact_id());
+                }
+            }
+            LastAttempt::Unresolved if risk_paying_twice => {
+                runtime.retire_unresolved(&job_id)?;
+                remove_receipt(project.root(), plan.artifact_id());
+            }
+            LastAttempt::Unresolved => return Err(GenerationError::UnresolvedSubmission),
+        }
     }
     let record = match runtime.prepare(
         job_id.clone(),
@@ -469,6 +571,7 @@ pub fn start_with<T: Transport>(
                 keyframe_content_hash: keyframe.content_hash.as_str().to_owned(),
                 provenance: provenance_of(&prompt.compiled, &prompt.prompt_hash),
                 task_id: None,
+                refused_attempt: None,
                 content_hash: None,
             },
         )
@@ -487,6 +590,7 @@ pub fn start_with<T: Transport>(
         root: project.root(),
         artifact_id: plan.artifact_id(),
         input_hash: plan.input_hash(),
+        attempt: record.attempts().saturating_add(1),
         hooks,
     };
     match runtime.invoke_prepared(&job_id, &mut submit, &request) {
@@ -503,6 +607,10 @@ pub fn start_with<T: Transport>(
             "a video submission completed synchronously",
         )),
         Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+        // A failure that may have reached MiniMax may have been charged.
+        Err(InvokePreparedError::Provider { source, .. }) if !source.certainly_not_accepted() => {
+            Err(GenerationError::UnresolvedSubmission)
+        }
         Err(InvokePreparedError::Provider { source, class, .. }) => {
             Err(GenerationError::Provider {
                 source: Box::new(source),
@@ -662,6 +770,9 @@ pub fn finish(
 #[derive(Debug, Default)]
 pub struct InFlight {
     pub jobs: Vec<VideoJob>,
+    /// Shots whose last submission may have been accepted but left no task;
+    /// see [`resubmit`].
+    pub unresolved: Vec<u32>,
     /// Records this build cannot read or place.
     pub needs_attention: usize,
 }
@@ -678,9 +789,21 @@ pub fn in_flight(project: &CanonicalProject) -> Result<InFlight, JobRuntimeError
                 Some(job) => found.jobs.push(job),
                 None => found.needs_attention += 1,
             },
-            // Never submitted, or its submission failed: the director asks
-            // again when they want it.
-            StartupOutcome::RetryPrepared { .. } => {}
+            // Never submitted, or MiniMax refused it: the director asks again
+            // when they want it. Any other attempt may have been charged.
+            StartupOutcome::RetryPrepared { job_id, .. } => {
+                if let Some(record) = runtime.load(&job_id)?
+                    && last_attempt(project.root(), &record) == LastAttempt::Unresolved
+                {
+                    match record.intent().artifact_id().and_then(|artifact_id| {
+                        VideoPlan::for_artifact(artifact_id, record.intent().input_hash().clone())
+                            .ok()
+                    }) {
+                        Some(plan) => found.unresolved.push(plan.shot_number()),
+                        None => found.needs_attention += 1,
+                    }
+                }
+            }
             StartupOutcome::ResultReady { .. }
             | StartupOutcome::NeedsAttention { .. }
             | StartupOutcome::UnreadableIntent { .. }

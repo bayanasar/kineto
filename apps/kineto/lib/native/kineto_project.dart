@@ -171,6 +171,15 @@ external int _kinetoProjectShotGenerateVideo(
 );
 
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_video',
+)
+external int _kinetoProjectShotResubmitVideo(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_lock_video',
 )
 external int _kinetoProjectShotLockVideo(
@@ -595,6 +604,14 @@ final class KinetoProjectSession implements Finalizable {
         (token) => _kinetoProjectShotGenerateVideo(_handle, shotIndex, token),
       );
 
+  /// Submit the shot's video again although its last submission is
+  /// unresolved: MiniMax may already have accepted, and charged for, it.
+  /// Only on the director's explicit decision to risk paying twice.
+  Future<void> resubmitShotVideo(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitVideo(_handle, shotIndex, token),
+      );
+
   Future<void> lockShotVideo(int shotIndex) => _submit(
         shotIndex,
         (token) => _kinetoProjectShotLockVideo(_handle, shotIndex, token),
@@ -1016,6 +1033,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'no_video': 129,
   'stale_video': 130,
   'no_first_frame': 131,
+  'video_unresolved': 132,
   'panic': 199,
 };
 
@@ -1053,6 +1071,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   129: 'Generate a video before locking it',
   130: 'The video was made from a keyframe that is no longer locked; regenerate it',
   131: 'The locked keyframe has no image to start a video from',
+  132: 'MiniMax may already have accepted, and charged for, the last video submission; '
+      'submit again only if you accept paying twice',
   199: 'Native project call failed unexpectedly',
 };
 

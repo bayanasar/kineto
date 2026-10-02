@@ -209,7 +209,9 @@ impl<T: Transport> MinimaxClient<T> {
             return Err(MinimaxError::InvalidPrompt);
         }
         if request.first_frame.is_empty() || request.first_frame.len() > MAX_FIRST_FRAME_BYTES {
-            return Err(MinimaxError::Malformed("first frame is empty or too large"));
+            return Err(MinimaxError::InvalidRequest(
+                "first frame is empty or too large",
+            ));
         }
         let first_frame_image = format!(
             "data:{};base64,{}",
@@ -224,7 +226,7 @@ impl<T: Transport> MinimaxClient<T> {
             resolution: request.resolution.as_str(),
             prompt_optimizer: false,
         })
-        .map_err(|_| MinimaxError::Malformed("request did not encode"))?;
+        .map_err(|_| MinimaxError::InvalidRequest("request did not encode"))?;
         let response = self
             .transport
             .post_json(
@@ -534,6 +536,47 @@ mod tests {
             assert_eq!(error.class(), class, "{error}");
             assert!(!format!("{error:?}").contains(KEY));
         }
+    }
+
+    #[test]
+    fn a_submission_is_known_unaccepted_only_if_it_never_arrived_or_was_refused() {
+        let cases = [
+            (
+                json(
+                    200,
+                    r#"{"task_id":"","base_resp":{"status_code":1002,"status_msg":"rate limit"}}"#,
+                ),
+                true,
+            ),
+            (json(400, r#"{"error":"bad request"}"#), true),
+            (Err(TransportFailure::Connect), true),
+            // Each of these may have reached MiniMax and created a task.
+            (Err(TransportFailure::Timeout), false),
+            (Err(TransportFailure::Io), false),
+            (Err(TransportFailure::Tls), false),
+            (json(502, "bad gateway"), false),
+            (
+                json(
+                    200,
+                    r#"{"task_id":"12/../x","base_resp":{"status_code":0}}"#,
+                ),
+                false,
+            ),
+        ];
+        for (answer, refused) in cases {
+            let error = client([answer]).submit_video(&request()).unwrap_err();
+            assert_eq!(error.certainly_not_accepted(), refused, "{error}");
+        }
+        let unsent = VideoRequest {
+            first_frame: Vec::new(),
+            ..request()
+        };
+        let error = client([]).submit_video(&unsent).unwrap_err();
+        assert_eq!(
+            error,
+            MinimaxError::InvalidRequest("first frame is empty or too large")
+        );
+        assert!(error.certainly_not_accepted());
     }
 
     #[test]
