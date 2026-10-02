@@ -39,13 +39,13 @@ pub(crate) const PROJECT_ERR_PROVIDER_UNKNOWN: i32 = 122;
 pub(crate) const PROJECT_ERR_PROVIDER_NOT_CONFIGURED: i32 = 123;
 pub(crate) const PROJECT_ERR_SHOT_INTENT_MISSING: i32 = 124;
 pub(crate) const PROJECT_ERR_PROVIDER_REFUSED: i32 = 125;
-pub(crate) const PROJECT_ERR_VIDEO_IN_FLIGHT: i32 = 126;
-pub(crate) const PROJECT_ERR_KEYFRAME_NOT_LOCKED: i32 = 127;
-pub(crate) const PROJECT_ERR_VIDEO_LOCKED: i32 = 128;
-pub(crate) const PROJECT_ERR_NO_VIDEO: i32 = 129;
-pub(crate) const PROJECT_ERR_STALE_VIDEO: i32 = 130;
-pub(crate) const PROJECT_ERR_NO_FIRST_FRAME: i32 = 131;
-pub(crate) const PROJECT_ERR_VIDEO_UNRESOLVED: i32 = 132;
+pub(crate) const PROJECT_ERR_PAID_CALL_UNRESOLVED: i32 = 126;
+pub(crate) const PROJECT_ERR_VIDEO_IN_FLIGHT: i32 = 127;
+pub(crate) const PROJECT_ERR_KEYFRAME_NOT_LOCKED: i32 = 128;
+pub(crate) const PROJECT_ERR_VIDEO_LOCKED: i32 = 129;
+pub(crate) const PROJECT_ERR_NO_VIDEO: i32 = 130;
+pub(crate) const PROJECT_ERR_STALE_VIDEO: i32 = 131;
+pub(crate) const PROJECT_ERR_NO_FIRST_FRAME: i32 = 132;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
@@ -80,13 +80,13 @@ const STATUSES: [(&str, i32); 35] = [
     ),
     ("shot_intent_missing", PROJECT_ERR_SHOT_INTENT_MISSING),
     ("provider_refused", PROJECT_ERR_PROVIDER_REFUSED),
+    ("paid_call_unresolved", PROJECT_ERR_PAID_CALL_UNRESOLVED),
     ("video_in_flight", PROJECT_ERR_VIDEO_IN_FLIGHT),
     ("keyframe_not_locked", PROJECT_ERR_KEYFRAME_NOT_LOCKED),
     ("video_locked", PROJECT_ERR_VIDEO_LOCKED),
     ("no_video", PROJECT_ERR_NO_VIDEO),
     ("stale_video", PROJECT_ERR_STALE_VIDEO),
     ("no_first_frame", PROJECT_ERR_NO_FIRST_FRAME),
-    ("video_unresolved", PROJECT_ERR_VIDEO_UNRESOLVED),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

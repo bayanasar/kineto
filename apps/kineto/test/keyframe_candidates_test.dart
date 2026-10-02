@@ -39,6 +39,8 @@ Widget _workspace({
   List<String?> media = const <String?>[],
   List<KinetoCandidateOrigin> origins = const <KinetoCandidateOrigin>[],
   VoidCallback? onGenerate,
+  bool unresolved = false,
+  VoidCallback? onResubmit,
 }) =>
     MaterialApp(
       theme: WabTheme.materialTheme(lightTheme: false),
@@ -47,6 +49,8 @@ Widget _workspace({
         imageProvider: provider,
         candidateMedia: media,
         candidateOrigins: origins,
+        keyframesUnresolved: unresolved,
+        onResubmitKeyframes: onResubmit,
         shotSnapshot: shot,
         shotSnapshots: <KinetoShotSnapshot>[shot, _empty],
         activeShotIndex: 0,
@@ -210,5 +214,29 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(refused, warnIfMissed: false);
     expect(generated, 1, reason: 'no generation without a key');
+  });
+
+  testWidgets('an unresolved generation is asked for again only as an explicit risk', (tester) async {
+    var generated = 0;
+    var resubmitted = 0;
+    await tester.pumpWidget(
+      _workspace(
+        shot: _empty,
+        provider: _minimax,
+        unresolved: true,
+        onGenerate: () => generated++,
+        onResubmit: () => resubmitted++,
+      ),
+    );
+    expect(find.textContaining('may already have charged for keyframes'), findsOneWidget);
+    final generate = find.text(r'Generate 3 keyframes · MiniMax image-01 · ≈ $0.0105');
+    await tester.ensureVisible(generate);
+    await tester.pumpAndSettle();
+    await tester.tap(generate, warnIfMissed: false);
+    final resubmit = find.text(r'Generate again · may pay twice · ≈ $0.0105');
+    await tester.ensureVisible(resubmit);
+    await tester.pumpAndSettle();
+    await tester.tap(resubmit);
+    expect((generated, resubmitted), (0, 1));
   });
 }

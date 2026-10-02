@@ -61,6 +61,10 @@ pub enum ShotCommand {
     Lock,
     Reset,
     MigrateLegacyHashes,
+    /// Generate again although a paid call of the last attempt may have been
+    /// accepted, and charged for, without leaving its result. The director's
+    /// explicit decision to risk paying twice.
+    ResubmitKeyframes,
     /// Submit a video from the locked keyframe. Completes once MiniMax has
     /// accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
@@ -207,6 +211,8 @@ struct PublishedShot {
     video_unresolved: bool,
     /// Who made each current candidate, in candidate order.
     origins: Vec<CandidateOrigin>,
+    /// A paid keyframe call may have been accepted without leaving its result.
+    keyframes_unresolved: bool,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -376,6 +382,13 @@ impl ProjectSession {
     /// director resubmits. Never does I/O.
     pub fn video_unresolved(&self, shot_index: u32) -> Result<bool, SnapshotError> {
         self.published(shot_index, |published| published.video_unresolved)
+    }
+
+    /// Whether a paid keyframe call of the shot's last generation may have
+    /// been accepted, and charged, without leaving its result. Generating is
+    /// refused until the director resubmits. Never does I/O.
+    pub fn keyframes_unresolved(&self, shot_index: u32) -> Result<bool, SnapshotError> {
+        self.published(shot_index, |published| published.keyframes_unresolved)
     }
 
     fn published<R>(
@@ -598,6 +611,9 @@ struct Worker {
     // Canonical JSON is loaded once per shot per session; reads then stay
     // typed and in memory rather than re-parsing project files.
     shots: [Option<ShotWorkflow>; SHOT_COUNT],
+    /// Shots whose last generation is unresolved; see
+    /// [`ShotCommand::ResubmitKeyframes`].
+    keyframes_unresolved: [bool; SHOT_COUNT],
 }
 
 impl Worker {
@@ -625,6 +641,7 @@ impl Worker {
                 poll_interval: options.video_poll_interval,
             },
             shots: [None, None],
+            keyframes_unresolved: [false, false],
         }
     }
 
@@ -666,11 +683,8 @@ impl Worker {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
             // Generation runs as write-ahead jobs so an interruption is
             // recoverable; every other command is a single canonical update.
-            ShotCommand::Generate => self
-                .with_shot(shot_index, |project, provider, shot| {
-                    generation::generate(project, shot, provider, &mut NoHooks).map(|_outcome| ())
-                })
-                .map_err(generation_error),
+            ShotCommand::Generate => self.generate(shot_index, false),
+            ShotCommand::ResubmitKeyframes => self.generate(shot_index, true),
             ShotCommand::GenerateVideo => self.start_video(shot_index, false),
             ShotCommand::ResubmitVideo => self.start_video(shot_index, true),
             command => self
@@ -684,6 +698,7 @@ impl Worker {
                     }
                     ShotCommand::LockVideo => shot.lock_video(project),
                     ShotCommand::Generate
+                    | ShotCommand::ResubmitKeyframes
                     | ShotCommand::GenerateVideo
                     | ShotCommand::ResubmitVideo => {
                         unreachable!("generation is handled above")
@@ -758,6 +773,24 @@ impl Worker {
         }
     }
 
+    fn generate(&mut self, shot_index: usize, risk_paying_twice: bool) -> Result<(), SessionError> {
+        let generated = self.with_shot(shot_index, |project, provider, shot| {
+            if risk_paying_twice {
+                generation::resubmit(project, shot, provider, &mut NoHooks)
+            } else {
+                generation::generate(project, shot, provider, &mut NoHooks)
+            }
+        });
+        match &generated {
+            Ok(_) => self.keyframes_unresolved[shot_index] = false,
+            Err(GenerationError::UnresolvedSubmission) => {
+                self.keyframes_unresolved[shot_index] = true;
+            }
+            Err(_) => {}
+        }
+        generated.map(|_outcome| ()).map_err(generation_error)
+    }
+
     /// Complete generations an earlier session left unfinished. Read-only
     /// projects are never written, so nothing is recovered in them.
     ///
@@ -774,6 +807,7 @@ impl Worker {
             project,
             provider,
             shots,
+            keyframes_unresolved,
             ..
         } = self;
         let minimax = match provider {
@@ -786,6 +820,7 @@ impl Worker {
             let Unfinished {
                 plans,
                 needs_attention,
+                unresolved,
             } = match generation::unfinished(project, provider) {
                 Ok(unfinished) => unfinished,
                 Err(_) => {
@@ -794,6 +829,15 @@ impl Worker {
                 }
             };
             unplaced += needs_attention;
+            for shot_number in unresolved {
+                if let Some(flag) = usize::try_from(shot_number)
+                    .ok()
+                    .and_then(|number| number.checked_sub(1))
+                    .and_then(|index| keyframes_unresolved.get_mut(index))
+                {
+                    *flag = true;
+                }
+            }
             for plan in plans {
                 let Some(shot_index) = usize::try_from(plan.shot_number())
                     .ok()
@@ -847,6 +891,7 @@ impl Worker {
                     video_in_flight: false,
                     video_unresolved: false,
                     origins: shot.candidate_origins()?,
+                    keyframes_unresolved: false,
                 })
             })
         }))
@@ -854,6 +899,7 @@ impl Worker {
         .map(|mut published| {
             published.video_in_flight = self.videos.in_flight[shot_index].is_some();
             published.video_unresolved = self.videos.unresolved[shot_index];
+            published.keyframes_unresolved = self.keyframes_unresolved[shot_index];
             published
         })
         .map_err(Arc::new);

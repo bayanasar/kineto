@@ -229,8 +229,13 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onDirectionChanged: (direction) => _run(
         () => widget.project.setShotDirection(_activeShotIndex, direction),
       ),
+      keyframesUnresolved: widget.project.keyframesUnresolved(_activeShotIndex),
       onGenerate: () => _run(
         () => widget.project.generateShotCandidates(_activeShotIndex),
+        label: 'Generating',
+      ),
+      onResubmitKeyframes: () => _run(
+        () => widget.project.resubmitShotKeyframes(_activeShotIndex),
         label: 'Generating',
       ),
       onSelect: (candidateIndex) => _run(
@@ -278,6 +283,8 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.onLock,
     required this.onReset,
     this.onMigrate,
+    this.keyframesUnresolved = false,
+    this.onResubmitKeyframes,
     this.imageProvider = const KinetoImageProvider(
       kind: KinetoImageProviderKind.localDemo,
       ready: true,
@@ -313,6 +320,12 @@ class DemoWorkspaceView extends StatelessWidget {
   final VoidCallback onLock;
   final VoidCallback onReset;
   final VoidCallback? onMigrate;
+
+  /// A paid keyframe call of the last generation may have been accepted, and
+  /// charged, without its result being kept; generating waits for the
+  /// director's explicit decision to risk paying twice.
+  final bool keyframesUnresolved;
+  final VoidCallback? onResubmitKeyframes;
 
   /// Who generates candidates for this session, and what one generation costs.
   final KinetoImageProvider imageProvider;
@@ -350,7 +363,7 @@ class DemoWorkspaceView extends StatelessWidget {
   Widget build(BuildContext context) {
     final selectedIndex = shotSnapshot.selectedIndex;
     final blocked = shotSnapshot.changesBlocked || working;
-    final canGenerate = !blocked && imageProvider.ready;
+    final canGenerate = !blocked && imageProvider.ready && !keyframesUnresolved;
     final canLock = !blocked &&
         shotSnapshot.generated &&
         selectedIndex != null &&
@@ -536,6 +549,22 @@ class DemoWorkspaceView extends StatelessWidget {
                         Text(
                           '${imageProvider.kind.label} is selected but has no API key; set '
                           'KINETO_${imageProvider.kind.wireName.toUpperCase()}_API_KEY and reopen Kineto.',
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      if (keyframesUnresolved) ...<Widget>[
+                        const Text(
+                          'The last generation did not finish cleanly, and MiniMax may already have '
+                          'charged for keyframes Kineto never received. Check your MiniMax account; '
+                          'generate again only if you accept paying twice.',
+                        ),
+                        const SizedBox(height: 12),
+                        WabButton(
+                          kind: WabMaterialKind.zhuwen,
+                          onPressed: blocked || !imageProvider.ready ? null : onResubmitKeyframes,
+                          child: Text(
+                            'Generate again · may pay twice · ≈ ${imageProvider.generationCostLabel}',
+                          ),
                         ),
                         const SizedBox(height: 12),
                       ],
