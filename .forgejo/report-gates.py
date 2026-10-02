@@ -20,6 +20,7 @@ def main() -> int:
     sha = os.environ.get("HEAD_SHA", "").strip()
     server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
     repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    run_number = os.environ.get("GITHUB_RUN_NUMBER", "").strip()
     steps = json.loads(os.environ.get("STEPS") or "{}")
 
     if not token:
@@ -44,7 +45,11 @@ def main() -> int:
                 "state": state,
                 "context": f"gate/{name}",
                 "description": f"{outcome} in this run",
-                "target_url": f"{server}/{repo}/actions",
+                "target_url": (
+                    f"{server}/{repo}/actions/runs/{run_number}"
+                    if run_number
+                    else f"{server}/{repo}/actions"
+                ),
             }
         ).encode()
 
