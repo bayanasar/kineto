@@ -1,4 +1,5 @@
 pub mod bible;
+pub mod cast;
 pub mod fs;
 pub mod manifest;
 pub mod revisions;

@@ -35,6 +35,7 @@ use kineto_jobs::{
 };
 use kineto_project::{
     ArtifactId, InputHash,
+    cast::CastImageKind,
     manifest::CanonicalProject,
     shot::{
         AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
@@ -45,7 +46,7 @@ use kineto_project::{
 use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
 use kineto_provider_minimax::{MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport};
 use kineto_providers::{
-    ImageCapabilities, ImageRequirements, Price, SeedSupport, evaluate_image,
+    AspectRatio, ImageCapabilities, ImageRequirements, Price, SeedSupport, evaluate_image,
     secret::{SecretError, SecretSource},
 };
 
@@ -58,12 +59,39 @@ use crate::{
 pub const GENERATE_OPERATION: &str = "image.generate";
 
 /// What a generated image belongs to, which decides where it is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateOwner {
     /// A keyframe candidate of the shot with this 1-based number.
     Shot(u32),
     /// A sample of a style direction.
     Style,
+    /// A casting image of a character.
+    Character { id: String, kind: CastImageKind },
+}
+
+/// The frame keyframes are generated in.
+pub const KEYFRAME_ASPECT: AspectRatio = AspectRatio {
+    width: 16,
+    height: 9,
+};
+
+/// An approved picture of the person an image must show, sent to providers
+/// that take an identity reference.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IdentityReference {
+    pub artifact_id: ArtifactId,
+    pub bytes: Arc<[u8]>,
+}
+
+impl fmt::Debug for IdentityReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "IdentityReference({}, {} bytes)",
+            self.artifact_id.as_str(),
+            self.bytes.len()
+        )
+    }
 }
 
 /// One candidate to generate, as the adapter receives it.
@@ -72,6 +100,8 @@ pub struct CandidateRequest {
     pub artifact_id: ArtifactId,
     pub input_hash: InputHash,
     pub owner: CandidateOwner,
+    pub aspect_ratio: AspectRatio,
+    pub identity: Option<IdentityReference>,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -206,6 +236,17 @@ impl ImageProvider {
                     .map(MinimaxClient::shared),
             )),
             Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
+        }
+    }
+
+    /// How the provider is given a character's identity, as a cast lock
+    /// records it: the provider and the request field the reference travels
+    /// in. `None` when it takes no identity reference.
+    #[must_use]
+    pub const fn identity_mechanism(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::LocalDemo => None,
+            Self::Minimax(_) => Some((MINIMAX_PROVIDER, "subject_reference")),
         }
     }
 
@@ -601,6 +642,16 @@ pub enum Prerequisite {
     /// The image provider delivers through remote jobs, which keyframes and
     /// style samples do not follow.
     SynchronousImageProvider,
+    /// Casting is done from the bible.
+    Bible,
+    /// The bible has no character with the ID asked for.
+    Character,
+    /// Casting follows the locked style.
+    LockedStyle,
+    /// A reference pack is made from the selected portrait.
+    SelectedPortrait,
+    /// The image provider takes no identity reference, or not this portrait.
+    IdentityReference,
 }
 
 impl fmt::Display for Prerequisite {
@@ -615,6 +666,13 @@ impl fmt::Display for Prerequisite {
             Self::StyleSample => "there is no style sample with that id",
             Self::SynchronousImageProvider => {
                 "the image provider delivers images as remote jobs, which this step does not follow"
+            }
+            Self::Bible => "write the bible first",
+            Self::Character => "the bible has no character with that id",
+            Self::LockedStyle => "lock a style first",
+            Self::SelectedPortrait => "select a portrait first",
+            Self::IdentityReference => {
+                "the image provider takes no identity reference, or not this portrait"
             }
         })
     }
@@ -741,6 +799,8 @@ fn generate_requested<G: CandidateGenerator>(
                 artifact_id: candidate.clone(),
                 input_hash: record.intent().input_hash().clone(),
                 owner: CandidateOwner::Shot(plan.shot_number()),
+                aspect_ratio: KEYFRAME_ASPECT,
+                identity: None,
                 prompt: None,
             })
         {
@@ -851,6 +911,8 @@ fn complete_inner<G: CandidateGenerator>(
                 artifact_id: candidate.clone(),
                 input_hash: plan.input_hash().clone(),
                 owner: CandidateOwner::Shot(plan.shot_number()),
+                aspect_ratio: KEYFRAME_ASPECT,
+                identity: None,
                 prompt: None,
             },
         ));
@@ -1090,6 +1152,8 @@ pub fn unfinished_with<G: CandidateGenerator>(
                 artifact_id: candidate,
                 input_hash,
                 owner: CandidateOwner::Shot(plan.shot_number()),
+                aspect_ratio: KEYFRAME_ASPECT,
+                identity: None,
                 prompt: None,
             })
             && !unfinished.unresolved.contains(&plan.shot_number())
@@ -1381,6 +1445,8 @@ mod tests {
             artifact_id: candidate,
             input_hash: input,
             owner: CandidateOwner::Shot(1),
+            aspect_ratio: KEYFRAME_ASPECT,
+            identity: None,
             prompt: None,
         };
 

@@ -28,7 +28,7 @@ use kineto_jobs::{
     ProviderExecutionPolicy, ProviderJobId,
 };
 use kineto_project::{
-    ArtifactId, ContentHash, InputHash,
+    ArtifactId, ContentHash, InputHash, cast,
     fs::{ProjectFsError, ProjectRelativePath},
     manifest::CanonicalProject,
     shot::{CandidateOutput, PromptProvenance, keyframe_media_path},
@@ -36,7 +36,7 @@ use kineto_project::{
 };
 use kineto_provider_minimax::{
     AspectRatio, HttpsTransport, IMAGE_MODEL, ImageRequest, MinimaxClient, MinimaxError, PROVIDER,
-    Transport,
+    SubjectReference, Transport,
 };
 use kineto_providers::{ImageCapabilities, ImageFormat};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,9 @@ pub enum MinimaxKeyframeError {
     Fs(ProjectFsError),
     /// The project could not be prepared for a call, so none was made.
     Unsent(ProjectFsError),
+    /// The request asks for something `image-01` cannot do; nothing was
+    /// sent.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for MinimaxKeyframeError {
@@ -73,6 +76,7 @@ impl fmt::Display for MinimaxKeyframeError {
             Self::Receipt(what) => write!(formatter, "MiniMax keyframe receipt: {what}"),
             Self::Fs(error) => error.fmt(formatter),
             Self::Unsent(error) => write!(formatter, "no MiniMax call was made: {error}"),
+            Self::Unsupported(what) => write!(formatter, "no MiniMax call was made: {what}"),
         }
     }
 }
@@ -82,7 +86,9 @@ impl Error for MinimaxKeyframeError {
         match self {
             Self::Provider(error) => Some(error),
             Self::Fs(error) | Self::Unsent(error) => Some(error),
-            Self::NotConfigured | Self::MissingPrompt | Self::Receipt(_) => None,
+            Self::NotConfigured | Self::MissingPrompt | Self::Receipt(_) | Self::Unsupported(_) => {
+                None
+            }
         }
     }
 }
@@ -299,9 +305,24 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
                 .map(Invocation::Completed);
         }
         self.clear_refusal(&request.artifact_id)?;
+        let aspect_ratio = match (request.aspect_ratio.width, request.aspect_ratio.height) {
+            (1, 1) => AspectRatio::Square,
+            (16, 9) => AspectRatio::Landscape16x9,
+            (9, 16) => AspectRatio::Portrait9x16,
+            _ => {
+                let _ = self.record_refusal(request);
+                return Err(MinimaxKeyframeError::Unsupported(
+                    "image-01 takes 1:1, 16:9 or 9:16",
+                ));
+            }
+        };
         let image = match client.generate_image(&ImageRequest {
             prompt: prompt.compiled.prompt().to_owned(),
-            aspect_ratio: AspectRatio::Landscape16x9,
+            aspect_ratio,
+            subject_reference: request
+                .identity
+                .as_ref()
+                .map(|identity| SubjectReference(identity.bytes.to_vec())),
         }) {
             Ok(image) => image,
             Err(error) => {
@@ -317,14 +338,18 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
             answered();
         }
 
-        let media_path = match request.owner {
+        let media_path = match &request.owner {
             CandidateOwner::Shot(shot_number) => {
-                keyframe_media_path(shot_number, &request.artifact_id, extension(image.format))
+                keyframe_media_path(*shot_number, &request.artifact_id, extension(image.format))
                     .map_err(|_| MinimaxKeyframeError::Receipt("keyframe path is invalid"))?
             }
             CandidateOwner::Style => {
                 style::sample_media_path(&request.artifact_id, extension(image.format))
                     .map_err(|_| MinimaxKeyframeError::Receipt("style sample path is invalid"))?
+            }
+            CandidateOwner::Character { id, kind } => {
+                cast::media_path(id, &request.artifact_id, *kind, extension(image.format))
+                    .map_err(|_| MinimaxKeyframeError::Receipt("casting image path is invalid"))?
             }
         };
         let root = self.project.root();
@@ -382,7 +407,8 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
             MinimaxKeyframeError::Fs(_) | MinimaxKeyframeError::Unsent(_) => ErrorClass::Retryable,
             MinimaxKeyframeError::NotConfigured
             | MinimaxKeyframeError::MissingPrompt
-            | MinimaxKeyframeError::Receipt(_) => ErrorClass::Terminal,
+            | MinimaxKeyframeError::Receipt(_)
+            | MinimaxKeyframeError::Unsupported(_) => ErrorClass::Terminal,
         }
     }
 }
@@ -440,7 +466,8 @@ impl<T: Transport + Sync> CandidateGenerator for MinimaxKeyframes<'_, T> {
             MinimaxKeyframeError::Provider(error) => error.certainly_not_accepted(),
             MinimaxKeyframeError::NotConfigured
             | MinimaxKeyframeError::MissingPrompt
-            | MinimaxKeyframeError::Unsent(_) => true,
+            | MinimaxKeyframeError::Unsent(_)
+            | MinimaxKeyframeError::Unsupported(_) => true,
             // Raised after MiniMax answered, or on a kept answer.
             MinimaxKeyframeError::Fs(_) | MinimaxKeyframeError::Receipt(_) => false,
         }

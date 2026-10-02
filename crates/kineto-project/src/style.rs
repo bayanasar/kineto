@@ -362,6 +362,18 @@ pub fn lock(project: &CanonicalProject, artifact_id: &str) -> Result<StyleLock, 
     Ok(lock)
 }
 
+/// The dependency work made in the locked style records on it: the locked
+/// sample, and the hash of the lock, which changes with the style itself.
+#[must_use]
+pub fn lock_dependency(lock: &StyleLock) -> Option<crate::ArtifactDependency> {
+    Some(crate::ArtifactDependency {
+        artifact_id: ArtifactId::new(lock.artifact_id.clone()).ok()?,
+        content_hash: ContentHash::of(&serde_json::to_vec(lock).ok()?),
+        impact: crate::DependencyImpact::Semantic,
+        field: None,
+    })
+}
+
 /// The locked style, if there is one.
 pub fn locked(project: &CanonicalProject) -> Result<Option<StyleLock>, StyleError> {
     let Some(bytes) = read_optional(project, &path(LOCK_PATH))? else {

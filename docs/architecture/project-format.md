@@ -27,11 +27,13 @@ my-film/
 │       └── style_s0001.jpg
 ├── characters/
 │   └── alice/
+│       ├── casting.json
 │       ├── character.json
 │       ├── candidates/
-│       │   ├── 01J7X....png
-│       │   └── 01J7Y....png
+│       │   ├── cast.alice.0001.jpg
+│       │   └── cast.alice.0002.jpg
 │       ├── refs/
+│       │   └── cast.alice.0003.jpg
 │       └── voice.json
 ├── locations/
 ├── props/
@@ -88,6 +90,23 @@ A style direction is explored with sample images. Each sample is one paid image 
 A sample is a `candidate`, the one `selected`, or `rejected`; nothing is deleted. Locking the selected sample writes `bible/style.json` (`style.schema.json`): the sample's stable artifact ID and image hash, and the style itself (preset, version, directives and note) verbatim, so later visual work reads the locked style without the preset table of whichever build it runs on. Every change is one atomic file write, and deleting `.kineto/` changes no sample and no lock.
 
 Samples are write-ahead jobs under their own runtime partition, `minimax-style`, with the receipt, refusal and fail-closed rules of keyframes. What the sample record needs beyond the receipt is kept beside it as a plan before the call, so an interrupted sample is completed from disk when the project opens or before the next sample, never by calling again; a sample whose call may have been accepted without its result being kept makes the next one wait for the director to risk paying twice.
+
+## Casting
+
+A character of the bible is cast with paid images in the locked style. Portrait candidates are written from the character's bible entry (appearance, wardrobe, forbidden changes) and kept under `characters/<id>/candidates/`. The director selects one portrait or rejects others. From the selected portrait a reference pack is made under `characters/<id>/refs/`, each image sent with the portrait as the provider's identity reference (MiniMax `subject_reference`):
+- a front view and left and right profiles;
+- a full-length view and a costume reference;
+- two expressions (a smile and a tense close-up).
+
+Which kinds and frames the pack holds follows the provider's declared capabilities: a full-length view wants 9:16 and is made at the nearest frame the provider takes, reported as a dropped constraint; with no identity reference there is no pack, since it would not show the same person. Prompts never truncate; what does not fit is dropped and reported (`cast-portrait/1`, `cast-reference/1`).
+
+`characters/<id>/casting.json` (`casting.schema.json`) records every image as `cast.<id>.NNNN` in order, with its kind, its status (portraits only), the portrait it was made from (references only), its hashes, provider, model, prompt provenance and dependencies. Locking writes `characters/<id>/character.json` (`character.schema.json`):
+- the canonical portrait and the newest reference of each kind made from it, by artifact ID, content hash and path;
+- the provider reference: provider, the request field it travels in, the role, and the image sent;
+- the forbidden changes the bible names;
+- the portrait's dependencies.
+
+A casting image depends on the character's bible entry (`bible_character.<id>`, the hash of the entry alone, so editing another character leaves it fresh) and on the locked style (the locked sample's ID and the hash of the lock); a reference also depends on its portrait. A locked cast is stale when either parent changed, went or came, and staleness names each. Images are paid write-ahead jobs in the `minimax-cast` partition with the rules of style samples: no new casting image is paid for while one may have been charged without its result, until the director risks paying twice.
 
 ## `project.toml`
 

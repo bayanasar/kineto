@@ -65,7 +65,7 @@ pub fn image_capabilities() -> ImageCapabilities {
         max_reference_images: 1,
         reference_roles: [ReferenceRole::Identity].into_iter().collect(),
         reference_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
-        max_reference_bytes: Some(10 * 1024 * 1024 - 1),
+        max_reference_bytes: Some(MAX_REFERENCE_BYTES as u64),
         output_formats: [ImageFormat::Jpeg].into_iter().collect(),
         max_prompt_chars: Some(MAX_PROMPT_CHARS),
         // The image comes back base64 in the answer to the request.
@@ -93,11 +93,27 @@ impl AspectRatio {
     }
 }
 
+/// A picture of the person an image must show, sent as `subject_reference`
+/// of type `character`: a JPEG or PNG under 10 MB, best a single
+/// front-facing portrait.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SubjectReference(pub Vec<u8>);
+
+impl fmt::Debug for SubjectReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "SubjectReference({} bytes)", self.0.len())
+    }
+}
+
+/// Largest subject reference MiniMax accepts.
+pub const MAX_REFERENCE_BYTES: usize = 10 * 1024 * 1024 - 1;
+
 /// One image to generate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRequest {
     pub prompt: String,
     pub aspect_ratio: AspectRatio,
+    pub subject_reference: Option<SubjectReference>,
 }
 
 /// The image MiniMax returned.
@@ -379,6 +395,15 @@ struct WireRequest<'a> {
     response_format: &'a str,
     n: u8,
     prompt_optimizer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_reference: Option<[WireSubject; 1]>,
+}
+
+#[derive(Serialize)]
+struct WireSubject {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    image_file: String,
 }
 
 #[derive(Deserialize)]
@@ -452,6 +477,32 @@ impl<T: Transport> MinimaxClient<T> {
         if request.prompt.trim().is_empty() || chars > MAX_PROMPT_CHARS {
             return Err(MinimaxError::InvalidPrompt);
         }
+        let subject_reference = match &request.subject_reference {
+            None => None,
+            Some(SubjectReference(bytes)) => {
+                let media_type = match sniff(bytes) {
+                    Some(ImageFormat::Jpeg) => "image/jpeg",
+                    Some(ImageFormat::Png) => "image/png",
+                    _ => {
+                        return Err(MinimaxError::InvalidRequest(
+                            "a subject reference must be a JPEG or PNG",
+                        ));
+                    }
+                };
+                if bytes.len() > MAX_REFERENCE_BYTES {
+                    return Err(MinimaxError::InvalidRequest(
+                        "a subject reference must be under 10 MB",
+                    ));
+                }
+                Some([WireSubject {
+                    kind: "character",
+                    image_file: format!(
+                        "data:{media_type};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    ),
+                }])
+            }
+        };
         let body = serde_json::to_vec(&WireRequest {
             model: IMAGE_MODEL,
             prompt: &request.prompt,
@@ -461,6 +512,7 @@ impl<T: Transport> MinimaxClient<T> {
             response_format: "base64",
             n: 1,
             prompt_optimizer: false,
+            subject_reference,
         })
         .map_err(|_| MinimaxError::InvalidRequest("request did not encode"))?;
         let response = self
@@ -624,7 +676,50 @@ mod tests {
         ImageRequest {
             prompt: "A filmmaker hears the final line.".to_owned(),
             aspect_ratio: AspectRatio::Landscape16x9,
+            subject_reference: None,
         }
+    }
+
+    #[test]
+    fn a_subject_reference_is_sent_as_a_character_data_url_within_its_limits() {
+        let client = client([answer(200, &success(JPEG))]);
+        let mut request = request();
+        request.aspect_ratio = AspectRatio::Portrait9x16;
+        request.subject_reference = Some(SubjectReference(JPEG.to_vec()));
+        client.generate_image(&request).unwrap();
+        let requests = client.transport.requests.lock().unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0].2).unwrap();
+        assert_eq!(sent["aspect_ratio"], "9:16");
+        assert_eq!(
+            sent["subject_reference"],
+            serde_json::json!([{
+                "type": "character",
+                "image_file": format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(JPEG)
+                ),
+            }])
+        );
+        drop(requests);
+
+        // What MiniMax would refuse is refused before any request.
+        let client = self::client([]);
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        webp.resize(64, 0);
+        let mut huge = JPEG.to_vec();
+        huge.resize(MAX_REFERENCE_BYTES + 1, 0);
+        for bytes in [webp, huge, Vec::new()] {
+            let mut refused = request.clone();
+            refused.subject_reference = Some(SubjectReference(bytes));
+            let error = client.generate_image(&refused).unwrap_err();
+            assert!(matches!(error, MinimaxError::InvalidRequest(_)), "{error}");
+            assert!(error.certainly_not_accepted());
+        }
+        assert!(client.transport.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            format!("{:?}", SubjectReference(vec![0; 3])),
+            "SubjectReference(3 bytes)"
+        );
     }
 
     #[test]
@@ -738,6 +833,7 @@ mod tests {
         let unsent = ImageRequest {
             prompt: String::new(),
             aspect_ratio: AspectRatio::Square,
+            subject_reference: None,
         };
         assert!(
             client([])
@@ -810,6 +906,7 @@ mod tests {
             let request = ImageRequest {
                 prompt: prompt.to_owned(),
                 aspect_ratio: AspectRatio::Square,
+                subject_reference: None,
             };
             assert_eq!(
                 client.generate_image(&request),

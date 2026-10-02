@@ -1065,9 +1065,15 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(
             Prerequisite::RealImageProvider | Prerequisite::SynchronousImageProvider,
         ) => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
-        GenerationError::Prerequisite(Prerequisite::StylePreset | Prerequisite::StyleSample) => {
-            PROJECT_ERR_INVALID_ARGUMENT
-        }
+        GenerationError::Prerequisite(
+            Prerequisite::StylePreset
+            | Prerequisite::StyleSample
+            | Prerequisite::Bible
+            | Prerequisite::Character
+            | Prerequisite::LockedStyle
+            | Prerequisite::SelectedPortrait
+            | Prerequisite::IdentityReference,
+        ) => PROJECT_ERR_INVALID_ARGUMENT,
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }

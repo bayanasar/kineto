@@ -30,6 +30,24 @@ const MAX_ENTRY_ID: usize = 112;
 /// Scene IDs as the screenplay allows them.
 const MAX_SCENE_ID: usize = 64;
 
+/// The artifact ID prefix a character's entry is depended on by, as in
+/// `bible_character.mira`.
+pub const CHARACTER_ARTIFACT_PREFIX: &str = "bible_character.";
+
+/// The artifact ID the world's entry is depended on by.
+pub const WORLD_ARTIFACT_ID: &str = "bible_world";
+
+/// A dependency on one entry: it stays fresh across bible revisions for as
+/// long as the entry says the same.
+fn entry_dependency<T: Serialize>(artifact_id: &str, entry: &T) -> ArtifactDependency {
+    ArtifactDependency {
+        artifact_id: ArtifactId::new(artifact_id).expect("entry IDs leave room for the prefix"),
+        content_hash: ContentHash::of(&serde_json::to_vec(entry).expect("an entry always encodes")),
+        impact: DependencyImpact::Semantic,
+        field: None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct World {
@@ -326,6 +344,23 @@ impl Bible {
     #[must_use]
     pub fn location(&self, id: &str) -> Option<&Location> {
         self.locations.iter().find(|location| location.id == id)
+    }
+
+    /// The dependency work on character `id` records on its entry.
+    #[must_use]
+    pub fn character_dependency(&self, id: &str) -> Option<ArtifactDependency> {
+        self.character(id).map(|character| {
+            entry_dependency(
+                &format!("{CHARACTER_ARTIFACT_PREFIX}{}", character.id),
+                character,
+            )
+        })
+    }
+
+    /// The dependency work that follows the world's rules records on them.
+    #[must_use]
+    pub fn world_dependency(&self) -> ArtifactDependency {
+        entry_dependency(WORLD_ARTIFACT_ID, &self.world)
     }
 }
 
@@ -733,6 +768,28 @@ mod tests {
                 .collect(),
         );
         (project, bible)
+    }
+
+    #[test]
+    fn an_entry_is_depended_on_by_what_it_says() {
+        let bible = parse(&sample()).unwrap();
+        let filmmaker = bible.character_dependency("filmmaker").unwrap();
+        assert_eq!(filmmaker.artifact_id.as_str(), "bible_character.filmmaker");
+        assert!(bible.character_dependency("waiter").is_none());
+        let mut edited = bible.clone();
+        edited.characters[1].wardrobe = "A raincoat.".to_owned();
+        assert_eq!(
+            edited.character_dependency("filmmaker"),
+            Some(filmmaker),
+            "another character's edit leaves this one fresh"
+        );
+        assert_ne!(
+            edited.character_dependency("interviewer"),
+            bible.character_dependency("interviewer")
+        );
+        assert_eq!(bible.world_dependency().artifact_id.as_str(), "bible_world");
+        edited.world.continuity_rules.clear();
+        assert_ne!(edited.world_dependency(), bible.world_dependency());
     }
 
     #[test]

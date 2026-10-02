@@ -1,52 +1,35 @@
-//! Style exploration: paid sample images of style directions, as durable
-//! write-ahead jobs.
+//! Style exploration: paid sample images of style directions.
 //!
-//! Each sample is one MiniMax `image-01` call, run exactly as a keyframe
-//! candidate is (receipt before the intent is marked invoked, a refusal
-//! record when the call certainly was not accepted) under its own job
-//! partition, `minimax-style`. What the sample record needs beyond the
-//! receipt (preset, note, scene, dependencies) is written beside it as a
-//! plan before the intent is prepared, so an interrupted sample is
-//! completed from disk on the next request or when the project opens.
-//!
-//! ```text
-//! plan -> prepare -> MiniMax -> image + receipt -> invoked -> attach to style/samples.json -> acknowledge
-//! ```
-//!
-//! A sample whose call may have been accepted without its result being kept
-//! is never paid for again unasked: the next sample is refused until the
-//! director chooses to risk paying twice.
+//! Each sample is one paid image (see [`crate::paid_image`]) in the
+//! `minimax-style` partition, recorded in `style/samples.json` with what its
+//! plan kept: preset, note, scene and dependencies.
 
 use std::sync::Arc;
 
-use kineto_job_runtime::{
-    DispatchOutcome, InvokePreparedError, JobRuntime, PrepareOutcome, ProviderKey, StartupOutcome,
-};
-use kineto_jobs::{IntentState, JobId};
 use kineto_project::{
-    ArtifactId, DependencyImpact, InputHash, InputHashMaterial,
+    DependencyImpact, InputHash, InputHashMaterial,
     bible::{self, Bible},
-    fs::ProjectRelativePath,
     manifest::CanonicalProject,
     revisions::{self, DependencyRecord, DocumentKind},
     style::{self as document, SampleStatus, StyleSample},
 };
-use kineto_provider_minimax::{IMAGE_MODEL, MinimaxClient, PROVIDER, Transport};
+use kineto_provider_minimax::{IMAGE_MODEL, PROVIDER, Transport};
 use kineto_providers::Price;
 use serde::{Deserialize, Serialize};
 
+pub use crate::paid_image::{ImageRecovery as StyleRecovery, Submission};
 use crate::{
     documents::document_error,
     generation::{
-        CandidateGenerator, CandidateOwner, CandidateRequest, GENERATE_OPERATION,
-        GeneratedCandidate, GenerationError, GenerationHooks, GenerationPoint, ImageProvider,
-        Prerequisite, invoke_when_permitted, require_synchronous,
+        CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate, GenerationError,
+        GenerationHooks, ImageProvider, KEYFRAME_ASPECT, Prerequisite, require_synchronous,
     },
     minimax::MinimaxKeyframes,
+    paid_image::{self, Jobs, Ledger},
     style_prompt::{self, StylePreset},
 };
 
-/// The job partition style samples are recorded under, apart from keyframes.
+/// The job partition style samples are recorded under.
 pub const STYLE_PROVIDER: &str = "minimax-style";
 
 /// The aspect ratio samples are generated at, as keyframes are.
@@ -81,73 +64,6 @@ pub struct SampleRequest<'a> {
     pub scene_id: Option<&'a str>,
 }
 
-/// Whether the director accepted the risk of paying twice.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Submission {
-    /// Refused when an earlier sample may have been charged without its
-    /// result being kept.
-    #[default]
-    Once,
-    /// The director's explicit decision to ask again anyway.
-    RiskPayingTwice,
-}
-
-/// What finishing interrupted samples found.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct StyleRecovery {
-    /// Samples completed from their receipts.
-    pub attached: Vec<String>,
-    /// A sample's call may have been accepted without its result being kept.
-    pub unresolved: bool,
-    /// Records this build cannot complete; they need a person.
-    pub needs_attention: usize,
-}
-
-fn style_provider() -> ProviderKey {
-    ProviderKey::new(STYLE_PROVIDER).expect("static provider key is valid")
-}
-
-fn plan_path(artifact_id: &str) -> Result<ProjectRelativePath, GenerationError> {
-    ProjectRelativePath::new(format!(".kineto/generation/{artifact_id}.style.json"))
-        .map_err(|_| GenerationError::Unexpected("a style sample ID is not a valid file name"))
-}
-
-fn write_plan(project: &CanonicalProject, plan: &SamplePlan) -> Result<(), GenerationError> {
-    let mut bytes = serde_json::to_vec_pretty(plan)
-        .map_err(|_| GenerationError::Unexpected("a style sample plan did not encode"))?;
-    bytes.push(b'\n');
-    project
-        .root()
-        .write_atomic(&plan_path(&plan.artifact_id)?, &bytes)
-        .map_err(document_error)
-}
-
-fn read_plan(project: &CanonicalProject, artifact_id: &str) -> Option<SamplePlan> {
-    let bytes = project.root().read(&plan_path(artifact_id).ok()?).ok()?;
-    serde_json::from_slice::<SamplePlan>(&bytes)
-        .ok()
-        .filter(|plan| {
-            plan.schema_version == PLAN_SCHEMA_VERSION && plan.artifact_id == artifact_id
-        })
-}
-
-/// The plan is runtime state; a plan left behind is overwritten by the next
-/// sample with its ID.
-fn remove_plan(project: &CanonicalProject, artifact_id: &str) {
-    if let Ok(path) = plan_path(artifact_id) {
-        let _ = std::fs::remove_file(project.root().resolve(&path));
-    }
-}
-
-fn request(artifact_id: ArtifactId, input_hash: InputHash) -> CandidateRequest {
-    CandidateRequest {
-        artifact_id,
-        input_hash,
-        owner: CandidateOwner::Style,
-        prompt: None,
-    }
-}
-
 /// The record of a sample from its plan and the generated image.
 fn sample_of(
     plan: &SamplePlan,
@@ -156,6 +72,7 @@ fn sample_of(
     let output = generated.output;
     if generated.input_hash.as_str() != plan.input_hash
         || output.artifact_id.as_str() != plan.artifact_id
+        || plan.schema_version != PLAN_SCHEMA_VERSION
     {
         return Err(GenerationError::Unexpected(
             "a style sample's result belongs to another plan",
@@ -186,98 +103,37 @@ fn sample_of(
     })
 }
 
-/// Attach a sample whose result is ready, then acknowledge it.
-fn attach_ready<T: Transport + Sync>(
-    project: &CanonicalProject,
-    runtime: &JobRuntime<'_>,
-    adapter: &mut MinimaxKeyframes<'_, T>,
-    job_id: &JobId,
-    generated: GeneratedCandidate,
-) -> Result<String, GenerationError> {
-    let plan = read_plan(project, job_id.as_str()).ok_or(GenerationError::Unexpected(
-        "a finished style sample has no plan",
-    ))?;
-    let input_hash = generated.input_hash.clone();
-    document::attach(project, sample_of(&plan, generated)?).map_err(document_error)?;
-    let _ = runtime.acknowledge_result(job_id)?;
-    let artifact_id = ArtifactId::new(plan.artifact_id.clone())
-        .map_err(|_| GenerationError::Unexpected("a style sample has an invalid ID"))?;
-    adapter.release(&request(artifact_id, input_hash));
-    remove_plan(project, &plan.artifact_id);
-    Ok(plan.artifact_id)
-}
+struct Samples;
 
-/// Complete samples whose results arrived before an interruption, and say
-/// whether one may have been charged without its result. Never calls
-/// MiniMax.
-fn finish<T: Transport + Sync>(
-    project: &CanonicalProject,
-    runtime: &JobRuntime<'_>,
-    adapter: &mut MinimaxKeyframes<'_, T>,
-) -> Result<StyleRecovery, GenerationError> {
-    let mut recovery = StyleRecovery::default();
-    for outcome in runtime.reconcile_startup(adapter)? {
-        match outcome {
-            StartupOutcome::ResultReady { job_id, output } => {
-                match attach_ready(project, runtime, adapter, &job_id, output) {
-                    Ok(artifact_id) => recovery.attached.push(artifact_id),
-                    Err(_) => recovery.needs_attention += 1,
-                }
-            }
-            StartupOutcome::RetryPrepared { job_id, .. } => {
-                if let Some(record) = runtime.load(&job_id)?
-                    && record.attempts() > 0
-                    && let Ok(artifact_id) = ArtifactId::new(job_id.as_str())
-                    && !adapter
-                        .may_call_again(&request(artifact_id, record.intent().input_hash().clone()))
-                {
-                    recovery.unresolved = true;
-                }
-            }
-            StartupOutcome::StillPending { .. }
-            | StartupOutcome::NeedsAttention { .. }
-            | StartupOutcome::UnreadableIntent { .. }
-            | StartupOutcome::ProviderError { .. } => recovery.needs_attention += 1,
-        }
+impl Ledger for Samples {
+    type Plan = SamplePlan;
+
+    const PARTITION: &'static str = STYLE_PROVIDER;
+    const PLAN: &'static str = "style";
+
+    fn artifact_id(plan: &SamplePlan) -> &str {
+        &plan.artifact_id
     }
-    Ok(recovery)
+
+    fn input_hash(plan: &SamplePlan) -> &str {
+        &plan.input_hash
+    }
+
+    fn attach(
+        project: &CanonicalProject,
+        plan: &SamplePlan,
+        generated: GeneratedCandidate,
+    ) -> Result<(), GenerationError> {
+        document::attach(project, sample_of(plan, generated)?)
+            .map(|_| ())
+            .map_err(document_error)
+    }
 }
 
 /// Complete style samples an interrupted session left, as a project opens.
 /// Never calls MiniMax.
 pub fn recover(project: &CanonicalProject) -> Result<StyleRecovery, GenerationError> {
-    let mut adapter = MinimaxKeyframes::new(project, None::<&MinimaxClient>);
-    let runtime = JobRuntime::new(project, style_provider(), adapter.policy());
-    finish(project, &runtime, &mut adapter)
-}
-
-/// Make way for the next sample, `job_id`. A prepared intent there that was
-/// never called is retired; one whose call may have been charged without
-/// its result is refused unless the director risks paying twice.
-fn settle<T: Transport + Sync>(
-    runtime: &JobRuntime<'_>,
-    adapter: &mut MinimaxKeyframes<'_, T>,
-    job_id: &JobId,
-    artifact_id: &ArtifactId,
-    submission: Submission,
-) -> Result<(), GenerationError> {
-    let Some(record) = runtime.load(job_id)? else {
-        return Ok(());
-    };
-    if record.intent().state() != IntentState::Prepared {
-        return Ok(());
-    }
-    let earlier = request(artifact_id.clone(), record.intent().input_hash().clone());
-    if record.attempts() == 0 {
-        runtime.retire_unattempted(job_id)?;
-    } else {
-        if !adapter.may_call_again(&earlier) && submission == Submission::Once {
-            return Err(GenerationError::UnresolvedSubmission);
-        }
-        runtime.retire_unresolved(job_id)?;
-    }
-    adapter.release(&earlier);
-    Ok(())
+    paid_image::recover::<Samples>(project)
 }
 
 /// What one sample, one call, costs with `provider`, as it declares; `None`
@@ -391,7 +247,7 @@ pub fn refine_with<T: Transport + Sync>(
 #[allow(clippy::too_many_arguments)]
 fn ask<T: Transport + Sync>(
     project: &CanonicalProject,
-    mut adapter: MinimaxKeyframes<'_, T>,
+    adapter: MinimaxKeyframes<'_, T>,
     preset: &StylePreset,
     note: Option<&str>,
     refines: Option<&str>,
@@ -447,12 +303,9 @@ fn ask<T: Transport + Sync>(
         compiler_version: style_prompt::STYLE_COMPILER_VERSION,
     });
 
-    let runtime = JobRuntime::new(project, style_provider(), adapter.policy());
     // A sample an interruption left is recorded first, so it keeps its ID.
-    finish(project, &runtime, &mut adapter)?;
+    let mut jobs = Jobs::<Samples, _>::open(project, adapter, submission)?;
     let artifact_id = document::next_artifact_id(project).map_err(document_error)?;
-    let job_id = JobId::new(artifact_id.as_str())?;
-    settle(&runtime, &mut adapter, &job_id, &artifact_id, submission)?;
     let plan = SamplePlan {
         schema_version: PLAN_SCHEMA_VERSION,
         artifact_id: artifact_id.as_str().to_owned(),
@@ -465,42 +318,18 @@ fn ask<T: Transport + Sync>(
         scene_id: scene.id.clone(),
         dependencies: dependencies.iter().map(DependencyRecord::from).collect(),
     };
-    write_plan(project, &plan)?;
-    match runtime.prepare(
-        job_id.clone(),
-        GENERATE_OPERATION,
-        input_hash.clone(),
-        artifact_id.clone(),
-    )? {
-        PrepareOutcome::Created(_) | PrepareOutcome::Existing(_) => {}
-    }
-    hooks.reached(GenerationPoint::Prepared { index: 0 });
-
     let call = CandidateRequest {
+        artifact_id: artifact_id.clone(),
+        input_hash,
+        owner: CandidateOwner::Style,
+        aspect_ratio: KEYFRAME_ASPECT,
+        identity: None,
         prompt: Some(Arc::new(prompt)),
-        ..request(artifact_id, input_hash)
     };
-    let generated = match invoke_when_permitted(&runtime, &job_id, &mut adapter, &call) {
-        Ok(DispatchOutcome::Completed { output, .. }) => output,
-        Ok(DispatchOutcome::Pending { .. }) => {
-            return Err(GenerationError::Unexpected(
-                "a style sample was left pending",
-            ));
-        }
-        Err(InvokePreparedError::Runtime(error)) => return Err(error.into()),
-        Err(InvokePreparedError::Provider { source, class, .. }) => {
-            return Err(GenerationError::Provider {
-                source: Box::new(source),
-                class,
-            });
-        }
-    };
-    hooks.reached(GenerationPoint::Invoked);
-    let sample = sample_of(&plan, generated)?;
-    document::attach(project, sample.clone()).map_err(document_error)?;
-    hooks.reached(GenerationPoint::Attached);
-    let _ = runtime.acknowledge_result(&job_id)?;
-    adapter.release(&call);
-    remove_plan(project, &plan.artifact_id);
-    Ok(sample)
+    jobs.generate(&plan, &call, 0, hooks)?;
+    document::samples(project)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|sample| sample.artifact_id == artifact_id.as_str())
+        .ok_or(GenerationError::Unexpected("a recorded sample is missing"))
 }

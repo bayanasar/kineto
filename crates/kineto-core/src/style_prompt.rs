@@ -102,13 +102,15 @@ pub fn representative_scene(screenplay: &Screenplay) -> Option<&Scene> {
         .map(|(_, scene)| scene)
 }
 
-/// One part of the prompt and the constraint it carries.
-struct Part {
-    constraint: String,
-    text: String,
+/// One part of a prompt and the constraint it carries.
+pub(crate) struct Part {
+    pub(crate) constraint: String,
+    pub(crate) text: String,
     /// Parts of lower rank are dropped first, later parts of one rank
     /// before earlier ones.
-    rank: u8,
+    pub(crate) rank: u8,
+    /// What dropping it costs.
+    pub(crate) degradation: DegradationLevel,
 }
 
 const RANK_WORLD: u8 = 0;
@@ -140,7 +142,7 @@ fn constraint(value: &str) -> Result<ConstraintId, KeyframePromptError> {
     Ok(ConstraintId::new(value)?)
 }
 
-fn sentence(text: &str) -> String {
+pub(crate) fn sentence(text: &str) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let text = text.trim_end_matches(['.', ' ']);
     format!("{text}.")
@@ -163,18 +165,21 @@ pub fn compile(
         constraint: "style.preset".to_owned(),
         text: sentence(preset.directives),
         rank: u8::MAX,
+        degradation: DegradationLevel::Cosmetic,
     }];
     if let Some(note) = note {
         required.push(Part {
             constraint: "style.note".to_owned(),
             text: sentence(&format!("Director's note: {note}")),
             rank: u8::MAX,
+            degradation: DegradationLevel::Cosmetic,
         });
     }
     required.push(Part {
         constraint: "scene.setting".to_owned(),
         text: sentence(&format!("Scene: {}, {}", scene.heading, scene.time)),
         rank: u8::MAX,
+        degradation: DegradationLevel::Cosmetic,
     });
     // Dropped by rank when the prompt is too long.
     let mut optional = Vec::new();
@@ -183,6 +188,7 @@ pub fn compile(
             constraint: "bible.location".to_owned(),
             text: sentence(&location.appearance),
             rank: RANK_LOCATION,
+            degradation: DegradationLevel::Cosmetic,
         });
     }
     if let Some(action) = scene
@@ -194,6 +200,7 @@ pub fn compile(
             constraint: "scene.action".to_owned(),
             text: sentence(&action.text),
             rank: RANK_ACTION,
+            degradation: DegradationLevel::Cosmetic,
         });
     }
     for (number, id) in scene.characters.iter().enumerate() {
@@ -212,6 +219,7 @@ pub fn compile(
                 constraint: person_constraint(id, number, ""),
                 text: sentence(&format!("{name} is in the scene")),
                 rank: RANK_PERSON,
+                degradation: DegradationLevel::Cosmetic,
             });
             continue;
         };
@@ -220,6 +228,7 @@ pub fn compile(
             constraint: person_constraint(id, number, ""),
             text: sentence(&format!("{name}: {look}")),
             rank: RANK_PERSON,
+            degradation: DegradationLevel::Cosmetic,
         });
         let wardrobe = entry
             .wardrobe_changes
@@ -235,6 +244,7 @@ pub fn compile(
                 format!("{} {wardrobe}", sentence(more))
             },
             rank: RANK_PERSON_DETAIL,
+            degradation: DegradationLevel::Cosmetic,
         });
     }
     if let Some(bible) = bible
@@ -244,12 +254,10 @@ pub fn compile(
             constraint: "bible.world".to_owned(),
             text: sentence(&bible.world.visual_rules.join(" ")),
             rank: RANK_WORLD,
+            degradation: DegradationLevel::Cosmetic,
         });
     }
-    let mut order: Vec<usize> = (0..optional.len()).collect();
-    order.sort_by_key(|index| (optional[*index].rank, std::cmp::Reverse(*index)));
-
-    let mut dropped = vec![DroppedConstraint {
+    let avoid = DroppedConstraint {
         constraint: constraint("style.avoid")?,
         reason: if capabilities.negative_prompt {
             "this build sends no negative prompt".to_owned()
@@ -257,7 +265,31 @@ pub fn compile(
             "the provider takes no negative prompt".to_owned()
         },
         degradation: DegradationLevel::Cosmetic,
-    }];
+    };
+    fit(
+        &required,
+        &optional,
+        vec![avoid],
+        capabilities.max_prompt_chars,
+        STYLE_COMPILER_VERSION,
+        &canonical_intent(preset, note, scene, bible),
+    )
+}
+
+/// The prompt of `required` and as many of `optional` as fit in
+/// `max_chars`, dropping by rank and reporting each drop after `dropped`.
+/// Nothing is truncated: a prompt whose required parts do not fit is
+/// refused.
+pub(crate) fn fit(
+    required: &[Part],
+    optional: &[Part],
+    mut dropped: Vec<DroppedConstraint>,
+    max_chars: Option<usize>,
+    compiler_version: &str,
+    intent: &[u8],
+) -> Result<KeyframePrompt, KeyframePromptError> {
+    let mut order: Vec<usize> = (0..optional.len()).collect();
+    order.sort_by_key(|index| (optional[*index].rank, std::cmp::Reverse(*index)));
     let mut kept = vec![true; optional.len()];
     let text = |kept: &[bool]| {
         required
@@ -273,7 +305,7 @@ pub fn compile(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    if let Some(max) = capabilities.max_prompt_chars {
+    if let Some(max) = max_chars {
         for index in order {
             if text(&kept).chars().count() <= max {
                 break;
@@ -284,7 +316,7 @@ pub fn compile(
                 reason: format!(
                     "the prompt would be longer than the {max} characters the provider takes"
                 ),
-                degradation: DegradationLevel::Cosmetic,
+                degradation: optional[index].degradation,
             });
         }
         let chars = text(&kept).chars().count();
@@ -303,8 +335,8 @@ pub fn compile(
         )
         .map(|part| constraint(&part.constraint))
         .collect::<Result<Vec<_>, _>>()?;
-    let compiled = CompiledPrompt::new(text(&kept), applied, dropped, STYLE_COMPILER_VERSION)?;
-    let prompt_hash = compiled.prompt_hash(&canonical_intent(preset, note, scene, bible));
+    let compiled = CompiledPrompt::new(text(&kept), applied, dropped, compiler_version)?;
+    let prompt_hash = compiled.prompt_hash(intent);
     Ok(KeyframePrompt {
         compiled,
         prompt_hash,

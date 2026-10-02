@@ -1,10 +1,12 @@
 pub mod bible;
 pub mod bootstrap;
+pub mod cast;
 pub mod documents;
 pub mod generation;
 pub mod keyframe_prompt;
 pub mod llm;
 pub mod minimax;
+pub mod paid_image;
 pub mod screenplay;
 pub mod session;
 pub mod story;
