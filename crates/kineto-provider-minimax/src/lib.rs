@@ -198,6 +198,8 @@ pub enum MinimaxError {
     Malformed(&'static str),
     /// The prompt is empty or longer than [`MAX_PROMPT_CHARS`].
     InvalidPrompt,
+    /// The request was refused before it was sent.
+    InvalidRequest(&'static str),
 }
 
 impl MinimaxError {
@@ -216,9 +218,26 @@ impl MinimaxError {
                 1000 | 1001 | 1002 | 1013 | 1041 | 2045 => ErrorClass::Retryable,
                 _ => ErrorClass::Terminal,
             },
-            Self::Http { .. } | Self::NoImage | Self::Malformed(_) | Self::InvalidPrompt => {
-                ErrorClass::Terminal
-            }
+            Self::Http { .. }
+            | Self::NoImage
+            | Self::Malformed(_)
+            | Self::InvalidPrompt
+            | Self::InvalidRequest(_) => ErrorClass::Terminal,
+        }
+    }
+
+    /// Whether MiniMax certainly did not accept the request: it was never
+    /// sent, no connection was made, or MiniMax answered with a refusal. Any
+    /// other failure may have reached MiniMax and been accepted, and charged.
+    #[must_use]
+    pub fn certainly_not_accepted(&self) -> bool {
+        match self {
+            Self::InvalidPrompt
+            | Self::InvalidRequest(_)
+            | Self::Api { .. }
+            | Self::Transport(TransportFailure::Connect) => true,
+            Self::Http { status } => (400..500).contains(status),
+            Self::Transport(_) | Self::NoImage | Self::Malformed(_) => false,
         }
     }
 }
@@ -239,6 +258,7 @@ impl fmt::Display for MinimaxError {
                 formatter,
                 "prompt must be 1..={MAX_PROMPT_CHARS} characters"
             ),
+            Self::InvalidRequest(what) => write!(formatter, "MiniMax request is invalid: {what}"),
         }
     }
 }
@@ -327,7 +347,7 @@ impl<T: Transport> MinimaxClient<T> {
             n: 1,
             prompt_optimizer: false,
         })
-        .map_err(|_| MinimaxError::Malformed("request did not encode"))?;
+        .map_err(|_| MinimaxError::InvalidRequest("request did not encode"))?;
         let response = self
             .transport
             .post_json(
@@ -567,6 +587,37 @@ mod tests {
             assert!(!error.to_string().contains(KEY));
             assert!(!format!("{error:?}").contains(KEY));
         }
+    }
+
+    #[test]
+    fn a_call_is_known_unaccepted_only_if_it_never_arrived_or_was_refused() {
+        let cases = [
+            (answer(200, &refused(1002, "rate limit")), true),
+            (answer(401, &refused(1004, "auth failed")), true),
+            (answer(404, "not found"), true),
+            (Err(TransportFailure::Connect), true),
+            // Each of these may have reached MiniMax and been charged.
+            (Err(TransportFailure::Timeout), false),
+            (Err(TransportFailure::Io), false),
+            (Err(TransportFailure::Tls), false),
+            (answer(503, "<html>"), false),
+            (answer(200, "not json"), false),
+            (answer(200, &success(b"not an image")), false),
+        ];
+        for (response, refused) in cases {
+            let error = client([response]).generate_image(&request()).unwrap_err();
+            assert_eq!(error.certainly_not_accepted(), refused, "{error}");
+        }
+        let unsent = ImageRequest {
+            prompt: String::new(),
+            aspect_ratio: AspectRatio::Square,
+        };
+        assert!(
+            client([])
+                .generate_image(&unsent)
+                .unwrap_err()
+                .certainly_not_accepted()
+        );
     }
 
     #[test]

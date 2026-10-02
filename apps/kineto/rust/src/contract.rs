@@ -39,10 +39,11 @@ pub(crate) const PROJECT_ERR_PROVIDER_UNKNOWN: i32 = 122;
 pub(crate) const PROJECT_ERR_PROVIDER_NOT_CONFIGURED: i32 = 123;
 pub(crate) const PROJECT_ERR_SHOT_INTENT_MISSING: i32 = 124;
 pub(crate) const PROJECT_ERR_PROVIDER_REFUSED: i32 = 125;
+pub(crate) const PROJECT_ERR_PAID_CALL_UNRESOLVED: i32 = 126;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 28] = [
+const STATUSES: [(&str, i32); 29] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -73,6 +74,7 @@ const STATUSES: [(&str, i32); 28] = [
     ),
     ("shot_intent_missing", PROJECT_ERR_SHOT_INTENT_MISSING),
     ("provider_refused", PROJECT_ERR_PROVIDER_REFUSED),
+    ("paid_call_unresolved", PROJECT_ERR_PAID_CALL_UNRESOLVED),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

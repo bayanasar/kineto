@@ -11,8 +11,12 @@
 //! ```
 //!
 //! MiniMax keeps no record a request could be looked up by, so the receipt
-//! is the only way back to a finished call. A crash before the receipt is
-//! written loses the answer, and the retry pays again.
+//! is the only way back to a finished call. A call that was made but left no
+//! receipt (a crash before it was written, or a failure after the request
+//! was sent) may have been charged; it is called again only on the
+//! director's explicit decision to risk paying twice. Only a call MiniMax
+//! certainly did not accept leaves a refusal record next to where its
+//! receipt would be, and that proof lets the candidate be asked for again.
 
 use std::{error::Error, fmt, num::NonZeroU16};
 
@@ -53,7 +57,10 @@ pub enum MinimaxKeyframeError {
     /// A finished call's receipt or keyframe is missing, unreadable, or does
     /// not match. Nothing is regenerated; a person needs to look.
     Receipt(&'static str),
+    /// Writing down a call's answer failed after MiniMax gave it.
     Fs(ProjectFsError),
+    /// The project could not be prepared for a call, so none was made.
+    Unsent(ProjectFsError),
 }
 
 impl fmt::Display for MinimaxKeyframeError {
@@ -64,6 +71,7 @@ impl fmt::Display for MinimaxKeyframeError {
             Self::MissingPrompt => formatter.write_str("the candidate has no compiled prompt"),
             Self::Receipt(what) => write!(formatter, "MiniMax keyframe receipt: {what}"),
             Self::Fs(error) => error.fmt(formatter),
+            Self::Unsent(error) => write!(formatter, "no MiniMax call was made: {error}"),
         }
     }
 }
@@ -72,7 +80,7 @@ impl Error for MinimaxKeyframeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Provider(error) => Some(error),
-            Self::Fs(error) => Some(error),
+            Self::Fs(error) | Self::Unsent(error) => Some(error),
             Self::NotConfigured | Self::MissingPrompt | Self::Receipt(_) => None,
         }
     }
@@ -94,11 +102,20 @@ struct Receipt {
     provenance: PromptProvenance,
 }
 
+/// Proof that MiniMax certainly did not accept a candidate's latest call.
+#[derive(Debug, Serialize, Deserialize)]
+struct Refusal {
+    schema_version: u32,
+    artifact_id: String,
+    input_hash: String,
+}
+
 /// MiniMax keyframes for one project. Cheap to copy: every candidate of a
 /// generation gets its own copy and they run in parallel.
 pub struct MinimaxKeyframes<'a, T = HttpsTransport> {
     project: &'a CanonicalProject,
     client: Option<&'a MinimaxClient<T>>,
+    answered: Option<&'a (dyn Fn() + Sync)>,
 }
 
 impl<T> Clone for MinimaxKeyframes<'_, T> {
@@ -114,7 +131,67 @@ impl<'a, T: Transport> MinimaxKeyframes<'a, T> {
     /// their receipts, but cannot make new ones.
     #[must_use]
     pub const fn new(project: &'a CanonicalProject, client: Option<&'a MinimaxClient<T>>) -> Self {
-        Self { project, client }
+        Self {
+            project,
+            client,
+            answered: None,
+        }
+    }
+
+    /// Run `hook` as soon as MiniMax has answered a call, before anything is
+    /// written: where a crash test stops.
+    #[must_use]
+    pub const fn when_answered(mut self, hook: &'a (dyn Fn() + Sync)) -> Self {
+        self.answered = Some(hook);
+        self
+    }
+
+    fn refusal_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, MinimaxKeyframeError> {
+        ProjectRelativePath::new(format!(
+            ".kineto/generation/{}.refused.json",
+            artifact_id.as_str()
+        ))
+        .map_err(|_| MinimaxKeyframeError::Receipt("artifact ID is not a valid file name"))
+    }
+
+    fn refused(&self, request: &CandidateRequest) -> bool {
+        Self::refusal_path(&request.artifact_id)
+            .ok()
+            .and_then(|path| self.project.root().read(&path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Refusal>(&bytes).ok())
+            .is_some_and(|refusal| {
+                refusal.schema_version == RECEIPT_SCHEMA_VERSION
+                    && refusal.artifact_id == request.artifact_id.as_str()
+                    && refusal.input_hash == request.input_hash.as_str()
+            })
+    }
+
+    fn record_refusal(&self, request: &CandidateRequest) -> Result<(), MinimaxKeyframeError> {
+        let mut encoded = serde_json::to_vec_pretty(&Refusal {
+            schema_version: RECEIPT_SCHEMA_VERSION,
+            artifact_id: request.artifact_id.as_str().to_owned(),
+            input_hash: request.input_hash.as_str().to_owned(),
+        })
+        .map_err(|_| MinimaxKeyframeError::Receipt("refusal did not encode"))?;
+        encoded.push(b'\n');
+        self.project
+            .root()
+            .write_atomic(&Self::refusal_path(&request.artifact_id)?, &encoded)
+            .map_err(MinimaxKeyframeError::Fs)
+    }
+
+    /// Forget the proof of an earlier refusal before a new call: it speaks
+    /// for that call only.
+    fn clear_refusal(&self, artifact_id: &ArtifactId) -> Result<(), MinimaxKeyframeError> {
+        let path = self
+            .project
+            .root()
+            .resolve(&Self::refusal_path(artifact_id)?);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(MinimaxKeyframeError::Unsent(ProjectFsError::Io(error))),
+        }
     }
 
     fn receipt_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, MinimaxKeyframeError> {
@@ -213,12 +290,31 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
             .prompt
             .as_deref()
             .ok_or(MinimaxKeyframeError::MissingPrompt)?;
-        let image = client
-            .generate_image(&ImageRequest {
-                prompt: prompt.compiled.prompt().to_owned(),
-                aspect_ratio: AspectRatio::Landscape16x9,
-            })
-            .map_err(MinimaxKeyframeError::Provider)?;
+        // An earlier call answered and wrote its receipt, but the intent never
+        // said so: use that answer instead of paying for another.
+        if let Some(receipt) = self.read_receipt(&request.artifact_id)? {
+            return self
+                .candidate_from_receipt(&request.artifact_id, &request.input_hash, receipt)
+                .map(Invocation::Completed);
+        }
+        self.clear_refusal(&request.artifact_id)?;
+        let image = match client.generate_image(&ImageRequest {
+            prompt: prompt.compiled.prompt().to_owned(),
+            aspect_ratio: AspectRatio::Landscape16x9,
+        }) {
+            Ok(image) => image,
+            Err(error) => {
+                // Without this proof the call stays unresolved, which fails
+                // closed.
+                if error.certainly_not_accepted() {
+                    let _ = self.record_refusal(request);
+                }
+                return Err(MinimaxKeyframeError::Provider(error));
+            }
+        };
+        if let Some(answered) = self.answered {
+            answered();
+        }
 
         let media_path = keyframe_media_path(
             request.shot_number,
@@ -278,7 +374,7 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
         match error {
             MinimaxKeyframeError::Provider(error) => error.class(),
             // Writing the answer down failed; the disk may recover.
-            MinimaxKeyframeError::Fs(_) => ErrorClass::Retryable,
+            MinimaxKeyframeError::Fs(_) | MinimaxKeyframeError::Unsent(_) => ErrorClass::Retryable,
             MinimaxKeyframeError::NotConfigured
             | MinimaxKeyframeError::MissingPrompt
             | MinimaxKeyframeError::Receipt(_) => ErrorClass::Terminal,
@@ -324,10 +420,33 @@ impl<T: Transport + Sync> CandidateGenerator for MinimaxKeyframes<'_, T> {
         self.candidate_from_receipt(&request.artifact_id, &request.input_hash, receipt)
     }
 
+    fn may_call_again(&self, request: &CandidateRequest) -> bool {
+        // A kept answer is used without a call; a refusal proves nothing was
+        // charged.
+        matches!(self.read_receipt(&request.artifact_id), Ok(Some(_))) || self.refused(request)
+    }
+
+    fn certainly_not_charged(&self, error: &MinimaxKeyframeError) -> bool {
+        match error {
+            MinimaxKeyframeError::Provider(error) => error.certainly_not_accepted(),
+            MinimaxKeyframeError::NotConfigured
+            | MinimaxKeyframeError::MissingPrompt
+            | MinimaxKeyframeError::Unsent(_) => true,
+            // Raised after MiniMax answered, or on a kept answer.
+            MinimaxKeyframeError::Fs(_) | MinimaxKeyframeError::Receipt(_) => false,
+        }
+    }
+
     fn release(&mut self, request: &CandidateRequest) {
-        // Best effort: a receipt left behind is never read again once its
-        // candidate is acknowledged.
-        if let Ok(path) = Self::receipt_path(&request.artifact_id) {
+        // Best effort: a receipt or refusal left behind is never read again
+        // once its candidate is acknowledged.
+        for path in [
+            Self::receipt_path(&request.artifact_id),
+            Self::refusal_path(&request.artifact_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let _ = std::fs::remove_file(self.project.root().resolve(&path));
         }
     }

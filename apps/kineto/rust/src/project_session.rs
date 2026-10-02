@@ -560,6 +560,39 @@ pub unsafe extern "C" fn kineto_project_candidate_media_copy(
     })
 }
 
+/// Write 1 to `out_unresolved` when a paid keyframe call of the shot's last
+/// generation may have been accepted, and charged, without leaving its
+/// result, so generating is refused until the director resubmits; 0
+/// otherwise. Reads published state only; never does I/O.
+///
+/// # Safety
+/// `session` must be live and `out_unresolved` must point to writable `u8`
+/// storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_keyframes_unresolved(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    out_unresolved: *mut u8,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        if out_unresolved.is_null() {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        }
+        match session.session.keyframes_unresolved(shot_index) {
+            Ok(unresolved) => {
+                // SAFETY: caller guarantees writable storage for one u8.
+                unsafe { ptr::write(out_unresolved, u8::from(unresolved)) };
+                PROJECT_OK
+            }
+            Err(error) => snapshot_error_code(&error),
+        }
+    })
+}
+
 /// Copy the provider recorded on a candidate's artifact, for example
 /// `minimax`, with the same sizing contract as project metadata. This is who
 /// made the candidate, not the session's provider. Empty when the record names
@@ -712,6 +745,25 @@ pub unsafe extern "C" fn kineto_project_shot_generate(
     })
 }
 
+/// Queue generating the shot's candidates again although a paid call of the
+/// last attempt may have been accepted, and charged for, without leaving its
+/// result (status `126`). Only on the director's explicit decision to risk
+/// paying twice. Otherwise as [`kineto_project_shot_generate`].
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_resubmit_keyframes(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::ResubmitKeyframes, token)
+    })
+}
+
 /// Queue a candidate selection. Returns once queued.
 ///
 /// # Safety
@@ -816,6 +868,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
             PROJECT_ERR_SHOT_INTENT_MISSING
         }
         GenerationError::Prompt(_) => PROJECT_ERR_INVALID_SHOT_STATE,
+        GenerationError::UnresolvedSubmission => PROJECT_ERR_PAID_CALL_UNRESOLVED,
         GenerationError::Provider {
             class: ErrorClass::Terminal,
             ..

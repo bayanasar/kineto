@@ -105,6 +105,15 @@ external int _kinetoProjectShotState(
   Pointer<Uint64> outState,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>)>(
+  symbol: 'kineto_project_shot_keyframes_unresolved',
+)
+external int _kinetoProjectShotKeyframesUnresolved(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint8> outUnresolved,
+);
+
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_set_direction',
 )
@@ -119,6 +128,15 @@ external int _kinetoProjectShotSetDirection(
   symbol: 'kineto_project_shot_generate',
 )
 external int _kinetoProjectShotGenerate(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_keyframes',
+)
+external int _kinetoProjectShotResubmitKeyframes(
   Pointer<Void> session,
   int shotIndex,
   int token,
@@ -588,6 +606,26 @@ final class KinetoProjectSession implements Finalizable {
     }
   }
 
+  /// Whether a paid keyframe call of the shot's last generation may have
+  /// been accepted, and charged, without leaving its result. Generating is
+  /// refused until [resubmitShotKeyframes]. Reads published state; never
+  /// does I/O.
+  bool keyframesUnresolved(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final arena = Arena();
+    try {
+      final outUnresolved = arena<Uint8>();
+      outUnresolved.value = 0;
+      _checkProjectResult(
+        _kinetoProjectShotKeyframesUnresolved(_handle, shotIndex, outUnresolved),
+      );
+      return outUnresolved.value != 0;
+    } finally {
+      arena.releaseAll();
+    }
+  }
+
   Future<void> setShotDirection(int shotIndex, KinetoShotDirection direction) =>
       _submit(
         shotIndex,
@@ -602,6 +640,14 @@ final class KinetoProjectSession implements Finalizable {
   Future<void> generateShotCandidates(int shotIndex) => _submit(
         shotIndex,
         (token) => _kinetoProjectShotGenerate(_handle, shotIndex, token),
+      );
+
+  /// Generate the shot's candidates again although a paid call of the last
+  /// attempt may already have been accepted, and charged for. Only on the
+  /// director's explicit decision to risk paying twice.
+  Future<void> resubmitShotKeyframes(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitKeyframes(_handle, shotIndex, token),
       );
 
   Future<void> selectShotCandidate(int shotIndex, int candidateIndex) {
@@ -895,6 +941,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'provider_not_configured': 123,
   'shot_intent_missing': 124,
   'provider_refused': 125,
+  'paid_call_unresolved': 126,
   'panic': 199,
 };
 
@@ -926,6 +973,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   123: 'The image provider has no API key configured',
   124: 'This shot has no written intent to generate from',
   125: 'The image provider refused the request; it will not succeed unchanged',
+  126: 'A paid call may already have been accepted and charged without its result being kept; '
+      'asking again may pay twice',
   199: 'Native project call failed unexpectedly',
 };
 

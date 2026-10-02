@@ -515,6 +515,17 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// The intent recorded for `job_id`, if any, read without changing it.
+    pub fn load(&self, job_id: &JobId) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
+        let store = IntentStore::new(self.project);
+        let _guard = lock_intent_store();
+        let record = store.load_optional(job_id)?;
+        if let Some(record) = &record {
+            self.ensure_provider(record)?;
+        }
+        Ok(record)
+    }
+
     /// Give up on a prepared intent whose last provider call failed, so the
     /// same job can be prepared afresh.
     ///
@@ -526,6 +537,31 @@ impl<'project> JobRuntime<'project> {
     /// crash after the second leaves a `Reserved` mapping without an intent,
     /// which the next lookup clears.
     pub fn retire_failed(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.last_error_class.is_some()
+        })
+    }
+
+    /// Give up on a prepared intent whose provider call was attempted but
+    /// whose outcome was never established, so the same job can be prepared
+    /// and invoked afresh.
+    ///
+    /// The provider may have accepted, and charged for, that attempt. Only a
+    /// caller acting on a person's explicit decision to risk paying twice
+    /// may retire it. An intent that was never attempted, or that has a
+    /// result, is not retired. The removal order is that of
+    /// [`Self::retire_failed`].
+    pub fn retire_unresolved(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.attempts > 0
+        })
+    }
+
+    fn retire_where(
+        &self,
+        job_id: &JobId,
+        eligible: impl FnOnce(&RuntimeIntent) -> bool,
+    ) -> Result<bool, JobRuntimeError> {
         self.ensure_writable()?;
         let operation_lock = job_operation_lock(self.project, job_id);
         let _operation_guard = lock_unpoisoned(&operation_lock);
@@ -535,7 +571,7 @@ impl<'project> JobRuntime<'project> {
             return Ok(false);
         };
         self.ensure_provider(&record)?;
-        if record.intent.state() != IntentState::Prepared || record.last_error_class.is_none() {
+        if !eligible(&record) {
             return Ok(false);
         }
         let key = record.intent.idempotency_key();
@@ -2547,6 +2583,45 @@ mod tests {
         assert!(
             !runtime.retire_failed(&job_id).unwrap(),
             "an invoked intent is never retired"
+        );
+    }
+
+    #[test]
+    fn an_attempted_intent_is_retired_only_on_an_explicit_decision() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-video-unresolved").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_video_unresolved").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "video.generate",
+                input_hash('4'),
+                artifact("video_candidate_unresolved"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "never attempted"
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Retryable);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+        assert_eq!(runtime.load(&job_id).unwrap().unwrap().attempts(), 1);
+
+        assert!(runtime.retire_unresolved(&job_id).unwrap());
+        assert!(runtime.load(&job_id).unwrap().is_none());
+        created(prepare().unwrap());
+        adapter.invocation = Ok(Invocation::Pending(ProviderJobId::new("task-2").unwrap()));
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "an invoked intent has a result to follow"
         );
     }
 
