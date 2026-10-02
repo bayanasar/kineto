@@ -21,7 +21,9 @@ use std::{
 use base64::Engine as _;
 use kineto_core::{
     bible, cast,
-    generation::{GenerationError, ImageProvider, NoHooks, Prerequisite},
+    generation::{
+        GenerationError, GenerationHooks, GenerationPoint, ImageProvider, NoHooks, Prerequisite,
+    },
     minimax::MinimaxKeyframes,
     screenplay, story,
     style::{self, SampleRequest, Submission},
@@ -434,22 +436,244 @@ fn nothing_is_asked_or_written_without_what_casting_needs() {
 }
 
 /// The child half. A no-op unless the parent asked for a crash.
+///
+/// `KINETO_CASTING_CRASH` is `<action>-<point>-<n>:<project>`: `action` is
+/// `pack` or `audition` (of three portraits); the child dies as MiniMax
+/// answers its `n`th call (`answered`), or as the intent of its `n`th image
+/// is written (`prepared`, counted from zero).
 #[test]
 fn crash_child() {
-    let Ok(path) = env::var(CHILD) else {
+    let Ok(value) = env::var(CHILD) else {
         return;
     };
+    let (mode, path) = value.split_once(':').unwrap();
+    let mut parts = mode.split('-');
+    let (action, point, n) = (
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+        parts.next().unwrap().parse::<u32>().unwrap(),
+    );
     let project = CanonicalProject::open(path).expect("child opens the project");
     let minimax = Minimax::new();
-    let abort = || std::process::abort();
-    let _ = cast::make_pack_with(
+    let answered = AtomicU32::new(0);
+    let abort_on_answer = || {
+        if answered.fetch_add(1, Ordering::SeqCst) + 1 == n {
+            std::process::abort();
+        }
+    };
+    let mut adapter = minimax.adapter(&project);
+    if point == "answered" {
+        adapter = adapter.when_answered(&abort_on_answer);
+    }
+    let mut hooks = AbortAt(match point {
+        "prepared" => GenerationPoint::Prepared {
+            index: usize::try_from(n).unwrap(),
+        },
+        _ => GenerationPoint::Prepared { index: usize::MAX },
+    });
+    let _ = match action {
+        "pack" => {
+            cast::make_pack_with(&project, adapter, "filmmaker", Submission::Once, &mut hooks)
+        }
+        _ => cast::audition_with(
+            &project,
+            adapter,
+            "filmmaker",
+            3,
+            Submission::Once,
+            &mut hooks,
+        ),
+    };
+    panic!("the child must abort at {mode}");
+}
+
+/// Abort the process at one point of an image.
+struct AbortAt(GenerationPoint);
+
+impl GenerationHooks for AbortAt {
+    fn reached(&mut self, point: GenerationPoint) {
+        if point == self.0 {
+            std::process::abort();
+        }
+    }
+}
+
+/// Run the child in `mode` on `target`; it must die by SIGABRT.
+fn crash(temp: &TempDir, target: &Path, mode: &str) {
+    let status = Command::new(env::current_exe().unwrap())
+        .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, format!("{mode}:{}", target.display()))
+        // An aborted child may write `core*` into its working directory.
+        .current_dir(&temp.0)
+        .status()
+        .unwrap();
+    assert!(!status.success(), "the child must not exit cleanly");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(6), "the child must die by SIGABRT");
+    }
+}
+
+/// A styled film whose filmmaker has one selected portrait.
+fn selected(target: &Path) -> CanonicalProject {
+    let project = film(target, true);
+    cast::audition_with(
         &project,
-        minimax.adapter(&project).when_answered(&abort),
+        Minimax::new().adapter(&project),
+        "filmmaker",
+        1,
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
+    project
+}
+
+fn references(project: &CanonicalProject) -> Vec<CastImageKind> {
+    document::images(project, "filmmaker")
+        .unwrap()
+        .into_iter()
+        .filter(|image| image.kind != CastImageKind::Portrait)
+        .map(|image| image.kind)
+        .collect()
+}
+
+#[test]
+fn a_pack_cut_short_pays_only_for_what_it_had_not_made() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(selected(&target));
+    // Front and both profiles are made; the full-length view is prepared
+    // and never called.
+    crash(&temp, &target, "pack-prepared-3");
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(references(&project).len(), 3);
+
+    let minimax = Minimax::new();
+    let pack = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
         "filmmaker",
         Submission::Once,
         &mut NoHooks,
-    );
-    panic!("the child must abort once MiniMax answers");
+    )
+    .unwrap();
+    assert_eq!(minimax.calls(), 4, "only the four the pack lacked");
+    assert_eq!(pack.len(), 7);
+    let mut made = references(&project);
+    assert_eq!(made.len(), 7, "no kind made twice");
+    made.sort();
+    made.dedup();
+    assert_eq!(made.len(), 7);
+}
+
+#[test]
+fn a_pack_cut_short_by_an_unknown_answer_pays_again_only_for_that_one() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(selected(&target));
+    // Three references are made; MiniMax answers the fourth call and the
+    // process dies before it is kept.
+    crash(&temp, &target, "pack-answered-4");
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(references(&project).len(), 3);
+    let minimax = Minimax::new();
+    let make = |submission| {
+        cast::make_pack_with(
+            &project,
+            minimax.adapter(&project),
+            "filmmaker",
+            submission,
+            &mut NoHooks,
+        )
+    };
+    assert!(matches!(
+        make(Submission::Once),
+        Err(GenerationError::UnresolvedSubmission)
+    ));
+    assert_eq!(minimax.calls(), 0);
+    make(Submission::RiskPayingTwice).unwrap();
+    // Four calls before the crash and four now: the seven the pack holds
+    // and the one call whose answer was lost, resubmitted on purpose.
+    assert_eq!(minimax.calls(), 4);
+    assert_eq!(references(&project).len(), 7);
+}
+
+#[test]
+fn an_audition_cut_short_makes_only_the_portraits_it_lacked() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(film(&target, true));
+    crash(&temp, &target, "audition-prepared-2");
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 2);
+    let minimax = Minimax::new();
+    let audition = |count| {
+        cast::audition_with(
+            &project,
+            minimax.adapter(&project),
+            "filmmaker",
+            count,
+            Submission::Once,
+            &mut NoHooks,
+        )
+        .unwrap()
+    };
+    assert_eq!(audition(3).len(), 3);
+    assert_eq!(minimax.calls(), 1);
+    // Asking again for what is there pays nothing; a rejected portrait is
+    // replaced, and more are made only when more are asked for.
+    assert_eq!(audition(3).len(), 3);
+    assert_eq!(minimax.calls(), 1);
+    document::reject(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
+    assert_eq!(audition(3).len(), 3);
+    assert_eq!(minimax.calls(), 2);
+    assert_eq!(audition(5).len(), 5);
+    assert_eq!(minimax.calls(), 4);
+}
+
+#[test]
+fn a_complete_pack_is_made_again_only_where_the_director_asks() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = selected(&target);
+    let minimax = Minimax::new();
+    let first = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(minimax.calls(), 7);
+    let again = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(again, first);
+    assert_eq!(minimax.calls(), 7, "a complete pack costs nothing");
+
+    let remade = cast::remake_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        &[CastImageKind::Front],
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(minimax.calls(), 8);
+    assert_ne!(remade[0].artifact_id, first[0].artifact_id);
+    assert_eq!(remade[1..], first[1..]);
+    let locked = cast::lock(&project, &provider(), "filmmaker").unwrap();
+    assert_eq!(locked.references[0].artifact_id, remade[0].artifact_id);
 }
 
 #[test]
@@ -470,19 +694,7 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
     document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
     drop(project);
 
-    let status = Command::new(env::current_exe().unwrap())
-        .args(["crash_child", "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD, &target)
-        // An aborted child may write `core*` into its working directory.
-        .current_dir(&temp.0)
-        .status()
-        .unwrap();
-    assert!(!status.success(), "the child must not exit cleanly");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        assert_eq!(status.signal(), Some(6), "the child must die by SIGABRT");
-    }
+    crash(&temp, &target, "pack-answered-1");
 
     let project = CanonicalProject::open(&target).unwrap();
     assert!(cast::recover(&project).unwrap().unresolved);

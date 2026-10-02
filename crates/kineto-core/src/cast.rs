@@ -468,27 +468,37 @@ pub fn recover(project: &CanonicalProject) -> Result<CastRecovery, GenerationErr
     paid_image::recover::<Casting>(project)
 }
 
-/// Generate one image of `kind` for `character_id` and record it.
-#[allow(clippy::too_many_arguments)]
-fn make<T: Transport + Sync>(
-    project: &CanonicalProject,
-    jobs: &mut Jobs<'_, '_, Casting, T>,
-    material: &Material,
+/// One image to make: what it shows and in which frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shot {
     kind: CastImageKind,
     frame: AspectRatio,
-    degraded: Option<&str>,
+    /// Why the frame differs from the one wanted, when it does.
+    degraded: Option<String>,
+}
+
+/// An image compiled and hashed, before anything is written.
+#[derive(Debug, Clone)]
+struct Planned {
+    prompt: KeyframePrompt,
+    input_hash: InputHash,
+    dependencies: Vec<ArtifactDependency>,
+}
+
+/// Compile `shot` of the character in `material` and derive its input
+/// hash: what makes two images the same request.
+fn plan_shot(
+    material: &Material,
+    shot: &Shot,
     identity: Option<&IdentityReference>,
     capabilities: &ImageCapabilities,
-    index: usize,
-    hooks: &mut dyn GenerationHooks,
-) -> Result<CastImage, GenerationError> {
-    let character_id = &material.character.id;
+) -> Result<Planned, GenerationError> {
     let prompt = compile(
         &material.character,
-        kind,
+        shot.kind,
         &material.style,
         identity.is_some(),
-        degraded,
+        shot.degraded.as_deref(),
         capabilities,
     )
     .map_err(GenerationError::Prompt)?;
@@ -501,12 +511,12 @@ fn make<T: Transport + Sync>(
             field: Some("identity".to_owned()),
         });
     }
-    let params = format!("aspect_ratio={}:{}", frame.width, frame.height);
+    let params = format!("aspect_ratio={}:{}", shot.frame.width, shot.frame.height);
     let input_hash = InputHash::derive(InputHashMaterial {
         dependencies: &dependencies,
         canonical_intent: &canonical_intent(
             &material.character,
-            kind,
+            shot.kind,
             &material.style,
             identity.is_some(),
         ),
@@ -515,26 +525,49 @@ fn make<T: Transport + Sync>(
         canonical_params: params.as_bytes(),
         compiler_version: prompt.compiled.compiler_version(),
     });
+    Ok(Planned {
+        prompt,
+        input_hash,
+        dependencies,
+    })
+}
+
+/// Generate `shot` as `planned` and record it.
+#[allow(clippy::too_many_arguments)]
+fn make<T: Transport + Sync>(
+    project: &CanonicalProject,
+    jobs: &mut Jobs<'_, '_, Casting, T>,
+    character_id: &str,
+    shot: &Shot,
+    identity: Option<&IdentityReference>,
+    planned: Planned,
+    index: usize,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<CastImage, GenerationError> {
     let artifact_id = document::next_artifact_id(project, character_id).map_err(document_error)?;
     let plan = CastPlan {
         schema_version: PLAN_SCHEMA_VERSION,
         artifact_id: artifact_id.as_str().to_owned(),
-        input_hash: input_hash.as_str().to_owned(),
-        character_id: character_id.clone(),
-        kind,
+        input_hash: planned.input_hash.as_str().to_owned(),
+        character_id: character_id.to_owned(),
+        kind: shot.kind,
         identity_reference: identity.map(|identity| identity.artifact_id.as_str().to_owned()),
-        dependencies: dependencies.iter().map(DependencyRecord::from).collect(),
+        dependencies: planned
+            .dependencies
+            .iter()
+            .map(DependencyRecord::from)
+            .collect(),
     };
     let call = CandidateRequest {
         artifact_id: artifact_id.clone(),
-        input_hash,
+        input_hash: planned.input_hash,
         owner: CandidateOwner::Character {
-            id: character_id.clone(),
-            kind,
+            id: character_id.to_owned(),
+            kind: shot.kind,
         },
-        aspect_ratio: frame,
+        aspect_ratio: shot.frame,
         identities: identity.cloned().into_iter().collect(),
-        prompt: Some(Arc::new(prompt)),
+        prompt: Some(Arc::new(planned.prompt)),
     };
     jobs.generate(&plan, &call, index, hooks)?;
     document::images(project, character_id)
@@ -546,7 +579,12 @@ fn make<T: Transport + Sync>(
         ))
 }
 
-/// Generate `count` portrait candidates of `character_id` and record them.
+/// Have `count` portrait candidates of `character_id` that are not
+/// rejected and were made from the character's current bible entry in the
+/// locked style, making only those missing. `count` is how many to have,
+/// not how many to add: asking again after an interruption pays only for
+/// what the interruption left undone, and a director who wants more asks
+/// for more. Returns those portraits, oldest first.
 pub fn audition(
     project: &CanonicalProject,
     provider: &ImageProvider,
@@ -595,43 +633,49 @@ pub fn audition_with<T: Transport + Sync>(
                 .next()
                 .expect("a non-empty set has a first ratio")
         };
-    let degraded = (frame != SQUARE).then(|| {
-        format!(
-            "the provider takes no 1:1 frame; made at {}:{}",
-            frame.width, frame.height
-        )
-    });
-    // Refuse a prompt that cannot fit before anything is written.
-    compile(
-        &material.character,
-        CastImageKind::Portrait,
-        &material.style,
-        false,
-        degraded.as_deref(),
-        &capabilities,
-    )
-    .map_err(GenerationError::Prompt)?;
-    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
-    (0..count)
-        .map(|index| {
-            make(
-                project,
-                &mut jobs,
-                &material,
-                CastImageKind::Portrait,
-                frame,
-                degraded.as_deref(),
-                None,
-                &capabilities,
-                index,
-                hooks,
+    let shot = Shot {
+        kind: CastImageKind::Portrait,
+        frame,
+        degraded: (frame != SQUARE).then(|| {
+            format!(
+                "the provider takes no 1:1 frame; made at {}:{}",
+                frame.width, frame.height
             )
+        }),
+    };
+    // A prompt that cannot fit is refused before anything is written.
+    let planned = plan_shot(&material, &shot, None, &capabilities)?;
+    // Portraits an interruption left are recorded first, so they count.
+    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
+    let mut portraits: Vec<CastImage> = document::images(project, character_id)
+        .map_err(document_error)?
+        .into_iter()
+        .filter(|image| {
+            image.kind == CastImageKind::Portrait
+                && image.input_hash == planned.input_hash.as_str()
+                && image.status != Some(PortraitStatus::Rejected)
         })
-        .collect()
+        .collect();
+    for index in 0..count.saturating_sub(portraits.len()) {
+        portraits.push(make(
+            project,
+            &mut jobs,
+            character_id,
+            &shot,
+            None,
+            planned.clone(),
+            index,
+            hooks,
+        )?);
+    }
+    Ok(portraits)
 }
 
-/// Generate the reference pack of `character_id`'s selected portrait, as
-/// [`pack_plan`] says the provider can make it, and record it.
+/// Complete the reference pack of `character_id`'s selected portrait, as
+/// [`pack_plan`] says the provider can make it: only the kinds the pack of
+/// that portrait lacks for the current bible entry and style are made, so
+/// asking again after an interruption pays only for what it left undone.
+/// Returns the pack, in plan order.
 pub fn make_pack(
     project: &CanonicalProject,
     provider: &ImageProvider,
@@ -639,14 +683,28 @@ pub fn make_pack(
     submission: Submission,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<Vec<CastImage>, GenerationError> {
+    remake_pack(project, provider, character_id, &[], submission, hooks)
+}
+
+/// [`make_pack`] that also makes `remake` again, though the pack holds
+/// them: the director's explicit request for other takes of those kinds.
+pub fn remake_pack(
+    project: &CanonicalProject,
+    provider: &ImageProvider,
+    character_id: &str,
+    remake: &[CastImageKind],
+    submission: Submission,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<Vec<CastImage>, GenerationError> {
     match provider {
         ImageProvider::LocalDemo => Err(GenerationError::Prerequisite(
             Prerequisite::RealImageProvider,
         )),
-        ImageProvider::Minimax(client) => make_pack_with(
+        ImageProvider::Minimax(client) => remake_pack_with(
             project,
             MinimaxKeyframes::new(project, client.as_ref()),
             character_id,
+            remake,
             submission,
             hooks,
         ),
@@ -658,6 +716,18 @@ pub fn make_pack_with<T: Transport + Sync>(
     project: &CanonicalProject,
     adapter: MinimaxKeyframes<'_, T>,
     character_id: &str,
+    submission: Submission,
+    hooks: &mut dyn GenerationHooks,
+) -> Result<Vec<CastImage>, GenerationError> {
+    remake_pack_with(project, adapter, character_id, &[], submission, hooks)
+}
+
+/// [`remake_pack`] with an explicit MiniMax adapter.
+pub fn remake_pack_with<T: Transport + Sync>(
+    project: &CanonicalProject,
+    adapter: MinimaxKeyframes<'_, T>,
+    character_id: &str,
+    remake: &[CastImageKind],
     submission: Submission,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<Vec<CastImage>, GenerationError> {
@@ -694,36 +764,50 @@ pub fn make_pack_with<T: Transport + Sync>(
             .map_err(|_| GenerationError::Unexpected("a portrait has an invalid ID"))?,
         bytes: Arc::from(bytes),
     };
-    for shot in &plan.shots {
-        compile(
-            &material.character,
-            shot.kind,
-            &material.style,
-            true,
-            shot.degraded.as_deref(),
-            &capabilities,
-        )
-        .map_err(GenerationError::Prompt)?;
-    }
-    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
-    plan.shots
+    // Every prompt is compiled, and refused if it cannot fit, before
+    // anything is written.
+    let shots = plan
+        .shots
         .iter()
-        .enumerate()
-        .map(|(index, shot)| {
-            make(
-                project,
-                &mut jobs,
-                &material,
-                shot.kind,
-                shot.aspect_ratio,
-                shot.degraded.as_deref(),
-                Some(&identity),
-                &capabilities,
-                index,
-                hooks,
-            )
+        .map(|pack_shot| {
+            let shot = Shot {
+                kind: pack_shot.kind,
+                frame: pack_shot.aspect_ratio,
+                degraded: pack_shot.degraded.clone(),
+            };
+            let planned = plan_shot(&material, &shot, Some(&identity), &capabilities)?;
+            Ok((shot, planned))
         })
-        .collect()
+        .collect::<Result<Vec<_>, GenerationError>>()?;
+    // References an interruption left are recorded first, so they count.
+    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
+    let recorded = document::images(project, character_id).map_err(document_error)?;
+    let mut pack = Vec::with_capacity(shots.len());
+    let mut made = 0;
+    for (shot, planned) in shots {
+        let kept = recorded.iter().rev().find(|image| {
+            image.kind == shot.kind
+                && image.identity_reference.as_deref() == Some(portrait.artifact_id.as_str())
+                && image.input_hash == planned.input_hash.as_str()
+        });
+        match kept {
+            Some(image) if !remake.contains(&shot.kind) => pack.push(image.clone()),
+            _ => {
+                pack.push(make(
+                    project,
+                    &mut jobs,
+                    character_id,
+                    &shot,
+                    Some(&identity),
+                    planned,
+                    made,
+                    hooks,
+                )?);
+                made += 1;
+            }
+        }
+    }
+    Ok(pack)
 }
 
 /// Lock `character_id` as cast with `provider`: its selected portrait and
