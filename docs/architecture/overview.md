@@ -66,6 +66,7 @@ kineto/
 │   ├── kineto-jobs/             # paid-job intent/cost/retry policy model
 │   ├── kineto-job-runtime/      # write-ahead persistence/executor/reconciliation
 │   ├── kineto-providers/        # provider capability/routing model
+│   ├── kineto-provider-minimax/ # MiniMax HTTPS client (image-01): the first real provider edge
 │   └── kineto-testkit/          # offline fake adapters behind the real runtime contract
 ├── schemas/                     # canonical wire/storage contracts
 ├── fixtures/projects/           # deterministic golden projects

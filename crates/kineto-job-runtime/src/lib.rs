@@ -515,6 +515,76 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// The intent recorded for `job_id`, if any, read without changing it.
+    pub fn load(&self, job_id: &JobId) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
+        let store = IntentStore::new(self.project);
+        let _guard = lock_intent_store();
+        let record = store.load_optional(job_id)?;
+        if let Some(record) = &record {
+            self.ensure_provider(record)?;
+        }
+        Ok(record)
+    }
+
+    /// Give up on a prepared intent whose last provider call failed, so the
+    /// same job can be prepared afresh.
+    ///
+    /// Only a `Prepared` intent with a recorded failure is retired: it never
+    /// produced a result, so nothing is lost. Returns whether an intent was
+    /// retired. The reservation is first returned to `Reserved`, then the
+    /// intent is removed, then the reservation: a crash after the first step
+    /// leaves the intent in place and the next lookup reactivates it, and a
+    /// crash after the second leaves a `Reserved` mapping without an intent,
+    /// which the next lookup clears.
+    pub fn retire_failed(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.last_error_class.is_some()
+        })
+    }
+
+    /// Give up on a prepared intent whose provider call was attempted but
+    /// whose outcome was never established, so the same job can be prepared
+    /// and invoked afresh.
+    ///
+    /// The provider may have accepted, and charged for, that attempt. Only a
+    /// caller acting on a person's explicit decision to risk paying twice
+    /// may retire it. An intent that was never attempted, or that has a
+    /// result, is not retired. The removal order is that of
+    /// [`Self::retire_failed`].
+    pub fn retire_unresolved(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.attempts > 0
+        })
+    }
+
+    fn retire_where(
+        &self,
+        job_id: &JobId,
+        eligible: impl FnOnce(&RuntimeIntent) -> bool,
+    ) -> Result<bool, JobRuntimeError> {
+        self.ensure_writable()?;
+        let operation_lock = job_operation_lock(self.project, job_id);
+        let _operation_guard = lock_unpoisoned(&operation_lock);
+        let store = IntentStore::new(self.project);
+        let _guard = lock_intent_store();
+        let Some(record) = store.load_optional(job_id)? else {
+            return Ok(false);
+        };
+        self.ensure_provider(&record)?;
+        if !eligible(&record) {
+            return Ok(false);
+        }
+        let key = record.intent.idempotency_key();
+        if let Some(mut reservation) = store.load_reservation(&self.provider, key)? {
+            validate_reservation_record(&reservation, &record)?;
+            reservation.state = StoredReservationState::Reserved;
+            store.save_reservation(&reservation)?;
+        }
+        store.remove_intent(job_id)?;
+        store.remove_reservation(&self.provider, key)?;
+        Ok(true)
+    }
+
     pub fn reconcile_startup<A: PaidJobAdapter>(&self, adapter: &mut A) -> StartupOutcomes<A> {
         self.ensure_writable()?;
         let store = IntentStore::new(self.project);
@@ -2465,6 +2535,149 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_failed_prepared_intent_can_be_retired_and_prepared_afresh() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-retire").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_retire").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "image.generate",
+                input_hash('7'),
+                artifact("image_candidate_retire"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_failed(&job_id).unwrap(),
+            "an intent that never failed is not retired"
+        );
+
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Terminal);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+        assert!(matches!(
+            runtime.invoke_prepared(&job_id, &mut adapter, &1),
+            Err(InvokePreparedError::Runtime(
+                JobRuntimeError::PreviousTerminalFailure
+            ))
+        ));
+
+        assert!(runtime.retire_failed(&job_id).unwrap());
+        assert!(!runtime.retire_failed(&job_id).unwrap(), "already gone");
+        let fresh = created(prepare().unwrap());
+        assert_eq!(fresh.attempts(), 0);
+        adapter.invocation = Ok(Invocation::Completed("result"));
+        assert!(matches!(
+            runtime.invoke_prepared(&job_id, &mut adapter, &1),
+            Ok(DispatchOutcome::Completed { .. })
+        ));
+        assert!(
+            !runtime.retire_failed(&job_id).unwrap(),
+            "an invoked intent is never retired"
+        );
+    }
+
+    #[test]
+    fn an_attempted_intent_is_retired_only_on_an_explicit_decision() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-video-unresolved").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_video_unresolved").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "video.generate",
+                input_hash('4'),
+                artifact("video_candidate_unresolved"),
+            )
+        };
+        created(prepare().unwrap());
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "never attempted"
+        );
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Retryable);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+        assert_eq!(runtime.load(&job_id).unwrap().unwrap().attempts(), 1);
+
+        assert!(runtime.retire_unresolved(&job_id).unwrap());
+        assert!(runtime.load(&job_id).unwrap().is_none());
+        created(prepare().unwrap());
+        adapter.invocation = Ok(Invocation::Pending(ProviderJobId::new("task-2").unwrap()));
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1).unwrap();
+        assert!(
+            !runtime.retire_unresolved(&job_id).unwrap(),
+            "an invoked intent has a result to follow"
+        );
+    }
+
+    #[test]
+    fn retiring_is_consistent_after_a_crash_at_every_step() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let provider = ProviderKey::new("fake-image-retire-crash").unwrap();
+        let runtime = JobRuntime::new(&project, provider.clone(), policy(1, 3));
+        let job_id = JobId::new("job_retire_crash").unwrap();
+        let prepare = || {
+            runtime.prepare(
+                job_id.clone(),
+                "image.generate",
+                input_hash('6'),
+                artifact("image_candidate_retire_crash"),
+            )
+        };
+        created(prepare().unwrap());
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Terminal);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+
+        let key = derive_idempotency_key(
+            "image.generate",
+            &artifact("image_candidate_retire_crash"),
+            &input_hash('6'),
+        )
+        .unwrap();
+        let reservation = temp
+            .0
+            .join(reservation_path(&provider, &key).unwrap().as_path());
+        let intent = temp.0.join(intent_path(&job_id).unwrap().as_path());
+        let set_reserved = || {
+            let mut value: Value =
+                serde_json::from_slice(&fs::read(&reservation).unwrap()).unwrap();
+            value["state"] = Value::from("reserved");
+            fs::write(&reservation, serde_json::to_vec(&value).unwrap()).unwrap();
+        };
+
+        // Stopped after the first step: the intent is still there and the
+        // next lookup reactivates it unchanged.
+        set_reserved();
+        match prepare().unwrap() {
+            PrepareOutcome::Existing(record) => {
+                assert_eq!(record.last_error_class(), Some(ErrorClass::Terminal));
+            }
+            PrepareOutcome::Created(_) => panic!("the failed intent is still in place"),
+        }
+
+        // Stopped after the second step: a reserved mapping without its
+        // intent is cleared and the job is prepared afresh.
+        set_reserved();
+        fs::remove_file(&intent).unwrap();
+        let fresh = created(prepare().unwrap());
+        assert_eq!(fresh.attempts(), 0);
     }
 
     #[test]

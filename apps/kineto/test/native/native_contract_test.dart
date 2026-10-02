@@ -24,6 +24,21 @@ void main() {
     expect(KinetoProjectException.migrationRequired, contract.statuses['migration_required']);
     expect(KinetoProjectException.lockUnavailable, contract.statuses['lock_unavailable']);
     expect(KinetoProjectException.generationJob, contract.statuses['generation_job']);
+    expect(
+      KinetoProjectException.providerNotConfigured,
+      contract.statuses['provider_not_configured'],
+    );
+    expect(KinetoProjectException.shotIntentMissing, contract.statuses['shot_intent_missing']);
+    expect(KinetoProjectException.providerRefused, contract.statuses['provider_refused']);
+  });
+
+  test('image provider codes match the native table', () {
+    expect(
+      <String, int>{
+        for (final kind in KinetoImageProviderKind.values) kind.wireName: kind.wireValue,
+      },
+      contract.imageProviders,
+    );
   });
 
   test('shot direction wire codes match the native table', () {

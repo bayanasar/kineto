@@ -412,10 +412,26 @@ fn ensure_directory(root: &ProjectRoot, directory: &Path) -> Result<(), ProjectF
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(ProjectFsError::Io)?;
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    // Another writer created it first. Accept only a real
+                    // directory; a file or symlink that appeared is refused.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata =
+                            fs::symlink_metadata(&current).map_err(ProjectFsError::Io)?;
+                        if metadata.file_type().is_symlink() {
+                            return Err(ProjectFsError::Symlink(current));
+                        }
+                        if !metadata.is_dir() {
+                            return Err(ProjectFsError::NotDirectory(current));
+                        }
+                    }
+                    Err(error) => return Err(ProjectFsError::Io(error)),
+                }
                 // The new entry lives in the parent directory. Flush it so a
                 // file later published inside this directory cannot outlive
-                // the directory's own name after a crash.
+                // the directory's own name after a crash. A writer that lost
+                // the race flushes too: it cannot know the other has finished.
                 let parent = current.parent().unwrap_or(root.root());
                 sync_directory_impl(parent).map_err(ProjectFsError::Io)?;
             }
@@ -513,6 +529,53 @@ mod tests {
         assert!(ProjectRelativePath::new(r"..\secret").is_err());
         assert!(ProjectRelativePath::new("").is_err());
         assert!(ProjectRelativePath::new(std::env::temp_dir()).is_err());
+    }
+
+    #[test]
+    fn writers_racing_to_create_the_same_directory_all_succeed() {
+        for round in 0..20 {
+            let temp = TempProject::new();
+            let root = ProjectRoot::open(&temp.path).unwrap();
+            let start = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                for writer in 0..8 {
+                    let (root, start) = (&root, &start);
+                    scope.spawn(move || {
+                        let path = ProjectRelativePath::new(format!(
+                            "scenes/scene_001/shots/shot_001/keyframes/take_{writer}.jpg"
+                        ))
+                        .unwrap();
+                        start.wait();
+                        root.write_atomic(&path, b"frame").unwrap_or_else(|error| {
+                            panic!("round {round} writer {writer}: {error}")
+                        });
+                    });
+                }
+            });
+            assert_eq!(
+                fs::read_dir(temp.path.join("scenes/scene_001/shots/shot_001/keyframes"))
+                    .unwrap()
+                    .count(),
+                8
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_or_symlink_where_a_directory_belongs_is_still_refused() {
+        let temp = TempProject::new();
+        let root = ProjectRoot::open(&temp.path).unwrap();
+        fs::write(temp.path.join("videos"), b"not a directory").unwrap();
+        assert!(matches!(
+            root.write_atomic(&ProjectRelativePath::new("videos/a.mp4").unwrap(), b"x"),
+            Err(ProjectFsError::NotDirectory(_))
+        ));
+        std::os::unix::fs::symlink(std::env::temp_dir(), temp.path.join("keyframes")).unwrap();
+        assert!(matches!(
+            root.write_atomic(&ProjectRelativePath::new("keyframes/a.jpg").unwrap(), b"x"),
+            Err(ProjectFsError::Symlink(_))
+        ));
     }
 
     #[test]

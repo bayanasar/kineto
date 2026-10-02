@@ -6,6 +6,7 @@ members = [
     "crates/kineto-jobs",
     "crates/kineto-project",
     "crates/kineto-prompts",
+    "crates/kineto-provider-minimax",
     "crates/kineto-providers",
     "crates/kineto-schema-contracts",
     "crates/kineto-testkit",

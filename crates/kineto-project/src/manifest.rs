@@ -328,6 +328,18 @@ impl CanonicalProject {
         manifest: ProjectManifest,
         source_bytes: &[u8],
     ) -> Result<Self, ProjectStoreError> {
+        Self::create_with_files(path, manifest, source_bytes, &[])
+    }
+
+    /// Create a project that starts with further canonical files beside its
+    /// manifest and source. They are staged and published with the project in
+    /// the same rename, so a crash leaves either none of them or all of them.
+    pub fn create_with_files(
+        path: impl AsRef<Path>,
+        manifest: ProjectManifest,
+        source_bytes: &[u8],
+        files: &[(ProjectRelativePath, Vec<u8>)],
+    ) -> Result<Self, ProjectStoreError> {
         manifest
             .validate_for_write()
             .map_err(ProjectStoreError::Manifest)?;
@@ -360,6 +372,9 @@ impl CanonicalProject {
         let result = (|| {
             let root = ProjectRoot::open(&staging).map_err(ProjectStoreError::Fs)?;
             write_new(&root, &source_path, source_bytes)?;
+            for (file, bytes) in files {
+                write_new(&root, file, bytes)?;
+            }
             let encoded = manifest.to_toml().map_err(ProjectStoreError::Manifest)?;
             let manifest_path = ProjectRelativePath::new(PROJECT_MANIFEST_PATH)
                 .expect("static canonical project manifest path is valid");
@@ -724,6 +739,41 @@ future_workflow = "keep-me-too"
         assert_eq!(reopened.manifest().title, "Test Film");
         assert_eq!(reopened.access(), ProjectAccess::ReadWrite);
         assert!(target.join("project.toml").is_file());
+    }
+
+    #[test]
+    fn initial_files_are_published_with_the_project() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let scene = ProjectRelativePath::new("scenes/scene_001/scene.json").unwrap();
+
+        let created = CanonicalProject::create_with_files(
+            &target,
+            manifest(),
+            b"source\n",
+            &[(scene.clone(), b"{}\n".to_vec())],
+        )
+        .unwrap();
+        assert_eq!(created.root().read(&scene).unwrap(), b"{}\n");
+    }
+
+    #[test]
+    fn an_initial_file_that_collides_leaves_no_project() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let source = ProjectRelativePath::new("source/story.txt").unwrap();
+
+        assert!(
+            CanonicalProject::create_with_files(
+                &target,
+                manifest(),
+                b"source\n",
+                &[(source, b"replacement\n".to_vec())],
+            )
+            .is_err()
+        );
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(&temp.path).unwrap().count(), 0);
     }
 
     #[test]

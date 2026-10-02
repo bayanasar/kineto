@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use kineto_core::generation::{self, NoHooks};
+use kineto_core::generation::{self, ImageProvider, NoHooks};
 use kineto_job_runtime::{JobRuntime, JobRuntimePolicy, ProviderKey};
 use kineto_jobs::{BackoffPolicy, FallbackPolicy, JobId, PaidFallback, ProviderExecutionPolicy};
 use kineto_project::{
@@ -414,7 +414,10 @@ fn instance_type(value: &Value) -> &'static str {
 fn is_supported_pattern(pattern: &str) -> bool {
     matches!(
         pattern,
-        "^[A-Za-z0-9_.-]+$" | "^[A-Za-z0-9_.-]{1,128}$" | "^sha256:[0-9a-f]{64}$"
+        "^[A-Za-z0-9_.-]+$"
+            | "^[A-Za-z0-9_.-]{1,128}$"
+            | "^[A-Za-z0-9_./-]+$"
+            | "^sha256:[0-9a-f]{64}$"
     )
 }
 
@@ -424,6 +427,10 @@ fn matches_pattern(pattern: &str, value: &str) -> Result<bool, String> {
         "^[A-Za-z0-9_.-]{1,128}$" => {
             Ok((1..=128).contains(&value.len()) && value.bytes().all(is_portable_id_byte))
         }
+        "^[A-Za-z0-9_./-]+$" => Ok(!value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte == b'/' || is_portable_id_byte(byte))),
         "^sha256:[0-9a-f]{64}$" => Ok(value.strip_prefix("sha256:").is_some_and(|digest| {
             digest.len() == 64
                 && digest
@@ -734,6 +741,44 @@ fn real_project_and_shot_persistence_match_committed_schemas() {
 }
 
 #[test]
+fn bootstrap_scene_written_at_creation_matches_committed_schemas() {
+    let scene_schema = schema("scene.schema.json");
+    let shot_schema = schema("shot.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create_with_files(
+        &temp.0,
+        manifest(),
+        b"schema contract story\n",
+        &kineto_core::bootstrap::scene_files(),
+    )
+    .expect("test project should be creatable with the bootstrap scene");
+
+    validate(
+        &scene_schema,
+        &json_file(&temp.0.join("scenes/scene_001/scene.json")),
+        "bootstrap scene.json",
+    );
+    for shot_number in 1..=2 {
+        let shot_json = temp.0.join(format!(
+            "scenes/scene_001/shots/shot_{shot_number:03}/shot.json"
+        ));
+        validate(&shot_schema, &json_file(&shot_json), "bootstrap shot.json");
+
+        // A canonical write keeps the intent and still matches the schema.
+        let mut shot = ShotWorkflow::load(&project, shot_number).expect("shot should load");
+        shot.generate(&project)
+            .expect("bootstrap shot should accept a generation");
+        let written = json_file(&shot_json);
+        validate(&shot_schema, &written, "bootstrap shot.json after a write");
+        assert!(
+            written["action"]
+                .as_str()
+                .is_some_and(|action| !action.is_empty())
+        );
+    }
+}
+
+#[test]
 fn real_job_runtime_intent_matches_committed_schema() {
     let job_schema = schema("job.schema.json");
     let temp = TempDir::new();
@@ -777,7 +822,7 @@ fn production_generation_jobs_and_candidates_match_committed_schemas() {
         .expect("test project should be creatable");
     let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
 
-    generation::generate(&project, &mut shot, &mut NoHooks)
+    generation::generate(&project, &mut shot, &ImageProvider::LocalDemo, &mut NoHooks)
         .expect("generation should run as write-ahead jobs");
 
     let mut intents = fs::read_dir(temp.0.join(".kineto/jobs/intents"))
@@ -803,6 +848,77 @@ fn production_generation_jobs_and_candidates_match_committed_schemas() {
     {
         assert_eq!(artifact["provider"], "local-demo");
         assert_eq!(artifact["model"], "deterministic-demo-v1");
+    }
+}
+
+/// Answers every MiniMax image request with a tiny JPEG; never touches the
+/// network.
+struct RecordedMinimax;
+
+impl kineto_provider_minimax::Transport for RecordedMinimax {
+    fn post_json(
+        &self,
+        _url: &str,
+        _api_key: &kineto_providers::secret::SecretString,
+        _body: &[u8],
+    ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+    {
+        Ok(kineto_provider_minimax::HttpResponse {
+            status: 200,
+            // base64 of ff d8 ff e0 00 10
+            body: br#"{"id":"r","data":{"image_base64":["/9j/4AAQ"]},"base_resp":{"status_code":0,"status_msg":"success"}}"#
+                .to_vec(),
+        })
+    }
+}
+
+#[test]
+fn provider_generated_keyframe_candidates_match_committed_schemas() {
+    let artifact_schema = schema("artifact.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create_with_files(
+        &temp.0,
+        manifest(),
+        b"schema contract story\n",
+        &kineto_core::bootstrap::scene_files(),
+    )
+    .expect("test project should be creatable with the bootstrap scene");
+    let client = kineto_provider_minimax::MinimaxClient::with_transport(
+        RecordedMinimax,
+        kineto_providers::secret::SecretString::new("sk-contract".to_owned())
+            .expect("test key is not blank"),
+        "https://example.test",
+    );
+    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+
+    generation::generate_with(
+        &project,
+        &mut shot,
+        kineto_core::minimax::MinimaxKeyframes::new(&project, Some(&client)),
+        &mut NoHooks,
+    )
+    .expect("generation should attach provider keyframes");
+
+    let artifacts_path = temp
+        .0
+        .join("scenes/scene_001/shots/shot_001/artifacts.json");
+    validate_artifact_array(&artifacts_path, &artifact_schema);
+    for artifact in json_file(&artifacts_path)
+        .as_array()
+        .expect("artifacts.json is an array")
+    {
+        for field in [
+            "media_path",
+            "media_state",
+            "compiler_version",
+            "compiled_prompt",
+            "prompt_hash",
+            "applied_constraints",
+            "dropped_constraints",
+            "degradation",
+        ] {
+            assert!(!artifact[field].is_null(), "{field} is recorded");
+        }
     }
 }
 

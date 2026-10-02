@@ -21,6 +21,19 @@ void main() {
         File(_path(target.path, 'source', 'story.txt')).readAsStringSync(),
         'A filmmaker waits across the table.\n',
       );
+      // The bootstrap scene's intent is written with the project.
+      final shot = jsonDecode(
+        File(_path(target.path, 'scenes', 'scene_001', 'shots', 'shot_001', 'shot.json'))
+            .readAsStringSync(),
+      ) as Map<String, Object?>;
+      expect(shot['action'], contains('filmmaker'));
+
+      // No provider was named, so the free demo generator is used.
+      final provider = created.imageProvider;
+      expect(provider.kind, KinetoImageProviderKind.localDemo);
+      expect(provider.ready, isTrue);
+      expect(provider.isPaid, isFalse);
+      expect(provider.generationCostMicros, 0);
 
       // A second writer session is refused while this one is open.
       await expectLater(
@@ -341,6 +354,25 @@ void main() {
       expect(shotTwo.selectedIndex, 0);
       expect(shotTwo.locked, isTrue);
       expect(shotTwo.supersededCount, 3);
+      // Demo candidates have no media; a candidate past the last is refused.
+      expect(project.candidateMediaPath(0, 0), isNull);
+      expect(
+        () => project.candidateMediaPath(0, 3),
+        throwsA(
+          isA<KinetoProjectException>().having((error) => error.code, 'code', 110),
+        ),
+      );
+      // Each candidate names the provider and model its record holds.
+      final origin = project.candidateOrigin(1, 2);
+      expect(origin.provider, 'local-demo');
+      expect(origin.model, 'deterministic-demo-v1');
+      expect(origin.label, 'Local demo deterministic-demo-v1');
+      expect(
+        () => project.candidateOrigin(0, 3),
+        throwsA(
+          isA<KinetoProjectException>().having((error) => error.code, 'code', 110),
+        ),
+      );
       project.close();
     } finally {
       sandbox.deleteSync(recursive: true);

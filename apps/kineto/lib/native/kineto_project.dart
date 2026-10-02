@@ -105,6 +105,15 @@ external int _kinetoProjectShotState(
   Pointer<Uint64> outState,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>)>(
+  symbol: 'kineto_project_shot_keyframes_unresolved',
+)
+external int _kinetoProjectShotKeyframesUnresolved(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint8> outUnresolved,
+);
+
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_set_direction',
 )
@@ -119,6 +128,15 @@ external int _kinetoProjectShotSetDirection(
   symbol: 'kineto_project_shot_generate',
 )
 external int _kinetoProjectShotGenerate(
+  Pointer<Void> session,
+  int shotIndex,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Uint64)>(
+  symbol: 'kineto_project_shot_resubmit_keyframes',
+)
+external int _kinetoProjectShotResubmitKeyframes(
   Pointer<Void> session,
   int shotIndex,
   int token,
@@ -161,6 +179,150 @@ external int _kinetoProjectShotMigrateLegacyHashes(
   int token,
 );
 
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_image_provider',
+  isLeaf: true,
+)
+external int _kinetoProjectImageProvider(Pointer<Void> session);
+
+@Native<Uint8 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_image_provider_ready',
+  isLeaf: true,
+)
+external int _kinetoProjectImageProviderReady(Pointer<Void> session);
+
+@Native<Uint64 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_generation_cost_micros',
+  isLeaf: true,
+)
+external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
+
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_media_copy')
+external int _kinetoProjectCandidateMediaCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_provider_copy')
+external int _kinetoProjectCandidateProviderCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
+@Native<
+    Int32 Function(
+      Pointer<Void>,
+      Uint32,
+      Uint32,
+      Pointer<Uint8>,
+      Uint64,
+      Pointer<Uint64>,
+    )>(symbol: 'kineto_project_candidate_model_copy')
+external int _kinetoProjectCandidateModelCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  int candidateIndex,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
+/// Who generates a session's shot candidates. Chosen when Kineto starts, by
+/// `KINETO_IMAGE_PROVIDER`; a paid provider is never chosen implicitly.
+enum KinetoImageProviderKind {
+  localDemo(1, 'local_demo', 'Local demo'),
+  minimax(2, 'minimax', 'MiniMax image-01');
+
+  const KinetoImageProviderKind(this.wireValue, this.wireName, this.label);
+
+  final int wireValue;
+  final String wireName;
+  final String label;
+
+  static KinetoImageProviderKind fromWireValue(int value) {
+    for (final kind in values) {
+      if (kind.wireValue == value) return kind;
+    }
+    throw StateError('Unknown Kineto image provider code $value');
+  }
+}
+
+/// Who made a candidate: the provider and model recorded on its artifact.
+/// Not the session's provider, which may have changed since.
+final class KinetoCandidateOrigin {
+  const KinetoCandidateOrigin({required this.provider, required this.model});
+
+  /// The recorded provider, for example `minimax`; empty when none is recorded.
+  final String provider;
+
+  /// The recorded model, for example `image-01`; empty when none is recorded.
+  final String model;
+
+  static const Map<String, String> _providerNames = <String, String>{
+    'local-demo': 'Local demo',
+    'minimax': 'MiniMax',
+  };
+
+  /// For example `MiniMax image-01`; null when no provider is recorded.
+  String? get label {
+    if (provider.isEmpty) return null;
+    final name = _providerNames[provider] ?? provider;
+    return model.isEmpty ? name : '$name $model';
+  }
+}
+
+/// The session's image provider, as the director needs to know it before
+/// asking for a generation.
+final class KinetoImageProvider {
+  const KinetoImageProvider({
+    required this.kind,
+    required this.ready,
+    required this.generationCostMicros,
+  });
+
+  final KinetoImageProviderKind kind;
+
+  /// False for a paid provider without credentials: generating would fail.
+  final bool ready;
+
+  /// Estimated cost of one generation (every candidate), in USD micros.
+  final int generationCostMicros;
+
+  bool get isPaid => kind != KinetoImageProviderKind.localDemo;
+
+  /// The estimate in US dollars, for example `$0.0105`.
+  String get generationCostLabel {
+    final dollars = generationCostMicros ~/ 1000000;
+    final micros = (generationCostMicros % 1000000).toString().padLeft(6, '0');
+    final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
+    return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
+  }
+}
+
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
@@ -180,6 +342,16 @@ final class KinetoProjectException implements Exception {
   /// A generation job stopped before it finished. Its write-ahead intents are
   /// kept and the generation is completed when the project is next opened.
   static const int generationJob = 121;
+
+  /// The selected image provider has no credentials configured.
+  static const int providerNotConfigured = 123;
+
+  /// The shot has no written intent for a real provider to generate from.
+  static const int shotIntentMissing = 124;
+
+  /// The image provider refused the request; asking again unchanged will not
+  /// help (for example a content or account refusal).
+  static const int providerRefused = 125;
 
   final int code;
   final String message;
@@ -337,6 +509,86 @@ final class KinetoProjectSession implements Finalizable {
     return _copyProjectUtf8(_handle, _kinetoProjectTitleCopy, 'project title');
   }
 
+  /// Absolute path of the media file of the shot's candidate
+  /// [candidateIndex], or null for a candidate without media (a demo
+  /// candidate). Reads published state; never does I/O.
+  String? candidateMediaPath(int shotIndex, int candidateIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    if (candidateIndex < 0) {
+      throw RangeError.value(
+        candidateIndex,
+        'candidateIndex',
+        'Candidate index must be non-negative',
+      );
+    }
+    final path = _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) => _kinetoProjectCandidateMediaCopy(
+        session,
+        shotIndex,
+        candidateIndex,
+        buffer,
+        capacity,
+        length,
+      ),
+      'candidate media path',
+    );
+    return path.isEmpty ? null : path;
+  }
+
+  /// The provider and model recorded on the shot's candidate
+  /// [candidateIndex]. Reads published state; never does I/O.
+  KinetoCandidateOrigin candidateOrigin(int shotIndex, int candidateIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    if (candidateIndex < 0) {
+      throw RangeError.value(
+        candidateIndex,
+        'candidateIndex',
+        'Candidate index must be non-negative',
+      );
+    }
+    return KinetoCandidateOrigin(
+      provider: _copyProjectUtf8(
+        _handle,
+        (session, buffer, capacity, length) => _kinetoProjectCandidateProviderCopy(
+          session,
+          shotIndex,
+          candidateIndex,
+          buffer,
+          capacity,
+          length,
+        ),
+        'candidate provider',
+      ),
+      model: _copyProjectUtf8(
+        _handle,
+        (session, buffer, capacity, length) => _kinetoProjectCandidateModelCopy(
+          session,
+          shotIndex,
+          candidateIndex,
+          buffer,
+          capacity,
+          length,
+        ),
+        'candidate model',
+      ),
+    );
+  }
+
+  /// The image provider this session generates with. Fixed when it opened.
+  KinetoImageProvider get imageProvider {
+    _ensureOpen();
+    return KinetoImageProvider(
+      kind: KinetoImageProviderKind.fromWireValue(
+        _kinetoProjectImageProvider(_handle),
+      ),
+      ready: _kinetoProjectImageProviderReady(_handle) != 0,
+      generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
+    );
+  }
+
   /// The shot's most recently published state. Never does I/O.
   KinetoShotSnapshot shotSnapshot(int shotIndex) {
     _ensureOpen();
@@ -349,6 +601,26 @@ final class KinetoProjectSession implements Finalizable {
         _kinetoProjectShotState(_handle, shotIndex, outState),
       );
       return KinetoShotSnapshot.fromBits(outState.value);
+    } finally {
+      arena.releaseAll();
+    }
+  }
+
+  /// Whether a paid keyframe call of the shot's last generation may have
+  /// been accepted, and charged, without leaving its result. Generating is
+  /// refused until [resubmitShotKeyframes]. Reads published state; never
+  /// does I/O.
+  bool keyframesUnresolved(int shotIndex) {
+    _ensureOpen();
+    _checkShotIndex(shotIndex);
+    final arena = Arena();
+    try {
+      final outUnresolved = arena<Uint8>();
+      outUnresolved.value = 0;
+      _checkProjectResult(
+        _kinetoProjectShotKeyframesUnresolved(_handle, shotIndex, outUnresolved),
+      );
+      return outUnresolved.value != 0;
     } finally {
       arena.releaseAll();
     }
@@ -368,6 +640,14 @@ final class KinetoProjectSession implements Finalizable {
   Future<void> generateShotCandidates(int shotIndex) => _submit(
         shotIndex,
         (token) => _kinetoProjectShotGenerate(_handle, shotIndex, token),
+      );
+
+  /// Generate the shot's candidates again although a paid call of the last
+  /// attempt may already have been accepted, and charged for. Only on the
+  /// director's explicit decision to risk paying twice.
+  Future<void> resubmitShotKeyframes(int shotIndex) => _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotResubmitKeyframes(_handle, shotIndex, token),
       );
 
   Future<void> selectShotCandidate(int shotIndex, int candidateIndex) {
@@ -657,6 +937,11 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'lock_unavailable': 119,
   'not_open': 120,
   'generation_job': 121,
+  'provider_unknown': 122,
+  'provider_not_configured': 123,
+  'shot_intent_missing': 124,
+  'provider_refused': 125,
+  'paid_call_unresolved': 126,
   'panic': 199,
 };
 
@@ -683,7 +968,13 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   118: 'Legacy shot hashes need migration before this shot can change',
   119: 'Project cannot be locked for single-writer access on this filesystem',
   120: 'Project session is not open',
-  121: 'Generation did not finish; it resumes when the project reopens',
+  121: 'Generation did not finish. Finished candidates are kept; generate again to retry the rest',
+  122: 'KINETO_IMAGE_PROVIDER names an image provider this Kineto build does not have',
+  123: 'The image provider has no API key configured',
+  124: 'This shot has no written intent to generate from',
+  125: 'The image provider refused the request; it will not succeed unchanged',
+  126: 'A paid call may already have been accepted and charged without its result being kept; '
+      'asking again may pay twice',
   199: 'Native project call failed unexpectedly',
 };
 

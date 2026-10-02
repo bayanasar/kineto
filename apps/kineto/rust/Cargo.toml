@@ -13,7 +13,9 @@ ownership-test-hooks = []
 
 [dependencies]
 kineto-core = { path = "../../../crates/kineto-core" }
+kineto-jobs = { path = "../../../crates/kineto-jobs" }
 kineto-project = { path = "../../../crates/kineto-project" }
+kineto-providers = { path = "../../../crates/kineto-providers" }
 
 [dev-dependencies]
 serde_json = "1"

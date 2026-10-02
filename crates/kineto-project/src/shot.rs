@@ -17,7 +17,8 @@ use crate::{
 
 const SHOT_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_SCHEMA_VERSION: u32 = 1;
-const GENERATED_CANDIDATE_COUNT: usize = 3;
+/// Candidates one generation creates.
+pub const GENERATED_CANDIDATE_COUNT: usize = 3;
 const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
 /// Provider key recorded on candidates from the deterministic local demo
@@ -176,6 +177,87 @@ pub struct CandidateOutput {
     pub content_hash: ContentHash,
     pub provider: String,
     pub model: String,
+    /// The file holding the candidate's bytes. `content_hash` is the hash of
+    /// that file. The demo generator produces no media.
+    pub media_path: Option<ProjectRelativePath>,
+    /// How the provider input was compiled, for providers that took a prompt.
+    pub provenance: Option<PromptProvenance>,
+}
+
+/// The provider and model recorded on a candidate's artifact. Each is empty
+/// when the record names none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateOrigin {
+    pub provider: String,
+    pub model: String,
+}
+
+/// How much a compilation lost, derived from its dropped constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Degradation {
+    None,
+    Cosmetic,
+    IdentityAffecting,
+}
+
+/// A constraint the compiler could not carry into the provider input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedConstraintRecord {
+    pub constraint: String,
+    pub reason: String,
+    pub degradation: Degradation,
+}
+
+/// The compiled provider input a candidate was generated from, kept verbatim
+/// so it can be explained and reproduced without a newer compiler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptProvenance {
+    pub compiler_version: String,
+    pub compiled_prompt: String,
+    pub prompt_hash: String,
+    pub applied_constraints: Vec<String>,
+    pub dropped_constraints: Vec<DroppedConstraintRecord>,
+}
+
+impl PromptProvenance {
+    #[must_use]
+    pub fn degradation(&self) -> Degradation {
+        self.dropped_constraints
+            .iter()
+            .map(|dropped| dropped.degradation)
+            .max()
+            .unwrap_or(Degradation::None)
+    }
+
+    fn validate(&self) -> Result<(), ShotWorkflowError> {
+        ContentHash::new(self.prompt_hash.clone())?;
+        if self.compiler_version.trim().is_empty()
+            || self.compiled_prompt.trim().is_empty()
+            || self.dropped_constraints.iter().any(|dropped| {
+                dropped.reason.trim().is_empty() || dropped.degradation == Degradation::None
+            })
+        {
+            return Err(ShotWorkflowError::InvalidCanonicalState);
+        }
+        Ok(())
+    }
+}
+
+/// Where a keyframe candidate's bytes live: beside the shot's canonical
+/// files, named by the candidate's stable artifact ID.
+pub fn keyframe_media_path(
+    shot_number: u32,
+    artifact_id: &ArtifactId,
+    extension: &str,
+) -> Result<ProjectRelativePath, ShotWorkflowError> {
+    if extension.is_empty() || !extension.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return Err(ShotWorkflowError::InvalidCanonicalState);
+    }
+    shot_path(
+        shot_number,
+        &format!("keyframes/{}.{extension}", artifact_id.as_str()),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +266,86 @@ pub enum AttachOutcome {
     Attached,
     /// Every candidate was already in canonical state; nothing was written.
     AlreadyAttached,
+}
+
+/// What a shot is meant to show, as written in its `shot.json`.
+///
+/// Only `action` is required for a shot to have an intent; every other field
+/// is optional, and fields this build does not know stay in the file.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShotIntent {
+    pub action: String,
+    pub framing: Option<String>,
+    pub lens: Option<String>,
+    pub camera_motion: Option<String>,
+    pub emotion: Option<String>,
+    pub dialogue: Option<String>,
+    pub characters: Vec<String>,
+    pub duration_target: Option<f64>,
+}
+
+/// The scene a shot belongs to, as written in its `scene.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneIntent {
+    pub location: Option<String>,
+    pub time: Option<String>,
+    pub dramatic_goal: Option<String>,
+    pub characters: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredShotIntent {
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    framing: Option<String>,
+    #[serde(default)]
+    lens: Option<String>,
+    #[serde(default)]
+    camera_motion: Option<String>,
+    #[serde(default)]
+    emotion: Option<String>,
+    #[serde(default)]
+    dialogue: Option<String>,
+    #[serde(default)]
+    characters: Vec<String>,
+    #[serde(default)]
+    duration_target: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct StoredSceneIntent {
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    time: Option<String>,
+    #[serde(default)]
+    dramatic_goal: Option<String>,
+    #[serde(default)]
+    characters: Vec<String>,
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// The intent of the bootstrap scene, or `None` when it has no `scene.json`.
+pub fn load_scene_intent(
+    project: &CanonicalProject,
+) -> Result<Option<SceneIntent>, ShotWorkflowError> {
+    let path =
+        ProjectRelativePath::new("scenes/scene_001/scene.json").map_err(ShotWorkflowError::Path)?;
+    let Some(stored) = read_json_optional::<StoredSceneIntent>(project, &path)? else {
+        return Ok(None);
+    };
+    Ok(Some(SceneIntent {
+        location: non_blank(stored.location),
+        time: non_blank(stored.time),
+        dramatic_goal: non_blank(stored.dramatic_goal),
+        characters: stored.characters,
+    }))
 }
 
 /// Output of the deterministic local demo generator for one candidate.
@@ -195,6 +357,8 @@ pub fn demo_candidate_output(
         content_hash: demo_content_hash(artifact_id)?,
         provider: DEMO_PROVIDER.to_owned(),
         model: DEMO_MODEL.to_owned(),
+        media_path: None,
+        provenance: None,
     })
 }
 
@@ -282,9 +446,32 @@ struct StoredArtifactRecord {
     provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_state: Option<MediaState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiler_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiled_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_constraints: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dropped_constraints: Option<Vec<DroppedConstraintRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    degradation: Option<Degradation>,
     dependencies: Vec<StoredArtifactDependency>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MediaState {
+    Present,
+    Evicted,
 }
 
 impl StoredArtifactRecord {
@@ -505,6 +692,92 @@ impl ShotWorkflow {
         &self.hash_issues
     }
 
+    /// The shot's written intent, or `None` when its `shot.json` has no
+    /// `action`. A field of the wrong type is invalid canonical state.
+    pub fn intent(&self) -> Result<Option<ShotIntent>, ShotWorkflowError> {
+        let stored: StoredShotIntent = serde_json::from_value(Value::Object(
+            self.shot
+                .extra
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ))
+        .map_err(ShotWorkflowError::Json)?;
+        let Some(action) = non_blank(stored.action) else {
+            return Ok(None);
+        };
+        Ok(Some(ShotIntent {
+            action,
+            framing: non_blank(stored.framing),
+            lens: non_blank(stored.lens),
+            camera_motion: non_blank(stored.camera_motion),
+            emotion: non_blank(stored.emotion),
+            dialogue: non_blank(stored.dialogue),
+            characters: stored.characters,
+            duration_target: stored.duration_target,
+        }))
+    }
+
+    #[must_use]
+    pub const fn shot_number(&self) -> u32 {
+        self.shot_number
+    }
+
+    #[must_use]
+    pub const fn direction(&self) -> ShotDirection {
+        self.shot.direction
+    }
+
+    /// Whether every candidate of `plan` is already in canonical state, so
+    /// attaching it again would change nothing.
+    #[must_use]
+    pub fn is_attached(&self, plan: &GenerationPlan) -> bool {
+        plan.shot_number == self.shot_number
+            && self.shot.generation_revision >= plan.revision
+            && plan
+                .candidate_ids
+                .iter()
+                .all(|candidate| self.artifact(candidate).is_some())
+    }
+
+    /// The media file of each current candidate, in candidate order. `None`
+    /// for a candidate without media, such as a demo candidate.
+    pub fn candidate_media(&self) -> Result<Vec<Option<ProjectRelativePath>>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                self.artifact(candidate)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?
+                    .media_path
+                    .as_ref()
+                    .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
+                    .transpose()
+            })
+            .collect()
+    }
+
+    /// Who made each current candidate, in candidate order, as its artifact
+    /// records it. This is not the session's provider: a project generated
+    /// with one provider may be reopened with another.
+    pub fn candidate_origins(&self) -> Result<Vec<CandidateOrigin>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                let artifact = self
+                    .artifact(candidate)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+                Ok(CandidateOrigin {
+                    provider: artifact.provider.clone().unwrap_or_default(),
+                    model: artifact.model.clone().unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
     pub fn migrate_legacy_hashes(
         &mut self,
         project: &CanonicalProject,
@@ -623,19 +896,11 @@ impl ShotWorkflow {
         {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
-        if self.shot.generation_revision >= plan.revision
-            && plan
-                .candidate_ids
-                .iter()
-                .all(|candidate| self.artifact(candidate).is_some())
-        {
+        if self.is_attached(plan) {
             // Records with the planned IDs are only this plan's attachment if
             // they hold its outputs. Anything else must not be acknowledged
             // as the provider's result.
-            self.ensure_mutation_allowed()?;
-            for output in outputs {
-                self.verify_attached(plan, output)?;
-            }
+            self.check_attached(plan, outputs)?;
             return Ok(AttachOutcome::AlreadyAttached);
         }
         if self.shot.generation_revision > plan.revision {
@@ -651,6 +916,9 @@ impl ShotWorkflow {
         project
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
+        for output in outputs {
+            verify_output(project, plan.shot_number, output)?;
+        }
 
         let mut next_shot = self.shot.clone();
         next_shot.generation_revision = plan.revision;
@@ -665,6 +933,7 @@ impl ShotWorkflow {
             {
                 return Err(ShotWorkflowError::InvalidCanonicalState);
             }
+            let provenance = output.provenance.as_ref();
             next_artifacts.push(StoredArtifactRecord {
                 artifact_id: output.artifact_id.as_str().to_owned(),
                 schema_version: ARTIFACT_SCHEMA_VERSION,
@@ -674,6 +943,17 @@ impl ShotWorkflow {
                 input_hash: Some(plan.input_hash.as_str().to_owned()),
                 provider: Some(output.provider.clone()),
                 model: Some(output.model.clone()),
+                media_path: output
+                    .media_path
+                    .as_ref()
+                    .map(|path| path.as_path().to_string_lossy().into_owned()),
+                media_state: output.media_path.as_ref().map(|_| MediaState::Present),
+                compiler_version: provenance.map(|p| p.compiler_version.clone()),
+                compiled_prompt: provenance.map(|p| p.compiled_prompt.clone()),
+                prompt_hash: provenance.map(|p| p.prompt_hash.clone()),
+                applied_constraints: provenance.map(|p| p.applied_constraints.clone()),
+                dropped_constraints: provenance.map(|p| p.dropped_constraints.clone()),
+                degradation: provenance.map(PromptProvenance::degradation),
                 dependencies: Vec::new(),
                 extra: BTreeMap::new(),
             });
@@ -914,6 +1194,20 @@ impl ShotWorkflow {
 
     /// The canonical record of `output`'s candidate must be exactly what
     /// attaching `plan` with `output` wrote.
+    /// Prove that `plan` is already in canonical state with exactly
+    /// `outputs`, before its jobs are acknowledged.
+    pub fn check_attached(
+        &self,
+        plan: &GenerationPlan,
+        outputs: &[CandidateOutput],
+    ) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
+        for output in outputs {
+            self.verify_attached(plan, output)?;
+        }
+        Ok(())
+    }
+
     fn verify_attached(
         &self,
         plan: &GenerationPlan,
@@ -922,12 +1216,22 @@ impl ShotWorkflow {
         let record = self
             .artifact(&output.artifact_id)
             .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        let media_path = output
+            .media_path
+            .as_ref()
+            .map(|path| path.as_path().to_string_lossy().into_owned());
+        let prompt_hash = output
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.prompt_hash.as_str());
         if record.artifact_type != "shot_candidate"
             || record.status == StoredArtifactStatus::Draft
             || record.input_hash.as_deref() != Some(plan.input_hash.as_str())
             || record.content_hash != output.content_hash.as_str()
             || record.provider.as_deref() != Some(output.provider.as_str())
             || record.model.as_deref() != Some(output.model.as_str())
+            || record.media_path != media_path
+            || record.prompt_hash.as_deref() != prompt_hash
         {
             return Err(ShotWorkflowError::AttachedRecordMismatch(
                 output.artifact_id.as_str().to_owned(),
@@ -1123,6 +1427,41 @@ impl ShotWorkflow {
     }
 }
 
+/// A candidate's media must be the shot's own keyframe file, present, and
+/// exactly the bytes its content hash names.
+fn verify_output(
+    project: &CanonicalProject,
+    shot_number: u32,
+    output: &CandidateOutput,
+) -> Result<(), ShotWorkflowError> {
+    if let Some(provenance) = &output.provenance {
+        provenance.validate()?;
+    }
+    let Some(media_path) = &output.media_path else {
+        return Ok(());
+    };
+    let expected_dir = shot_path(shot_number, "keyframes")?;
+    if media_path.as_path().parent() != Some(expected_dir.as_path())
+        || media_path
+            .as_path()
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            != Some(output.artifact_id.as_str())
+    {
+        return Err(ShotWorkflowError::InvalidCanonicalState);
+    }
+    let bytes = project
+        .root()
+        .read(media_path)
+        .map_err(ShotWorkflowError::Fs)?;
+    if ContentHash::of(&bytes) != output.content_hash {
+        return Err(ShotWorkflowError::MediaMismatch(
+            media_path.as_path().to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_stored_hash(issue: &ShotHashIssue) -> ShotWorkflowError {
     ShotWorkflowError::InvalidStoredHash {
         artifact_id: issue.artifact_id.clone(),
@@ -1282,6 +1621,9 @@ pub enum ShotWorkflowError {
         value: String,
     },
     MigrationBackupConflict(String),
+    /// A candidate's media file is missing its bytes or holds other bytes
+    /// than its content hash names.
+    MediaMismatch(String),
     /// A candidate already in canonical state does not hold the output its
     /// generation produced, so that generation cannot be acknowledged.
     AttachedRecordMismatch(String),
@@ -1332,6 +1674,10 @@ impl fmt::Display for ShotWorkflowError {
                     "legacy hash migration backup conflicts at {path}"
                 )
             }
+            Self::MediaMismatch(path) => write!(
+                formatter,
+                "candidate media does not match its content hash: {path}"
+            ),
             Self::AttachedRecordMismatch(artifact_id) => write!(
                 formatter,
                 "candidate {artifact_id} in canonical state does not match its generation"
@@ -1377,6 +1723,7 @@ impl Error for ShotWorkflowError {
             | Self::MigrationRequired
             | Self::InvalidStoredHash { .. }
             | Self::MigrationBackupConflict(_)
+            | Self::MediaMismatch(_)
             | Self::AttachedRecordMismatch(_)
             | Self::InvalidTarget(_) => None,
         }
@@ -1502,6 +1849,78 @@ mod tests {
         fs::write(base.join("shot.json"), &state.shot).unwrap();
         fs::write(base.join("artifacts.json"), &state.artifacts).unwrap();
         fs::write(base.join("selection.json"), &state.selection).unwrap();
+    }
+
+    #[test]
+    fn written_intent_is_read_and_survives_a_canonical_write() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        assert_eq!(
+            ShotWorkflow::load(&project, 1).unwrap().intent().unwrap(),
+            None
+        );
+        assert_eq!(load_scene_intent(&project).unwrap(), None);
+
+        fs::create_dir_all(shot_dir(&target)).unwrap();
+        fs::write(
+            shot_dir(&target).join("shot.json"),
+            include_bytes!(
+                "../../../fixtures/projects/minimal/scenes/scene_001/shots/shot_001/shot.json"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            target.join("scenes/scene_001/scene.json"),
+            include_bytes!("../../../fixtures/projects/minimal/scenes/scene_001/scene.json"),
+        )
+        .unwrap();
+
+        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let expected = ShotIntent {
+            action: "Alice picks up the sealed letter".to_owned(),
+            framing: Some("medium_close_up".to_owned()),
+            lens: Some("50mm".to_owned()),
+            camera_motion: Some("slow_dolly_in".to_owned()),
+            emotion: Some("cautious curiosity".to_owned()),
+            dialogue: None,
+            characters: vec!["alice".to_owned()],
+            duration_target: Some(4.0),
+        };
+        assert_eq!(shot.intent().unwrap(), Some(expected.clone()));
+        assert_eq!(
+            load_scene_intent(&project).unwrap(),
+            Some(SceneIntent {
+                location: Some("empty_room".to_owned()),
+                time: Some("day".to_owned()),
+                dramatic_goal: Some("Alice discovers the letter".to_owned()),
+                characters: vec!["alice".to_owned()],
+            })
+        );
+
+        shot.set_direction(&project, ShotDirection::Tension)
+            .unwrap();
+        let reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        assert_eq!(reloaded.direction(), ShotDirection::Tension);
+        assert_eq!(reloaded.intent().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn an_intent_field_of_the_wrong_type_is_refused() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        fs::create_dir_all(shot_dir(&target)).unwrap();
+        fs::write(
+            shot_dir(&target).join("shot.json"),
+            br#"{"shot_id":"shot_001","schema_version":1,"action":7}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ShotWorkflow::load(&project, 1).unwrap().intent(),
+            Err(ShotWorkflowError::Json(_))
+        ));
     }
 
     #[test]

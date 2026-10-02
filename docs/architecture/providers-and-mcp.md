@@ -91,6 +91,8 @@ CLI adapters are experimental. Agent CLIs are not stable substitutes for inferen
 
 Start with one cloud provider and one local path.
 
+The first cloud provider is MiniMax (`kineto-provider-minimax`): `image-01` for keyframes over blocking HTTPS with rustls and the bundled Mozilla roots, base64 responses so the image arrives inside the authenticated answer, no redirects, and every failure classified as retryable or terminal (unknown codes are terminal). Its image endpoint has no idempotency key or request lookup, so a request that fails after it was sent may already have been billed; the job runtime's attempt limit bounds the duplicate spend. `cargo run -p kineto-provider-minimax --example image_smoke` is the manual paid smoke test; no test suite calls it.
+
 Local generation should be implementable through a process/API adapter such as ComfyUI without coupling core workflow logic to it.
 
 ### TTS
@@ -176,6 +178,10 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
+The first compiler in use is `keyframe-prompt/1` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json` and compiles a still-image prompt. Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step. Until approved character reference images exist, every named character is an identity-affecting drop. The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it.
+
+Projects created by the desktop app start with the bootstrap scene (`kineto-core/src/bootstrap.rs`) written into these files, published atomically with the project.
+
 ## Paid job safety
 
 A paid/asynchronous provider call has a deterministic idempotency key derived from semantic `input_hash` plus operation identity.
@@ -191,6 +197,10 @@ Adapters declare:
 - remote-job recovery capability
 
 Batch generation has a dry-run/preflight path that can report call count and estimated cost before spend.
+
+A provider answer is only as durable as what is kept of it. For a synchronous provider without remote job handles, the adapter writes the result into the project and a receipt under `.kineto/generation/` before it returns, and the runtime marks the intent invoked only after that. Startup reconciliation completes such a job from its receipt, after checking the media bytes against the recorded hash, instead of calling the provider again; a receipt that no longer matches its media needs a person. Receipts are runtime state and are removed once the candidate is acknowledged. A call that was made but left no receipt (a crash before it was written, or a failure after the request was sent) may have been charged, and a provider that cannot be asked whether a request arrived gives no way to find out. Such an attempt fails closed: it is not retried automatically or on an ordinary request. It is retried only when a refusal record proves the provider certainly did not accept it (never sent, no connection, or an explicit refusal), or on a person's explicit decision to risk paying twice, which retires it with `JobRuntime::retire_unresolved`.
+
+The runtime refuses, rather than queues, a call over the provider's process-wide concurrency ceiling. A refusal spends no attempt, so the generation path waits for a permit (bounded) before invoking.
 
 ## Deterministic fake providers
 

@@ -37,6 +37,7 @@ final class KinetoNativeContract {
     this.statuses,
     this.directions,
     this._fields,
+    this.imageProviders,
     this.snapshotSample,
   );
 
@@ -50,6 +51,9 @@ final class KinetoNativeContract {
   final Map<String, int> directions;
 
   final Map<String, (int, int)> _fields;
+
+  /// Image provider code by name, for example `minimax` → 2.
+  final Map<String, int> imageProviders;
 
   /// A fixed snapshot packed by the native encoder, for contract tests.
   final int snapshotSample;
@@ -72,7 +76,9 @@ final class KinetoNativeContract {
     const statusKind = 1;
     const directionKind = 2;
     const fieldKind = 3;
+    const imageProviderKind = 4;
     final statuses = <String, int>{};
+    final imageProviders = <String, int>{};
     final directions = <String, int>{};
     final fields = <String, (int, int)>{};
     final arena = Arena();
@@ -95,6 +101,8 @@ final class KinetoNativeContract {
             directions[entryName] = value.value;
           case fieldKind:
             fields[entryName] = (value.value, extra.value);
+          case imageProviderKind:
+            imageProviders[entryName] = value.value;
         }
       }
     } finally {
@@ -104,6 +112,7 @@ final class KinetoNativeContract {
       Map.unmodifiable(statuses),
       Map.unmodifiable(directions),
       Map.unmodifiable(fields),
+      Map.unmodifiable(imageProviders),
       _kinetoContractSnapshotSample(),
     );
   }

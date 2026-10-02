@@ -14,18 +14,24 @@
 use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
-use kineto_core::session::{
-    OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand, SnapshotError,
-    SubmitError,
+use kineto_core::{
+    generation::{GenerationError, ImageProvider, ImageProviderKind},
+    keyframe_prompt::KeyframePromptError,
+    session::{
+        OpenRequest, ProjectSession, Recovery, SessionError, SessionSink, ShotCommand,
+        SnapshotError, SubmitError,
+    },
 };
+use kineto_jobs::ErrorClass;
 use kineto_project::{
     fs::ProjectFsError,
     manifest::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
-    shot::{ShotDirection, ShotWorkflowError},
+    shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
 };
+use kineto_providers::secret::EnvSecretSource;
 
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
@@ -146,7 +152,10 @@ unsafe fn spawn(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    match ProjectSession::spawn(request, Box::new(DartPort { post, port })) {
+    let Ok(provider) = image_provider_from_environment() else {
+        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    };
+    match ProjectSession::spawn(request, provider, Box::new(DartPort { post, port })) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
             // SAFETY: callers validated `out_session` as writable pointer storage.
@@ -155,6 +164,21 @@ unsafe fn spawn(
         }
         Err(_) => PROJECT_ERR_IO,
     }
+}
+
+/// The environment variable that names the image provider a session uses.
+/// Unset, empty or `local-demo` means the free demo generator; `minimax`
+/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`. A paid provider is
+/// used only when named here, never because a key happens to be set.
+const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
+
+fn image_provider_from_environment() -> Result<ImageProvider, ()> {
+    let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+    };
+    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
 }
 
 /// Start opening an existing canonical Kineto project.
@@ -337,6 +361,67 @@ pub unsafe extern "C" fn kineto_project_is_read_only(session: *const KinetoProje
     })
 }
 
+/// The session's image provider as a contract `image_provider` code: 1 for the
+/// local demo generator, 2 for MiniMax; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_image_provider(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        image_provider_code(session.session.image_provider().kind)
+    })
+}
+
+/// 1 when the session's image provider can generate, 0 when it cannot (a
+/// paid provider without credentials) or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_image_provider_ready(
+    session: *const KinetoProjectSession,
+) -> u8 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u8::from(session.session.image_provider().ready)
+    })
+}
+
+/// Estimated cost of one shot generation with the session's image provider,
+/// in USD micros; 0 for a free provider or a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_generation_cost_micros(
+    session: *const KinetoProjectSession,
+) -> u64 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        session.session.image_provider().generation_cost_micros
+    })
+}
+
+fn image_provider_code(kind: ImageProviderKind) -> u32 {
+    match kind {
+        ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
+        ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
+    }
+}
+
 /// Copy the UTF-8 project ID into caller-owned memory.
 ///
 /// # Safety
@@ -420,11 +505,181 @@ pub unsafe extern "C" fn kineto_project_shot_state(
                 unsafe { ptr::write(out_state, encode_shot_snapshot(snapshot)) };
                 PROJECT_OK
             }
-            Err(SnapshotError::InvalidShot) => PROJECT_ERR_INVALID_SHOT,
-            Err(SnapshotError::NotOpen) => PROJECT_ERR_NOT_OPEN,
-            Err(SnapshotError::Failed(error)) => shot_error_code(&error),
+            Err(error) => snapshot_error_code(&error),
         }
     })
+}
+
+fn snapshot_error_code(error: &SnapshotError) -> i32 {
+    match error {
+        SnapshotError::InvalidShot => PROJECT_ERR_INVALID_SHOT,
+        SnapshotError::InvalidCandidate => PROJECT_ERR_INVALID_CANDIDATE,
+        SnapshotError::NotOpen => PROJECT_ERR_NOT_OPEN,
+        SnapshotError::Failed(error) => shot_error_code(error),
+    }
+}
+
+/// Copy the absolute path of a candidate's media into caller-owned memory,
+/// with the same sizing contract as project metadata. A candidate without
+/// media, such as a demo candidate, copies an empty path. Reads published
+/// state only; never does I/O.
+///
+/// # Safety
+/// `session` must be live. `out_len` must point to writable `u64` storage. If
+/// `out_cap` is non-zero, `out_buf` must be writable for at least `out_cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_media_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let Ok(candidate_index) = usize::try_from(candidate_index) else {
+            return PROJECT_ERR_INVALID_CANDIDATE;
+        };
+        let media = match session.session.candidate_media(shot_index, candidate_index) {
+            Ok(media) => media,
+            Err(error) => return snapshot_error_code(&error),
+        };
+        let path = match &media {
+            None => "",
+            Some(path) => match path.to_str() {
+                Some(path) => path,
+                None => return PROJECT_ERR_INVALID_UTF8,
+            },
+        };
+        // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
+        unsafe { copy_utf8(path.as_bytes(), out_buf, out_cap, out_len) }
+    })
+}
+
+/// Write 1 to `out_unresolved` when a paid keyframe call of the shot's last
+/// generation may have been accepted, and charged, without leaving its
+/// result, so generating is refused until the director resubmits; 0
+/// otherwise. Reads published state only; never does I/O.
+///
+/// # Safety
+/// `session` must be live and `out_unresolved` must point to writable `u8`
+/// storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_keyframes_unresolved(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    out_unresolved: *mut u8,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        if out_unresolved.is_null() {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        }
+        match session.session.keyframes_unresolved(shot_index) {
+            Ok(unresolved) => {
+                // SAFETY: caller guarantees writable storage for one u8.
+                unsafe { ptr::write(out_unresolved, u8::from(unresolved)) };
+                PROJECT_OK
+            }
+            Err(error) => snapshot_error_code(&error),
+        }
+    })
+}
+
+/// Copy the provider recorded on a candidate's artifact, for example
+/// `minimax`, with the same sizing contract as project metadata. This is who
+/// made the candidate, not the session's provider. Empty when the record names
+/// none. Reads published state only; never does I/O.
+///
+/// # Safety
+/// Same contract as [`kineto_project_candidate_media_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_provider_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            copy_candidate_origin(
+                session,
+                shot_index,
+                candidate_index,
+                |origin| origin.provider,
+                out_buf,
+                out_cap,
+                out_len,
+            )
+        }
+    })
+}
+
+/// Copy the model recorded on a candidate's artifact, for example
+/// `image-01`. Otherwise as [`kineto_project_candidate_provider_copy`].
+///
+/// # Safety
+/// Same contract as [`kineto_project_candidate_media_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_candidate_model_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            copy_candidate_origin(
+                session,
+                shot_index,
+                candidate_index,
+                |origin| origin.model,
+                out_buf,
+                out_cap,
+                out_len,
+            )
+        }
+    })
+}
+
+unsafe fn copy_candidate_origin(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    candidate_index: u32,
+    field: impl FnOnce(CandidateOrigin) -> String,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    // SAFETY: the caller guarantees a live handle or null.
+    let Some(session) = (unsafe { session.as_ref() }) else {
+        return PROJECT_ERR_INVALID_ARGUMENT;
+    };
+    let Ok(candidate_index) = usize::try_from(candidate_index) else {
+        return PROJECT_ERR_INVALID_CANDIDATE;
+    };
+    let origin = match session
+        .session
+        .candidate_origin(shot_index, candidate_index)
+    {
+        Ok(origin) => origin,
+        Err(error) => return snapshot_error_code(&error),
+    };
+    // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
+    unsafe { copy_utf8(field(origin).as_bytes(), out_buf, out_cap, out_len) }
 }
 
 unsafe fn submit(
@@ -487,6 +742,25 @@ pub unsafe extern "C" fn kineto_project_shot_generate(
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
         submit(session, shot_index, ShotCommand::Generate, token)
+    })
+}
+
+/// Queue generating the shot's candidates again although a paid call of the
+/// last attempt may have been accepted, and charged for, without leaving its
+/// result (status `126`). Only on the director's explicit decision to risk
+/// paying twice. Otherwise as [`kineto_project_shot_generate`].
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_resubmit_keyframes(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    token: u64,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(session, shot_index, ShotCommand::ResubmitKeyframes, token)
     })
 }
 
@@ -580,9 +854,30 @@ fn session_error_code(error: &SessionError) -> i32 {
     match error {
         SessionError::Open(error) => project_error_code(error),
         SessionError::Shot(error) => shot_error_code(error),
-        SessionError::Generation(_) => PROJECT_ERR_GENERATION_JOB,
+        SessionError::Generation(error) => generation_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+    }
+}
+
+fn generation_error_code(error: &GenerationError) -> i32 {
+    match error {
+        GenerationError::Shot(error) => shot_error_code(error),
+        GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
+        GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
+            PROJECT_ERR_SHOT_INTENT_MISSING
+        }
+        GenerationError::Prompt(_) => PROJECT_ERR_INVALID_SHOT_STATE,
+        GenerationError::UnresolvedSubmission => PROJECT_ERR_PAID_CALL_UNRESOLVED,
+        GenerationError::Provider {
+            class: ErrorClass::Terminal,
+            ..
+        } => PROJECT_ERR_PROVIDER_REFUSED,
+        GenerationError::Provider { .. }
+        | GenerationError::NeedsProviderCall
+        | GenerationError::Runtime(_)
+        | GenerationError::JobId(_)
+        | GenerationError::Unexpected(_) => PROJECT_ERR_GENERATION_JOB,
     }
 }
 
@@ -612,6 +907,7 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         | ShotWorkflowError::StaleGeneration
         | ShotWorkflowError::InvalidStoredHash { .. }
         | ShotWorkflowError::MigrationBackupConflict(_)
+        | ShotWorkflowError::MediaMismatch(_)
         | ShotWorkflowError::AttachedRecordMismatch(_)
         | ShotWorkflowError::InvalidTarget(_)
         | ShotWorkflowError::Path(_)
