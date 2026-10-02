@@ -41,7 +41,7 @@ There is no desktop:
 - engine executable lookup
 - duplicate request/response schema
 
-Native ABI v13 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer busy status (`117`), v11 the explicit legacy-hash migration entry point with its refusal status (`118`), v12 the lock-unavailable status (`119`), v13 made every filesystem-touching project call asynchronous (see Concurrency model) with status `120` for a session that is not open, v14 runs generation as write-ahead jobs with status `121` for a generation job that did not finish, and v15 reports work recovered at open as `RECOVERED` messages. Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
+Native ABI v13 keeps the shot-indexed demo control surface and opaque canonical-project session, keeps the panic/version guards introduced in v7, and keeps v8's project-session ownership rules. v10 added the single-writer busy status (`117`), v11 the explicit legacy-hash migration entry point with its refusal status (`118`), v12 the lock-unavailable status (`119`), v13 made every filesystem-touching project call asynchronous (see Concurrency model) with status `120` for a session that is not open, v14 runs generation as write-ahead jobs with status `121` for a generation job that did not finish, v15 reports work recovered at open as `RECOVERED` messages, and v16 publishes the native contract table described under ABI compatibility. Project creation is explicitly a UTF-8 text constructor, and project metadata is copied into caller-owned buffers instead of exposing pointers into Rust `String` storage. TOML, JSON, serde values, and whole project models do not cross FFI.
 
 The demo snapshot remains one packed `u64` containing generated/locked/stale flags, legacy-migration-pending and invalid-hash flags, candidate count, selected candidate, shot direction, generation revision, and superseded count. This compact demo ABI is disposable scaffolding, not the final project model.
 
@@ -90,6 +90,14 @@ Every exported function runs its body inside `guarded`, which catches an unwind,
 `kineto_engine_abi_version()` names the revision of the whole exported surface: symbol set, packed snapshot layout, and status codes. `lib/native/kineto_engine.dart` declares the revision it was written against as `kinetoExpectedNativeAbiVersion`, and every entry point into the bindings — `KinetoEngine.open()`, `KinetoProjectSession.createTextProject`, `KinetoProjectSession.open` — checks the loaded library before doing anything else, throwing `KinetoAbiMismatchException` on a mismatch.
 
 Bump the Rust constant and the Dart constant in the same change whenever any of the following moves: an exported symbol's name or signature, the packed `u64` demo layout, or the meaning of a status code. A committed test asserts the two constants agree against the bundled library, so drift fails the build rather than silently mis-decoding state.
+
+The revision check cannot catch a change made to one side only, because both revisions are bumped by hand in the same change. So project status codes, shot direction codes and the packed shot-snapshot layout are defined once, in `apps/kineto/rust/src/contract.rs`, and published through `kineto_contract_entry_count`, `kineto_contract_entry` and `kineto_contract_snapshot_sample`.
+
+- Dart reads them on first use (`KinetoNativeContract`) and decodes snapshots with the published layout, so bit positions are not repeated in Dart.
+- The status constants Dart keeps for control flow, its status message table and the direction wire codes are compared name for name against the native table in `test/native/native_contract_test.dart`. Changing either side alone fails that test.
+- Symbol signatures (`@Native` types and `extern "C"` declarations) are still written on both sides.
+
+Code generation (`flutter_rust_bridge` or a `build.rs` emitter) was considered and not introduced. ADR-0005 reserves generated bridge tooling for when the typed async/stream surface is large enough to justify it. The current surface is small enough that one published table and one test cover the drift generation would prevent.
 
 ## Text project creation
 

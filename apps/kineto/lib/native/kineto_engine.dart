@@ -5,6 +5,7 @@ import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 
+part 'kineto_contract.dart';
 part 'kineto_project.dart';
 
 typedef _DestroyEngineNative = Void Function(Pointer<Void>);
@@ -26,7 +27,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 15;
+const int kinetoExpectedNativeAbiVersion = 16;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);
@@ -54,12 +55,12 @@ final class KinetoEngineSnapshot {
 }
 
 enum KinetoShotDirection {
-  reaction(1, 'Reaction'),
-  spatialClarity(2, 'Spatial clarity'),
-  intimacy(3, 'Intimacy'),
-  tension(4, 'Tension');
+  reaction(1, 'reaction', 'Reaction'),
+  spatialClarity(2, 'spatial_clarity', 'Spatial clarity'),
+  intimacy(3, 'intimacy', 'Intimacy'),
+  tension(4, 'tension', 'Tension');
 
-  const KinetoShotDirection(this.wireValue, this.label);
+  const KinetoShotDirection(this.wireValue, this.wireName, this.label);
 
   factory KinetoShotDirection.fromWire(int value) => switch (value) {
         1 => reaction,
@@ -70,6 +71,9 @@ enum KinetoShotDirection {
       };
 
   final int wireValue;
+
+  /// The name the native contract gives this direction.
+  final String wireName;
   final String label;
 }
 
@@ -87,19 +91,23 @@ final class KinetoShotSnapshot {
     this.hasInvalidHashes = false,
   });
 
+  /// Decode a packed native snapshot with the layout the native library
+  /// publishes; the bit positions are not repeated here.
   factory KinetoShotSnapshot.fromBits(int bits) {
-    final selectedCode = (bits >> 16) & 0xff;
+    final contract = KinetoNativeContract.instance;
+    int field(String name) => contract.field(bits, name);
+    final selectedCode = field('selected_plus_one');
     return KinetoShotSnapshot(
-      direction: KinetoShotDirection.fromWire((bits >> 24) & 0xff),
-      generated: (bits & 1) != 0,
-      locked: ((bits >> 1) & 1) != 0,
-      stale: ((bits >> 2) & 1) != 0,
-      candidateCount: (bits >> 8) & 0xff,
+      direction: KinetoShotDirection.fromWire(field('direction')),
+      generated: field('generated') != 0,
+      locked: field('locked') != 0,
+      stale: field('stale') != 0,
+      candidateCount: field('candidate_count'),
       selectedIndex: selectedCode == 0 ? null : selectedCode - 1,
-      generation: (bits >> 32) & 0xffff,
-      supersededCount: (bits >> 48) & 0xffff,
-      migrationPending: ((bits >> 3) & 1) != 0,
-      hasInvalidHashes: ((bits >> 4) & 1) != 0,
+      generation: field('generation_revision'),
+      supersededCount: field('superseded_count'),
+      migrationPending: field('migration_pending') != 0,
+      hasInvalidHashes: field('invalid_hashes') != 0,
     );
   }
 

@@ -630,31 +630,64 @@ void _checkProjectResult(int code) {
   throw _projectException(code);
 }
 
-KinetoProjectException _projectException(int code) {
-  return KinetoProjectException(code, switch (code) {
-    100 => 'Invalid project argument',
-    101 => 'Project input is not valid UTF-8',
-    102 => 'Project filesystem operation failed',
-    103 => 'Project target already exists',
-    104 => 'Project manifest is invalid',
-    105 => 'Project format is newer than this Kineto build supports',
-    106 => 'Project metadata buffer is too small',
-    107 => 'Project is read-only until an explicit migration is performed',
-    108 => 'Shot index is invalid',
-    109 => 'Generate candidates before selecting',
-    110 => 'Candidate index is invalid',
-    111 => 'Shot selection is locked',
-    112 => 'Shot selection is already locked',
-    113 => 'Select a candidate before locking',
-    114 => 'Selection is stale; regenerate before locking',
-    115 => 'Canonical shot approval state is invalid',
-    116 => 'Shot generation revision overflow',
-    117 => 'Project is already open for writing in another Kineto window',
-    118 => 'Legacy shot hashes need migration before this shot can change',
-    119 => 'Project cannot be locked for single-writer access on this filesystem',
-    120 => 'Project session is not open',
-    121 => 'Generation did not finish; it resumes when the project reopens',
-    199 => 'Native project call failed unexpectedly',
-    _ => 'Unknown native project error',
-  });
-}
+/// Project status codes by the names the native contract uses. Tests check
+/// this table, and the named constants on [KinetoProjectException], against
+/// the bundled library.
+const Map<String, int> kinetoProjectStatusCodes = <String, int>{
+  'ok': 0,
+  'invalid_argument': 100,
+  'invalid_utf8': 101,
+  'io': 102,
+  'already_exists': 103,
+  'invalid_manifest': 104,
+  'unsupported_format': 105,
+  'buffer_too_small': 106,
+  'read_only': 107,
+  'invalid_shot': 108,
+  'not_generated': 109,
+  'invalid_candidate': 110,
+  'locked': 111,
+  'already_locked': 112,
+  'no_selection': 113,
+  'stale_selection': 114,
+  'invalid_shot_state': 115,
+  'generation_overflow': 116,
+  'busy': 117,
+  'migration_required': 118,
+  'lock_unavailable': 119,
+  'not_open': 120,
+  'generation_job': 121,
+  'panic': 199,
+};
+
+/// What each non-zero project status means to the director.
+const Map<int, String> kinetoProjectStatusMessages = <int, String>{
+  100: 'Invalid project argument',
+  101: 'Project input is not valid UTF-8',
+  102: 'Project filesystem operation failed',
+  103: 'Project target already exists',
+  104: 'Project manifest is invalid',
+  105: 'Project format is newer than this Kineto build supports',
+  106: 'Project metadata buffer is too small',
+  107: 'Project is read-only until an explicit migration is performed',
+  108: 'Shot index is invalid',
+  109: 'Generate candidates before selecting',
+  110: 'Candidate index is invalid',
+  111: 'Shot selection is locked',
+  112: 'Shot selection is already locked',
+  113: 'Select a candidate before locking',
+  114: 'Selection is stale; regenerate before locking',
+  115: 'Canonical shot approval state is invalid',
+  116: 'Shot generation revision overflow',
+  117: 'Project is already open for writing in another Kineto window',
+  118: 'Legacy shot hashes need migration before this shot can change',
+  119: 'Project cannot be locked for single-writer access on this filesystem',
+  120: 'Project session is not open',
+  121: 'Generation did not finish; it resumes when the project reopens',
+  199: 'Native project call failed unexpectedly',
+};
+
+KinetoProjectException _projectException(int code) => KinetoProjectException(
+      code,
+      kinetoProjectStatusMessages[code] ?? 'Unknown native project error',
+    );
