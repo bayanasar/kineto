@@ -42,29 +42,10 @@ struct Prepared {
 
 impl Prepared {
     fn gather(project: &CanonicalProject) -> Result<Self, GenerationError> {
-        let (locked, screenplay) = document::locked_screenplay(project)
-            .map_err(document_error)?
-            .ok_or(GenerationError::Prerequisite(
-                Prerequisite::LockedScreenplay,
-            ))?;
-        let analysis_prefix = format!("{}_r", DocumentKind::StoryAnalysis.id_prefix());
-        let written_from = locked
-            .dependencies
-            .iter()
-            .find(|dependency| dependency.artifact_id.starts_with(&analysis_prefix))
-            .ok_or(GenerationError::Unexpected(
-                "the locked screenplay does not name its story analysis",
-            ))?;
-        let analysis = revisions::revisions(project, DocumentKind::StoryAnalysis)
-            .map_err(document_error)?
-            .into_iter()
-            .find(|record| {
-                record.artifact_id == written_from.artifact_id
-                    && record.content_hash == written_from.content_hash
-            })
-            .ok_or(GenerationError::Unexpected(
-                "the story analysis the locked screenplay was written from is missing",
-            ))?;
+        let (locked, screenplay, analysis, _) =
+            document::material(project).map_err(document_error)?.ok_or(
+                GenerationError::Prerequisite(Prerequisite::LockedScreenplay),
+            )?;
         Ok(Self {
             locked,
             screenplay,

@@ -358,6 +358,47 @@ pub fn locked_screenplay(
     Ok(Some((record, screenplay)))
 }
 
+/// What a bible describes and may name: the locked screenplay, with its
+/// revision, and the story analysis it was adapted from, with its revision;
+/// `None` when no screenplay is locked.
+pub fn material(
+    project: &CanonicalProject,
+) -> Result<Option<(RevisionRecord, Screenplay, RevisionRecord, StoryAnalysis)>, RevisionError> {
+    let Some((locked, screenplay)) = locked_screenplay(project)? else {
+        return Ok(None);
+    };
+    let analysis_prefix = format!("{}_r", DocumentKind::StoryAnalysis.id_prefix());
+    let missing = || {
+        RevisionError::InvalidDocument(
+            "the story analysis the locked screenplay was written from is missing".to_owned(),
+        )
+    };
+    let written_from = locked
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.artifact_id.starts_with(&analysis_prefix))
+        .ok_or_else(missing)?;
+    let analysis_record = revisions::revisions(project, DocumentKind::StoryAnalysis)?
+        .into_iter()
+        .find(|record| {
+            record.artifact_id == written_from.artifact_id
+                && record.content_hash == written_from.content_hash
+        })
+        .ok_or_else(missing)?;
+    let analysis = revisions::read(project, &analysis_record)?;
+    Ok(Some((locked, screenplay, analysis_record, analysis)))
+}
+
+/// Check `bible` against the locked screenplay and its analysis, as a
+/// model's bible is before it is kept.
+fn check_references(project: &CanonicalProject, bible: &Bible) -> Result<(), RevisionError> {
+    let (_, screenplay, _, analysis) = material(project)?
+        .ok_or_else(|| RevisionError::InvalidDocument("no screenplay is locked".to_owned()))?;
+    bible
+        .check_against(&screenplay, &analysis)
+        .map_err(RevisionError::InvalidDocument)
+}
+
 /// What a bible written from the screenplay `locked` depends on: the
 /// material that screenplay was made from (its story analysis and source),
 /// each of its scenes, and the revision itself, which is cosmetic: it names
@@ -451,13 +492,15 @@ pub fn staleness(
 /// `based_on` must be the latest revision, so an edit never silently
 /// replaces one the director has not seen. An edit that changes nothing
 /// returns the revision it started from. The edit is made from what the
-/// edited revision was made from.
+/// edited revision was made from, and is held to the locked screenplay and
+/// its analysis as a model's bible is.
 pub fn edit(
     project: &CanonicalProject,
     based_on: u32,
     bible: &Bible,
 ) -> Result<RevisionRecord, RevisionError> {
     bible.validate().map_err(RevisionError::InvalidDocument)?;
+    check_references(project, bible)?;
     revisions::save_edit(
         project,
         DocumentKind::Bible,
@@ -466,10 +509,17 @@ pub fn edit(
     )
 }
 
-/// Lock `revision` as the bible production follows. A stale bible can be
-/// locked: the director decides whether it still holds, and [`staleness`]
-/// keeps saying why it may not.
+/// Lock `revision` as the bible production follows. It must name only what
+/// the locked screenplay and its analysis define. A stale bible that does
+/// can be locked: the director decides whether it still holds, and
+/// [`staleness`] keeps saying why it may not.
 pub fn lock(project: &CanonicalProject, revision: u32) -> Result<(), RevisionError> {
+    let record = revisions::revisions(project, DocumentKind::Bible)?
+        .into_iter()
+        .find(|record| record.revision == revision)
+        .ok_or(RevisionError::NoSuchRevision(revision))?;
+    let bible: Bible = revisions::read(project, &record)?;
+    check_references(project, &bible)?;
     revisions::lock(project, DocumentKind::Bible, revision)
 }
 
@@ -630,6 +680,19 @@ mod tests {
         record
     }
 
+    /// Record the sample analysis, as the screenplay's material.
+    fn analysed(project: &CanonicalProject) -> DependencyRecord {
+        let record = seed(
+            project,
+            DocumentKind::StoryAnalysis,
+            &revisions::encode(&analysis_sample()).unwrap(),
+            vec![made_from("source_r0001")],
+        );
+        DependencyRecord::from(
+            &revisions::dependency_on(&record, DependencyImpact::Semantic).unwrap(),
+        )
+    }
+
     fn analysis_sample() -> StoryAnalysis {
         serde_json::from_str(SAMPLE_ANALYSIS_JSON).unwrap()
     }
@@ -650,11 +713,12 @@ mod tests {
     /// it.
     fn with_bible(target: &std::path::Path) -> (CanonicalProject, RevisionRecord) {
         let project = project(target);
+        let analysis = analysed(&project);
         seed(
             &project,
             DocumentKind::Screenplay,
             &revisions::encode(&screenplay_sample()).unwrap(),
-            vec![made_from("story_analysis_r0001"), made_from("source_r0001")],
+            vec![analysis, made_from("source_r0001")],
         );
         screenplay::lock(&project, 1).unwrap();
         let (locked, screenplay) = locked_screenplay(&project).unwrap().unwrap();
@@ -867,6 +931,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(locked, edited);
+    }
+
+    #[test]
+    fn an_edit_or_a_lock_names_only_what_the_screenplay_and_its_analysis_define() {
+        let temp = TempDir::new();
+        let (project, _) = with_bible(&temp.0.join("film"));
+        type Edit = fn(&mut Bible);
+        let cases: [(Edit, &str); 3] = [
+            (
+                |bible| {
+                    bible.characters[1].id = "waiter".to_owned();
+                    bible.props[0].characters = vec!["waiter".to_owned()];
+                },
+                "character \"waiter\" is not in the screenplay's cast",
+            ),
+            (
+                |bible| {
+                    let mut rooftop = bible.locations[0].clone();
+                    rooftop.id = "rooftop".to_owned();
+                    bible.locations.push(rooftop);
+                },
+                "location \"rooftop\" is not a location of the story analysis",
+            ),
+            (
+                |bible| bible.props[0].scenes = vec!["office_dawn".to_owned()],
+                "names scene \"office_dawn\", which is not in the screenplay",
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut edited = parse(&sample()).unwrap();
+            change(&mut edited);
+            let Err(RevisionError::InvalidDocument(reason)) = edit(&project, 1, &edited) else {
+                panic!("an edit naming what the screenplay lacks was saved");
+            };
+            assert!(reason.contains(expected), "{reason:?} lacks {expected:?}");
+        }
+        assert_eq!(
+            revisions::revisions(&project, DocumentKind::Bible)
+                .unwrap()
+                .len(),
+            1,
+            "no refused edit became a revision"
+        );
+
+        // A revision that got past the edit path anyway is not locked.
+        let mut stranger = parse(&sample()).unwrap();
+        stranger.props[0].scenes = vec!["office_dawn".to_owned()];
+        let record = seed(
+            &project,
+            DocumentKind::Bible,
+            &revisions::encode(&stranger).unwrap(),
+            Vec::new(),
+        );
+        assert!(matches!(
+            lock(&project, record.revision),
+            Err(RevisionError::InvalidDocument(_))
+        ));
+        assert!(
+            revisions::revisions(&project, DocumentKind::Bible)
+                .unwrap()
+                .iter()
+                .all(|record| record.status != RevisionStatus::Locked)
+        );
     }
 
     #[test]
