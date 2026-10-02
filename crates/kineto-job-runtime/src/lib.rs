@@ -1731,6 +1731,13 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
+            // SystemTime is only microsecond-precise on macOS, so tests running in
+            // parallel could otherwise share a directory name.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let nonce = format!(
+                "{nonce}-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
             Self(
                 std::env::temp_dir()
                     .join(format!("kineto-job-runtime-{}-{nonce}", std::process::id())),
