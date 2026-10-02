@@ -18,9 +18,9 @@ my-film/
 │   ├── screenplay_r0001.json
 │   └── screenplay.md
 ├── bible/
-│   ├── world.json
-│   ├── style.json
-│   └── continuity.json
+│   ├── revisions.json
+│   ├── bible_r0001.json
+│   └── style.json
 ├── characters/
 │   └── alice/
 │       ├── character.json
@@ -52,13 +52,25 @@ Candidate filenames use stable artifact IDs or content-addressed names. Selectio
 
 ## Document revisions
 
-The story analysis (`story/analysis/`) and the screenplay (`screenplay/`) are document artifacts kept as revisions. Each revision is a JSON file named by its artifact ID (`story_analysis_r0001.json`, `screenplay_r0003.json`); `revisions.json` in the same directory (`revisions.schema.json`) records each revision's status (`candidate`, `locked`, `superseded`), origin (`generated` by a model or `edited` by the director, with `based_on`), content hash, input hash, provider, model, prompt provenance and dependencies. A new revision supersedes the earlier candidates; locking one supersedes the previously locked revision; nothing is deleted. A revision whose file no longer matches its hash is refused rather than read. The story analysis body follows `story-analysis.schema.json`, which is also the schema the model is asked to satisfy; a revision depends on the source revision it read (`source_rNNNN`).
+The story analysis (`story/analysis/`), the screenplay (`screenplay/`) and the world and character bible (`bible/`) are document artifacts kept as revisions. Each revision is a JSON file named by its artifact ID (`story_analysis_r0001.json`, `screenplay_r0003.json`); `revisions.json` in the same directory (`revisions.schema.json`) records each revision's status (`candidate`, `locked`, `superseded`), origin (`generated` by a model or `edited` by the director, with `based_on`), content hash, input hash, provider, model, prompt provenance and dependencies. A new revision supersedes the earlier candidates; locking one supersedes the previously locked revision; nothing is deleted. A revision whose file no longer matches its hash is refused rather than read. The story analysis body follows `story-analysis.schema.json`, which is also the schema the model is asked to satisfy; a revision depends on the source revision it read (`source_rNNNN`).
 
 A screenplay revision follows `screenplay.schema.json`: a title, a cast whose IDs are story analysis character IDs, and scenes. Each scene has a stable ID, a heading as printed, a setting, a story analysis location ID, a time, the cast present, a dramatic goal and blocks of action, dialogue (with its speaker and an optional parenthetical) and transitions. A generated screenplay depends on the story analysis revision and the source revision it was written from. One scene can be written again on its own (`screenplay-scene.schema.json`, the same shape as a scene in the screenplay): the result is a new revision `based_on` the one it reworked, with every other scene carried over unchanged. `screenplay.md` is rendered by Rust from the current revision (the locked one, otherwise the latest candidate); it is derived, never read back, and deleting it loses nothing, since rendering again reproduces it byte for byte.
 
 The director's edits never overwrite: saving an edit writes the next revision (`origin: edited`, `based_on` the revision edited, carrying that revision's analysis and source dependencies), and is refused when the edit did not start from the latest revision, so a revision the director has not seen is never replaced; saving without a change writes nothing. Locking a revision makes it the screenplay production follows, while newer candidates remain the director's working copy. All of this lives in `screenplay/`, so deleting `.kineto/` changes no revision and no lock.
 
 Downstream work depends on a scene, not on a screenplay revision: the dependency names `screenplay_scene.<scene_id>` and the scene's content hash. That hash covers what the scene says and ignores layout — file formatting, the scene's position, and whitespace at line ends or around paragraphs — so a new revision leaves work on unchanged scenes fresh. Against the current screenplay, such a dependency is fresh, changed, or removed.
+
+## World and character bible
+
+The bible (`bible/bible_rNNNN.json`, `bible.schema.json`) is the production memory visual work follows, written from the locked screenplay. It describes the world (setting, period, visual rules and continuity rules for the whole film), and has an entry for every cast member who appears in a scene and every location a scene is set in, plus props:
+
+- a character has a description, an appearance concrete enough to draw the same person every time, a usual wardrobe with wardrobe changes by scene, forbidden changes (what must never change between shots) and continuity notes;
+- a location has a description, an appearance, forbidden changes and continuity notes;
+- a prop has a description, an appearance, the characters who handle it and the scenes it appears in.
+
+Character IDs are screenplay cast IDs; location IDs are story analysis location IDs, so a place that is seen without a scene being set in it can be described too; scene IDs are screenplay scene IDs. A model's bible is checked against all of that before it is kept, and asked for once more with the reason when it fails. Entry IDs are at most 112 characters, so an entry can later be depended on as `bible_character.<id>` and the like.
+
+A bible depends on the story analysis and source the locked screenplay was made from, on each of that screenplay's scenes (`screenplay_scene.<id>`, semantic), and on the screenplay revision itself as a cosmetic dependency that only records where the scenes were read. It is stale when the locked screenplay changes a scene it read, removes one, adds one, or is made from another analysis or source; formatting changes and locking a revision whose scenes say the same thing leave it fresh. Staleness names each cause. Edits and locks follow the screenplay's rules (a new revision, `based_on`, refused when not started from the latest; one locked revision). A stale bible can still be locked, since the director decides whether it holds, and staleness keeps saying why it may not.
 
 ## `project.toml`
 

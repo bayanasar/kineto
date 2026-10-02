@@ -646,6 +646,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
         files,
         [
             "artifact.schema.json",
+            "bible.schema.json",
             "job.schema.json",
             "project.schema.json",
             "revisions.schema.json",
@@ -1001,6 +1002,86 @@ fn the_screenplay_schema_rejects_drift() {
         let mut value = sample.clone();
         edit(&mut value);
         assert!(validate_value(&screenplay_schema, &value, "$").is_err());
+    }
+}
+
+#[test]
+fn generated_and_edited_bibles_and_their_revision_log_match_committed_schemas() {
+    let bible_schema = schema("bible.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    validate(
+        &bible_schema,
+        &serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON)
+            .expect("the sample is JSON"),
+        "sample bible",
+    );
+    let written = kineto_core::bible::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    let mut bible: kineto_project::bible::Bible =
+        kineto_project::revisions::read(&project, &written).expect("the bible is readable");
+    bible.characters[0].wardrobe_changes = vec![kineto_project::bible::WardrobeChange {
+        scenes: vec!["office_night".to_owned()],
+        wardrobe: "Shirtsleeves, the coat over a chair.".to_owned(),
+    }];
+    let edited = kineto_project::bible::edit(&project, 1, &bible).expect("the edit is saved");
+    kineto_project::bible::lock(&project, 2).expect("the bible should lock");
+    for record in [&written, &edited] {
+        validate(
+            &bible_schema,
+            &json_file(&temp.0.join(&record.path)),
+            &record.path,
+        );
+    }
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("bible/revisions.json")),
+        "bible revisions",
+    );
+}
+
+#[test]
+fn the_bible_schema_rejects_drift() {
+    let bible_schema = schema("bible.schema.json");
+    let sample: Value =
+        serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON).expect("the sample is JSON");
+    type Edit = fn(&mut Value);
+    let drift: [Edit; 6] = [
+        |value| value["characters"][0]["age"] = 40.into(),
+        |value| value["characters"] = serde_json::json!([]),
+        |value| value["characters"][0]["id"] = "c".repeat(113).into(),
+        |value| {
+            value["characters"][0]["wardrobe_changes"] =
+                serde_json::json!([{"scenes": [], "wardrobe": "A raincoat."}]);
+        },
+        |value| value["props"][0]["scenes"][0] = "s".repeat(65).into(),
+        |value| {
+            value["world"]
+                .as_object_mut()
+                .expect("the world is an object")
+                .remove("continuity_rules");
+        },
+    ];
+    for edit in drift {
+        let mut value = sample.clone();
+        edit(&mut value);
+        assert!(validate_value(&bible_schema, &value, "$").is_err());
     }
 }
 

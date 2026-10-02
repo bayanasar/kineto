@@ -1,3 +1,4 @@
+pub mod bible;
 pub mod bootstrap;
 pub mod documents;
 pub mod generation;

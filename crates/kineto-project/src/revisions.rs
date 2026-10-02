@@ -1,4 +1,5 @@
-//! Revisions of a document artifact: the story analysis, the screenplay.
+//! Revisions of a document artifact: the story analysis, the screenplay, the
+//! world and character bible.
 //!
 //! Each revision is a JSON file named by its stable artifact ID, beside a
 //! `revisions.json` log that records every revision's status, provenance and
@@ -26,6 +27,7 @@ const LOG_SCHEMA_VERSION: u32 = 1;
 pub enum DocumentKind {
     StoryAnalysis,
     Screenplay,
+    Bible,
 }
 
 impl DocumentKind {
@@ -33,6 +35,7 @@ impl DocumentKind {
         match self {
             Self::StoryAnalysis => "story/analysis",
             Self::Screenplay => "screenplay",
+            Self::Bible => "bible",
         }
     }
 
@@ -42,6 +45,7 @@ impl DocumentKind {
         match self {
             Self::StoryAnalysis => "story_analysis",
             Self::Screenplay => "screenplay",
+            Self::Bible => "bible",
         }
     }
 
@@ -426,6 +430,53 @@ pub fn attach(
     log.revisions.push(record);
     save(project, &log)?;
     Ok(RevisionAttach::Attached)
+}
+
+/// Save the director's edit of revision `based_on` of `kind`, encoded as
+/// `bytes`, as the next revision. `based_on` must be the latest revision, so
+/// an edit never silently replaces one the director has not seen. An edit
+/// that changes nothing returns the revision it started from.
+pub fn save_edit(
+    project: &CanonicalProject,
+    kind: DocumentKind,
+    based_on: u32,
+    bytes: &[u8],
+) -> Result<RevisionRecord, RevisionError> {
+    let latest = latest(project, kind)?.ok_or(RevisionError::NoSuchRevision(based_on))?;
+    if latest.revision != based_on {
+        return Err(RevisionError::NotLatest {
+            based_on,
+            latest: latest.revision,
+        });
+    }
+    if ContentHash::of(bytes).as_str() == latest.content_hash {
+        return Ok(latest);
+    }
+    let next = next(project, kind)?;
+    let content_hash = write_document(project, &next, bytes)?;
+    let own_revisions = format!("{}_r", kind.id_prefix());
+    let record = RevisionRecord {
+        revision: next.revision,
+        artifact_id: next.artifact_id.as_str().to_owned(),
+        path: next.path.as_path().to_string_lossy().replace('\\', "/"),
+        status: RevisionStatus::Candidate,
+        origin: Origin::Edited,
+        content_hash: content_hash.as_str().to_owned(),
+        input_hash: None,
+        provider: None,
+        model: None,
+        provenance: None,
+        based_on: Some(based_on),
+        // Still made from what the edited revision was made from; `based_on`
+        // records the lineage.
+        dependencies: latest
+            .dependencies
+            .into_iter()
+            .filter(|dependency| !dependency.artifact_id.starts_with(&own_revisions))
+            .collect(),
+    };
+    attach(project, kind, record.clone())?;
+    Ok(record)
 }
 
 /// Lock `revision` as production truth. A previously locked revision is

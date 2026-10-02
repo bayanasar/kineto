@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/bible.schema.json",
+  "title": "Kineto World and Character Bible",
+  "description": "The production memory later visual work follows: the world, and every character, location and prop the locked screenplay needs, each with what must stay the same from shot to shot. Character identifiers are screenplay cast identifiers; location identifiers are story analysis location identifiers, with an entry for every location a screenplay scene is set in; scene identifiers are screenplay scene identifiers. Identifiers are at most 112 characters, so that an entry can be depended on as an artifact.",
+  "type": "object",
+  "required": ["world", "characters", "locations", "props"],
+  "properties": {
+    "world": {
+      "type": "object",
+      "required": ["setting", "period", "visual_rules", "continuity_rules"],
+      "properties": {
+        "setting": {"type": "string", "minLength": 1, "description": "Where the film takes place, as it should look on screen."},
+        "period": {"type": "string", "minLength": 1, "description": "When it takes place, and what that means for what is seen."},
+        "visual_rules": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "What every image must respect, such as no modern technology."},
+        "continuity_rules": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "What must hold across the whole film, such as the weather or the season."}
+      },
+      "additionalProperties": false
+    },
+    "characters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "appearance", "wardrobe", "wardrobe_changes", "forbidden_changes", "continuity_notes"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 112, "description": "A screenplay cast identifier."},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1, "description": "Who they are: role in the story, temperament, how they carry themselves."},
+          "appearance": {"type": "string", "minLength": 1, "description": "How they look, concretely enough to draw the same person every time: age, build, face, hair, distinguishing marks."},
+          "wardrobe": {"type": "string", "minLength": 1, "description": "What they wear unless a wardrobe change says otherwise."},
+          "wardrobe_changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["scenes", "wardrobe"],
+              "properties": {
+                "scenes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}},
+                "wardrobe": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          },
+          "forbidden_changes": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "What must never change between shots, such as a scar or eye colour."},
+          "continuity_notes": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "appearance", "forbidden_changes", "continuity_notes"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 112, "description": "A story analysis location identifier."},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1, "description": "What the place is and what it means in the story."},
+          "appearance": {"type": "string", "minLength": 1, "description": "How it looks: layout, materials, light, colour."},
+          "forbidden_changes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "continuity_notes": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "props": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "appearance", "characters", "scenes", "forbidden_changes", "continuity_notes"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 112},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1, "description": "What it is and why the story needs it."},
+          "appearance": {"type": "string", "minLength": 1},
+          "characters": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 112}, "description": "Characters of this bible who own or handle it."},
+          "scenes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}, "description": "Screenplay scenes it appears in."},
+          "forbidden_changes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "continuity_notes": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -532,6 +532,8 @@ pub enum Prerequisite {
     Screenplay,
     /// The screenplay has no scene with the ID asked for.
     Scene,
+    /// The bible is written from the locked screenplay.
+    LockedScreenplay,
 }
 
 impl fmt::Display for Prerequisite {
@@ -540,6 +542,7 @@ impl fmt::Display for Prerequisite {
             Self::StoryAnalysis => "analyse the story before writing the screenplay",
             Self::Screenplay => "write the screenplay before rewriting a scene",
             Self::Scene => "the screenplay has no scene with that id",
+            Self::LockedScreenplay => "lock the screenplay before writing the bible",
         })
     }
 }

@@ -141,6 +141,9 @@ impl SessionSink for DartPort {
                 match kind {
                     DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
                     DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
+                    // The desktop app has no bible yet; one kept from an
+                    // interrupted session is attached on disk all the same.
+                    DocumentKind::Bible => return,
                 },
             ],
         });
@@ -1056,7 +1059,9 @@ fn generation_error_code(error: &GenerationError) -> i32 {
             ..
         } => PROJECT_ERR_PROVIDER_REFUSED,
         GenerationError::Prerequisite(Prerequisite::StoryAnalysis) => PROJECT_ERR_NEEDS_ANALYSIS,
-        GenerationError::Prerequisite(Prerequisite::Screenplay) => PROJECT_ERR_NEEDS_SCREENPLAY,
+        GenerationError::Prerequisite(
+            Prerequisite::Screenplay | Prerequisite::LockedScreenplay,
+        ) => PROJECT_ERR_NEEDS_SCREENPLAY,
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
