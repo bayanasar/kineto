@@ -46,7 +46,10 @@ use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
 use kineto_provider_minimax::{
     IMAGE_PRICE_MICROS, MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport,
 };
-use kineto_providers::secret::{SecretError, SecretSource};
+use kineto_providers::{
+    ImageCapabilities,
+    secret::{SecretError, SecretSource},
+};
 
 use crate::{
     keyframe_prompt::{self, KeyframePrompt, KeyframePromptError},
@@ -87,9 +90,10 @@ pub trait CandidateGenerator:
     /// Whether candidates need a compiled prompt.
     fn needs_prompt(&self) -> bool;
 
-    /// The longest prompt the provider accepts, in characters.
-    fn prompt_limit(&self) -> usize {
-        usize::MAX
+    /// What the provider can preserve; prompt compilation reads this, never
+    /// the provider's name. A generator without a provider declares nothing.
+    fn capabilities(&self) -> ImageCapabilities {
+        ImageCapabilities::default()
     }
 
     /// Whether new provider calls can be made. A generator that cannot may
@@ -723,7 +727,7 @@ fn compile_prompt<G: CandidateGenerator>(
         scene.as_ref(),
         intent.as_ref(),
         shot.direction(),
-        generator.prompt_limit(),
+        &generator.capabilities(),
     )?)))
 }
 
@@ -1888,6 +1892,35 @@ mod tests {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(intent_states(&target).is_empty());
             assert!(intent_states(&bare_target).is_empty());
+        }
+
+        #[test]
+        fn a_prompt_longer_than_minimax_takes_is_refused_before_anything_is_written() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let project = bootstrap_project(&target);
+            let path = target.join("scenes/scene_001/shots/shot_001/shot.json");
+            let mut intent: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            intent["action"] = format!("A filmmaker {}", "waits ".repeat(300)).into();
+            fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let (client, calls) = client(FakeMinimax::default());
+
+            assert!(matches!(
+                generate_with(
+                    &project,
+                    &mut shot,
+                    MinimaxKeyframes::new(&project, Some(&client)),
+                    &mut NoHooks,
+                ),
+                Err(GenerationError::Prompt(KeyframePromptError::TooLong {
+                    max: kineto_provider_minimax::MAX_PROMPT_CHARS,
+                    ..
+                }))
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(intent_states(&target).is_empty());
         }
 
         fn project_without_intent(target: &Path) -> CanonicalProject {

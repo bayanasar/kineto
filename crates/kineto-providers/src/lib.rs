@@ -72,11 +72,31 @@ pub struct ImageCapabilities {
     pub resolutions: BTreeSet<Resolution>,
     pub seed_support: SeedSupport,
     pub negative_prompt: bool,
+    /// Reference images one request may carry, across every role.
     pub max_reference_images: u16,
     pub reference_roles: BTreeSet<ReferenceRole>,
+    /// Formats a reference image may be sent in.
+    pub reference_formats: BTreeSet<ImageFormat>,
+    /// Largest reference image the provider accepts, in bytes.
+    pub max_reference_bytes: Option<u64>,
     pub inpainting: bool,
     pub masks: bool,
     pub output_formats: BTreeSet<ImageFormat>,
+    /// Longest prompt the provider accepts, in characters; `None` when it
+    /// sets no limit.
+    pub max_prompt_chars: Option<usize>,
+}
+
+impl ImageCapabilities {
+    /// How many reference images of `role` one request may carry.
+    #[must_use]
+    pub fn reference_limit(&self, role: ReferenceRole) -> u16 {
+        if self.reference_roles.contains(&role) {
+            self.max_reference_images
+        } else {
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -285,9 +305,12 @@ pub mod fake {
             ]
             .into_iter()
             .collect(),
+            reference_formats: [ImageFormat::Png, ImageFormat::Jpeg].into_iter().collect(),
+            max_reference_bytes: Some(10 * 1024 * 1024),
             inpainting: true,
             masks: true,
             output_formats: [ImageFormat::Png].into_iter().collect(),
+            max_prompt_chars: None,
         }
     }
 

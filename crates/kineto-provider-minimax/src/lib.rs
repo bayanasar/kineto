@@ -19,7 +19,7 @@ use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
-use kineto_providers::{ImageFormat, secret::SecretString};
+use kineto_providers::{ImageCapabilities, ImageFormat, ReferenceRole, secret::SecretString};
 use serde::{Deserialize, Serialize};
 
 mod video;
@@ -47,6 +47,28 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_STATUS_MESSAGE_CHARS: usize = 200;
+
+/// What `image-01` can preserve, as MiniMax documents it. A subject reference
+/// (`subject_reference`, type `character`) is the one reference kind: an
+/// identity portrait, JPG or PNG, under 10 MB, best a single front-facing
+/// face. The client sends none yet; the declaration is what prompt
+/// compilation and routing read instead of the vendor's name.
+#[must_use]
+pub fn image_capabilities() -> ImageCapabilities {
+    ImageCapabilities {
+        aspect_ratios: [(1, 1), (16, 9), (9, 16)]
+            .into_iter()
+            .filter_map(|(width, height)| kineto_providers::AspectRatio::new(width, height))
+            .collect(),
+        max_reference_images: 1,
+        reference_roles: [ReferenceRole::Identity].into_iter().collect(),
+        reference_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
+        max_reference_bytes: Some(10 * 1024 * 1024 - 1),
+        output_formats: [ImageFormat::Jpeg].into_iter().collect(),
+        max_prompt_chars: Some(MAX_PROMPT_CHARS),
+        ..ImageCapabilities::default()
+    }
+}
 
 /// Aspect ratios `image-01` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +740,36 @@ mod tests {
                 .unwrap_err()
                 .certainly_not_accepted()
         );
+    }
+
+    #[test]
+    fn declared_capabilities_match_what_the_client_sends() {
+        use kineto_providers::{ImageRequirements, SeedSupport, evaluate_image};
+        let capabilities = image_capabilities();
+        // Every declared ratio is one the client can ask for, and back.
+        let sent = [
+            AspectRatio::Square,
+            AspectRatio::Landscape16x9,
+            AspectRatio::Portrait9x16,
+        ]
+        .map(AspectRatio::as_str);
+        assert_eq!(capabilities.aspect_ratios.len(), sent.len());
+        for ratio in &capabilities.aspect_ratios {
+            assert!(sent.contains(&format!("{}:{}", ratio.width, ratio.height).as_str()));
+        }
+        assert_eq!(capabilities.max_prompt_chars, Some(MAX_PROMPT_CHARS));
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Identity), 1);
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Style), 0);
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Composition), 0);
+        assert!(capabilities.max_reference_bytes < Some(10 * 1024 * 1024));
+        let needs = |role| ImageRequirements {
+            required_reference_role: Some(role),
+            minimum_seed_support: SeedSupport::None,
+            requires_negative_prompt: false,
+            requires_mask: false,
+        };
+        assert!(evaluate_image(needs(ReferenceRole::Identity), &capabilities).is_compatible());
+        assert!(!evaluate_image(needs(ReferenceRole::Style), &capabilities).is_compatible());
     }
 
     #[test]

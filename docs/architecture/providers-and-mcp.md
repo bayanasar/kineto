@@ -73,6 +73,8 @@ TTS capabilities should cover at least:
 
 Cross-cutting capability metadata includes cost model, concurrency/rate limits, retry semantics, and known provider policy constraints where useful for preflight.
 
+`ImageCapabilities` (`kineto-providers`) is what workflow code reads; an adapter declares it and no workflow code branches on a vendor name. Besides the items above it carries the formats and size limit of reference images and the longest prompt the provider accepts. MiniMax `image-01` declares 1:1, 16:9 and 9:16, JPEG output, prompts up to 1500 characters, and one identity reference (`subject_reference` of type `character`: a JPG or PNG portrait under 10 MB, best a single front-facing face); it takes no style or composition reference and no seed or negative prompt. The local demo generator declares nothing.
+
 ## Initial provider support
 
 Recommended first-wave support:
@@ -194,7 +196,7 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
-The first compiler in use is `keyframe-prompt/1` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json` and compiles a still-image prompt. Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step. Until approved character reference images exist, every named character is an identity-affecting drop. The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it.
+The first compiler in use is `keyframe-prompt/1` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json` and compiles a still-image prompt for the provider's declared `ImageCapabilities`. Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step. Until approved character reference images exist, every named character is an identity-affecting drop; the reason says whether the provider could have taken an identity reference at all. The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it.
 
 Projects created by the desktop app start with the bootstrap scene (`kineto-core/src/bootstrap.rs`) written into these files, published atomically with the project.
 

@@ -37,7 +37,7 @@ use kineto_provider_minimax::{
     AspectRatio, HttpsTransport, IMAGE_MODEL, ImageRequest, MinimaxClient, MinimaxError, PROVIDER,
     Transport,
 };
-use kineto_providers::ImageFormat;
+use kineto_providers::{ImageCapabilities, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::generation::{
@@ -405,6 +405,10 @@ impl<T: Transport + Sync> CandidateGenerator for MinimaxKeyframes<'_, T> {
 
     fn needs_prompt(&self) -> bool {
         true
+    }
+
+    fn capabilities(&self) -> ImageCapabilities {
+        kineto_provider_minimax::image_capabilities()
     }
 
     fn can_invoke(&self) -> bool {

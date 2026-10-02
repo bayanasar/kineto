@@ -3,9 +3,10 @@
 //! The intent stays expressive; the compiler reports what a still image cannot
 //! carry instead of deleting it. Camera motion, dialogue and duration belong
 //! to the video step and are dropped as cosmetic. Character identity is
-//! described in text only, because no approved reference images exist yet, so
-//! every named character is an identity-affecting drop: two takes of the same
-//! shot can show different faces.
+//! described in text only, because no approved reference images exist yet or
+//! the provider takes none (as its capabilities declare), so every named
+//! character is an identity-affecting drop: two takes of the same shot can
+//! show different faces.
 
 use std::{error::Error, fmt};
 
@@ -14,6 +15,7 @@ use kineto_prompts::{
     CompiledPrompt, CompiledPromptError, ConstraintId, ConstraintIdError, DegradationLevel,
     DroppedConstraint, PromptHash,
 };
+use kineto_providers::{ImageCapabilities, ReferenceRole};
 use sha2::{Digest, Sha256};
 
 /// Version recorded with every keyframe compiled by this module. Change it
@@ -71,12 +73,13 @@ impl From<CompiledPromptError> for KeyframePromptError {
     }
 }
 
-/// Compile the keyframe prompt for a shot.
+/// Compile the keyframe prompt for a shot, for a provider with
+/// `capabilities`.
 pub fn compile(
     scene: Option<&SceneIntent>,
     shot: Option<&ShotIntent>,
     direction: ShotDirection,
-    max_prompt_chars: usize,
+    capabilities: &ImageCapabilities,
 ) -> Result<KeyframePrompt, KeyframePromptError> {
     let shot = shot.ok_or(KeyframePromptError::MissingIntent)?;
     let mut applied = Vec::new();
@@ -141,24 +144,32 @@ pub fn compile(
             DegradationLevel::Cosmetic,
         )?);
     }
+    let takes_identity = capabilities.reference_limit(ReferenceRole::Identity) > 0;
     for character in &shot.characters {
-        dropped.push(DroppedConstraint {
-            constraint: constraint(&format!("identity.{character}"))?,
-            reason: format!(
+        let reason = if takes_identity {
+            format!(
                 "no approved reference images exist for {character}; identity is described in \
                  text only and can drift between takes and shots"
-            ),
+            )
+        } else {
+            format!(
+                "the provider takes no identity reference image; {character} is described in \
+                 text only and can drift between takes and shots"
+            )
+        };
+        dropped.push(DroppedConstraint {
+            constraint: constraint(&format!("identity.{character}"))?,
+            reason,
             degradation: DegradationLevel::IdentityAffecting,
         });
     }
 
     let prompt = sentences.join(". ") + ".";
     let chars = prompt.chars().count();
-    if chars > max_prompt_chars {
-        return Err(KeyframePromptError::TooLong {
-            chars,
-            max: max_prompt_chars,
-        });
+    if let Some(max) = capabilities.max_prompt_chars
+        && chars > max
+    {
+        return Err(KeyframePromptError::TooLong { chars, max });
     }
     let compiled = CompiledPrompt::new(prompt, applied, dropped, KEYFRAME_COMPILER_VERSION)?;
     let prompt_hash = compiled.prompt_hash(&canonical_intent(scene, shot, direction));
@@ -275,9 +286,19 @@ mod tests {
         }
     }
 
+    fn minimax() -> ImageCapabilities {
+        kineto_provider_minimax::image_capabilities()
+    }
+
     #[test]
     fn a_shot_compiles_to_a_stable_prompt_with_its_losses_reported() {
-        let first = compile(Some(&scene()), Some(&shot()), ShotDirection::Reaction, 1500).unwrap();
+        let first = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            &minimax(),
+        )
+        .unwrap();
         assert_eq!(
             first.compiled.prompt(),
             "Medium close up shot. A filmmaker hears the final line across the table. \
@@ -305,18 +326,34 @@ mod tests {
         );
         assert_eq!(
             first,
-            compile(Some(&scene()), Some(&shot()), ShotDirection::Reaction, 1500).unwrap()
+            compile(
+                Some(&scene()),
+                Some(&shot()),
+                ShotDirection::Reaction,
+                &minimax()
+            )
+            .unwrap()
         );
     }
 
     #[test]
     fn every_intent_field_changes_the_prompt_hash() {
-        let base = compile(Some(&scene()), Some(&shot()), ShotDirection::Reaction, 1500)
-            .unwrap()
-            .prompt_hash;
+        let base = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            &minimax(),
+        )
+        .unwrap()
+        .prompt_hash;
         let mut variants = vec![
-            compile(None, Some(&shot()), ShotDirection::Reaction, 1500),
-            compile(Some(&scene()), Some(&shot()), ShotDirection::Tension, 1500),
+            compile(None, Some(&shot()), ShotDirection::Reaction, &minimax()),
+            compile(
+                Some(&scene()),
+                Some(&shot()),
+                ShotDirection::Tension,
+                &minimax(),
+            ),
         ];
         let edits: [fn(&mut ShotIntent); 4] = [
             |shot| shot.camera_motion = None,
@@ -331,7 +368,7 @@ mod tests {
                 Some(&scene()),
                 Some(&shot),
                 ShotDirection::Reaction,
-                1500,
+                &minimax(),
             ));
         }
         for variant in variants {
@@ -342,13 +379,70 @@ mod tests {
     #[test]
     fn a_shot_without_intent_or_too_long_a_prompt_is_refused() {
         assert_eq!(
-            compile(Some(&scene()), None, ShotDirection::Reaction, 1500),
+            compile(Some(&scene()), None, ShotDirection::Reaction, &minimax()),
             Err(KeyframePromptError::MissingIntent)
         );
         assert!(matches!(
-            compile(Some(&scene()), Some(&shot()), ShotDirection::Reaction, 40),
+            compile(
+                Some(&scene()),
+                Some(&shot()),
+                ShotDirection::Reaction,
+                &ImageCapabilities {
+                    max_prompt_chars: Some(40),
+                    ..minimax()
+                }
+            ),
             Err(KeyframePromptError::TooLong { max: 40, .. })
         ));
+        // MiniMax's own limit applies: a long action is refused, never cut.
+        let long = ShotIntent {
+            action: "a".repeat(1500),
+            ..shot()
+        };
+        assert!(matches!(
+            compile(
+                Some(&scene()),
+                Some(&long),
+                ShotDirection::Reaction,
+                &minimax()
+            ),
+            Err(KeyframePromptError::TooLong { max: 1500, .. })
+        ));
+        // A provider without a limit takes any length.
+        assert!(
+            compile(
+                Some(&scene()),
+                Some(&long),
+                ShotDirection::Reaction,
+                &ImageCapabilities::default()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn identity_drops_say_whether_the_provider_could_take_a_reference() {
+        let reason = |capabilities: &ImageCapabilities| {
+            compile(
+                Some(&scene()),
+                Some(&shot()),
+                ShotDirection::Reaction,
+                capabilities,
+            )
+            .unwrap()
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .find(|dropped| dropped.constraint.as_str() == "identity.filmmaker")
+            .map(|dropped| (dropped.reason.clone(), dropped.degradation))
+            .unwrap()
+        };
+        let (with_references, degradation) = reason(&minimax());
+        assert!(with_references.starts_with("no approved reference images exist"));
+        assert_eq!(degradation, DegradationLevel::IdentityAffecting);
+        let (text_only, degradation) = reason(&ImageCapabilities::default());
+        assert!(text_only.starts_with("the provider takes no identity reference image"));
+        assert_eq!(degradation, DegradationLevel::IdentityAffecting);
     }
 
     #[test]
@@ -357,7 +451,8 @@ mod tests {
             action: "Rain on an empty street".to_owned(),
             ..ShotIntent::default()
         };
-        let compiled = compile(None, Some(&shot), ShotDirection::SpatialClarity, 1500).unwrap();
+        let compiled =
+            compile(None, Some(&shot), ShotDirection::SpatialClarity, &minimax()).unwrap();
         assert_eq!(
             compiled.compiled.prompt(),
             "Rain on an empty street. Keep the geography of the space and where each person \

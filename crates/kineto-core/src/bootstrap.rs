@@ -139,9 +139,13 @@ mod tests {
         for shot_number in 1..=u32::try_from(SHOT_COUNT).unwrap() {
             let shot = ShotWorkflow::load(&project, shot_number).unwrap();
             let intent = shot.intent().unwrap().expect("bootstrap shot has intent");
-            let compiled =
-                keyframe_prompt::compile(Some(&scene), Some(&intent), shot.direction(), 1500)
-                    .unwrap();
+            let compiled = keyframe_prompt::compile(
+                Some(&scene),
+                Some(&intent),
+                shot.direction(),
+                &kineto_provider_minimax::image_capabilities(),
+            )
+            .unwrap();
             assert!(compiled.compiled.prompt().contains("filmmaker"));
             assert!(!shot.snapshot().unwrap().generated);
         }
