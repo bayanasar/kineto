@@ -203,6 +203,8 @@ impl SessionSink for Sink {
             .unwrap()
             .send(Event::VideoFinished(describe(result)));
     }
+
+    fn document_completed(&self, _token: u64, _result: &Result<(), SessionError>) {}
 }
 
 fn spawn(request: OpenRequest, fake: &Arc<FakeMinimax>) -> (ProjectSession, mpsc::Receiver<Event>) {

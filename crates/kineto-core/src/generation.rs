@@ -457,6 +457,10 @@ pub enum GenerationError {
     /// The locked keyframe has no image to start a video from (a demo
     /// keyframe).
     NoFirstFrame,
+    /// What this is made from does not exist yet.
+    Prerequisite(Prerequisite),
+    /// No language model is configured, so no document can be asked for.
+    ModelNotConfigured,
     /// The last paid submission may have been accepted but left no record of
     /// it, so submitting again may pay twice. Only the director decides that.
     UnresolvedSubmission,
@@ -487,6 +491,10 @@ impl fmt::Display for GenerationError {
                 "finishing this generation needs a paid provider call; generate again to make it",
             ),
             Self::JobId(error) => error.fmt(formatter),
+            Self::Prerequisite(missing) => missing.fmt(formatter),
+            Self::ModelNotConfigured => {
+                formatter.write_str("no language model is configured for documents")
+            }
             Self::Unexpected(message) => formatter.write_str(message),
         }
     }
@@ -503,9 +511,32 @@ impl Error for GenerationError {
             Self::NotConfigured
             | Self::NeedsProviderCall
             | Self::NoFirstFrame
+            | Self::Prerequisite(_)
+            | Self::ModelNotConfigured
             | Self::UnresolvedSubmission
             | Self::Unexpected(_) => None,
         }
+    }
+}
+
+/// What has to exist before a document can be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prerequisite {
+    /// A screenplay is written from a story analysis.
+    StoryAnalysis,
+    /// A scene is rewritten within a screenplay.
+    Screenplay,
+    /// The screenplay has no scene with the ID asked for.
+    Scene,
+}
+
+impl fmt::Display for Prerequisite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::StoryAnalysis => "analyse the story before writing the screenplay",
+            Self::Screenplay => "write the screenplay before rewriting a scene",
+            Self::Scene => "the screenplay has no scene with that id",
+        })
     }
 }
 
@@ -864,15 +895,15 @@ const PERMIT_POLL: Duration = Duration::from_millis(200);
 /// Invoke a prepared candidate, waiting while the provider's process-wide
 /// concurrency ceiling is reached. The runtime refuses rather than queues, and
 /// a refusal spends no attempt, so waiting here is the scheduler.
-fn invoke_when_permitted<G: CandidateGenerator>(
+pub(crate) fn invoke_when_permitted<A: PaidJobAdapter>(
     runtime: &JobRuntime<'_>,
     job_id: &JobId,
-    generator: &mut G,
-    request: &CandidateRequest,
-) -> Result<DispatchOutcome<GeneratedCandidate>, InvokePreparedError<G::Error>> {
+    adapter: &mut A,
+    request: &A::Request,
+) -> Result<DispatchOutcome<A::Output>, InvokePreparedError<A::Error>> {
     let deadline = Instant::now() + PERMIT_WAIT;
     loop {
-        match runtime.invoke_prepared(job_id, generator, request) {
+        match runtime.invoke_prepared(job_id, adapter, request) {
             Err(InvokePreparedError::Runtime(JobRuntimeError::ConcurrencyLimitReached))
                 if Instant::now() < deadline =>
             {

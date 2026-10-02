@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/source.schema.json",
+  "title": "Kineto Source Revisions",
+  "type": "object",
+  "required": ["schema_version", "revisions"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "revisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["revision", "path", "format", "content_hash", "chars"],
+        "properties": {
+          "revision": {"type": "integer", "minimum": 1},
+          "path": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
+          "format": {"enum": ["text", "markdown"]},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "chars": {"type": "integer", "minimum": 1},
+          "original_name": {"type": "string", "minLength": 1, "maxLength": 255}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

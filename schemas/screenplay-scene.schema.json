@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/screenplay-scene.schema.json",
+  "title": "Kineto Screenplay Scene",
+  "description": "One scene of a screenplay, as it appears in the screenplay's scene list. Characters are named by their cast identifiers; the location by its story analysis identifier.",
+  "type": "object",
+  "required": ["id", "heading", "setting", "location", "time", "characters", "dramatic_goal", "blocks"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$", "description": "Stable across revisions; downstream work refers to the scene by it."},
+    "heading": {"type": "string", "minLength": 1, "description": "The scene heading as the screenplay prints it, in the screenplay's language."},
+    "setting": {"enum": ["interior", "exterior", "interior_exterior"]},
+    "location": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$", "description": "A location identifier from the story analysis."},
+    "time": {"type": "string", "minLength": 1, "description": "Time of day or continuity, such as night or continuous."},
+    "characters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+      "description": "Cast identifiers of everyone present or heard in the scene."
+    },
+    "dramatic_goal": {"type": "string", "minLength": 1, "description": "What the scene must achieve dramatically, in one or two sentences."},
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": {"enum": ["action", "dialogue", "transition"]},
+          "character": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$", "description": "Dialogue only: the cast identifier of who speaks."},
+          "parenthetical": {"type": "string", "minLength": 1, "description": "Dialogue only: a short direction for the line, without parentheses."},
+          "text": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

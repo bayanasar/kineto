@@ -40,6 +40,8 @@ final class KinetoNativeContract {
     this.imageProviders,
     this.videoStates,
     this.snapshotSample,
+    this._codes,
+    this._documentFields,
   );
 
   /// Loaded once, on first use, after the ABI revision check.
@@ -70,6 +72,73 @@ final class KinetoNativeContract {
   /// A fixed snapshot packed by the native encoder, for contract tests.
   final int snapshotSample;
 
+  final Map<int, Map<String, int>> _codes;
+  final Map<String, (int, int)> _documentFields;
+
+  static const int _llmProviderKind = 6;
+  static const int _documentFieldKind = 7;
+  static const int _screenplayCountKind = 8;
+  static const int _screenplayValueKind = 9;
+  static const int _screenplayTextKind = 10;
+  static const int _blockKindKind = 11;
+  static const int _settingKind = 12;
+  static const int _revisionStatusKind = 13;
+  static const int _originKind = 14;
+  static const int _sourceFormatKind = 15;
+  static const int _documentCostKind = 16;
+
+  Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
+
+  /// Language model code by name, for example `kimi_code` → 1.
+  Map<String, int> get llmProviders => _table(_llmProviderKind);
+
+  /// What `kineto_project_screenplay_count` counts, by name.
+  Map<String, int> get screenplayCounts => _table(_screenplayCountKind);
+
+  /// Number fields of the published documents, by name.
+  Map<String, int> get screenplayValues => _table(_screenplayValueKind);
+
+  /// Text fields of the published documents, by name.
+  Map<String, int> get screenplayTexts => _table(_screenplayTextKind);
+
+  Map<String, int> get blockKinds => _table(_blockKindKind);
+  Map<String, int> get settings => _table(_settingKind);
+  Map<String, int> get revisionStatuses => _table(_revisionStatusKind);
+  Map<String, int> get origins => _table(_originKind);
+  Map<String, int> get sourceFormats => _table(_sourceFormatKind);
+  Map<String, int> get documentCosts => _table(_documentCostKind);
+
+  /// Names of the packed documents state's fields.
+  Iterable<String> get documentFields => _documentFields.keys;
+
+  /// The code [table] gives [name]; a name the library lacks is a contract
+  /// break, not a runtime condition.
+  int code(Map<String, int> table, String name) {
+    final code = table[name];
+    if (code == null) {
+      throw StateError('Kineto native contract has no code for "$name"');
+    }
+    return code;
+  }
+
+  /// The name [table] gives [code].
+  String nameOf(Map<String, int> table, int code) {
+    for (final entry in table.entries) {
+      if (entry.value == code) return entry.key;
+    }
+    throw StateError('Kineto native contract has no name for code $code');
+  }
+
+  /// Read the named field out of a packed documents state.
+  int documentField(int bits, String name) {
+    final layout = _documentFields[name];
+    if (layout == null) {
+      throw StateError('Kineto native documents state has no field "$name"');
+    }
+    final (shift, width) = layout;
+    return (bits >>> shift) & ((1 << width) - 1);
+  }
+
   /// Names of the packed snapshot's fields.
   Iterable<String> get snapshotFields => _fields.keys;
 
@@ -95,6 +164,8 @@ final class KinetoNativeContract {
     final videoStates = <String, int>{};
     final directions = <String, int>{};
     final fields = <String, (int, int)>{};
+    final codes = <int, Map<String, int>>{};
+    final documentFields = <String, (int, int)>{};
     final arena = Arena();
     try {
       final kind = arena<Uint32>();
@@ -119,6 +190,10 @@ final class KinetoNativeContract {
             imageProviders[entryName] = value.value;
           case videoStateKind:
             videoStates[entryName] = value.value;
+          case _documentFieldKind:
+            documentFields[entryName] = (value.value, extra.value);
+          default:
+            (codes[kind.value] ??= <String, int>{})[entryName] = value.value;
         }
       }
     } finally {
@@ -131,6 +206,10 @@ final class KinetoNativeContract {
       Map.unmodifiable(imageProviders),
       Map.unmodifiable(videoStates),
       _kinetoContractSnapshotSample(),
+      Map.unmodifiable(<int, Map<String, int>>{
+        for (final entry in codes.entries) entry.key: Map.unmodifiable(entry.value),
+      }),
+      Map.unmodifiable(documentFields),
     );
   }
 }

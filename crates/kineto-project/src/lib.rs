@@ -1,6 +1,10 @@
 pub mod fs;
 pub mod manifest;
+pub mod revisions;
+pub mod screenplay;
 pub mod shot;
+pub mod source;
+pub mod story;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -208,7 +212,8 @@ impl ArtifactStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DependencyImpact {
     Semantic,
     Cosmetic,

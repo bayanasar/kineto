@@ -1,8 +1,12 @@
 pub mod bootstrap;
+pub mod documents;
 pub mod generation;
 pub mod keyframe_prompt;
+pub mod llm;
 pub mod minimax;
+pub mod screenplay;
 pub mod session;
+pub mod story;
 pub mod video;
 pub mod video_prompt;
 

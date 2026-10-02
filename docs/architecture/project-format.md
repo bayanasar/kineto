@@ -14,8 +14,9 @@ my-film/
 ├── source/
 │   └── novel.txt
 ├── screenplay/
-│   ├── screenplay.md
-│   └── screenplay.json
+│   ├── revisions.json
+│   ├── screenplay_r0001.json
+│   └── screenplay.md
 ├── bible/
 │   ├── world.json
 │   ├── style.json
@@ -49,6 +50,16 @@ my-film/
 
 Candidate filenames use stable artifact IDs or content-addressed names. Selection is metadata; there is no canonical `selected.png` or `selected.mp4` rename step.
 
+## Document revisions
+
+The story analysis (`story/analysis/`) and the screenplay (`screenplay/`) are document artifacts kept as revisions. Each revision is a JSON file named by its artifact ID (`story_analysis_r0001.json`, `screenplay_r0003.json`); `revisions.json` in the same directory (`revisions.schema.json`) records each revision's status (`candidate`, `locked`, `superseded`), origin (`generated` by a model or `edited` by the director, with `based_on`), content hash, input hash, provider, model, prompt provenance and dependencies. A new revision supersedes the earlier candidates; locking one supersedes the previously locked revision; nothing is deleted. A revision whose file no longer matches its hash is refused rather than read. The story analysis body follows `story-analysis.schema.json`, which is also the schema the model is asked to satisfy; a revision depends on the source revision it read (`source_rNNNN`).
+
+A screenplay revision follows `screenplay.schema.json`: a title, a cast whose IDs are story analysis character IDs, and scenes. Each scene has a stable ID, a heading as printed, a setting, a story analysis location ID, a time, the cast present, a dramatic goal and blocks of action, dialogue (with its speaker and an optional parenthetical) and transitions. A generated screenplay depends on the story analysis revision and the source revision it was written from. One scene can be written again on its own (`screenplay-scene.schema.json`, the same shape as a scene in the screenplay): the result is a new revision `based_on` the one it reworked, with every other scene carried over unchanged. `screenplay.md` is rendered by Rust from the current revision (the locked one, otherwise the latest candidate); it is derived, never read back, and deleting it loses nothing, since rendering again reproduces it byte for byte.
+
+The director's edits never overwrite: saving an edit writes the next revision (`origin: edited`, `based_on` the revision edited, carrying that revision's analysis and source dependencies), and is refused when the edit did not start from the latest revision, so a revision the director has not seen is never replaced; saving without a change writes nothing. Locking a revision makes it the screenplay production follows, while newer candidates remain the director's working copy. All of this lives in `screenplay/`, so deleting `.kineto/` changes no revision and no lock.
+
+Downstream work depends on a scene, not on a screenplay revision: the dependency names `screenplay_scene.<scene_id>` and the scene's content hash. That hash covers what the scene says and ignores layout — file formatting, the scene's position, and whitespace at line ends or around paragraphs — so a new revision leaves work on unchanged scenes fresh. Against the current screenplay, such a dependency is fresh, changed, or removed.
+
 ## `project.toml`
 
 Minimum fields:
@@ -72,6 +83,10 @@ recipe_version = 1
 ```
 
 Provider secrets must never be stored in `project.toml`.
+
+## Source revisions
+
+The source a project was created with is revision 1, at `[source].path`. Importing text again never overwrites it: the import is normalised (UTF-8 only, byte-order mark removed, `\n` line endings, trailing whitespace trimmed, one final newline; at most 8 MiB) and written as `source/revisions/rNNNN.txt` or `.md`, and `source/source.json` (`source.schema.json`) lists every revision with its format, content hash, character count and original file name. The latest revision is current. Importing the text of the current revision again changes nothing. Work derived from the source records the content hash of the revision it read, and a revision whose bytes no longer match its hash is refused rather than read.
 
 ## Canonical ownership
 
@@ -135,7 +150,7 @@ Hard rules:
 
 Committed JSON Schemas are the source of truth for canonical structured storage. Rust types and serializers must satisfy those schemas; the schemas are not generated from Rust.
 
-`kineto-schema-contracts` is a test-only workspace package that executes the subset of JSON Schema draft 2020-12 used by this repository. It validates the committed golden project and real persistence output from `CanonicalProject`, `ShotWorkflow`, and `JobRuntime`. The harness fails closed on schema keywords, formats, or regular-expression patterns it does not implement, so extending a schema cannot silently weaken validation.
+`kineto-json-schema` executes the subset of JSON Schema draft 2020-12 used by this repository. `kineto-schema-contracts`, a test-only workspace package, uses it to validate the committed golden project and real persistence output from `CanonicalProject`, `ShotWorkflow`, and `JobRuntime`; `llm.complete` uses it to check a model's answer against the schema it was asked to satisfy. It fails closed on schema keywords, formats, or regular-expression patterns it does not implement, so extending a schema cannot silently weaken validation.
 
 When adding or changing a canonical structured file:
 
@@ -232,7 +247,7 @@ input_hash = H(
 )
 ```
 
-Dependency edges attach at the smallest meaningful production unit: scene, character, style, location, prop, shot, keyframe, and so on. A cosmetic change to screenplay formatting must not invalidate unrelated shots.
+Dependency edges attach at the smallest meaningful production unit: scene, character, style, location, prop, shot, keyframe, and so on. A cosmetic change to screenplay formatting must not invalidate unrelated shots. Screenplay scenes already work this way (see Document revisions).
 
 The UI must be able to explain which semantic parent or field caused a stale result.
 

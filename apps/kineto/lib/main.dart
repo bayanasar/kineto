@@ -7,6 +7,7 @@ import 'package:wabisabi/wabisabi.dart';
 import 'demo_workspace.dart';
 import 'native/kineto_engine.dart';
 import 'project_busy.dart';
+import 'screenplay_workspace.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -104,8 +105,12 @@ class KinetoApp extends StatefulWidget {
   State<KinetoApp> createState() => _KinetoAppState();
 }
 
+/// The workspaces the director moves between.
+enum KinetoWorkspace { screenplay, shots }
+
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
+  KinetoWorkspace _workspace = KinetoWorkspace.screenplay;
   late final AppLifecycleListener _lifecycle;
 
   @override
@@ -136,17 +141,41 @@ class _KinetoAppState extends State<KinetoApp> {
     super.dispose();
   }
 
+  Widget _navigation() => Wrap(
+        spacing: 12,
+        children: <Widget>[
+          for (final (workspace, label) in <(KinetoWorkspace, String)>[
+            (KinetoWorkspace.screenplay, 'Story & screenplay'),
+            (KinetoWorkspace.shots, 'Shots'),
+          ])
+            WabButton(
+              kind: workspace == _workspace ? WabMaterialKind.seal : WabMaterialKind.zhuwen,
+              onPressed: () => setState(() => _workspace = workspace),
+              child: Text(label),
+            ),
+        ],
+      );
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Kineto',
       theme: WabTheme.materialTheme(lightTheme: !_darkMode),
-      home: DemoWorkspaceScreen(
-        engine: widget.engine,
-        project: widget.project,
-        isDarkMode: _darkMode,
-        onThemeToggle: _toggleTheme,
-      ),
+      home: switch (_workspace) {
+        KinetoWorkspace.screenplay => ScreenplayWorkspaceScreen(
+            project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+        KinetoWorkspace.shots => DemoWorkspaceScreen(
+            engine: widget.engine,
+            project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+      },
     );
   }
 }

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/story-analysis.schema.json",
+  "title": "Kineto Story Analysis",
+  "description": "What a source story contains, as structured production state. Identifiers are short snake_case names unique within their list; every reference names an identifier defined in the same analysis.",
+  "type": "object",
+  "required": ["logline", "time_period", "tone", "themes", "characters", "locations", "events", "relationships", "candidate_scenes"],
+  "properties": {
+    "logline": {"type": "string", "minLength": 1, "description": "The story in one sentence."},
+    "time_period": {"type": "string", "minLength": 1, "description": "When the story takes place."},
+    "tone": {"type": "string", "minLength": 1, "description": "The emotional register, in a few words."},
+    "themes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "characters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "role"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1, "description": "Who they are and how they look, as the source tells it."},
+          "role": {"enum": ["protagonist", "antagonist", "supporting", "minor"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "summary", "characters"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "summary": {"type": "string", "minLength": 1},
+          "characters": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}},
+          "location": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,128}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "nature"],
+        "properties": {
+          "from": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "to": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "nature": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "candidate_scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "summary", "location", "characters", "events"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "summary": {"type": "string", "minLength": 1},
+          "location": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "characters": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}},
+          "events": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

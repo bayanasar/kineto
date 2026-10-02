@@ -4,6 +4,8 @@ members = [
     "crates/kineto-core",
     "crates/kineto-job-runtime",
     "crates/kineto-jobs",
+    "crates/kineto-json-schema",
+    "crates/kineto-llm",
     "crates/kineto-project",
     "crates/kineto-prompts",
     "crates/kineto-provider-minimax",

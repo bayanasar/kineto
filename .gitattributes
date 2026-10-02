@@ -1,0 +1,2 @@
+# Fixture files are hashed byte for byte; never convert their line endings.
+fixtures/projects/screenplay/** -text

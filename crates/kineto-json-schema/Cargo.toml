@@ -1,0 +1,12 @@
+[package]
+name = "kineto-json-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[lib]
+path = "src/lib.rs"
