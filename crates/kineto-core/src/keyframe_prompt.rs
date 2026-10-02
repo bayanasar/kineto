@@ -6,11 +6,11 @@
 //! to the video step and are dropped as cosmetic.
 //!
 //! The locked style leads the prompt. A character whose cast is locked is
-//! shown from their canonical portrait, sent as the provider's identity
-//! reference, when the provider takes one; one reference is sent per image,
-//! to the first such character of the shot. Every other named character is
-//! described in text only, an identity-affecting drop: two takes of the same
-//! shot can show different faces. A cast character's forbidden changes are
+//! shown from their canonical portrait, sent as an identity reference, up to
+//! as many references as the provider declares it takes in one image, in the
+//! shot's order. Every other named character is described in text only, an
+//! identity-affecting drop: two takes of the same shot can show different
+//! faces. A cast character's forbidden changes are
 //! said as long as the prompt has room, and dropping them is
 //! identity-affecting too. Nothing is truncated.
 
@@ -53,9 +53,9 @@ pub struct KeyframePrompt {
     /// The locks the prompt follows, which a keyframe made from it depends
     /// on.
     pub dependencies: Vec<ArtifactDependency>,
-    /// The canonical portrait to send as the identity reference, when one
-    /// is.
-    pub identity: Option<LockedImage>,
+    /// The canonical portraits to send as identity references, at most as
+    /// many as the provider takes, in the shot's order.
+    pub identities: Vec<LockedImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,8 +180,9 @@ pub fn compile(
         )?);
     }
 
-    let takes_identity = capabilities.reference_limit(ReferenceRole::Identity) > 0;
-    let mut identity: Option<LockedImage> = None;
+    let limit = usize::from(capabilities.reference_limit(ReferenceRole::Identity));
+    let takes_identity = limit > 0;
+    let mut identities: Vec<LockedImage> = Vec::new();
     for character in &shot.characters {
         let lock = locks
             .characters
@@ -191,8 +192,8 @@ pub fn compile(
             dependencies.extend(cast::lock_dependency(lock));
         }
         let reason = match lock {
-            Some(lock) if takes_identity && identity.is_none() => {
-                identity = Some(lock.portrait.clone());
+            Some(lock) if identities.len() < limit => {
+                identities.push(lock.portrait.clone());
                 needed(
                     &mut required,
                     &format!("identity.{character}"),
@@ -201,8 +202,10 @@ pub fn compile(
                 None
             }
             Some(_) if takes_identity => Some(format!(
-                "one identity reference is sent per image; {character} is described in text \
-                 only and can drift between takes and shots"
+                "the provider takes {limit} identity reference{} per image, given to characters \
+                 before {character} in the shot; {character} is described in text only and can \
+                 drift between takes and shots",
+                if limit == 1 { "" } else { "s" }
             )),
             _ if takes_identity => Some(format!(
                 "no approved reference images exist for {character}; identity is described in \
@@ -260,7 +263,7 @@ pub fn compile(
     )?;
     Ok(KeyframePrompt {
         dependencies,
-        identity,
+        identities,
         ..prompt
     })
 }
@@ -696,7 +699,7 @@ mod tests {
         assert!(!text.contains("Cinematic film still"));
         assert!(!text.contains("Photorealistic"));
         assert_eq!(prompt.compiled.degradation(), DegradationLevel::Cosmetic);
-        assert_eq!(prompt.identity, None);
+        assert!(prompt.identities.is_empty());
         assert_eq!(
             prompt
                 .dependencies
@@ -724,7 +727,7 @@ mod tests {
         let text = prompt.compiled.prompt();
         assert!(text.contains("The Filmmaker is the person in the reference image."));
         assert!(text.contains("The Filmmaker, always: Grey at the temples."));
-        assert_eq!(prompt.identity.as_ref(), Some(&locks[0].portrait));
+        assert_eq!(prompt.identities, [locks[0].portrait.clone()]);
         let applied: Vec<_> = prompt
             .compiled
             .applied_constraints()
@@ -778,7 +781,7 @@ mod tests {
             &minimax(),
         )
         .unwrap();
-        assert_eq!(prompt.identity.as_ref(), Some(&locks[0].portrait));
+        assert_eq!(prompt.identities, [locks[0].portrait.clone()]);
         let reasons: Vec<_> = prompt
             .compiled
             .dropped_constraints()
@@ -791,7 +794,7 @@ mod tests {
         assert!(
             reasons[0]
                 .1
-                .starts_with("one identity reference is sent per image")
+                .starts_with("the provider takes 1 identity reference per image")
         );
         assert_eq!(reasons[1].0, "identity.waiter");
         assert!(
@@ -822,7 +825,7 @@ mod tests {
             &text_only,
         )
         .unwrap();
-        assert_eq!(prompt.identity, None);
+        assert!(prompt.identities.is_empty());
         assert!(
             prompt
                 .compiled
@@ -832,6 +835,81 @@ mod tests {
                 .all(|dropped| dropped
                     .reason
                     .starts_with("the provider takes no identity reference image"))
+        );
+    }
+
+    #[test]
+    fn a_provider_that_takes_more_references_gets_them_in_shot_order() {
+        let two = ImageCapabilities {
+            max_reference_images: 2,
+            ..minimax()
+        };
+        let locks = [
+            cast("waiter", "The Waiter"),
+            cast("interviewer", "The Interviewer"),
+            cast("filmmaker", "The Filmmaker"),
+        ];
+        let prompt = compile(
+            Some(&scene()),
+            Some(&two_hander()),
+            ShotDirection::Reaction,
+            Locks {
+                style: None,
+                characters: &locks,
+            },
+            &two,
+        )
+        .unwrap();
+        assert_eq!(
+            prompt.identities,
+            [locks[2].portrait.clone(), locks[1].portrait.clone()],
+            "the first two of the shot, not of the locks"
+        );
+        let text = prompt.compiled.prompt();
+        assert!(text.contains("The Filmmaker is the person in the reference image."));
+        assert!(text.contains("The Interviewer is the person in the reference image."));
+        let identity_drops: Vec<_> = prompt
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .filter(|dropped| dropped.constraint.as_str().starts_with("identity."))
+            .map(|dropped| (dropped.constraint.as_str(), dropped.reason.as_str()))
+            .collect();
+        assert_eq!(identity_drops.len(), 1);
+        assert_eq!(identity_drops[0].0, "identity.waiter");
+        assert!(
+            identity_drops[0]
+                .1
+                .starts_with("the provider takes 2 identity references per image")
+        );
+
+        // Room for more references than cast characters: nobody is dropped
+        // for the limit, only the one who is not cast.
+        let three = ImageCapabilities {
+            max_reference_images: 3,
+            ..minimax()
+        };
+        let prompt = compile(
+            Some(&scene()),
+            Some(&two_hander()),
+            ShotDirection::Reaction,
+            Locks {
+                style: None,
+                characters: &locks[1..],
+            },
+            &three,
+        )
+        .unwrap();
+        assert_eq!(prompt.identities.len(), 2);
+        assert!(
+            prompt
+                .compiled
+                .dropped_constraints()
+                .iter()
+                .filter(|dropped| dropped.constraint.as_str().starts_with("identity."))
+                .all(|dropped| dropped
+                    .reason
+                    .starts_with("no approved reference images exist for waiter"))
         );
     }
 
@@ -858,6 +936,6 @@ mod tests {
         assert!(
             prompt.compiled.prompt().chars().count() <= kineto_provider_minimax::MAX_PROMPT_CHARS
         );
-        assert_eq!(prompt.identity.as_ref(), Some(&locks[0].portrait));
+        assert_eq!(prompt.identities, [locks[0].portrait.clone()]);
     }
 }

@@ -18,12 +18,21 @@ use std::{
 use base64::Engine as _;
 use kineto_core::{
     bible, bootstrap, cast,
-    generation::{self, Consent, GenerationError, NoHooks},
+    generation::{
+        self, CandidateGenerator, CandidateOwner, CandidateRequest, Consent, GeneratedCandidate,
+        GenerationError, IdentityReference, KEYFRAME_ASPECT, LocalDemoAdapter, LocalDemoError,
+        NoHooks,
+    },
     minimax::MinimaxKeyframes,
     screenplay, story,
     style::{self, SampleRequest, Submission},
 };
+use kineto_job_runtime::{
+    Invocation, JobRuntimePolicy, PaidJobAdapter, ProviderKey, Reconciliation,
+};
+use kineto_jobs::{CostEstimate, ErrorClass, IdempotencyKey, ProviderJobId};
 use kineto_llm::fake::FakeLlm;
+use kineto_project::{ArtifactId, InputHash};
 use kineto_project::{
     bible::SAMPLE_BIBLE_JSON,
     cast as cast_document,
@@ -37,7 +46,7 @@ use kineto_project::{
     style as style_document,
 };
 use kineto_provider_minimax::{HttpResponse, MinimaxClient, Transport, TransportFailure};
-use kineto_providers::secret::SecretString;
+use kineto_providers::{ImageCapabilities, ReferenceRole, secret::SecretString};
 
 /// MiniMax `image-01`, offline: a distinct JPEG for every call, and every
 /// request body kept.
@@ -195,30 +204,108 @@ fn film(target: &Path, cast_filmmaker: bool) -> CanonicalProject {
     let minimax = Minimax::new();
     lock_style(&project, &minimax, "film_noir");
     if cast_filmmaker {
-        cast::audition_with(
-            &project,
-            minimax.adapter(&project),
-            "filmmaker",
-            1,
-            Submission::Once,
-            &mut NoHooks,
-        )
-        .unwrap();
-        cast_document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
-        cast::make_pack_with(
-            &project,
-            minimax.adapter(&project),
-            "filmmaker",
-            Submission::Once,
-            &mut NoHooks,
-        )
-        .unwrap();
-        let provider = kineto_core::generation::ImageProvider::Minimax(Some(
-            MinimaxClient::shared(SecretString::new("sk-test".to_owned()).unwrap()),
-        ));
-        cast::lock(&project, &provider, "filmmaker").unwrap();
+        cast_character(&project, &minimax, "filmmaker");
     }
     project
+}
+
+/// Cast `character` from one portrait and its pack, and lock it.
+fn cast_character(project: &CanonicalProject, minimax: &Minimax, character: &str) {
+    let portraits = cast::audition_with(
+        project,
+        minimax.adapter(project),
+        character,
+        1,
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    cast_document::select(project, character, &portraits[0].artifact_id).unwrap();
+    cast::make_pack_with(
+        project,
+        minimax.adapter(project),
+        character,
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    let provider = kineto_core::generation::ImageProvider::Minimax(Some(MinimaxClient::shared(
+        SecretString::new("sk-test".to_owned()).unwrap(),
+    )));
+    cast::lock(project, &provider, character).unwrap();
+}
+
+/// The demo generator, declaring it takes two identity references and
+/// keeping every request it is asked to invoke.
+#[derive(Clone, Default)]
+struct TwoFaces {
+    seen: Arc<Mutex<Vec<CandidateRequest>>>,
+}
+
+impl PaidJobAdapter for TwoFaces {
+    type Request = CandidateRequest;
+    type Output = GeneratedCandidate;
+    type Error = LocalDemoError;
+
+    fn estimate_cost(&self, request: &CandidateRequest) -> Result<CostEstimate, LocalDemoError> {
+        LocalDemoAdapter.estimate_cost(request)
+    }
+
+    fn invoke(
+        &mut self,
+        request: &CandidateRequest,
+        key: &IdempotencyKey,
+    ) -> Result<Invocation<GeneratedCandidate>, LocalDemoError> {
+        self.seen.lock().unwrap().push(request.clone());
+        LocalDemoAdapter.invoke(request, key)
+    }
+
+    fn reconcile(
+        &mut self,
+        id: &ProviderJobId,
+    ) -> Result<Reconciliation<GeneratedCandidate>, LocalDemoError> {
+        LocalDemoAdapter.reconcile(id)
+    }
+
+    fn reconcile_by_idempotency_key(
+        &mut self,
+        key: &IdempotencyKey,
+    ) -> Result<Reconciliation<GeneratedCandidate>, LocalDemoError> {
+        LocalDemoAdapter.reconcile_by_idempotency_key(key)
+    }
+
+    fn classify_error(&self, error: &LocalDemoError) -> ErrorClass {
+        LocalDemoAdapter.classify_error(error)
+    }
+}
+
+impl CandidateGenerator for TwoFaces {
+    fn provider(&self) -> ProviderKey {
+        ProviderKey::new("fake-two-faces").unwrap()
+    }
+
+    fn policy(&self) -> JobRuntimePolicy {
+        LocalDemoAdapter.policy()
+    }
+
+    fn needs_prompt(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> ImageCapabilities {
+        ImageCapabilities {
+            max_reference_images: 2,
+            reference_roles: [ReferenceRole::Identity].into_iter().collect(),
+            ..generation::local_demo_capabilities()
+        }
+    }
+
+    fn recover(
+        &mut self,
+        request: &CandidateRequest,
+    ) -> Result<GeneratedCandidate, LocalDemoError> {
+        LocalDemoAdapter.recover(request)
+    }
 }
 
 /// Reopen the project with `identity_policy` set under `[workflow]`.
@@ -291,6 +378,101 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
             .all(|causes| causes == &["style_s0001".to_owned(), "style_s0002".to_owned()])
     );
     assert_eq!(shot.candidate_media().unwrap().len(), 3);
+}
+
+#[test]
+fn a_provider_that_takes_two_references_is_sent_the_first_two_cast_of_the_shot() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let minimax = Minimax::new();
+    cast_character(&project, &minimax, "interviewer");
+    // Shot 1 now shows both cast characters and one who is not cast.
+    let path = target.join("scenes/scene_001/shots/shot_001/shot.json");
+    let mut intent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent["characters"] = serde_json::json!(["filmmaker", "interviewer", "waiter"]);
+    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+
+    let generator = TwoFaces::default();
+    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    generation::generate_with(&project, &mut shot, generator.clone(), &mut NoHooks).unwrap();
+    let seen = generator.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    let portrait = |character: &str| {
+        cast_document::locked(&project, character)
+            .unwrap()
+            .unwrap()
+            .portrait
+    };
+    for request in seen.iter() {
+        let sent: Vec<_> = request
+            .identities
+            .iter()
+            .map(|identity| identity.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                portrait("filmmaker").artifact_id.as_str(),
+                portrait("interviewer").artifact_id.as_str()
+            ]
+        );
+        let interviewer = fs::read(target.join(portrait("interviewer").media_path)).unwrap();
+        assert_eq!(&*request.identities[1].bytes, interviewer.as_slice());
+        let prompt = request.prompt.as_ref().unwrap();
+        let dropped: Vec<_> = prompt
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .filter(|dropped| dropped.constraint.as_str().starts_with("identity."))
+            .map(|dropped| dropped.constraint.as_str())
+            .collect();
+        assert_eq!(dropped, ["identity.waiter"]);
+    }
+}
+
+#[test]
+fn minimax_is_never_sent_more_identity_references_than_it_takes() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, false);
+    let minimax = Minimax::new();
+    let reference = IdentityReference {
+        artifact_id: ArtifactId::new("cast.filmmaker.0001").unwrap(),
+        bytes: Arc::from(&[0xff_u8, 0xd8, 0xff, 0xe0][..]),
+    };
+    let request = CandidateRequest {
+        artifact_id: ArtifactId::new("shot_001_g0001_candidate_a").unwrap(),
+        input_hash: InputHash::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        owner: CandidateOwner::Shot(1),
+        aspect_ratio: KEYFRAME_ASPECT,
+        identities: vec![reference.clone(), reference],
+        prompt: Some(Arc::new(
+            kineto_core::keyframe_prompt::compile(
+                None,
+                Some(
+                    &ShotWorkflow::load(&project, 1)
+                        .unwrap()
+                        .intent()
+                        .unwrap()
+                        .unwrap(),
+                ),
+                kineto_project::shot::ShotDirection::Reaction,
+                kineto_core::keyframe_prompt::Locks::default(),
+                &kineto_provider_minimax::image_capabilities(),
+            )
+            .unwrap(),
+        )),
+    };
+    let mut adapter = minimax.adapter(&project);
+    let error = adapter
+        .invoke(
+            &request,
+            &IdempotencyKey::new("image.generate:x:y").unwrap(),
+        )
+        .unwrap_err();
+    assert!(adapter.certainly_not_charged(&error), "{error}");
+    assert_eq!(minimax.calls(), 0);
 }
 
 #[test]

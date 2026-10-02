@@ -337,13 +337,21 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
                 ));
             }
         };
+        // `image-01` takes one subject reference, as its capabilities say.
+        let subject_reference = match request.identities.as_slice() {
+            [] => None,
+            [identity] => Some(SubjectReference(identity.bytes.to_vec())),
+            _ => {
+                let _ = self.record_refusal(request);
+                return Err(MinimaxKeyframeError::Unsupported(
+                    "image-01 takes one identity reference per image",
+                ));
+            }
+        };
         let image = match client.generate_image(&ImageRequest {
             prompt: prompt.compiled.prompt().to_owned(),
             aspect_ratio,
-            subject_reference: request
-                .identity
-                .as_ref()
-                .map(|identity| SubjectReference(identity.bytes.to_vec())),
+            subject_reference,
         }) {
             Ok(image) => image,
             Err(error) => {

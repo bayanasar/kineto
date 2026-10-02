@@ -533,7 +533,7 @@ fn make<T: Transport + Sync>(
             kind,
         },
         aspect_ratio: frame,
-        identity: identity.cloned(),
+        identities: identity.cloned().into_iter().collect(),
         prompt: Some(Arc::new(prompt)),
     };
     jobs.generate(&plan, &call, index, hooks)?;

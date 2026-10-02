@@ -105,7 +105,9 @@ pub struct CandidateRequest {
     pub input_hash: InputHash,
     pub owner: CandidateOwner,
     pub aspect_ratio: AspectRatio,
-    pub identity: Option<IdentityReference>,
+    /// Approved pictures of the people the image must show, at most as many
+    /// as the provider takes.
+    pub identities: Vec<IdentityReference>,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -909,7 +911,7 @@ pub fn generate_consenting<G: CandidateGenerator>(
                 input_hash: record.intent().input_hash().clone(),
                 owner: CandidateOwner::Shot(plan.shot_number()),
                 aspect_ratio: KEYFRAME_ASPECT,
-                identity: None,
+                identities: Vec::new(),
                 prompt: None,
             })
         {
@@ -1095,7 +1097,7 @@ fn complete_inner<G: CandidateGenerator>(
                 input_hash: plan.input_hash().clone(),
                 owner: CandidateOwner::Shot(plan.shot_number()),
                 aspect_ratio: KEYFRAME_ASPECT,
-                identity: None,
+                identities: Vec::new(),
                 prompt: None,
             },
         ));
@@ -1140,13 +1142,17 @@ fn complete_inner<G: CandidateGenerator>(
             prompt = compile_prompt(project, shot, &generator)?;
         }
     }
-    let identity = match prompt.as_ref().and_then(|prompt| prompt.identity.as_ref()) {
-        Some(locked) if to_invoke > 0 => Some(identity_reference(project, locked)?),
-        _ => None,
+    let identities = match &prompt {
+        Some(prompt) if to_invoke > 0 => prompt
+            .identities
+            .iter()
+            .map(|locked| identity_reference(project, locked))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
     };
     for (_, request) in &mut requests {
         request.prompt.clone_from(&prompt);
-        request.identity.clone_from(&identity);
+        request.identities.clone_from(&identities);
     }
 
     // Every provider call runs on its own thread; recovering a finished call
@@ -1341,7 +1347,7 @@ pub fn unfinished_with<G: CandidateGenerator>(
                 input_hash,
                 owner: CandidateOwner::Shot(plan.shot_number()),
                 aspect_ratio: KEYFRAME_ASPECT,
-                identity: None,
+                identities: Vec::new(),
                 prompt: None,
             })
             && !unfinished.unresolved.contains(&plan.shot_number())
@@ -1634,7 +1640,7 @@ mod tests {
             input_hash: input,
             owner: CandidateOwner::Shot(1),
             aspect_ratio: KEYFRAME_ASPECT,
-            identity: None,
+            identities: Vec::new(),
             prompt: None,
         };
 

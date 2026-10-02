@@ -323,7 +323,7 @@ fn ask<T: Transport + Sync>(
         input_hash,
         owner: CandidateOwner::Style,
         aspect_ratio: KEYFRAME_ASPECT,
-        identity: None,
+        identities: Vec::new(),
         prompt: Some(Arc::new(prompt)),
     };
     jobs.generate(&plan, &call, 0, hooks)?;

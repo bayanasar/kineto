@@ -343,7 +343,7 @@ pub(crate) fn fit(
         compiled,
         prompt_hash,
         dependencies: Vec::new(),
-        identity: None,
+        identities: Vec::new(),
     })
 }
 
