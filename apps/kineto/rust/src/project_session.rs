@@ -618,7 +618,7 @@ pub unsafe extern "C" fn kineto_project_shot_state(
     })
 }
 
-fn snapshot_error_code(error: &SnapshotError) -> i32 {
+pub(crate) fn snapshot_error_code(error: &SnapshotError) -> i32 {
     match error {
         SnapshotError::InvalidShot => PROJECT_ERR_INVALID_SHOT,
         SnapshotError::InvalidCandidate => PROJECT_ERR_INVALID_CANDIDATE,
@@ -835,7 +835,7 @@ unsafe fn copy_candidate_origin(
     unsafe { copy_utf8(field(origin).as_bytes(), out_buf, out_cap, out_len) }
 }
 
-unsafe fn submit(
+pub(crate) unsafe fn submit_shot(
     session: *const KinetoProjectSession,
     shot_index: u32,
     command: ShotCommand,
@@ -872,7 +872,7 @@ pub unsafe extern "C" fn kineto_project_shot_set_direction(
         };
         // SAFETY: forwarded caller contract.
         unsafe {
-            submit(
+            submit_shot(
                 session,
                 shot_index,
                 ShotCommand::SetDirection(direction),
@@ -894,7 +894,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Generate, token)
+        submit_shot(session, shot_index, ShotCommand::Generate, token)
     })
 }
 
@@ -913,7 +913,7 @@ pub unsafe extern "C" fn kineto_project_shot_resubmit_keyframes(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::ResubmitKeyframes, token)
+        submit_shot(session, shot_index, ShotCommand::ResubmitKeyframes, token)
     })
 }
 
@@ -939,7 +939,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate_consenting(
     };
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(
+        submit_shot(
             session,
             shot_index,
             ShotCommand::GenerateConsenting(consent),
@@ -965,7 +965,7 @@ pub unsafe extern "C" fn kineto_project_shot_select(
         };
         // SAFETY: forwarded caller contract.
         unsafe {
-            submit(
+            submit_shot(
                 session,
                 shot_index,
                 ShotCommand::Select(candidate_index),
@@ -987,7 +987,7 @@ pub unsafe extern "C" fn kineto_project_shot_lock(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Lock, token)
+        submit_shot(session, shot_index, ShotCommand::Lock, token)
     })
 }
 
@@ -1005,7 +1005,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::GenerateVideo, token)
+        submit_shot(session, shot_index, ShotCommand::GenerateVideo, token)
     })
 }
 
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn kineto_project_shot_resubmit_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::ResubmitVideo, token)
+        submit_shot(session, shot_index, ShotCommand::ResubmitVideo, token)
     })
 }
 
@@ -1040,7 +1040,7 @@ pub unsafe extern "C" fn kineto_project_shot_lock_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::LockVideo, token)
+        submit_shot(session, shot_index, ShotCommand::LockVideo, token)
     })
 }
 
@@ -1093,7 +1093,7 @@ pub unsafe extern "C" fn kineto_project_shot_reset(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Reset, token)
+        submit_shot(session, shot_index, ShotCommand::Reset, token)
     })
 }
 
@@ -1112,7 +1112,7 @@ pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::MigrateLegacyHashes, token)
+        submit_shot(session, shot_index, ShotCommand::MigrateLegacyHashes, token)
     })
 }
 

@@ -1,0 +1,16 @@
+{
+  "action": "The filmmaker stands and walks toward the doorway to leave the office",
+  "camera_motion": "restrained_pan",
+  "characters": [
+    "filmmaker"
+  ],
+  "dialogue": "",
+  "direction": "reaction",
+  "duration_target": 3.5,
+  "emotion": "tension carried out through the doorway",
+  "framing": "medium_wide",
+  "generation_revision": 0,
+  "lens": "40mm",
+  "schema_version": 1,
+  "shot_id": "shot_002"
+}

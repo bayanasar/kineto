@@ -359,6 +359,129 @@ pub(crate) const DECISIONS: [(&str, u32); 3] = [("select", 1), ("reject", 2), ("
 /// Paid images whose cost `kineto_project_image_cost` gives.
 pub(crate) const IMAGE_COSTS: [(&str, u32); 3] = [("sample", 1), ("portrait", 2), ("pack", 3)];
 
+/// What `kineto_project_plan_count` counts; `group` selects the scene (or
+/// the step), `item` the shot.
+pub(crate) const PLAN_COUNTS: [(&str, u32); 9] = [
+    ("plan_revisions", 1),
+    ("plan_scenes", 2),
+    ("plan_shots", 3),
+    ("shot_characters", 4),
+    ("shot_continuity", 5),
+    ("plan_stale_causes", 6),
+    ("workflow_steps", 7),
+    ("step_waiting", 8),
+    ("step_stale", 9),
+];
+
+/// Number fields `kineto_project_plan_value` reads.
+pub(crate) const PLAN_VALUES: [(&str, u32); 11] = [
+    ("plan_revision_number", 1),
+    ("plan_revision_status", 2),
+    ("plan_revision_origin", 3),
+    ("plan_revision_based_on", 4),
+    ("plan_stale_cause", 5),
+    ("shot_direction", 6),
+    ("shot_framing", 7),
+    ("shot_camera_motion", 8),
+    ("shot_duration_millis", 9),
+    ("step_state", 10),
+    ("step_approval", 11),
+];
+
+/// Text fields `kineto_project_plan_text_copy` copies.
+pub(crate) const PLAN_TEXTS: [(&str, u32); 18] = [
+    ("plan_revision_provider", 1),
+    ("plan_revision_model", 2),
+    ("plan_stale_subject", 3),
+    ("scene_id", 4),
+    ("shot_id", 5),
+    ("shot_purpose", 6),
+    ("shot_lens", 7),
+    ("shot_action", 8),
+    ("shot_dialogue", 9),
+    ("shot_emotion", 10),
+    ("shot_continuity_from", 11),
+    ("shot_character", 12),
+    ("shot_continuity", 13),
+    ("step_id", 14),
+    ("step_description", 15),
+    ("step_waiting", 16),
+    ("step_stale", 17),
+    ("workflow_problem", 18),
+];
+
+pub(crate) const FRAMINGS: [(&str, u32); 10] = [
+    ("extreme_wide", 1),
+    ("wide", 2),
+    ("full", 3),
+    ("medium_wide", 4),
+    ("medium", 5),
+    ("medium_close_up", 6),
+    ("close_up", 7),
+    ("extreme_close_up", 8),
+    ("over_the_shoulder", 9),
+    ("insert", 10),
+];
+
+pub(crate) const CAMERA_MOTIONS: [(&str, u32); 11] = [
+    ("static", 1),
+    ("slow_dolly_in", 2),
+    ("dolly_in", 3),
+    ("slow_dolly_out", 4),
+    ("dolly_out", 5),
+    ("pan_left", 6),
+    ("pan_right", 7),
+    ("tilt_up", 8),
+    ("tilt_down", 9),
+    ("tracking", 10),
+    ("handheld", 11),
+];
+
+/// Why a shot plan may no longer follow the locked screenplay and bible.
+pub(crate) const PLAN_STALE_CAUSES: [(&str, u32); 5] = [
+    ("not_locked", 1),
+    ("scene_changed", 2),
+    ("scene_removed", 3),
+    ("scene_added", 4),
+    ("entry", 5),
+];
+
+/// Where a recipe step stands.
+pub(crate) const STEP_STATES: [(&str, u32); 4] = [
+    ("waiting", 1),
+    ("ready", 2),
+    ("awaiting_approval", 3),
+    ("done", 4),
+];
+
+/// What `kineto_project_take_count` counts for a shot.
+pub(crate) const TAKE_COUNTS: [(&str, u32); 2] = [("history", 1), ("staleness", 2)];
+
+/// Number fields `kineto_project_take_value` reads.
+pub(crate) const TAKE_VALUES: [(&str, u32); 3] = [
+    ("take_generation", 1),
+    ("take_status", 2),
+    ("take_refined", 3),
+];
+
+/// Text fields `kineto_project_take_text_copy` copies.
+pub(crate) const TAKE_TEXTS: [(&str, u32); 5] = [
+    ("take_id", 1),
+    ("take_media", 2),
+    ("take_provider", 3),
+    ("take_model", 4),
+    ("stale_reason", 5),
+];
+
+/// A take's standing in its shot.
+pub(crate) const TAKE_STATUSES: [(&str, u32); 5] = [
+    ("draft", 1),
+    ("candidate", 2),
+    ("selected", 3),
+    ("locked", 4),
+    ("superseded", 5),
+];
+
 /// The code `table` gives `name`.
 pub(crate) fn code(table: &[(&str, u32)], name: &str) -> u32 {
     table
@@ -444,6 +567,20 @@ pub(crate) const BIBLE_STALE: Field = field("bible_stale", 28, 1);
 pub(crate) const STYLE_LOCKED: Field = field("style_locked", 29, 1);
 pub(crate) const STYLE_UNRESOLVED: Field = field("style_unresolved", 30, 1);
 pub(crate) const PRODUCTION_DAMAGED: Field = field("production_damaged", 31, 1);
+
+/// The latest shot plan revision still in play.
+pub(crate) const PLAN_REVISION: Field = field("plan_revision", 0, 14);
+pub(crate) const PLAN_LOCKED_REVISION: Field = field("plan_locked_revision", 14, 14);
+pub(crate) const PLAN_STALE: Field = field("plan_stale", 28, 1);
+pub(crate) const WORKFLOW_UNKNOWN: Field = field("workflow_unknown", 29, 1);
+
+/// The packed `u64` plan state; 0 in a revision field means none.
+const PLAN_FIELDS: [Field; 4] = [
+    PLAN_REVISION,
+    PLAN_LOCKED_REVISION,
+    PLAN_STALE,
+    WORKFLOW_UNKNOWN,
+];
 
 /// The packed `u64` production state; 0 in a revision field means none.
 const PRODUCTION_FIELDS: [Field; 6] = [
@@ -544,6 +681,18 @@ const ENTRY_CAST_IMAGE_KIND: u32 = 23;
 const ENTRY_ENTRY_KIND: u32 = 24;
 const ENTRY_DECISION: u32 = 25;
 const ENTRY_IMAGE_COST: u32 = 26;
+const ENTRY_PLAN_FIELD: u32 = 27;
+const ENTRY_PLAN_COUNT: u32 = 28;
+const ENTRY_PLAN_VALUE: u32 = 29;
+const ENTRY_PLAN_TEXT: u32 = 30;
+const ENTRY_FRAMING: u32 = 31;
+const ENTRY_CAMERA_MOTION: u32 = 32;
+const ENTRY_PLAN_STALE_CAUSE: u32 = 33;
+const ENTRY_STEP_STATE: u32 = 34;
+const ENTRY_TAKE_COUNT: u32 = 35;
+const ENTRY_TAKE_VALUE: u32 = 36;
+const ENTRY_TAKE_TEXT: u32 = 37;
+const ENTRY_TAKE_STATUS: u32 = 38;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -605,6 +754,18 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_ENTRY_KIND, &ENTRY_KINDS);
         codes(&mut entries, ENTRY_DECISION, &DECISIONS);
         codes(&mut entries, ENTRY_IMAGE_COST, &IMAGE_COSTS);
+        fields(&mut entries, ENTRY_PLAN_FIELD, &PLAN_FIELDS);
+        codes(&mut entries, ENTRY_PLAN_COUNT, &PLAN_COUNTS);
+        codes(&mut entries, ENTRY_PLAN_VALUE, &PLAN_VALUES);
+        codes(&mut entries, ENTRY_PLAN_TEXT, &PLAN_TEXTS);
+        codes(&mut entries, ENTRY_FRAMING, &FRAMINGS);
+        codes(&mut entries, ENTRY_CAMERA_MOTION, &CAMERA_MOTIONS);
+        codes(&mut entries, ENTRY_PLAN_STALE_CAUSE, &PLAN_STALE_CAUSES);
+        codes(&mut entries, ENTRY_STEP_STATE, &STEP_STATES);
+        codes(&mut entries, ENTRY_TAKE_COUNT, &TAKE_COUNTS);
+        codes(&mut entries, ENTRY_TAKE_VALUE, &TAKE_VALUES);
+        codes(&mut entries, ENTRY_TAKE_TEXT, &TAKE_TEXTS);
+        codes(&mut entries, ENTRY_TAKE_STATUS, &TAKE_STATUSES);
         entries
     })
 }
@@ -669,6 +830,7 @@ mod tests {
             ENTRY_SNAPSHOT_FIELD,
             ENTRY_DOCUMENT_FIELD,
             ENTRY_PRODUCTION_FIELD,
+            ENTRY_PLAN_FIELD,
         ]
         .contains(&kind)
     }
@@ -679,6 +841,7 @@ mod tests {
             &SNAPSHOT_FIELDS[..],
             &DOCUMENT_FIELDS[..],
             &PRODUCTION_FIELDS[..],
+            &PLAN_FIELDS[..],
         ] {
             let mut used = 0_u64;
             for field in table {
@@ -769,9 +932,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_IMAGE_COST);
-        assert_eq!(&name[..len as usize], b"pack");
-        assert_eq!((value, extra), (3, 0));
+        assert_eq!(kind, ENTRY_TAKE_STATUS);
+        assert_eq!(&name[..len as usize], b"superseded");
+        assert_eq!((value, extra), (5, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

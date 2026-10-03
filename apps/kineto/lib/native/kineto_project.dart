@@ -409,6 +409,9 @@ final class KinetoImageProvider {
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
+  /// An argument the engine cannot take, such as an empty note.
+  static const int invalidArgument = 100;
+
   /// The create target already exists; nothing was overwritten.
   static const int alreadyExists = 103;
 

@@ -43,6 +43,9 @@ Widget _workspace({
   VoidCallback? onResubmit,
   String? error,
   VoidCallback? onConsent,
+  List<KinetoTake> takes = const <KinetoTake>[],
+  List<List<String>> staleReasons = const <List<String>>[],
+  ValueChanged<String>? onRefine,
 }) =>
     MaterialApp(
       theme: WabTheme.materialTheme(lightTheme: false),
@@ -55,6 +58,9 @@ Widget _workspace({
         onResubmitKeyframes: onResubmit,
         error: error,
         onGenerateDespiteIdentityDrift: onConsent,
+        takes: takes,
+        staleReasons: staleReasons,
+        onRefine: onRefine,
         shotSnapshot: shot,
         shotSnapshots: <KinetoShotSnapshot>[shot, _empty],
         activeShotIndex: 0,
@@ -267,5 +273,51 @@ void main() {
     await tester.tap(consent);
     await tester.pump();
     expect(consented, 1);
+  });
+
+  testWidgets('a shot is refined by a note, and earlier takes and stale reasons are shown', (tester) async {
+    tester.view.physicalSize = const Size(1280, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final notes = <String>[];
+    await tester.pumpWidget(
+      _workspace(
+        shot: _threeTakes,
+        provider: _minimax,
+        media: const <String?>[null, null, null],
+        takes: const <KinetoTake>[
+          KinetoTake(id: 'office_night_02_g0001_candidate_a', generation: 1, status: KinetoTakeStatus.superseded),
+          KinetoTake(id: 'office_night_02_g0001_candidate_b', generation: 1, status: KinetoTakeStatus.superseded),
+          KinetoTake(
+            id: 'office_night_02_g0002_candidate_a',
+            generation: 2,
+            status: KinetoTakeStatus.candidate,
+            refined: true,
+          ),
+        ],
+        staleReasons: const <List<String>>[
+          <String>['intent.emotion'],
+          <String>[],
+          <String>['intent.emotion', 'style_s0001'],
+        ],
+        onRefine: notes.add,
+      ),
+    );
+    expect(find.text('Earlier takes'), findsOneWidget);
+    expect(find.text('Generation 1 · a'), findsOneWidget);
+    expect(find.text('Generation 1 · b'), findsOneWidget);
+    expect(find.text('Take A no longer follows: intent.emotion'), findsOneWidget);
+    expect(find.text('Take C no longer follows: intent.emotion, style_s0001'), findsOneWidget);
+    expect(find.textContaining('Take B no longer follows'), findsNothing);
+
+    final refine = find.byKey(const ValueKey<String>('refine-shot'));
+    await tester.ensureVisible(refine);
+    await tester.tap(refine);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey<String>('refine-shot-note')), ' Warmer light. ');
+    await tester.tap(find.byKey(const ValueKey<String>('refine-shot-confirm')));
+    await tester.pumpAndSettle();
+    expect(notes, <String>['Warmer light.']);
   });
 }

@@ -1,0 +1,21 @@
+{
+  "shot_id": "office_night_02",
+  "schema_version": 1,
+  "direction": "reaction",
+  "generation_revision": 2,
+  "action": "He hears the question and does not answer.",
+  "camera_motion": "slow_dolly_in",
+  "characters": [
+    "filmmaker"
+  ],
+  "continuity": [
+    "Same coat, same light as the wide."
+  ],
+  "continuity_from": "office_night_01",
+  "dialogue": "Was it worth it?",
+  "duration_target": 5.0,
+  "emotion": "A quiet, withheld reaction.",
+  "framing": "medium_close_up",
+  "lens": "50mm",
+  "purpose": "Let the last question land on him."
+}

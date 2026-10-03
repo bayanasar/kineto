@@ -56,6 +56,7 @@ use crate::{
     screenplay, shot_plan, story,
     style::{self, SampleRequest},
     video::{self, VideoClient, VideoDone, VideoJob},
+    workflow,
 };
 
 /// How a session obtains its project.
@@ -530,6 +531,18 @@ struct View {
     shots: Mutex<Option<Vec<(ShotKey, ShotSlot)>>>,
     documents: Mutex<Option<Arc<PublishedDocuments>>>,
     production: Mutex<Option<Arc<PublishedProduction>>>,
+    workflow: Mutex<Option<Arc<PublishedWorkflow>>>,
+}
+
+/// Where the project stands in its recipe, as last published. Reads never
+/// do I/O.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedWorkflow {
+    /// Every step, in recipe order.
+    pub steps: Vec<workflow::StepStatus>,
+    /// Why the steps could not be worked out, such as a recipe this build
+    /// does not ship.
+    pub problem: Option<String>,
 }
 
 struct Gate {
@@ -755,6 +768,14 @@ impl ProjectSession {
             .ok_or(SnapshotError::NotOpen)
     }
 
+    /// Where the project stands in its recipe, as last published. Never does
+    /// I/O.
+    pub fn workflow(&self) -> Result<Arc<PublishedWorkflow>, SnapshotError> {
+        lock(&self.view.workflow)
+            .clone()
+            .ok_or(SnapshotError::NotOpen)
+    }
+
     /// The style and the cast as last published. Never does I/O.
     pub fn production(&self) -> Result<Arc<PublishedProduction>, SnapshotError> {
         lock(&self.view.production)
@@ -960,6 +981,7 @@ fn run(
             worker.publish_shots(view);
             worker.publish_documents(view);
             worker.publish_production(view);
+            worker.publish_workflow(view);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
             }
@@ -983,6 +1005,7 @@ fn run(
         if gate.is_closed() {
             break;
         }
+        let envelope_ran = envelope.is_some();
         match envelope {
             None => {}
             Some(Envelope {
@@ -1045,6 +1068,9 @@ fn run(
                 };
                 gate.deliver(|sink| sink.document_completed(token, &result));
             }
+        }
+        if envelope_ran && let Some(worker) = worker.as_ref() {
+            worker.publish_workflow(view);
         }
         if let Some(worker) = worker.as_mut() {
             for (key, revision, result) in worker.finish_videos() {
@@ -1855,6 +1881,25 @@ impl Worker {
             screenplay_stale,
             damaged: None,
         })
+    }
+
+    fn publish_workflow(&self, view: &View) {
+        let published =
+            match panic::catch_unwind(AssertUnwindSafe(|| workflow::status(&self.project))) {
+                Ok(Ok(steps)) => PublishedWorkflow {
+                    steps,
+                    problem: None,
+                },
+                Ok(Err(error)) => PublishedWorkflow {
+                    steps: Vec::new(),
+                    problem: Some(error.to_string()),
+                },
+                Err(_) => PublishedWorkflow {
+                    steps: Vec::new(),
+                    problem: Some("working out the steps panicked".to_owned()),
+                },
+            };
+        *lock(&view.workflow) = Some(Arc::new(published));
     }
 
     fn publish_production(&self, view: &View) {
