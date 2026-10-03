@@ -38,6 +38,7 @@ use kineto_project::{
     shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
     source::SourceError,
     style::StyleError,
+    voice::VoiceError,
 };
 use kineto_providers::secret::EnvSecretSource;
 
@@ -63,6 +64,9 @@ const RECOVERED_SHOT_PLAN: i64 = -7;
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
 const RECOVERED_CASTING_IMAGES: i64 = -6;
+/// The `shot` of a `RECOVERED` message for voice auditions kept from an
+/// interrupted session; the count stands where a revision would.
+const RECOVERED_VOICE_AUDITIONS: i64 = -8;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -225,6 +229,7 @@ impl SessionSink for DartPort {
                     match kind {
                         ImageWork::StyleSample => RECOVERED_STYLE_SAMPLES,
                         ImageWork::Casting => RECOVERED_CASTING_IMAGES,
+                        ImageWork::VoiceAudition => RECOVERED_VOICE_AUDITIONS,
                     },
                 ],
                 None,
@@ -1291,6 +1296,7 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
         SessionError::Production(ProductionError::Style(error)) => style_error_code(error),
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
+        SessionError::Production(ProductionError::Voice(error)) => voice_error_code(error),
         SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
         SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
         SessionError::Export(error) => export_error_code(error),
@@ -1336,6 +1342,8 @@ fn generation_error_code(error: &GenerationError) -> i32 {
                 cast_error_code(error)
             } else if let Some(error) = source.downcast_ref::<RevisionError>() {
                 revision_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<VoiceError>() {
+                voice_error_code(error)
             } else {
                 PROJECT_ERR_PROVIDER_REFUSED
             }
@@ -1362,6 +1370,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::Prerequisite(Prerequisite::LockedBible) => PROJECT_ERR_NEEDS_LOCKED_BIBLE,
         GenerationError::Prerequisite(Prerequisite::ShotPlan) => PROJECT_ERR_NEEDS_SHOT_PLAN,
+        GenerationError::Prerequisite(Prerequisite::LockedCast) => PROJECT_ERR_NEEDS_LOCKED_CAST,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall
@@ -1440,6 +1449,25 @@ fn cast_error_code(error: &CastError) -> i32 {
         | CastError::Conflict(_)
         | CastError::Path(_)
         | CastError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
+    }
+}
+
+fn voice_error_code(error: &VoiceError) -> i32 {
+    match error {
+        VoiceError::InvalidCharacter(_) | VoiceError::NoSuchAudition(_) => {
+            PROJECT_ERR_NO_SUCH_ARTIFACT
+        }
+        VoiceError::Rejected(_) => PROJECT_ERR_REJECTED,
+        VoiceError::Locked(_) => PROJECT_ERR_LOCKED,
+        VoiceError::NoSelection => PROJECT_ERR_NO_SELECTION,
+        VoiceError::StaleSelection => PROJECT_ERR_STALE_SELECTION,
+        VoiceError::Fs(_) => PROJECT_ERR_IO,
+        VoiceError::Manifest(error) => manifest_error_code(error),
+        VoiceError::InvalidLog
+        | VoiceError::Mismatch(_)
+        | VoiceError::Conflict(_)
+        | VoiceError::Path(_)
+        | VoiceError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
     }
 }
 

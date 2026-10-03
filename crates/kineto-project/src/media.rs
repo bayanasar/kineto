@@ -25,7 +25,7 @@ use crate::{
     fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
     manifest::CanonicalProject,
     shot::{ShotKey, ShotWorkflow, ShotWorkflowError},
-    style,
+    style, voice,
 };
 
 /// Whether a record's media bytes are kept. A record without one predates
@@ -56,6 +56,8 @@ pub enum MediaKind {
     /// A portrait candidate or a reference of a character's pack.
     Cast,
     StyleSample,
+    /// An audition of a character's voice.
+    Voice,
 }
 
 /// Where the director stands on what a media file shows, as far as keeping
@@ -91,6 +93,7 @@ pub enum MediaError {
     Shot(ShotWorkflowError),
     Cast(cast::CastError),
     Style(style::StyleError),
+    Voice(voice::VoiceError),
     Path(ProjectPathError),
     Fs(ProjectFsError),
 }
@@ -101,6 +104,7 @@ impl fmt::Display for MediaError {
             Self::Shot(error) => error.fmt(formatter),
             Self::Cast(error) => error.fmt(formatter),
             Self::Style(error) => error.fmt(formatter),
+            Self::Voice(error) => error.fmt(formatter),
             Self::Path(error) => error.fmt(formatter),
             Self::Fs(error) => error.fmt(formatter),
         }
@@ -113,6 +117,7 @@ impl Error for MediaError {
             Self::Shot(error) => Some(error),
             Self::Cast(error) => Some(error),
             Self::Style(error) => Some(error),
+            Self::Voice(error) => Some(error),
             Self::Path(error) => Some(error),
             Self::Fs(error) => Some(error),
         }
@@ -169,6 +174,36 @@ pub fn catalog(project: &CanonicalProject) -> Result<Vec<MediaRecord>, MediaErro
                 state: image.media_state.unwrap_or_default(),
                 standing,
                 dependencies: image
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.artifact_id.clone())
+                    .collect(),
+            });
+        }
+        let locked_voice = voice::locked(project, &character)
+            .map_err(MediaError::Voice)?
+            .map(|lock| lock.artifact_id);
+        for audition in voice::auditions(project, &character).map_err(MediaError::Voice)? {
+            let standing = if locked_voice.as_ref() == Some(&audition.artifact_id) {
+                Standing::Locked
+            } else {
+                match audition.status {
+                    voice::AuditionStatus::Selected => Standing::Chosen,
+                    voice::AuditionStatus::Rejected => Standing::Passed,
+                    voice::AuditionStatus::Candidate => Standing::Candidate,
+                }
+            };
+            records.push(MediaRecord {
+                owner: MediaOwner::Character(character.clone()),
+                artifact_id: audition.artifact_id,
+                kind: MediaKind::Voice,
+                path: ProjectRelativePath::new(&audition.media_path)
+                    .map_err(|error| MediaError::Voice(voice::VoiceError::Path(error)))?,
+                content_hash: ContentHash::new(audition.content_hash)
+                    .map_err(|_| MediaError::Voice(voice::VoiceError::InvalidLog))?,
+                state: audition.media_state.unwrap_or_default(),
+                standing,
+                dependencies: audition
                     .dependencies
                     .iter()
                     .map(|dependency| dependency.artifact_id.clone())
@@ -647,7 +682,22 @@ pub fn collect(
                 ShotWorkflow::load(project, key)?.evict_media(project, &ids)?
             }
             MediaOwner::Character(character) => {
-                cast::evict(project, character, &ids).map_err(MediaError::Cast)?;
+                let (voices, images): (Vec<&MediaRecord>, Vec<&MediaRecord>) = records
+                    .iter()
+                    .partition(|record| record.kind == MediaKind::Voice);
+                let ids_of = |records: Vec<&MediaRecord>| -> Vec<String> {
+                    records
+                        .into_iter()
+                        .map(|record| record.artifact_id.clone())
+                        .collect()
+                };
+                let (voices, images) = (ids_of(voices), ids_of(images));
+                if !images.is_empty() {
+                    cast::evict(project, character, &images).map_err(MediaError::Cast)?;
+                }
+                if !voices.is_empty() {
+                    voice::evict(project, character, &voices).map_err(MediaError::Voice)?;
+                }
             }
             MediaOwner::Style => style::evict(project, &ids).map_err(MediaError::Style)?,
         }

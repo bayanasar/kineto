@@ -37,6 +37,9 @@ my-film/
 │       │   └── cast.alice.0002.jpg
 │       ├── refs/
 │       │   └── cast.alice.0003.jpg
+│       ├── voice_auditions.json
+│       ├── voice/
+│       │   └── voice.alice.0001.mp3
 │       └── voice.json
 ├── locations/
 ├── props/
@@ -110,6 +113,35 @@ Which kinds and frames the pack holds follows the provider's declared capabiliti
 - the portrait's dependencies.
 
 A casting image depends on the character's bible entry (`bible_character.<id>`, the hash of the entry alone, so editing another character leaves it fresh) and on the locked style (the locked sample's ID and the hash of the lock); a reference also depends on its portrait. A locked cast is stale when either parent changed, went or came, and staleness names each. Images are paid write-ahead jobs in the `minimax-cast` partition with the rules of style samples: no new image of a character is paid for while one of that character's may have been charged without its result, until the director risks paying twice for that character. Images are numbered per character, so the decision retires only that character's unresolved images; another character's neither waits for it nor is retired by it. Asking for portraits or a pack says what should exist, not how much to add: an audition of `n` keeps the unrejected portraits already made from the same entry and style and makes only the rest, and a pack makes only the kinds the selected portrait's pack lacks for them. So a request cut short by a crash or a failure, asked again, pays only for what it had not made (and, on the director's decision, for a call whose answer was lost), while other takes of a kind are an explicit remake.
+
+A character's voice is cast after its look. `characters/<id>/voice_auditions.json` (`voice-auditions.schema.json`) records every audition in order as `voice.<id>.NNNN`, with its audio under `voice/`. Each audition is a voice from the speech provider's list saying a line, and records:
+
+- the voice: provider voice ID, ISO 639-1 language, delivery, rate in thousandths and pitch in semitones;
+- the voice's listed name;
+- the line;
+- its status: candidate, selected (at most one) or rejected;
+- its hashes, provider, model and parameters;
+- its measured length;
+- its dependencies;
+- its `media_state`.
+
+Locking the selected audition writes `characters/<id>/voice.json` (`voice.schema.json`):
+
+- the audition's ID;
+- its provider, model, voice and voice name;
+- its audio as a sample, by content hash and path;
+- its dependencies.
+
+An audition depends on the character's bible entry and its locked cast (the canonical portrait's ID and the hash of `character.json`, `field: character.<id>`). A locked voice is stale when either changed, went or came. A selected audition made for the character as it was is not locked (`StaleSelection`).
+
+Rules for asking:
+
+- An audition says the director's line, or the character's first line in the current screenplay, or a neutral line in the voice's language.
+- A voice already heard saying that line, and not rejected, is not asked again.
+- Auditions are paid speech in their provider's `voice` partition (`<provider>-voice`), numbered per character, with the rules of casting images.
+- Auditions are the character's media (`MediaKind::Voice`). The locked one is pinned, and a rejected one outside the recent takes may be collected.
+
+Work spoken in a character's voice records the lock as a dependency: the audition's ID and the hash of `voice.json`, `field: voice.<id>`.
 
 ## `project.toml`
 

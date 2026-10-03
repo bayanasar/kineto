@@ -43,6 +43,7 @@ use kineto_project::{
     source::{self, SourceError, SourceFormat},
     story::StoryAnalysis,
     style::{self as style_document, StyleError, StyleLock, StyleSample},
+    voice::{self as voice_document, Audition, VoiceError, VoiceLock},
 };
 use kineto_providers::Price;
 
@@ -56,13 +57,14 @@ use crate::{
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
     screenplay, shot_plan,
-    speech::{SpeechProvider, SpeechProviderInfo},
+    speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
     style::{self, SampleRequest},
     video::{
         self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
         VideoProvider, VideoProviderInfo,
     },
+    voice::{self, VoiceChoice},
     workflow,
 };
 
@@ -222,13 +224,35 @@ pub enum ProductionCommand {
     LockCharacter {
         character: String,
     },
+    /// Free: ask the speech provider which voices it offers.
+    LoadVoices,
+    /// Paid: have each voice of `choices` say `line` as `character`, or
+    /// its default line; a voice already heard saying it is not asked
+    /// again.
+    AuditionVoices {
+        character: String,
+        choices: Vec<VoiceChoice>,
+        line: Option<String>,
+    },
+    SelectVoice {
+        character: String,
+        audition: String,
+    },
+    RejectVoice {
+        character: String,
+        audition: String,
+    },
+    LockVoice {
+        character: String,
+    },
 }
 
-/// Why a style or casting change was refused.
+/// Why a style, casting or voice change was refused.
 #[derive(Debug)]
 pub enum ProductionError {
     Style(StyleError),
     Cast(CastError),
+    Voice(VoiceError),
 }
 
 impl fmt::Display for ProductionError {
@@ -236,6 +260,7 @@ impl fmt::Display for ProductionError {
         match self {
             Self::Style(error) => error.fmt(formatter),
             Self::Cast(error) => error.fmt(formatter),
+            Self::Voice(error) => error.fmt(formatter),
         }
     }
 }
@@ -245,6 +270,7 @@ impl Error for ProductionError {
         match self {
             Self::Style(error) => Some(error),
             Self::Cast(error) => Some(error),
+            Self::Voice(error) => Some(error),
         }
     }
 }
@@ -363,11 +389,13 @@ pub enum Recovery {
     Images { kind: ImageWork, count: usize },
 }
 
-/// A kind of paid image work.
+/// A kind of paid work kept as the provider answers it: images, and the
+/// speech of voice auditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageWork {
     StyleSample,
     Casting,
+    VoiceAudition,
 }
 
 /// Receives a session's outcomes on the worker thread.
@@ -465,6 +493,23 @@ pub struct PublishedCharacter {
     pub stale: Vec<String>,
     /// An image of this character may have been charged without its result.
     pub unresolved: bool,
+    pub voice: PublishedVoice,
+}
+
+/// Where casting a character's voice stands.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedVoice {
+    /// Every audition, oldest first, with where its audio is.
+    pub auditions: Vec<(Audition, PathBuf)>,
+    pub lock: Option<VoiceLock>,
+    /// The parents of the locked voice that changed, went or came.
+    pub stale: Vec<String>,
+    /// An audition of this character may have been charged without its
+    /// audio.
+    pub unresolved: bool,
+    /// What an audition says unless the director writes a line, in the
+    /// project's language.
+    pub default_line: String,
 }
 
 /// What the worker last published about the style and the cast. Reads
@@ -478,6 +523,10 @@ pub struct PublishedProduction {
     pub style_unresolved: bool,
     /// The characters worth casting, in bible order.
     pub characters: Vec<PublishedCharacter>,
+    /// The voices the speech provider offers, once asked for.
+    pub voices: Vec<Voice>,
+    /// Why the voices could not be listed, when they could not.
+    pub voices_problem: Option<String>,
     /// The style or the cast could not be read; why.
     pub damaged: Option<String>,
 }
@@ -1226,6 +1275,7 @@ fn run(
                                 | ProductionCommand::RefineStyle { .. }
                                 | ProductionCommand::Audition { .. }
                                 | ProductionCommand::MakePack { .. }
+                                | ProductionCommand::AuditionVoices { .. }
                         );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
@@ -1429,6 +1479,13 @@ struct Worker {
     /// Characters an image of which may have been charged without its
     /// result.
     cast_unresolved: BTreeSet<String>,
+    speech: SpeechProvider,
+    /// Characters an audition of which may have been charged without its
+    /// audio.
+    voice_unresolved: BTreeSet<String>,
+    /// The voices the speech provider offers, or why they could not be
+    /// listed; `None` until asked for.
+    voices: Option<Result<Vec<Voice>, String>>,
 }
 
 impl Worker {
@@ -1443,6 +1500,10 @@ impl Worker {
             .video_provider
             .clone()
             .unwrap_or_else(|| video_provider_for(&provider));
+        let speech = options
+            .speech_provider
+            .clone()
+            .unwrap_or_else(|| speech_provider_for(&provider));
         Self {
             project,
             provider,
@@ -1461,6 +1522,9 @@ impl Worker {
             keyframes_unresolved: BTreeSet::new(),
             style_unresolved: false,
             cast_unresolved: BTreeSet::new(),
+            speech,
+            voice_unresolved: BTreeSet::new(),
+            voices: None,
             collection: None,
             mismatched: Vec::new(),
             last_export: None,
@@ -1856,6 +1920,7 @@ impl Worker {
         let provider = &self.provider;
         let style_error = |error| SessionError::Production(ProductionError::Style(error));
         let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
+        let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
         let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
         let mut hooks = NoHooks;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match &command {
@@ -1913,6 +1978,63 @@ impl Worker {
                     .map(|_| ())
                     .map_err(generation_error)
             }
+            ProductionCommand::LoadVoices => {
+                let listed = match &self.speech {
+                    SpeechProvider::LocalDemo => {
+                        LocalDemoVoices.voices().map_err(|error| match error {})
+                    }
+                    SpeechProvider::Minimax(Some(client)) => {
+                        client.voices().map_err(|error| GenerationError::Provider {
+                            class: error.class(),
+                            source: Box::new(error),
+                        })
+                    }
+                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                };
+                self.voices = Some(
+                    listed
+                        .as_ref()
+                        .map(Clone::clone)
+                        .map_err(ToString::to_string),
+                );
+                listed.map(|_| ()).map_err(generation_error)
+            }
+            ProductionCommand::AuditionVoices {
+                character,
+                choices,
+                line,
+            } => {
+                let line = line.as_deref();
+                paid(
+                    match &self.speech {
+                        SpeechProvider::LocalDemo => voice::audition(
+                            project,
+                            &LocalDemoVoices,
+                            character,
+                            choices,
+                            line,
+                            submission,
+                            &mut hooks,
+                        ),
+                        SpeechProvider::Minimax(Some(client)) => voice::audition(
+                            project, client, character, choices, line, submission, &mut hooks,
+                        ),
+                        SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    }
+                    .map(|_| ()),
+                )
+            }
+            ProductionCommand::SelectVoice {
+                character,
+                audition,
+            } => voice_document::select(project, character, audition).map_err(voice_error),
+            ProductionCommand::RejectVoice {
+                character,
+                audition,
+            } => voice_document::reject(project, character, audition).map_err(voice_error),
+            ProductionCommand::LockVoice { character } => voice::lock(project, character)
+                .map(|_| ())
+                .map_err(generation_error),
         }))
         .unwrap_or(Err(SessionError::Panicked));
         // A paid call cut short may have been charged without its result;
@@ -1924,6 +2046,7 @@ impl Worker {
             ProductionCommand::Audition { .. } | ProductionCommand::MakePack { .. } => {
                 self.note_unresolved_casting();
             }
+            ProductionCommand::AuditionVoices { .. } => self.note_unresolved_voices(),
             _ => {}
         }
         outcome
@@ -1956,10 +2079,29 @@ impl Worker {
                 Err(_) => attention += 1,
             }
         }
+        match voice::recover(&self.project) {
+            Ok(recovery) => {
+                attention += recovery.needs_attention;
+                if !recovery.attached.is_empty() {
+                    recoveries.push(Recovery::Images {
+                        kind: ImageWork::VoiceAudition,
+                        count: recovery.attached.len(),
+                    });
+                }
+                self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+            }
+            Err(_) => attention += 1,
+        }
         if attention > 0 {
             recoveries.push(Recovery::NeedsAttention { count: attention });
         }
         recoveries
+    }
+
+    fn note_unresolved_voices(&mut self) {
+        if let Ok(recovery) = voice::recover(&self.project) {
+            self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+        }
     }
 
     fn note_unresolved_samples(&mut self) {
@@ -1977,6 +2119,9 @@ impl Worker {
     fn note_unresolved(&mut self, kind: ImageWork, recovery: &ImageRecovery) {
         match kind {
             ImageWork::StyleSample => self.style_unresolved = !recovery.unresolved.is_empty(),
+            ImageWork::VoiceAudition => {
+                self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+            }
             ImageWork::Casting => {
                 self.cast_unresolved = recovery
                     .unresolved
@@ -2333,6 +2478,26 @@ impl Worker {
                     (image, media)
                 })
                 .collect();
+            let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
+            let voice = PublishedVoice {
+                auditions: voice_document::auditions(project, &id)
+                    .map_err(voice_error)?
+                    .into_iter()
+                    .map(|audition| {
+                        let media = at(&audition.media_path);
+                        (audition, media)
+                    })
+                    .collect(),
+                lock: voice_document::locked(project, &id).map_err(voice_error)?,
+                stale: voice::staleness(project, &id).map_err(generation_error)?,
+                unresolved: self.voice_unresolved.contains(&id),
+                default_line: voice::default_line(
+                    project,
+                    &id,
+                    &project.manifest().defaults.language,
+                )
+                .map_err(generation_error)?,
+            };
             characters.push(PublishedCharacter {
                 lock: cast_document::locked(project, &id).map_err(cast_error)?,
                 stale: cast::staleness(project, &id).map_err(generation_error)?,
@@ -2340,13 +2505,21 @@ impl Worker {
                 id,
                 name,
                 images,
+                voice,
             });
         }
+        let (voices, voices_problem) = match &self.voices {
+            Some(Ok(voices)) => (voices.clone(), None),
+            Some(Err(problem)) => (Vec::new(), Some(problem.clone())),
+            None => (Vec::new(), None),
+        };
         Ok(PublishedProduction {
             samples,
             style: style_document::locked(project).map_err(style_error)?,
             style_unresolved: self.style_unresolved,
             characters,
+            voices,
+            voices_problem,
             damaged: None,
         })
     }
@@ -2475,6 +2648,15 @@ fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
         ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
         ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
     }
+}
+
+/// The characters `unresolved` auditions belong to.
+fn unresolved_characters(unresolved: &[String]) -> BTreeSet<String> {
+    unresolved
+        .iter()
+        .filter_map(|id| voice_document::character_of(id))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The shot's cached workflow, loaded from its canonical files on first use.
@@ -4400,7 +4582,11 @@ mod tests {
                 provider,
                 model,
                 sink,
-                SessionOptions::default(),
+                // Lines are spoken by the demo; the fake answers images only.
+                SessionOptions {
+                    speech_provider: Some(SpeechProvider::LocalDemo),
+                    ..SessionOptions::default()
+                },
             )
             .unwrap();
             (session, events)
@@ -4688,6 +4874,65 @@ mod tests {
             assert_eq!(lock.references.len(), 7);
             assert!(filmmaker.stale.is_empty() && !filmmaker.unresolved);
 
+            // The cast character's voice: the provider's voices listed free,
+            // two auditions of its default line, one chosen and locked.
+            assert!(session.production().unwrap().voices.is_empty());
+            produce(&session, &events, ProductionCommand::LoadVoices).unwrap();
+            assert_eq!(session.production().unwrap().voices.len(), 3);
+            let choice = |voice_id: &str| VoiceChoice {
+                voice: crate::speech::VoiceSettings::new(voice_id, "en"),
+                name: voice_id.to_owned(),
+            };
+            produce(
+                &session,
+                &events,
+                ProductionCommand::AuditionVoices {
+                    character: "filmmaker".to_owned(),
+                    choices: vec![choice("demo_low"), choice("demo_high")],
+                    line: None,
+                },
+            )
+            .unwrap();
+            let production = session.production().unwrap();
+            let voice = &production.characters[0].voice;
+            assert_eq!(voice.default_line, "This is how I sound.");
+            assert_eq!(voice.auditions.len(), 2);
+            assert!(voice.auditions[1].1.is_file());
+            assert_eq!(voice.auditions[1].0.line, "This is how I sound.");
+            for command in [
+                ProductionCommand::SelectVoice {
+                    character: "filmmaker".to_owned(),
+                    audition: "voice.filmmaker.0002".to_owned(),
+                },
+                ProductionCommand::LockVoice {
+                    character: "filmmaker".to_owned(),
+                },
+            ] {
+                produce(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::RejectVoice {
+                        character: "filmmaker".to_owned(),
+                        audition: "voice.filmmaker.0002".to_owned(),
+                    }
+                ),
+                Err("Production(Voice(Locked(\"voice.filmmaker.0002\")))".to_owned())
+            );
+            let voice = session.production().unwrap().characters[0].voice.clone();
+            assert_eq!(
+                voice.lock.as_ref().map(|lock| lock.voice.voice_id.as_str()),
+                Some("demo_high")
+            );
+            assert!(voice.stale.is_empty() && !voice.unresolved);
+            assert_eq!(
+                fake.calls.load(Ordering::SeqCst),
+                11,
+                "speech is the demo's"
+            );
+
             // Casting follows the locked bible: an edit of the entry the
             // cast was made from makes it stale once it is locked.
             document(
@@ -4708,6 +4953,10 @@ mod tests {
             .unwrap();
             assert_eq!(
                 session.production().unwrap().characters[0].stale,
+                ["bible_character.filmmaker"]
+            );
+            assert_eq!(
+                session.production().unwrap().characters[0].voice.stale,
                 ["bible_character.filmmaker"]
             );
 

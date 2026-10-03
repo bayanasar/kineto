@@ -91,7 +91,7 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
           '${recovery.document!.label} revision ${recovery.revisionOrCount} was answered before Kineto '
               'closed and has been kept.'
         else if (recovery.images != null)
-          '${recovery.revisionOrCount} ${recovery.images!.label} MiniMax answered before Kineto '
+          '${recovery.revisionOrCount} ${recovery.images!.label} answered before Kineto '
               'closed have been kept.'
         else if (recovery.completed)
           'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '

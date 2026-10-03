@@ -76,10 +76,11 @@ pub(crate) const PROJECT_ERR_EXPORT_INCOMPLETE: i32 = 159;
 pub(crate) const PROJECT_ERR_EXPORT_EXISTS: i32 = 160;
 pub(crate) const PROJECT_ERR_NOTHING_TO_EXPORT: i32 = 161;
 pub(crate) const PROJECT_ERR_MEDIA_CHANGED: i32 = 162;
+pub(crate) const PROJECT_ERR_NEEDS_LOCKED_CAST: i32 = 163;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 65] = [
+const STATUSES: [(&str, i32); 66] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -156,6 +157,7 @@ const STATUSES: [(&str, i32); 65] = [
     ("export_exists", PROJECT_ERR_EXPORT_EXISTS),
     ("nothing_to_export", PROJECT_ERR_NOTHING_TO_EXPORT),
     ("media_changed", PROJECT_ERR_MEDIA_CHANGED),
+    ("needs_locked_cast", PROJECT_ERR_NEEDS_LOCKED_CAST),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

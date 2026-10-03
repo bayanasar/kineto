@@ -115,6 +115,14 @@ The user can choose:
 
 Dialogue duration may affect shot design, so voice planning happens before final shot rendering when applicable, even if audio files are generated lazily.
 
+How it works now (`kineto_core::voice`):
+
+1. Voice casting follows the character's locked cast.
+2. The director lists the speech provider's voices; listing is free.
+3. Chosen voices audition the character's first line, or a line the director writes. Each audition is paid speech, priced before it is asked for.
+4. The director selects one audition and locks it. The lock fixes the provider, the voice ID, the language, the delivery, the rate and the pitch.
+5. Lines are spoken with the locked voice from then on. When the character's bible entry or cast changes, the voice is stale until it is cast again.
+
 ## Stage 8 — Scene breakdown and shot planning
 
 For each scene, generate explicit shots with:

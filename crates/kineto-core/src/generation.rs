@@ -677,6 +677,8 @@ pub enum Prerequisite {
     LockedBible,
     /// A scene is planned again within a shot plan.
     ShotPlan,
+    /// A character's voice is cast after its look is locked.
+    LockedCast,
 }
 
 impl fmt::Display for Prerequisite {
@@ -701,6 +703,7 @@ impl fmt::Display for Prerequisite {
             }
             Self::LockedBible => "lock the bible first",
             Self::ShotPlan => "plan the shots before planning a scene again",
+            Self::LockedCast => "lock the character's cast before casting its voice",
         })
     }
 }

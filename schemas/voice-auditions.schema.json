@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/voice-auditions.schema.json",
+  "title": "Kineto Voice Auditions",
+  "description": "Every audition made while casting one character's voice, as voice.<character>.NNNN in order: a voice from the speech provider's list saying a line, its audio under voice/. Each is a candidate, selected (at most one) or rejected. Nothing is deleted. The lock is voice.json.",
+  "type": "object",
+  "required": ["schema_version", "character_id", "auditions"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "character_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 112},
+    "auditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "status", "voice", "voice_name", "line", "content_hash", "input_hash", "provider", "model", "parameters", "media_path", "duration_ms", "dependencies"],
+        "properties": {
+          "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "status": {"enum": ["candidate", "selected", "rejected"]},
+          "voice": {
+            "type": "object",
+            "description": "How a voice speaks, as its provider is asked: its ID in the provider's list, the ISO 639-1 language, the delivery chosen, the rate in thousandths of normal and the pitch shift in semitones.",
+            "required": ["voice_id", "language", "speed_permille", "pitch_semitones"],
+            "properties": {
+              "voice_id": {"type": "string", "minLength": 1},
+              "language": {"type": "string", "minLength": 2, "maxLength": 3},
+              "emotion": {"enum": ["happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent", "whisper"]},
+              "speed_permille": {"type": "integer", "minimum": 1, "maximum": 65535},
+              "pitch_semitones": {"type": "integer", "minimum": -128, "maximum": 127}
+            },
+            "additionalProperties": false
+          },
+          "voice_name": {"type": "string", "minLength": 1},
+          "line": {"type": "string", "minLength": 1},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "provider": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1},
+          "parameters": {"type": "string"},
+          "media_path": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
+          "duration_ms": {"type": "integer", "minimum": 0},
+          "media_state": {"enum": ["present", "evicted"]},
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["artifact_id", "content_hash", "impact"],
+              "properties": {
+                "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
+                "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "impact": {"enum": ["semantic", "cosmetic"]},
+                "field": {"type": "string"}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
