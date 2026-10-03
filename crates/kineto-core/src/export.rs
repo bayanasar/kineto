@@ -233,6 +233,8 @@ pub struct Exported {
     pub complete: bool,
     /// The bytes of every file in the package.
     pub bytes: u64,
+    /// The dubbed lines it carries.
+    pub lines: usize,
 }
 
 /// Write the package `request` asks for, stamped `exported_at`.
@@ -266,8 +268,8 @@ pub fn export(
     }
     std::fs::create_dir_all(&staging)?;
     let written = write_package(project, &readiness, &staging, exported_at);
-    let bytes = match written {
-        Ok(bytes) => bytes,
+    let (bytes, lines) = match written {
+        Ok(written) => written,
         Err(error) => {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(error);
@@ -298,17 +300,20 @@ pub fn export(
         complete: readiness.missing.is_empty(),
         missing: readiness.missing,
         bytes,
+        lines,
     })
 }
 
-/// Write every file of the package into `folder`; the bytes written.
+/// Write every file of the package into `folder`; the bytes written and
+/// the dubbed lines carried.
 fn write_package(
     project: &CanonicalProject,
     readiness: &Readiness,
     folder: &Path,
     exported_at: SystemTime,
-) -> Result<u64, ExportError> {
+) -> Result<(u64, usize), ExportError> {
     let mut bytes = 0;
+    let mut carried_lines = 0;
     let mut scenes: Vec<(String, Vec<Value>)> = Vec::new();
     let mut runtime: u64 = 0;
     let lines = dubbed_lines(project)?;
@@ -388,6 +393,7 @@ fn write_package(
                 "speed_permille": take.voice.speed_permille,
             }));
             line_files.push(file);
+            carried_lines += 1;
         }
         let sidecar_file = format!("{stem}.json");
         let mut sidecar = sidecar(
@@ -451,7 +457,7 @@ fn write_package(
         "total_runtime_seconds": runtime,
     });
     bytes += write_json(&folder.join("manifest.json"), &document)?;
-    Ok(bytes)
+    Ok((bytes, carried_lines))
 }
 
 fn sidecar(

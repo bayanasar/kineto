@@ -395,7 +395,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
         UNIX_EPOCH + Duration::from_secs(1_791_015_045),
     )
     .unwrap();
-    assert_eq!(package.shots, 1);
+    assert_eq!((package.shots, package.lines), (1, 1));
     let folder = out.join("dailies");
     assert_eq!(
         fs::read(folder.join("office_night_02_line01.wav")).unwrap(),

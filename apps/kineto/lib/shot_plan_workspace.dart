@@ -398,7 +398,18 @@ class ShotPlanWorkspaceView extends StatelessWidget {
             ),
             Text(shot.purpose),
             Text(shot.action),
-            if (shot.dialogue.isNotEmpty) Text('“${shot.dialogue}”'),
+            if (shot.dialogue.isNotEmpty)
+              Text(
+                '“${shot.dialogue}”'
+                '${shot.dialogueMillis == 0 ? '' : ' · ${_seconds(shot.dialogueMillis)} s to say'}',
+              ),
+            if (shot.tooShort)
+              WabStatusBadge(
+                'Too short for its dialogue: ${_seconds(shot.dialogueMillis)} s to say in '
+                '${shot.durationTarget.toStringAsFixed(1)} s',
+                key: ValueKey<String>('too-short-${shot.id}'),
+                kind: WabBadgeKind.warning,
+              ),
             Text('Mood: ${shot.emotion} · ${shot.direction.label}'),
             if (shot.characters.isNotEmpty) Text('With ${shot.characters.join(', ')}'),
             if (shot.continuityFrom != null) Text('Continues from ${shot.continuityFrom}'),
@@ -677,6 +688,15 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
         _field('shot-$id-purpose', 'What the shot is for', draft.purpose),
         _field('shot-$id-action', 'What happens', draft.action, lines: 2),
         _field('shot-$id-dialogue', 'What is said (may be empty)', draft.dialogue),
+        if (draft.shot.dialogueMillis > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'As planned, its dialogue takes ${_seconds(draft.shot.dialogueMillis)} s to say; '
+              'keep the shot at least that long.',
+              key: ValueKey<String>('shot-$id-dialogue-length'),
+            ),
+          ),
         _field('shot-$id-emotion', 'The mood', draft.emotion),
         Wrap(
           spacing: 12,
@@ -735,3 +755,6 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
     );
   }
 }
+
+/// [millis] as seconds with one decimal, for example `1.4`.
+String _seconds(int millis) => (millis / 1000).toStringAsFixed(1);

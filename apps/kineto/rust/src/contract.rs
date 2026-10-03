@@ -266,7 +266,7 @@ pub(crate) const MEDIA_TEXTS: [(&str, u32); 4] = [
 ];
 
 /// Number fields `kineto_project_export_value` reads.
-pub(crate) const EXPORT_VALUES: [(&str, u32); 7] = [
+pub(crate) const EXPORT_VALUES: [(&str, u32); 8] = [
     ("export_ready", 1),
     ("export_missing", 2),
     ("export_complete", 3),
@@ -274,6 +274,7 @@ pub(crate) const EXPORT_VALUES: [(&str, u32); 7] = [
     ("last_shots", 5),
     ("last_complete", 6),
     ("last_bytes", 7),
+    ("last_lines", 8),
 ];
 
 /// Text fields `kineto_project_export_text_copy` copies.
@@ -489,7 +490,7 @@ pub(crate) const PLAN_COUNTS: [(&str, u32); 9] = [
 ];
 
 /// Number fields `kineto_project_plan_value` reads.
-pub(crate) const PLAN_VALUES: [(&str, u32); 11] = [
+pub(crate) const PLAN_VALUES: [(&str, u32); 13] = [
     ("plan_revision_number", 1),
     ("plan_revision_status", 2),
     ("plan_revision_origin", 3),
@@ -501,6 +502,8 @@ pub(crate) const PLAN_VALUES: [(&str, u32); 11] = [
     ("shot_duration_millis", 9),
     ("step_state", 10),
     ("step_approval", 11),
+    ("shot_dialogue_millis", 12),
+    ("shot_too_short", 13),
 ];
 
 /// Text fields `kineto_project_plan_text_copy` copies.
@@ -770,6 +773,134 @@ const SAMPLE: ShotApprovalSnapshot = ShotApprovalSnapshot {
     video_revision: 3,
 };
 
+/// What `kineto_project_voice_count` counts. `group` selects the character
+/// (in cast order), the line, the preference or the suggestion.
+pub(crate) const VOICE_COUNTS: [(&str, u32); 12] = [
+    ("voices", 1),
+    ("voice_auditions", 2),
+    ("voice_stale", 3),
+    ("voice_recommended", 4),
+    ("lines", 5),
+    ("line_takes", 6),
+    ("line_stale", 7),
+    ("preferences", 8),
+    ("preference_evidence", 9),
+    ("preference_revisions", 10),
+    ("suggestions", 11),
+    ("suggestion_evidence", 12),
+];
+
+/// Number fields `kineto_project_voice_value` reads.
+pub(crate) const VOICE_VALUES: [(&str, u32); 34] = [
+    ("voice_locked", 1),
+    ("voice_unresolved", 2),
+    ("audition_status", 3),
+    ("audition_duration_millis", 4),
+    ("audition_speed_permille", 5),
+    ("line_number", 6),
+    ("line_locked", 7),
+    ("line_unresolved", 8),
+    ("line_take_cost_known", 9),
+    ("line_take_cost_micros", 10),
+    ("line_duration_millis", 11),
+    ("line_duration_source", 12),
+    ("take_status", 13),
+    ("take_duration_millis", 14),
+    ("take_speed_permille", 15),
+    ("preference_dimension", 16),
+    ("preference_stance", 17),
+    ("preference_strength_permille", 18),
+    ("preference_from_suggestion", 19),
+    ("preferences_revision", 20),
+    ("preference_revision_number", 21),
+    ("preference_revision_origin", 22),
+    ("suggestion_batch", 23),
+    ("suggestion_index", 24),
+    ("suggestion_dimension", 25),
+    ("suggestion_stance", 26),
+    ("suggestion_compared_images", 27),
+    ("unconsidered_choices", 28),
+    ("suggestions_ready", 29),
+    ("plan_preferences_changed", 30),
+    ("speech_provider", 31),
+    ("speech_ready", 32),
+    ("speech_character_cost_known", 33),
+    ("speech_character_cost_micros", 34),
+];
+
+/// Text fields `kineto_project_voice_text_copy` copies.
+pub(crate) const VOICE_TEXTS: [(&str, u32); 34] = [
+    ("voice_id", 1),
+    ("voice_name", 2),
+    ("voice_description", 3),
+    ("voices_problem", 4),
+    ("voice_default_line", 5),
+    ("audition_id", 6),
+    ("audition_voice_id", 7),
+    ("audition_voice_name", 8),
+    ("audition_line", 9),
+    ("audition_media", 10),
+    ("audition_emotion", 11),
+    ("voice_lock_audition", 12),
+    ("voice_lock_voice_id", 13),
+    ("voice_lock_voice_name", 14),
+    ("voice_stale", 15),
+    ("recommended_voice_id", 16),
+    ("recommended_voice_name", 17),
+    ("recommended_reason", 18),
+    ("line_scene", 19),
+    ("line_character", 20),
+    ("line_text", 21),
+    ("line_parenthetical", 22),
+    ("take_id", 23),
+    ("take_media", 24),
+    ("take_note", 25),
+    ("take_emotion", 26),
+    ("line_lock_take", 27),
+    ("line_stale", 28),
+    ("preference_value", 29),
+    ("preference_reason", 30),
+    ("preference_evidence", 31),
+    ("suggestion_value", 32),
+    ("suggestion_reason", 33),
+    ("suggestion_evidence", 34),
+];
+
+/// Deliveries a line or an audition can be asked for.
+pub(crate) const EMOTIONS: [(&str, u32); 9] = [
+    ("happy", 1),
+    ("sad", 2),
+    ("angry", 3),
+    ("fearful", 4),
+    ("disgusted", 5),
+    ("surprised", 6),
+    ("calm", 7),
+    ("fluent", 8),
+    ("whisper", 9),
+];
+
+/// What a preference is about.
+pub(crate) const DIMENSIONS: [(&str, u32); 8] = [
+    ("camera_motion", 1),
+    ("lighting", 2),
+    ("framing", 3),
+    ("lens", 4),
+    ("color", 5),
+    ("composition", 6),
+    ("performance", 7),
+    ("pacing", 8),
+];
+
+pub(crate) const STANCES: [(&str, u32); 2] = [("prefer", 1), ("avoid", 2)];
+
+/// Where a line's length comes from.
+pub(crate) const DURATION_SOURCES: [(&str, u32); 2] = [("estimated", 1), ("measured", 2)];
+
+pub(crate) const SPEECH_PROVIDERS: [(&str, u32); 2] = [("local_demo", 1), ("minimax", 2)];
+
+/// What the director decides about a suggestion.
+pub(crate) const SUGGESTION_DECISIONS: [(&str, u32); 2] = [("accept", 1), ("reject", 2)];
+
 const ENTRY_STATUS: u32 = 1;
 const ENTRY_DIRECTION: u32 = 2;
 const ENTRY_SNAPSHOT_FIELD: u32 = 3;
@@ -821,6 +952,15 @@ const ENTRY_MEDIA_LIST: u32 = 48;
 const ENTRY_MEDIA_TEXT: u32 = 49;
 const ENTRY_EXPORT_VALUE: u32 = 50;
 const ENTRY_EXPORT_TEXT: u32 = 51;
+const ENTRY_VOICE_COUNT: u32 = 52;
+const ENTRY_VOICE_VALUE: u32 = 53;
+const ENTRY_VOICE_TEXT: u32 = 54;
+const ENTRY_EMOTION: u32 = 55;
+const ENTRY_DIMENSION: u32 = 56;
+const ENTRY_STANCE: u32 = 57;
+const ENTRY_DURATION_SOURCE: u32 = 58;
+const ENTRY_SPEECH_PROVIDER: u32 = 59;
+const ENTRY_SUGGESTION_DECISION: u32 = 60;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -907,6 +1047,19 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_MEDIA_TEXT, &MEDIA_TEXTS);
         codes(&mut entries, ENTRY_EXPORT_VALUE, &EXPORT_VALUES);
         codes(&mut entries, ENTRY_EXPORT_TEXT, &EXPORT_TEXTS);
+        codes(&mut entries, ENTRY_VOICE_COUNT, &VOICE_COUNTS);
+        codes(&mut entries, ENTRY_VOICE_VALUE, &VOICE_VALUES);
+        codes(&mut entries, ENTRY_VOICE_TEXT, &VOICE_TEXTS);
+        codes(&mut entries, ENTRY_EMOTION, &EMOTIONS);
+        codes(&mut entries, ENTRY_DIMENSION, &DIMENSIONS);
+        codes(&mut entries, ENTRY_STANCE, &STANCES);
+        codes(&mut entries, ENTRY_DURATION_SOURCE, &DURATION_SOURCES);
+        codes(&mut entries, ENTRY_SPEECH_PROVIDER, &SPEECH_PROVIDERS);
+        codes(
+            &mut entries,
+            ENTRY_SUGGESTION_DECISION,
+            &SUGGESTION_DECISIONS,
+        );
         entries
     })
 }
@@ -1073,9 +1226,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_EXPORT_TEXT);
-        assert_eq!(&name[..len as usize], b"last_path");
-        assert_eq!((value, extra), (4, 0));
+        assert_eq!(kind, ENTRY_SUGGESTION_DECISION);
+        assert_eq!(&name[..len as usize], b"reject");
+        assert_eq!((value, extra), (2, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

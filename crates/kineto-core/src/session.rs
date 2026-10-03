@@ -635,6 +635,9 @@ pub struct ProjectMetadata {
     pub title: String,
     pub format_version: u32,
     pub read_only: bool,
+    /// ISO 639-1 code of the language the project is written in, which its
+    /// voices speak.
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1274,6 +1277,7 @@ fn run(
                 title: project.manifest().title.clone(),
                 format_version: project.manifest().format_version,
                 read_only: project.is_read_only(),
+                language: project.manifest().defaults.language.clone(),
             });
             worker.publish_shots(view);
             worker.publish_documents(view);
