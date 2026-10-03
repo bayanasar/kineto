@@ -112,6 +112,7 @@ final class KinetoNativeContract {
   static const int _takeValueKind = 36;
   static const int _takeTextKind = 37;
   static const int _takeStatusKind = 38;
+  static const int _videoProviderKind = 39;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -167,6 +168,7 @@ final class KinetoNativeContract {
   Map<String, int> get takeValues => _table(_takeValueKind);
   Map<String, int> get takeTexts => _table(_takeTextKind);
   Map<String, int> get takeStatuses => _table(_takeStatusKind);
+  Map<String, int> get videoProviders => _table(_videoProviderKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

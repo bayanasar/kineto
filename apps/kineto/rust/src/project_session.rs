@@ -22,6 +22,7 @@ use kineto_core::{
         DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Recovery,
         SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError, SubmitError,
     },
+    video::{VideoProvider, VideoProviderKind},
 };
 use kineto_jobs::ErrorClass;
 use kineto_project::{
@@ -214,6 +215,9 @@ unsafe fn spawn(
     let Ok(provider) = image_provider_from_environment() else {
         return PROJECT_ERR_PROVIDER_UNKNOWN;
     };
+    let Ok(video_provider) = video_provider_from_environment() else {
+        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    };
     let Ok(model) = document_model_from_environment() else {
         return PROJECT_ERR_MODEL_UNKNOWN;
     };
@@ -222,7 +226,10 @@ unsafe fn spawn(
         provider,
         model,
         Box::new(DartPort { post, port }),
-        SessionOptions::default(),
+        SessionOptions {
+            video_provider,
+            ..SessionOptions::default()
+        },
     ) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
@@ -247,6 +254,21 @@ fn image_provider_from_environment() -> Result<ImageProvider, ()> {
         Err(std::env::VarError::NotUnicode(_)) => return Err(()),
     };
     ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+}
+
+/// The environment variable that names the video provider a session uses:
+/// `local-demo` for the free demo clip, `minimax` for MiniMax Hailuo with the
+/// key in `KINETO_MINIMAX_API_KEY`. Unset or empty follows the image
+/// provider. As for images, a paid provider is used only when named.
+const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
+
+fn video_provider_from_environment() -> Result<Option<VideoProvider>, ()> {
+    let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+    };
+    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
 }
 
 /// The language model named by `KINETO_LLM_PROVIDER` (see
@@ -498,8 +520,9 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
     })
 }
 
-/// Estimated cost of one shot video with the session's provider, in USD
-/// micros; 0 when it cannot generate video, or for a null handle.
+/// Estimated cost of one shot video, of the shortest clip the session's
+/// video provider makes, in USD micros; 0 for a free provider or a null
+/// handle.
 ///
 /// # Safety
 /// `session` must be a live project-session handle.
@@ -512,7 +535,64 @@ pub unsafe extern "C" fn kineto_project_video_cost_micros(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        session.session.image_provider().video_cost_micros
+        session.session.video_provider().clip_cost_micros
+    })
+}
+
+/// The session's video provider as a contract `video_provider` code: 1 for
+/// the local demo, 2 for MiniMax; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_provider(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        match session.session.video_provider().kind {
+            VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
+            VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
+        }
+    })
+}
+
+/// 1 when the session's video provider can make a video, 0 when it cannot
+/// (a paid provider without credentials) or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_provider_ready(
+    session: *const KinetoProjectSession,
+) -> u8 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u8::from(session.session.video_provider().ready)
+    })
+}
+
+/// Length in seconds of the clip [`kineto_project_video_cost_micros`]
+/// prices; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_clip_seconds(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u32::from(session.session.video_provider().clip_seconds)
     })
 }
 
@@ -1143,6 +1223,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Shot(error) => shot_error_code(error),
         GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
         GenerationError::NoFirstFrame => PROJECT_ERR_NO_FIRST_FRAME,
+        GenerationError::Incapable(_) => PROJECT_ERR_PROVIDER_INCAPABLE,
         GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
             PROJECT_ERR_SHOT_INTENT_MISSING
         }

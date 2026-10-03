@@ -1,6 +1,6 @@
 pub mod secret;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum SeedSupport {
@@ -161,6 +161,40 @@ pub struct VideoCapabilities {
     pub async_jobs: bool,
     pub resumable_remote_handle: bool,
     pub output_containers: BTreeSet<VideoContainer>,
+    /// Clip lengths the provider renders, in seconds; empty when it renders
+    /// any length between the minimum and maximum duration.
+    pub clip_seconds: BTreeSet<u8>,
+    /// Longest prompt the provider accepts, in characters; `None` when it
+    /// sets no limit.
+    pub max_prompt_chars: Option<usize>,
+    /// Formats a start frame may be sent in.
+    pub start_frame_formats: BTreeSet<ImageFormat>,
+    /// Largest start frame the provider accepts, in bytes.
+    pub max_start_frame_bytes: Option<u64>,
+    /// What one clip costs, by its length in seconds; a length missing
+    /// here has no known price.
+    pub clip_prices: BTreeMap<u8, Price>,
+}
+
+impl VideoCapabilities {
+    /// The clip length closest to `seconds` that the provider renders;
+    /// ties go to the shorter, cheaper clip. `None` when it declares no
+    /// lengths and no range.
+    #[must_use]
+    pub fn nearest_clip_seconds(&self, seconds: f64) -> Option<u8> {
+        if self.clip_seconds.is_empty() {
+            let min = self.min_duration_ms? as f64 / 1000.0;
+            let max = self.max_duration_ms? as f64 / 1000.0;
+            let clamped = seconds.clamp(min, max).round();
+            return u8::try_from(clamped as u64).ok();
+        }
+        self.clip_seconds.iter().copied().min_by(|a, b| {
+            (f64::from(*a) - seconds)
+                .abs()
+                .total_cmp(&(f64::from(*b) - seconds).abs())
+                .then(a.cmp(b))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -375,6 +409,13 @@ pub mod fake {
             async_jobs: true,
             resumable_remote_handle: true,
             output_containers: [VideoContainer::Mp4].into_iter().collect(),
+            clip_seconds: [5, 10].into_iter().collect(),
+            max_prompt_chars: Some(2_000),
+            start_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
+            max_start_frame_bytes: Some(20 * 1024 * 1024),
+            clip_prices: [(5, Price::usd(250_000)), (10, Price::usd(500_000))]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -418,6 +459,25 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_is_the_nearest_length_the_provider_renders() {
+        let listed = fake::video_i2v_resumable();
+        assert_eq!(listed.nearest_clip_seconds(4.0), Some(5));
+        assert_eq!(
+            listed.nearest_clip_seconds(7.5),
+            Some(5),
+            "a tie goes to the shorter clip"
+        );
+        assert_eq!(listed.nearest_clip_seconds(8.0), Some(10));
+        assert_eq!(listed.nearest_clip_seconds(30.0), Some(10));
+
+        let ranged = fake::video_t2v_only();
+        assert_eq!(ranged.nearest_clip_seconds(4.4), Some(4));
+        assert_eq!(ranged.nearest_clip_seconds(0.2), Some(1));
+        assert_eq!(ranged.nearest_clip_seconds(12.0), Some(8));
+        assert_eq!(VideoCapabilities::default().nearest_clip_seconds(5.0), None);
+    }
 
     #[test]
     fn i2v_fallback_never_silently_becomes_t2v() {

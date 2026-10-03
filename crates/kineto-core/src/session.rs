@@ -55,7 +55,10 @@ use crate::{
     paid_image::{ImageRecovery, Submission},
     screenplay, shot_plan, story,
     style::{self, SampleRequest},
-    video::{self, VideoClient, VideoDone, VideoJob},
+    video::{
+        self, LocalDemoVideos, VideoDone, VideoGenerator, VideoJob, VideoProvider,
+        VideoProviderInfo,
+    },
     workflow,
 };
 
@@ -598,6 +601,7 @@ struct Envelope {
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
+    video_provider: VideoProviderInfo,
     image_prices: ImagePrices,
     document_model: DocumentModelInfo,
     view: Arc<View>,
@@ -635,6 +639,11 @@ impl ProjectSession {
         options: SessionOptions,
     ) -> std::io::Result<Self> {
         let image_provider = provider.info();
+        let mut options = options;
+        let videos = options
+            .video_provider
+            .get_or_insert_with(|| video_provider_for(&provider));
+        let video_provider = videos.info();
         let image_prices = ImagePrices {
             sample: style::sample_cost(&provider),
             portrait: cast::audition_cost(&provider, 1),
@@ -659,6 +668,7 @@ impl ProjectSession {
         Ok(Self {
             commands: Some(commands),
             image_provider,
+            video_provider,
             image_prices,
             document_model,
             view,
@@ -912,6 +922,12 @@ impl ProjectSession {
         self.image_provider
     }
 
+    /// The provider this session makes videos with.
+    #[must_use]
+    pub const fn video_provider(&self) -> VideoProviderInfo {
+        self.video_provider
+    }
+
     /// Project metadata, available once the open has succeeded.
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
@@ -1091,17 +1107,21 @@ fn run(
     }
 }
 
-/// Timing a session runs with.
-#[derive(Debug, Clone, Copy)]
+/// Timing and video provider a session runs with.
+#[derive(Debug, Clone)]
 pub struct SessionOptions {
     /// How often a video's remote task is queried.
     pub video_poll_interval: std::time::Duration,
+    /// The provider videos are made with. `None` follows the image
+    /// provider: MiniMax with its key, otherwise the local demo.
+    pub video_provider: Option<VideoProvider>,
 }
 
 impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             video_poll_interval: video::POLL_INTERVAL,
+            video_provider: None,
         }
     }
 }
@@ -1111,7 +1131,7 @@ const VIDEO_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 /// Videos being generated for this session's shots.
 struct Videos {
-    client: Option<VideoClient>,
+    provider: VideoProvider,
     gate: Arc<Gate>,
     in_flight: BTreeMap<ShotKey, VideoJob>,
     /// Shots whose last submission is unresolved; see [`ShotCommand::ResubmitVideo`].
@@ -1122,11 +1142,24 @@ struct Videos {
 }
 
 impl Videos {
-    /// Follow `job` on its own thread until its video is on disk or failed.
+    /// Follow `job` on its own thread, with the provider it was submitted
+    /// to, until its video is on disk or failed. A MiniMax job waits for a
+    /// session with the key.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        if job.provider == video::DEMO_VIDEO_PROVIDER {
+            self.spawn_watcher(LocalDemoVideos, job, root);
+        } else if let VideoProvider::Minimax(Some(client)) = &self.provider {
+            let client = client.clone();
+            self.spawn_watcher(client, job, root);
+        }
+    }
+
+    fn spawn_watcher<G: VideoGenerator + Send + 'static>(
+        &mut self,
+        generator: G,
+        job: VideoJob,
+        root: ProjectRoot,
+    ) {
         let shot = job.shot.clone();
         self.in_flight.insert(shot.clone(), job.clone());
         let gate = Arc::clone(&self.gate);
@@ -1135,7 +1168,7 @@ impl Videos {
         let spawned = thread::Builder::new()
             .name("kineto-video-watch".to_owned())
             .spawn(move || {
-                if let Some(done) = video::watch(&client, &root, job, &gate.closed, interval) {
+                if let Some(done) = video::watch(&generator, &root, job, &gate.closed, interval) {
                     lock(&finished).push(done);
                 }
             });
@@ -1200,17 +1233,16 @@ impl Worker {
         gate: Arc<Gate>,
         options: SessionOptions,
     ) -> Self {
-        // Video uses the MiniMax key the image provider was given.
-        let client = match &provider {
-            ImageProvider::Minimax(client) => client.clone(),
-            ImageProvider::LocalDemo => None,
-        };
+        let video_provider = options
+            .video_provider
+            .clone()
+            .unwrap_or_else(|| video_provider_for(&provider));
         Self {
             project,
             provider,
             model,
             videos: Videos {
-                client,
+                provider: video_provider,
                 gate,
                 in_flight: BTreeMap::new(),
                 unresolved: BTreeSet::new(),
@@ -1302,16 +1334,29 @@ impl Worker {
         if self.videos.in_flight.contains_key(key) {
             return Err(SessionError::VideoInFlight);
         }
-        let Some(client) = self.videos.client.clone() else {
-            return Err(SessionError::Generation(GenerationError::NotConfigured));
-        };
-        let started = self.with_shot(key, |project, _, shot| {
+        fn submit<G: VideoGenerator>(
+            project: &CanonicalProject,
+            shot: &ShotWorkflow,
+            generator: &G,
+            risk_paying_twice: bool,
+        ) -> Result<VideoJob, GenerationError> {
             if risk_paying_twice {
-                video::resubmit(project, shot, &client)
+                video::resubmit(project, shot, generator)
             } else {
-                video::start(project, shot, &client)
+                video::start(project, shot, generator)
             }
-        });
+        }
+        let started = match self.videos.provider.clone() {
+            VideoProvider::LocalDemo => self.with_shot(key, |project, _, shot| {
+                submit(project, shot, &LocalDemoVideos, risk_paying_twice)
+            }),
+            VideoProvider::Minimax(Some(client)) => self.with_shot(key, |project, _, shot| {
+                submit(project, shot, &client, risk_paying_twice)
+            }),
+            VideoProvider::Minimax(None) => {
+                return Err(SessionError::Generation(GenerationError::NotConfigured));
+            }
+        };
         match &started {
             Ok(_) => {
                 self.videos.unresolved.remove(key);
@@ -1328,22 +1373,31 @@ impl Worker {
     }
 
     /// Watch again the videos an earlier session submitted. Nothing is
-    /// submitted; without a key they wait for a session that has one.
+    /// submitted. The demo's are always followed; MiniMax's wait for a
+    /// session with the key.
     fn resume_videos(&mut self) -> usize {
-        if self.project.is_read_only() || self.videos.client.is_none() {
+        if self.project.is_read_only() {
             return 0;
         }
-        match video::in_flight(&self.project) {
-            Ok(found) => {
-                for job in found.jobs {
-                    let root = self.project.root().clone();
-                    self.videos.watch(job, root);
-                }
-                self.videos.unresolved.extend(found.unresolved);
-                found.needs_attention
+        let keyed = matches!(self.videos.provider, VideoProvider::Minimax(Some(_)));
+        let mut needs_attention = 0;
+        for provider in [video::DEMO_VIDEO_PROVIDER, video::VIDEO_PROVIDER] {
+            if provider == video::VIDEO_PROVIDER && !keyed {
+                continue;
             }
-            Err(_) => 1,
+            match video::in_flight(&self.project, provider) {
+                Ok(found) => {
+                    for job in found.jobs {
+                        let root = self.project.root().clone();
+                        self.videos.watch(job, root);
+                    }
+                    self.videos.unresolved.extend(found.unresolved);
+                    needs_attention += found.needs_attention;
+                }
+                Err(_) => needs_attention += 1,
+            }
         }
+        needs_attention
     }
 
     fn generate(&mut self, key: &ShotKey, consent: Consent) -> Result<(), SessionError> {
@@ -2065,6 +2119,15 @@ impl Worker {
     }
 }
 
+/// The video provider a session follows its image provider with: MiniMax
+/// with the same key, otherwise the local demo.
+fn video_provider_for(images: &ImageProvider) -> VideoProvider {
+    match images {
+        ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
+        ImageProvider::LocalDemo => VideoProvider::LocalDemo,
+    }
+}
+
 /// The shot's cached workflow, loaded from its canonical files on first use.
 fn shot_mut<'a>(
     project: &CanonicalProject,
@@ -2283,7 +2346,6 @@ mod tests {
                     kind: ImageProviderKind::LocalDemo,
                     ready: true,
                     generation_cost_micros: 0,
-                    video_cost_micros: 0,
                 }
             );
         }
@@ -2294,7 +2356,6 @@ mod tests {
                 kind: ImageProviderKind::Minimax,
                 ready: true,
                 generation_cost_micros: 10_500,
-                video_cost_micros: 280_000,
             }
         );
         assert!(!format!("{minimax:?}").contains("sk-test"));
@@ -2434,6 +2495,8 @@ mod tests {
         use kineto_providers::secret::SecretString;
         use std::sync::atomic::{AtomicBool, AtomicU32};
 
+        use crate::video::VideoProviderKind;
+
         const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isommp41-video";
 
         /// MiniMax for images and Hailuo video, offline. A video task stays
@@ -2537,6 +2600,7 @@ mod tests {
         fn options() -> SessionOptions {
             SessionOptions {
                 video_poll_interval: Duration::from_millis(20),
+                ..SessionOptions::default()
             }
         }
 
@@ -2858,15 +2922,78 @@ mod tests {
         }
 
         #[test]
-        fn a_video_needs_a_real_locked_keyframe() {
+        fn the_demo_makes_a_free_video_from_its_own_keyframe_and_minimax_refuses_it() {
             let temp = TempDir::new();
-            let (session, events) = create(&temp.0.join("film"));
-            // The demo session has no video provider.
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            assert_eq!(session.video_provider().kind, VideoProviderKind::LocalDemo);
+            assert_eq!(session.video_provider().clip_cost_micros, 0);
             assert!(
                 command(&session, &events, 1, ShotCommand::GenerateVideo)
                     .unwrap_err()
-                    .contains("NotConfigured")
+                    .contains("KeyframeNotLocked")
             );
+            command(&session, &events, 2, ShotCommand::Generate).unwrap();
+            command(&session, &events, 3, ShotCommand::Select(0)).unwrap();
+            command(&session, &events, 4, ShotCommand::Lock).unwrap();
+            // The demo keyframe has no image; the demo video needs none, and
+            // runs through the same job as a paid one.
+            command(&session, &events, 5, ShotCommand::GenerateVideo).unwrap();
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+            let media = session.video_media(0).unwrap().unwrap();
+            assert_eq!(fs::read(&media).unwrap(), video::DEMO_CLIP);
+            command(&session, &events, 6, ShotCommand::LockVideo).unwrap();
+            assert_eq!(
+                session.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Locked
+            );
+            let artifacts: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+            )
+            .unwrap();
+            let video = artifacts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["artifact_id"] == "shot_001_v0001")
+                .unwrap();
+            assert_eq!(video["provider"], "local-demo-video");
+            assert_eq!(video["model"], "demo-clip");
+            for (token, command) in [
+                (7, ShotCommand::Generate),
+                (8, ShotCommand::Select(0)),
+                (9, ShotCommand::Lock),
+            ] {
+                session.submit(1, command, token).unwrap();
+                assert_eq!(completion(&events, token), Ok(()));
+            }
+            drop(session);
+
+            // MiniMax starts only from an image, which a demo keyframe has not.
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(session.video_provider().kind, VideoProviderKind::Minimax);
+            session.submit(1, ShotCommand::GenerateVideo, 10).unwrap();
+            assert!(
+                completion(&events, 10)
+                    .unwrap_err()
+                    .contains("NoFirstFrame")
+            );
+            drop(session);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn a_video_needs_a_real_locked_keyframe() {
+            let temp = TempDir::new();
             let fake = Arc::new(FakeMinimax::default());
             let (session, events) = spawn(
                 OpenRequest::CreateText {

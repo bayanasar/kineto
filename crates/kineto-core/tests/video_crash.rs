@@ -216,6 +216,7 @@ fn spawn(request: OpenRequest, fake: &Arc<FakeMinimax>) -> (ProjectSession, mpsc
         Box::new(Sink(Mutex::new(sender))),
         SessionOptions {
             video_poll_interval: Duration::from_millis(20),
+            ..SessionOptions::default()
         },
     )
     .unwrap();

@@ -20,7 +20,20 @@ const KinetoImageProvider _minimax = KinetoImageProvider(
   kind: KinetoImageProviderKind.minimax,
   ready: true,
   generationCostMicros: 10500,
-  videoCostMicros: 280000,
+);
+
+const KinetoVideoProvider _hailuo = KinetoVideoProvider(
+  kind: KinetoVideoProviderKind.minimax,
+  ready: true,
+  clipCostMicros: 280000,
+  clipSeconds: 6,
+);
+
+const KinetoVideoProvider _demo = KinetoVideoProvider(
+  kind: KinetoVideoProviderKind.localDemo,
+  ready: true,
+  clipCostMicros: 0,
+  clipSeconds: 2,
 );
 
 KinetoShotSnapshot _locked(KinetoVideoState video) => KinetoShotSnapshot(
@@ -56,7 +69,8 @@ void main() {
   Future<void> pump(
     WidgetTester tester, {
     required KinetoVideoState state,
-    KinetoImageProvider provider = _minimax,
+    KinetoVideoProvider provider = _hailuo,
+    List<String?>? takes,
     String? video,
     VoidCallback? onGenerateVideo,
     VoidCallback? onResubmitVideo,
@@ -69,8 +83,9 @@ void main() {
         theme: WabTheme.materialTheme(lightTheme: false),
         home: DemoWorkspaceView(
           engineSnapshot: const KinetoEngineSnapshot(abiVersion: 20),
-          imageProvider: provider,
-          candidateMedia: media,
+          imageProvider: _minimax,
+          videoProvider: provider,
+          candidateMedia: takes ?? media,
           videoMedia: video,
           shotSnapshot: shot,
           shotSnapshots: <KinetoShotSnapshot>[shot, shot],
@@ -161,17 +176,45 @@ void main() {
     expect(find.text('Lock video'), findsNothing);
   });
 
-  testWidgets('the demo provider explains what video needs', (tester) async {
+  testWidgets('the demo makes a free clip from a keyframe without an image', (tester) async {
+    var asked = 0;
     await pump(
       tester,
       state: KinetoVideoState.none,
-      provider: const KinetoImageProvider(
-        kind: KinetoImageProviderKind.localDemo,
-        ready: true,
-        generationCostMicros: 0,
+      provider: _demo,
+      takes: const <String?>[null, null, null],
+      onGenerateVideo: () => asked++,
+    );
+    expect(find.textContaining('placeholder clip'), findsOneWidget);
+    await tap(tester, find.text('Generate video · 2 s · free'));
+    expect(asked, 1);
+  });
+
+  testWidgets('MiniMax starts only from an image, and only with its key', (tester) async {
+    var asked = 0;
+    await pump(
+      tester,
+      state: KinetoVideoState.none,
+      takes: const <String?>[null, null, null],
+      onGenerateVideo: () => asked++,
+    );
+    expect(find.textContaining('has no image to start a video from'), findsOneWidget);
+    final generate = find.text(r'Generate video · 6 s · ≈ $0.28');
+    await tester.ensureVisible(generate);
+    await tester.tap(generate, warnIfMissed: false);
+    expect(asked, 0);
+
+    await pump(
+      tester,
+      state: KinetoVideoState.none,
+      provider: const KinetoVideoProvider(
+        kind: KinetoVideoProviderKind.minimax,
+        ready: false,
+        clipCostMicros: 280000,
+        clipSeconds: 6,
       ),
     );
-    expect(find.textContaining('select MiniMax'), findsOneWidget);
+    expect(find.textContaining('has no key configured'), findsOneWidget);
     expect(find.textContaining('Generate video'), findsNothing);
   });
 }

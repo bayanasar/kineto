@@ -156,6 +156,7 @@ class DemoWorkspaceScreen extends StatefulWidget {
 class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late final KinetoEngineSnapshot _engineSnapshot;
   late final KinetoImageProvider _imageProvider;
+  late final KinetoVideoProvider _videoProvider;
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
   bool _working = false;
@@ -173,6 +174,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     super.initState();
     _engineSnapshot = widget.engine.snapshot;
     _imageProvider = widget.project.imageProvider;
+    _videoProvider = widget.project.videoProvider;
     _shotSnapshots = _readShotSnapshots();
     _recoveryNotes = describeRecoveries(widget.project.recoveries);
     // Videos finish in the background, whatever the director is doing.
@@ -288,6 +290,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       ),
       engineSnapshot: _engineSnapshot,
       imageProvider: _imageProvider,
+      videoProvider: _videoProvider,
       candidateMedia: _candidateMedia(_activeShotIndex),
       candidateOrigins: _candidateOrigins(_activeShotIndex),
       shotSnapshot: snapshot,
@@ -376,6 +379,12 @@ class DemoWorkspaceView extends StatelessWidget {
       ready: true,
       generationCostMicros: 0,
     ),
+    this.videoProvider = const KinetoVideoProvider(
+      kind: KinetoVideoProviderKind.localDemo,
+      ready: true,
+      clipCostMicros: 0,
+      clipSeconds: 2,
+    ),
     this.candidateMedia = const <String?>[],
     this.videoMedia,
     this.onGenerateVideo,
@@ -435,6 +444,9 @@ class DemoWorkspaceView extends StatelessWidget {
 
   /// Who generates candidates for this session, and what one generation costs.
   final KinetoImageProvider imageProvider;
+
+  /// Who makes this session's videos, and what one clip costs.
+  final KinetoVideoProvider videoProvider;
 
   /// Absolute media path of each candidate of the active shot; null for a
   /// candidate without media.
@@ -822,7 +834,7 @@ class DemoWorkspaceView extends StatelessWidget {
                   const SizedBox(height: 20),
                   _VideoPanel(
                     snapshot: shotSnapshot,
-                    provider: imageProvider,
+                    provider: videoProvider,
                     poster: selectedIndex != null && selectedIndex < candidateMedia.length
                         ? candidateMedia[selectedIndex]
                         : null,
@@ -1003,7 +1015,7 @@ class _VideoPanel extends StatelessWidget {
   });
 
   final KinetoShotSnapshot snapshot;
-  final KinetoImageProvider provider;
+  final KinetoVideoProvider provider;
   final String? poster;
   final String? video;
   final bool blocked;
@@ -1015,15 +1027,16 @@ class _VideoPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = snapshot.videoState;
-    final canGenerate = provider.canGenerateVideo &&
-        poster != null &&
+    final hasFirstFrame = poster != null || !provider.needsFrameImage;
+    final canGenerate = provider.ready &&
+        hasFirstFrame &&
         !blocked &&
         state != KinetoVideoState.generating &&
         state != KinetoVideoState.locked &&
         state != KinetoVideoState.unresolved;
     final generateLabel = state == KinetoVideoState.none
-        ? 'Generate video · 6 s · ≈ ${provider.videoCostLabel}'
-        : 'Regenerate video · ≈ ${provider.videoCostLabel}';
+        ? 'Generate video · ${provider.clipSeconds} s · ${provider.costLabel}'
+        : 'Regenerate video · ${provider.costLabel}';
     return WabPanel(
       title: 'Video',
       trailing: WabStatusBadge(
@@ -1060,13 +1073,13 @@ class _VideoPanel extends StatelessWidget {
                   onPressed: blocked ? null : onLock,
                   child: const Text('Lock video'),
                 ),
-              if (provider.canGenerateVideo && state == KinetoVideoState.unresolved)
+              if (provider.ready && state == KinetoVideoState.unresolved)
                 WabButton(
                   kind: WabMaterialKind.zhuwen,
-                  onPressed: blocked || poster == null ? null : onResubmit,
-                  child: Text('Submit again · may pay twice · ≈ ${provider.videoCostLabel}'),
+                  onPressed: blocked || !hasFirstFrame ? null : onResubmit,
+                  child: Text('Submit again · may pay twice · ${provider.costLabel}'),
                 ),
-              if (provider.canGenerateVideo &&
+              if (provider.ready &&
                   state != KinetoVideoState.locked &&
                   state != KinetoVideoState.unresolved)
                 WabButton(
@@ -1091,18 +1104,22 @@ class _VideoPanel extends StatelessWidget {
       };
 
   String _explanation(KinetoVideoState state) {
-    if (!provider.canGenerateVideo) {
-      return 'Video starts from a generated keyframe; select MiniMax to generate one.';
+    if (!provider.ready) {
+      return '${provider.kind.label} has no key configured, so no video can be asked for.';
     }
-    if (poster == null) {
-      return 'The locked keyframe has no image to start a video from; regenerate the keyframes.';
+    if (poster == null && provider.needsFrameImage) {
+      return 'The locked keyframe has no image to start a video from; regenerate the keyframes '
+          'with an image provider.';
     }
     return switch (state) {
-      KinetoVideoState.none =>
-        'The locked keyframe becomes the first frame of a 6-second clip, generated in the background.',
+      KinetoVideoState.none => provider.isPaid
+          ? 'The locked keyframe becomes the first frame of a ${provider.clipSeconds}-second clip, '
+              'generated in the background.'
+          : 'The local demo makes a ${provider.clipSeconds}-second placeholder clip from the locked '
+              'keyframe, free and at once.',
       KinetoVideoState.generating =>
-        'MiniMax is generating the video. It usually takes a few minutes; you can keep working, '
-            'and closing Kineto does not lose it.',
+        '${provider.kind.label} is generating the video. It can take a few minutes; you can keep '
+            'working, and closing Kineto does not lose it.',
       KinetoVideoState.ready => 'The video is ready. Open it, then lock it or generate another.',
       KinetoVideoState.locked => 'The video is locked as production truth.',
       KinetoVideoState.stale =>

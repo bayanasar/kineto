@@ -49,6 +49,15 @@ void main() {
     );
   });
 
+  test('video provider codes match the native table', () {
+    expect(
+      <String, int>{
+        for (final kind in KinetoVideoProviderKind.values) kind.wireName: kind.wireValue,
+      },
+      contract.videoProviders,
+    );
+  });
+
   test('document codes match the native tables name for name', () {
     Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
         <String>{for (final value in values) wireName(value)};
@@ -122,6 +131,7 @@ void main() {
       KinetoProjectException.packIncomplete: 'pack_incomplete',
       KinetoProjectException.needsLockedBible: 'needs_locked_bible',
       KinetoProjectException.needsShotPlan: 'needs_shot_plan',
+      KinetoProjectException.providerIncapable: 'provider_incapable',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);

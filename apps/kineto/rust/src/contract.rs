@@ -69,10 +69,11 @@ pub(crate) const PROJECT_ERR_REJECTED: i32 = 152;
 pub(crate) const PROJECT_ERR_PACK_INCOMPLETE: i32 = 153;
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_BIBLE: i32 = 154;
 pub(crate) const PROJECT_ERR_NEEDS_SHOT_PLAN: i32 = 155;
+pub(crate) const PROJECT_ERR_PROVIDER_INCAPABLE: i32 = 156;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 58] = [
+const STATUSES: [(&str, i32); 59] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -142,6 +143,7 @@ const STATUSES: [(&str, i32); 58] = [
     ("pack_incomplete", PROJECT_ERR_PACK_INCOMPLETE),
     ("needs_locked_bible", PROJECT_ERR_NEEDS_LOCKED_BIBLE),
     ("needs_shot_plan", PROJECT_ERR_NEEDS_SHOT_PLAN),
+    ("provider_incapable", PROJECT_ERR_PROVIDER_INCAPABLE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -169,6 +171,15 @@ const VIDEO_STATES: [(&str, u8); 6] = [
 const IMAGE_PROVIDERS: [(&str, u32); 2] = [
     ("local_demo", IMAGE_PROVIDER_LOCAL_DEMO),
     ("minimax", IMAGE_PROVIDER_MINIMAX),
+];
+
+pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
+pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
+
+/// Video provider codes returned by `kineto_project_video_provider`.
+const VIDEO_PROVIDERS: [(&str, u32); 2] = [
+    ("local_demo", VIDEO_PROVIDER_LOCAL_DEMO),
+    ("minimax", VIDEO_PROVIDER_MINIMAX),
 ];
 
 /// Language model codes returned by `kineto_project_llm_provider`.
@@ -693,6 +704,7 @@ const ENTRY_TAKE_COUNT: u32 = 35;
 const ENTRY_TAKE_VALUE: u32 = 36;
 const ENTRY_TAKE_TEXT: u32 = 37;
 const ENTRY_TAKE_STATUS: u32 = 38;
+const ENTRY_VIDEO_PROVIDER: u32 = 39;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -766,6 +778,7 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_TAKE_VALUE, &TAKE_VALUES);
         codes(&mut entries, ENTRY_TAKE_TEXT, &TAKE_TEXTS);
         codes(&mut entries, ENTRY_TAKE_STATUS, &TAKE_STATUSES);
+        codes(&mut entries, ENTRY_VIDEO_PROVIDER, &VIDEO_PROVIDERS);
         entries
     })
 }
@@ -932,9 +945,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_TAKE_STATUS);
-        assert_eq!(&name[..len as usize], b"superseded");
-        assert_eq!((value, extra), (5, 0));
+        assert_eq!(kind, ENTRY_VIDEO_PROVIDER);
+        assert_eq!(&name[..len as usize], b"minimax");
+        assert_eq!((value, extra), (i64::from(VIDEO_PROVIDER_MINIMAX), 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

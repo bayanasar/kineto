@@ -267,6 +267,24 @@ external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
 )
 external int _kinetoProjectVideoCostMicros(Pointer<Void> session);
 
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_provider',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoProvider(Pointer<Void> session);
+
+@Native<Uint8 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_provider_ready',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoProviderReady(Pointer<Void> session);
+
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_clip_seconds',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoClipSeconds(Pointer<Void> session);
+
 @Native<
     Int32 Function(
       Pointer<Void>,
@@ -341,6 +359,55 @@ enum KinetoImageProviderKind {
   }
 }
 
+enum KinetoVideoProviderKind {
+  localDemo(1, 'local_demo', 'Local demo'),
+  minimax(2, 'minimax', 'MiniMax Hailuo-02');
+
+  const KinetoVideoProviderKind(this.wireValue, this.wireName, this.label);
+
+  final int wireValue;
+  final String wireName;
+  final String label;
+
+  static KinetoVideoProviderKind fromWireValue(int value) {
+    for (final kind in values) {
+      if (kind.wireValue == value) return kind;
+    }
+    throw StateError('Unknown Kineto video provider code $value');
+  }
+}
+
+/// The session's video provider, as the director needs to know it before
+/// asking for a video.
+final class KinetoVideoProvider {
+  const KinetoVideoProvider({
+    required this.kind,
+    required this.ready,
+    required this.clipCostMicros,
+    required this.clipSeconds,
+  });
+
+  final KinetoVideoProviderKind kind;
+
+  /// False for a paid provider without credentials: asking would fail.
+  final bool ready;
+
+  /// Estimated cost of one clip of [clipSeconds], in USD micros.
+  final int clipCostMicros;
+
+  /// The length of the shortest clip the provider makes, in seconds.
+  final int clipSeconds;
+
+  bool get isPaid => kind != KinetoVideoProviderKind.localDemo;
+
+  /// Whether a video starts only from a keyframe's image. The demo starts
+  /// from its own keyframes, which have none.
+  bool get needsFrameImage => isPaid;
+
+  /// What one clip costs, for example `≈ $0.28`, or `free`.
+  String get costLabel => isPaid ? '≈ ${_dollars(clipCostMicros)}' : 'free';
+}
+
 /// Who made a candidate: the provider and model recorded on its artifact.
 /// Not the session's provider, which may have changed since.
 final class KinetoCandidateOrigin {
@@ -372,7 +439,6 @@ final class KinetoImageProvider {
     required this.kind,
     required this.ready,
     required this.generationCostMicros,
-    this.videoCostMicros = 0,
   });
 
   final KinetoImageProviderKind kind;
@@ -383,27 +449,19 @@ final class KinetoImageProvider {
   /// Estimated cost of one generation (every candidate), in USD micros.
   final int generationCostMicros;
 
-  /// Estimated cost of one shot video, in USD micros; 0 when this provider
-  /// cannot generate video.
-  final int videoCostMicros;
-
   bool get isPaid => kind != KinetoImageProviderKind.localDemo;
-
-  /// Whether this session can generate a shot video at all.
-  bool get canGenerateVideo => ready && videoCostMicros > 0;
 
   /// The generation estimate in US dollars, for example `$0.0105`.
   String get generationCostLabel => _dollars(generationCostMicros);
 
-  /// The video estimate in US dollars, for example `$0.28`.
-  String get videoCostLabel => _dollars(videoCostMicros);
+}
 
-  static String _dollars(int amountMicros) {
-    final dollars = amountMicros ~/ 1000000;
-    final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
-    final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
-    return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
-  }
+/// [amountMicros] in US dollars, for example `$0.0105`.
+String _dollars(int amountMicros) {
+  final dollars = amountMicros ~/ 1000000;
+  final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
+  final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
+  return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
 }
 
 final class KinetoProjectException implements Exception {
@@ -503,6 +561,10 @@ final class KinetoProjectException implements Exception {
 
   /// A scene is planned again within a shot plan, which does not exist yet.
   static const int needsShotPlan = 155;
+
+  /// The provider cannot do what the generation needs, such as start a
+  /// video from the locked keyframe.
+  static const int providerIncapable = 156;
 
   final int code;
   final String message;
@@ -802,7 +864,18 @@ final class KinetoProjectSession implements Finalizable {
       ),
       ready: _kinetoProjectImageProviderReady(_handle) != 0,
       generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
-      videoCostMicros: _kinetoProjectVideoCostMicros(_handle),
+    );
+  }
+
+  /// The video provider this session makes videos with. Fixed when it
+  /// opened.
+  KinetoVideoProvider get videoProvider {
+    _ensureOpen();
+    return KinetoVideoProvider(
+      kind: KinetoVideoProviderKind.fromWireValue(_kinetoProjectVideoProvider(_handle)),
+      ready: _kinetoProjectVideoProviderReady(_handle) != 0,
+      clipCostMicros: _kinetoProjectVideoCostMicros(_handle),
+      clipSeconds: _kinetoProjectVideoClipSeconds(_handle),
     );
   }
 
@@ -1271,6 +1344,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'pack_incomplete': 153,
   'needs_locked_bible': 154,
   'needs_shot_plan': 155,
+  'provider_incapable': 156,
   'panic': 199,
 };
 
@@ -1335,6 +1409,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   153: "The selected portrait's reference pack is not complete; make the pack first",
   154: 'Lock the bible before planning shots',
   155: 'Plan the shots before planning a scene again',
+  156: 'The provider cannot do what this needs, such as start a video from the locked keyframe',
   199: 'Native project call failed unexpectedly',
 };
 

@@ -202,9 +202,6 @@ pub struct ImageProviderInfo {
     pub ready: bool,
     /// Estimated cost of one generation (every candidate), in USD micros.
     pub generation_cost_micros: u64,
-    /// Estimated cost of one shot video, in USD micros; 0 when the provider
-    /// cannot generate video.
-    pub video_cost_micros: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,13 +277,11 @@ impl ImageProvider {
                 kind: ImageProviderKind::LocalDemo,
                 ready: true,
                 generation_cost_micros,
-                video_cost_micros: 0,
             },
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
                 ready: client.is_some(),
                 generation_cost_micros,
-                video_cost_micros: crate::video::estimated_cost_micros(),
             },
         }
     }
@@ -567,6 +562,9 @@ pub enum GenerationError {
     /// The locked keyframe has no image to start a video from (a demo
     /// keyframe).
     NoFirstFrame,
+    /// The provider cannot do what the generation needs, named by
+    /// capability, such as `video.start_frame`.
+    Incapable(Vec<&'static str>),
     /// What this is made from does not exist yet.
     Prerequisite(Prerequisite),
     /// No language model is configured, so no document can be asked for.
@@ -596,6 +594,11 @@ impl fmt::Display for GenerationError {
             Self::NoFirstFrame => {
                 formatter.write_str("the locked keyframe has no image to start a video from")
             }
+            Self::Incapable(missing) => write!(
+                formatter,
+                "the provider cannot do what this generation needs: {}",
+                missing.join(", ")
+            ),
             Self::UnresolvedSubmission => formatter.write_str(
                 "the last submission may already have been accepted and charged; submitting \
                  again may pay twice",
@@ -630,6 +633,7 @@ impl Error for GenerationError {
             Self::NotConfigured
             | Self::NeedsProviderCall
             | Self::NoFirstFrame
+            | Self::Incapable(_)
             | Self::Prerequisite(_)
             | Self::ModelNotConfigured
             | Self::UnresolvedSubmission

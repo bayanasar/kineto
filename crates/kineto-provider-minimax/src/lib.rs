@@ -28,7 +28,7 @@ mod video;
 
 pub use video::{
     MAX_VIDEO_BYTES, VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask,
-    VideoTaskState,
+    VideoTaskState, video_capabilities,
 };
 
 /// The provider key MiniMax jobs are recorded under.

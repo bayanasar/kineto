@@ -7,7 +7,9 @@
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode};
-use kineto_providers::ImageFormat;
+use kineto_providers::{
+    CameraControl, ImageFormat, Price, VideoCapabilities, VideoContainer, VideoMode,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{MinimaxClient, MinimaxError, Transport, WireBaseResp, api_error};
@@ -21,6 +23,52 @@ pub const MAX_VIDEO_BYTES: u64 = 256 * 1024 * 1024;
 /// Hailuo accepts a first frame of at most 20 MB.
 const MAX_FIRST_FRAME_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TASK_ID_LEN: usize = 128;
+
+/// What `MiniMax-Hailuo-02` does through this adapter: image-to-video from
+/// a first frame, at 768P, in clips of 6 or 10 seconds. The prompt takes
+/// Hailuo's bracketed camera commands. A task outlives the client and is
+/// followed again after a restart. The model can take a last frame too, but
+/// this adapter does not send one, so none is declared.
+#[must_use]
+pub fn video_capabilities() -> VideoCapabilities {
+    VideoCapabilities {
+        modes: [VideoMode::ImageToVideo].into_iter().collect(),
+        min_duration_ms: Some(6_000),
+        max_duration_ms: Some(10_000),
+        start_frame: true,
+        camera_control: CameraControl::Parametric,
+        async_jobs: true,
+        resumable_remote_handle: true,
+        output_containers: [VideoContainer::Mp4].into_iter().collect(),
+        clip_seconds: [VideoDuration::Six, VideoDuration::Ten]
+            .map(VideoDuration::seconds)
+            .into_iter()
+            .collect(),
+        max_prompt_chars: Some(MAX_VIDEO_PROMPT_CHARS),
+        start_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+            .into_iter()
+            .collect(),
+        max_start_frame_bytes: Some(MAX_FIRST_FRAME_BYTES as u64),
+        clip_prices: [VideoDuration::Six, VideoDuration::Ten]
+            .map(|duration| {
+                (
+                    duration.seconds(),
+                    Price::usd(clip_price_micros(duration, VideoResolution::P768)),
+                )
+            })
+            .into_iter()
+            .collect(),
+        ..VideoCapabilities::default()
+    }
+}
+
+/// Published price of one Hailuo-02 clip.
+const fn clip_price_micros(duration: VideoDuration, resolution: VideoResolution) -> u64 {
+    match (resolution, duration) {
+        (VideoResolution::P768, VideoDuration::Six) => 280_000,
+        (VideoResolution::P768, VideoDuration::Ten) => 560_000,
+    }
+}
 
 /// Clip lengths Hailuo generates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,13 +238,9 @@ impl<T: Transport> MinimaxClient<T> {
         duration: VideoDuration,
         resolution: VideoResolution,
     ) -> CostEstimate {
-        let amount_micros = match (resolution, duration) {
-            (VideoResolution::P768, VideoDuration::Six) => 280_000,
-            (VideoResolution::P768, VideoDuration::Ten) => 560_000,
-        };
         CostEstimate {
             call_count: 1,
-            amount_micros,
+            amount_micros: clip_price_micros(duration, resolution),
             currency: CurrencyCode::new(*b"USD").expect("static currency code is valid"),
             estimated_duration_ms: Some(240_000),
         }
@@ -407,6 +451,37 @@ mod tests {
             duration: VideoDuration::Six,
             resolution: VideoResolution::P768,
         }
+    }
+
+    #[test]
+    fn declared_capabilities_match_what_the_client_sends_and_charges() {
+        let capabilities = video_capabilities();
+        assert_eq!(
+            capabilities.modes,
+            [VideoMode::ImageToVideo].into_iter().collect()
+        );
+        assert!(capabilities.start_frame && !capabilities.end_frame);
+        assert!(capabilities.async_jobs && capabilities.resumable_remote_handle);
+        assert_eq!(capabilities.camera_control, CameraControl::Parametric);
+        assert_eq!(capabilities.max_prompt_chars, Some(MAX_VIDEO_PROMPT_CHARS));
+        assert_eq!(
+            capabilities.max_start_frame_bytes,
+            Some(MAX_FIRST_FRAME_BYTES as u64)
+        );
+        for format in &capabilities.start_frame_formats {
+            assert!(!mime(*format).is_empty());
+        }
+        let client = client([]);
+        for duration in [VideoDuration::Six, VideoDuration::Ten] {
+            assert!(capabilities.clip_seconds.contains(&duration.seconds()));
+            assert_eq!(
+                capabilities.clip_prices[&duration.seconds()].amount_micros,
+                client
+                    .estimate_video_cost(duration, VideoResolution::P768)
+                    .amount_micros
+            );
+        }
+        assert_eq!(capabilities.clip_seconds.len(), 2);
     }
 
     #[test]
