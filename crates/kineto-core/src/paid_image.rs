@@ -132,6 +132,7 @@ fn keyed(artifact_id: ArtifactId, input_hash: InputHash) -> CandidateRequest {
         owner: CandidateOwner::Style,
         aspect_ratio: KEYFRAME_ASPECT,
         identities: Vec::new(),
+        composition: None,
         prompt: None,
     }
 }
