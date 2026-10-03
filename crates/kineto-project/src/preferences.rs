@@ -178,6 +178,133 @@ impl Preferences {
     }
 }
 
+/// `schemas/preference-suggestions.schema.json`: a model's answer, and the
+/// revision that keeps it.
+pub const SUGGESTIONS_SCHEMA: &str =
+    include_str!("../../../schemas/preference-suggestions.schema.json");
+
+/// A preference a model suggests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Suggestion {
+    pub dimension: Dimension,
+    pub stance: Stance,
+    pub value: String,
+    /// What the chosen candidates share that the others lack.
+    pub reason: String,
+    /// The candidates that show it, by artifact ID.
+    pub evidence: Vec<String>,
+}
+
+/// How a model compared the director's choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Compared {
+    /// Their prompts, notes and settings only.
+    Text,
+    ImagesAndText,
+}
+
+/// One revision of suggestions: what a model suggested, and what it was
+/// drawn from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionBatch {
+    pub suggestions: Vec<Suggestion>,
+    /// Every chosen artifact the suggestions were drawn from.
+    #[serde(default)]
+    pub considered: Vec<String>,
+    #[serde(default = "text_only")]
+    pub compared: Compared,
+}
+
+const fn text_only() -> Compared {
+    Compared::Text
+}
+
+/// What the director did with a suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Taken into the profile as suggested.
+    Accepted,
+    /// Taken into the profile in the director's words.
+    Modified,
+    Rejected,
+}
+
+/// A suggestion the director reviewed: the suggestions revision, its place
+/// in it from 0, and what was done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Review {
+    pub batch: u32,
+    pub index: u32,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ReviewLog {
+    schema_version: u32,
+    reviewed: Vec<Review>,
+}
+
+fn review_path() -> crate::fs::ProjectRelativePath {
+    crate::fs::ProjectRelativePath::new("preferences/review.json")
+        .expect("static review path is valid")
+}
+
+/// Every suggestion the director has reviewed, in the order reviewed.
+pub fn reviews(project: &CanonicalProject) -> Result<Vec<Review>, RevisionError> {
+    match project.root().read(&review_path()) {
+        Ok(bytes) => serde_json::from_slice::<ReviewLog>(&bytes)
+            .map(|log| log.reviewed)
+            .map_err(|_| RevisionError::InvalidLog),
+        Err(crate::fs::ProjectFsError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(RevisionError::Fs(error)),
+    }
+}
+
+/// Record that the director reviewed suggestion `index` of suggestions
+/// revision `batch`. A suggestion is reviewed once.
+pub fn record_review(
+    project: &CanonicalProject,
+    batch: u32,
+    index: u32,
+    outcome: Outcome,
+) -> Result<(), RevisionError> {
+    project
+        .validate_for_write()
+        .map_err(RevisionError::Manifest)?;
+    let mut reviewed = reviews(project)?;
+    if reviewed
+        .iter()
+        .any(|review| review.batch == batch && review.index == index)
+    {
+        return Err(RevisionError::InvalidDocument(format!(
+            "suggestion {index} of revision {batch} was already reviewed"
+        )));
+    }
+    reviewed.push(Review {
+        batch,
+        index,
+        outcome,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&ReviewLog {
+        schema_version: 1,
+        reviewed,
+    })
+    .map_err(|_| RevisionError::InvalidLog)?;
+    bytes.push(b'\n');
+    project
+        .root()
+        .write_atomic(&review_path(), &bytes)
+        .map_err(RevisionError::Fs)
+}
+
 /// The profile in force: the latest revision, and what it says.
 pub fn current(
     project: &CanonicalProject,

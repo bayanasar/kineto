@@ -252,6 +252,8 @@ pub struct CandidateRecord {
     pub origin: CandidateOrigin,
     /// The constraints its prompt applied, such as `director.note`.
     pub applied: Vec<String>,
+    /// The prompt it was made from, when a provider was given one.
+    pub prompt: Option<String>,
 }
 
 /// One video as the shot's history keeps it.
@@ -1043,6 +1045,7 @@ impl ShotWorkflow {
                         model: artifact.model.clone().unwrap_or_default(),
                     },
                     applied: artifact.applied_constraints.clone().unwrap_or_default(),
+                    prompt: artifact.compiled_prompt.clone(),
                 })
             })
             .collect()

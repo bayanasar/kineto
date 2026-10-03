@@ -103,6 +103,37 @@ pub struct VoiceLock {
     pub dependencies: Vec<DependencyRecord>,
 }
 
+/// `schemas/voice-recommendations.schema.json`: a model's answer, and the
+/// revision that keeps it.
+pub const RECOMMENDATIONS_SCHEMA: &str =
+    include_str!("../../../schemas/voice-recommendations.schema.json");
+
+/// A voice a model recommends for a character.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecommendedVoice {
+    pub voice_id: String,
+    /// The voice's name as its provider lists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub reason: String,
+}
+
+/// The voices recommended for one character, best first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterVoices {
+    pub character_id: String,
+    pub voices: Vec<RecommendedVoice>,
+}
+
+/// One revision of voice recommendations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceRecommendations {
+    pub characters: Vec<CharacterVoices>,
+}
+
 /// Whether attaching wrote anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceAttach {

@@ -1161,6 +1161,8 @@ final class _SessionPort {
               -3 => KinetoDocumentKind.screenplay,
               -4 => KinetoDocumentKind.bible,
               -7 => KinetoDocumentKind.shotPlan,
+              -11 => KinetoDocumentKind.preferenceSuggestions,
+              -12 => KinetoDocumentKind.voiceRecommendations,
               _ => null,
             },
             images: switch (values[3]) {

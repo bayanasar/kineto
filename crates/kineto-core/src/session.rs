@@ -57,6 +57,7 @@ use crate::{
     generation::{
         self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
     },
+    learning,
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
     screenplay, shot_plan,
@@ -188,6 +189,22 @@ pub enum DocumentCommand {
         based_on: Option<u32>,
         preferences: Preferences,
     },
+    /// Ask the model what the director's choices show.
+    SuggestPreferences,
+    /// Take a suggestion into the profile, as suggested or, with `value`,
+    /// in the director's words.
+    AcceptSuggestion {
+        batch: u32,
+        index: u32,
+        value: Option<String>,
+    },
+    RejectSuggestion {
+        batch: u32,
+        index: u32,
+    },
+    /// Ask the model which of the speech provider's voices fit the
+    /// characters who speak. Lists the voices first when they are not yet.
+    RecommendVoices,
 }
 
 /// A change to the style or the cast. Every command runs on the session
@@ -515,6 +532,17 @@ pub struct PublishedDocuments {
     /// The plan in play was made with other preferences than those in
     /// force. Never a reason for staleness.
     pub shot_plan_preferences_changed: bool,
+    /// Suggestions the director has not reviewed, oldest first.
+    pub open_suggestions: Vec<learning::OpenSuggestion>,
+    /// Choices no suggestions have considered yet, and whether they are
+    /// enough to ask.
+    pub unconsidered_choices: usize,
+    pub suggestions_ready: bool,
+    /// Estimated cost of asking for suggestions; `None` when not known.
+    pub suggestions_cost: Option<u64>,
+    /// Estimated cost of asking for voice recommendations, once the
+    /// provider's voices are listed; `None` when not known.
+    pub recommendations_cost: Option<u64>,
     /// Every line of the screenplay work builds on, with how long it takes
     /// to say.
     pub line_durations: Vec<dialogue::LineDuration>,
@@ -566,6 +594,8 @@ pub struct PublishedVoice {
     /// What an audition says unless the director writes a line, in the
     /// project's language.
     pub default_line: String,
+    /// The voices a model last recommended for the character, best first.
+    pub recommended: Vec<kineto_project::voice::RecommendedVoice>,
 }
 
 /// What the worker last published about the style and the cast. Reads
@@ -1297,6 +1327,8 @@ fn run(
                         );
                         let result = worker.apply(index, command);
                         worker.publish(view, index);
+                        // A choice among takes counts toward suggestions.
+                        worker.publish_documents(view);
                         worker.publish_workflow(view);
                         if makes_media {
                             worker.tend_media(view, true);
@@ -1352,6 +1384,9 @@ fn run(
                         );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
+                        // Choices and listed voices bear on suggestions and
+                        // recommendations.
+                        worker.publish_documents(view);
                         worker.publish_workflow(view);
                         if makes_media {
                             worker.tend_media(view, true);
@@ -1885,6 +1920,19 @@ impl Worker {
         command: DocumentCommand,
         resubmit: bool,
     ) -> Result<(), SessionError> {
+        // Recommendations read the provider's voices, listed now if they
+        // have not been.
+        let catalog = match (&command, &self.voices) {
+            (DocumentCommand::RecommendVoices, Some(Ok(voices))) => voices.clone(),
+            (DocumentCommand::RecommendVoices, _) => {
+                self.apply_production(ProductionCommand::LoadVoices, Submission::Once)?;
+                match &self.voices {
+                    Some(Ok(voices)) => voices.clone(),
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
         let ready = self.model.describe().ready;
         let project = &self.project;
         let model = &self.model;
@@ -1990,6 +2038,24 @@ impl Worker {
             } => preferences_document::save(project, based_on, &preferences)
                 .map(|_| ())
                 .map_err(revision_error),
+            DocumentCommand::SuggestPreferences => {
+                ask(DocumentKind::PreferenceSuggestions, &|| {
+                    learning::suggest(project, model)
+                })
+            }
+            DocumentCommand::AcceptSuggestion {
+                batch,
+                index,
+                value,
+            } => learning::accept(project, batch, index, value.as_deref())
+                .map(|_| ())
+                .map_err(generation_error),
+            DocumentCommand::RejectSuggestion { batch, index } => {
+                learning::reject(project, batch, index).map_err(generation_error)
+            }
+            DocumentCommand::RecommendVoices => ask(DocumentKind::VoiceRecommendations, &|| {
+                voice::recommend(project, model, &catalog)
+            }),
         }))
         .unwrap_or(Err(SessionError::Panicked))
     }
@@ -2418,6 +2484,17 @@ impl Worker {
                 preferences.as_ref().map(|(record, _)| record),
             )
         });
+        let open_suggestions = learning::open_suggestions(project).map_err(generation_error)?;
+        let unconsidered_choices = learning::unconsidered(project).map_err(generation_error)?;
+        let suggestions_cost = learning::suggestion_cost(project, &self.model.info())
+            .ok()
+            .flatten();
+        let recommendations_cost = match &self.voices {
+            Some(Ok(catalog)) => voice::recommendation_cost(project, &self.model.info(), catalog)
+                .ok()
+                .flatten(),
+            _ => None,
+        };
         let line_durations =
             match revisions::current(project, DocumentKind::Screenplay).map_err(revision_error)? {
                 Some(record) => dialogue::line_durations(
@@ -2440,6 +2517,11 @@ impl Worker {
             preferences,
             preferences_revisions,
             shot_plan_preferences_changed,
+            open_suggestions,
+            unconsidered_choices,
+            suggestions_ready: unconsidered_choices >= learning::CHOICES_PER_SUGGESTION,
+            suggestions_cost,
+            recommendations_cost,
             shot_plan_cost: if ready && bible_locked.is_some() && locked.is_some() {
                 shot_plan::plan_cost(project, &info).ok().flatten()
             } else {
@@ -2629,6 +2711,7 @@ impl Worker {
             .map(|record| revisions::read::<Bible>(project, &record))
             .transpose()
             .map_err(|error| SessionError::Document(DocumentError::Revision(error)))?;
+        let recommendations = voice::recommendations(project).map_err(generation_error)?;
         let mut characters = Vec::new();
         for id in cast::main_characters(project).map_err(generation_error)? {
             let name = bible
@@ -2662,6 +2745,16 @@ impl Worker {
                     &project.manifest().defaults.language,
                 )
                 .map_err(generation_error)?,
+                recommended: recommendations
+                    .as_ref()
+                    .and_then(|recommendations| {
+                        recommendations
+                            .characters
+                            .iter()
+                            .find(|character| character.character_id == id)
+                    })
+                    .map(|character| character.voices.clone())
+                    .unwrap_or_default(),
             };
             characters.push(PublishedCharacter {
                 lock: cast_document::locked(project, &id).map_err(cast_error)?,

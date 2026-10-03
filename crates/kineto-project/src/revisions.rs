@@ -30,6 +30,10 @@ pub enum DocumentKind {
     Bible,
     ShotPlan,
     Preferences,
+    /// Preferences a model suggests from the director's choices.
+    PreferenceSuggestions,
+    /// Voices a model recommends for the characters who speak.
+    VoiceRecommendations,
 }
 
 impl DocumentKind {
@@ -40,6 +44,8 @@ impl DocumentKind {
             Self::Bible => "bible",
             Self::ShotPlan => "shot_plan",
             Self::Preferences => "preferences",
+            Self::PreferenceSuggestions => "preferences/suggestions",
+            Self::VoiceRecommendations => "recommendations/voices",
         }
     }
 
@@ -52,6 +58,8 @@ impl DocumentKind {
             Self::Bible => "bible",
             Self::ShotPlan => "shot_plan",
             Self::Preferences => "preferences",
+            Self::PreferenceSuggestions => "suggestions",
+            Self::VoiceRecommendations => "voice_recommendations",
         }
     }
 

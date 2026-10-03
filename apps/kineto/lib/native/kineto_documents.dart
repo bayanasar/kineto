@@ -201,7 +201,9 @@ enum KinetoDocumentKind {
   storyAnalysis('analysis', 'Story analysis'),
   screenplay('screenplay', 'Screenplay'),
   bible('bible', 'Bible'),
-  shotPlan('shot_plan', 'Shot plan');
+  shotPlan('shot_plan', 'Shot plan'),
+  preferenceSuggestions('preference_suggestions', 'Preference suggestions'),
+  voiceRecommendations('voice_recommendations', 'Voice recommendations');
 
   const KinetoDocumentKind(this.wireName, this.label);
 

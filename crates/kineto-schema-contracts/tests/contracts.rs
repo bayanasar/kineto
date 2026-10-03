@@ -185,6 +185,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "export-shot.schema.json",
             "job.schema.json",
             "lines.schema.json",
+            "preference-suggestions.schema.json",
             "preferences.schema.json",
             "project.schema.json",
             "recipe.schema.json",
@@ -201,6 +202,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "style-samples.schema.json",
             "style.schema.json",
             "voice-auditions.schema.json",
+            "voice-recommendations.schema.json",
             "voice.schema.json",
         ]
     );

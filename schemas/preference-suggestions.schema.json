@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/preference-suggestions.schema.json",
+  "title": "Kineto Preference Suggestions",
+  "description": "Preferences a model suggests from the director's choices, each with the dimension, prefer or avoid, the value in plain words, why, and the candidates that show it by artifact ID. A model answers with suggestions alone; the stored revision adds the chosen work it was drawn from (considered) and whether images or only text were compared. Nothing takes effect until the director accepts it.",
+  "type": "object",
+  "required": ["suggestions"],
+  "properties": {
+    "suggestions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["dimension", "stance", "value", "reason", "evidence"],
+        "properties": {
+          "dimension": {"enum": ["camera_motion", "lighting", "framing", "lens", "color", "composition", "performance", "pacing"]},
+          "stance": {"enum": ["prefer", "avoid"]},
+          "value": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "considered": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}},
+    "compared": {"enum": ["text", "images_and_text"]}
+  },
+  "additionalProperties": false
+}

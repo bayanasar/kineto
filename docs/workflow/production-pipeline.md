@@ -251,6 +251,16 @@ In a prompt, the preferences are the lowest-ranked part, the first cut when the 
 - Undecided keyframe candidates, and the plan in play, report that they were made with other preferences, for the director's information.
 - Videos keep the preferences they followed in their prompt provenance.
 
+**Learning from choices** (`kineto_core::learning`):
+
+1. **Evidence.** The director's choices are gathered: keyframe candidates and video takes of each shot, voice auditions of each character who speaks, and takes of each line. For each, what was chosen (selected or locked) and what was passed over, each by artifact ID with what it was asked for. That is the prompt, notes, delivery or rate: words only, for now.
+2. **Suggestions.** On the director's request (`preference-suggestions/1`), a language model compares the evidence, given the profile in force, and suggests at most eight preferences. Each has a reason and the artifact IDs that show it. A suggestion citing anything it was not given is asked for once more.
+3. **Storage.** Suggestions are kept as revisions (`preferences/suggestions/suggestions_rNNNN.json`, `preference-suggestions.schema.json`), with the chosen work they considered and `compared: text`.
+4. **Review.** Nothing takes effect until the director reviews each suggestion: accept it, accept it in their own words, or turn it down (`preferences/review.json`). An accepted one enters the profile as a new revision, sourced to its reason and evidence.
+5. **When to ask.** Once five choices no suggestions have considered have accumulated, the session says suggestions are worth asking for. The director decides when; nothing asks on every choice. With an agent on a subscription the cost shows as unknown.
+
+**Voice recommendations** (`kineto_core::voice::recommend`, `voice-recommendations/1`). For the characters who speak, a model recommends up to three voices each from the speech provider's list, with reasons, drawn from the bible's descriptions. An unlisted voice or a missing character is asked about once more. Recommendations are kept as revisions (`recommendations/voices/`, `voice-recommendations.schema.json`) and are advice: the director auditions and chooses.
+
 ## Stage 12 — Export
 
 Kineto exports production-ready shot packages, not a finished edit.

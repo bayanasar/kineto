@@ -292,11 +292,13 @@ pub(crate) const LLM_PROVIDERS: [(&str, u32); 4] =
 pub(crate) const SOURCE_FORMATS: [(&str, u32); 2] = [("text", 1), ("markdown", 2)];
 
 /// Documents whose cost `kineto_project_document_cost` estimates.
-pub(crate) const DOCUMENT_COSTS: [(&str, u32); 4] = [
+pub(crate) const DOCUMENT_COSTS: [(&str, u32); 6] = [
     ("analysis", 1),
     ("screenplay", 2),
     ("bible", 3),
     ("shot_plan", 4),
+    ("preference_suggestions", 5),
+    ("voice_recommendations", 6),
 ];
 
 /// What `kineto_project_screenplay_count` counts.

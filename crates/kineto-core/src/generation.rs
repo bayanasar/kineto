@@ -683,6 +683,8 @@ pub enum Prerequisite {
     LockedVoice,
     /// The scene has no line with the number asked for, or no one says it.
     Line,
+    /// Suggestions are drawn from the director's choices; none is made yet.
+    Choices,
 }
 
 impl fmt::Display for Prerequisite {
@@ -710,6 +712,7 @@ impl fmt::Display for Prerequisite {
             Self::LockedCast => "lock the character's cast before casting its voice",
             Self::LockedVoice => "lock the character's voice before dubbing its lines",
             Self::Line => "the scene has no line with that number spoken by a character",
+            Self::Choices => "choose among some takes before asking what they show",
         })
     }
 }

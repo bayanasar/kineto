@@ -66,6 +66,10 @@ const RECOVERED_SHOT_PLAN: i64 = -7;
 /// The director writes preferences and no model does, so a session never
 /// posts one; the code keeps the document kinds answerable.
 const RECOVERED_PREFERENCES: i64 = -10;
+/// The `shot` of a `RECOVERED` message for preference suggestions or voice
+/// recommendations a model answered before an interruption.
+const RECOVERED_PREFERENCE_SUGGESTIONS: i64 = -11;
+const RECOVERED_VOICE_RECOMMENDATIONS: i64 = -12;
 /// The `shot` of a `RECOVERED` message for style samples or casting images
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
@@ -227,6 +231,8 @@ impl SessionSink for DartPort {
                         DocumentKind::Bible => RECOVERED_BIBLE,
                         DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
                         DocumentKind::Preferences => RECOVERED_PREFERENCES,
+                        DocumentKind::PreferenceSuggestions => RECOVERED_PREFERENCE_SUGGESTIONS,
+                        DocumentKind::VoiceRecommendations => RECOVERED_VOICE_RECOMMENDATIONS,
                     },
                 ],
                 None,
@@ -1388,6 +1394,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(Prerequisite::LockedCast) => PROJECT_ERR_NEEDS_LOCKED_CAST,
         GenerationError::Prerequisite(Prerequisite::LockedVoice) => PROJECT_ERR_NEEDS_LOCKED_VOICE,
         GenerationError::Prerequisite(Prerequisite::Line) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        GenerationError::Prerequisite(Prerequisite::Choices) => PROJECT_ERR_NO_SELECTION,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall

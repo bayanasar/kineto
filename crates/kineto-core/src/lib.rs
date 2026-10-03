@@ -7,6 +7,7 @@ pub mod dubbing;
 pub mod export;
 pub mod generation;
 pub mod keyframe_prompt;
+pub mod learning;
 pub mod llm;
 pub mod minimax;
 pub mod paid_image;
