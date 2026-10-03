@@ -38,9 +38,9 @@ use crate::{
 };
 
 /// Version recorded with every video prompt compiled by this module.
-pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/3";
+pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/4";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v3";
+const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v4";
 
 /// Mood is cut last of what is optional, the shot's direction before it,
 /// its continuity notes first: the first frame already holds what carries
@@ -81,6 +81,9 @@ pub struct VideoPromptInput<'a> {
     pub notes: &'a [String],
     /// The locked style's directives, kept throughout the clip.
     pub style: Option<&'a str>,
+    /// How long the shot's dialogue takes to say, which the clip should
+    /// hold.
+    pub dialogue_ms: Option<u32>,
 }
 
 /// Compile the video prompt for `input`.
@@ -197,8 +200,19 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             "the video model generates no speech",
         )?);
     }
-    let duration_seconds = clip_seconds(capabilities, shot.duration_target)
+    let duration_seconds = clip_seconds(capabilities, shot.duration_target, input.dialogue_ms)
         .ok_or(KeyframePromptError::MissingIntent)?;
+    if let Some(dialogue_ms) = input.dialogue_ms
+        && u32::from(duration_seconds) * 1000 < dialogue_ms
+    {
+        dropped.push(drop(
+            "shot.dialogue_duration",
+            &format!(
+                "the dialogue takes {:.1} s; the provider's longest clip is {duration_seconds} s",
+                f64::from(dialogue_ms) / 1000.0
+            ),
+        )?);
+    }
     if let Some(target) = shot.duration_target {
         if (f64::from(duration_seconds) - target).abs() > f64::EPSILON {
             dropped.push(drop(
@@ -246,16 +260,49 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
 }
 
 /// The clip length a shot of `target` seconds is made at: the declared
-/// length nearest it, or the shortest without a target. `None` when the
-/// provider declares no lengths.
+/// length nearest it, or the shortest without a target. A clip that would
+/// cut off the shot's dialogue (`dialogue_ms`) is made at the shortest
+/// length that holds it, or the longest there is. `None` when the provider
+/// declares no lengths.
 #[must_use]
-pub fn clip_seconds(capabilities: &VideoCapabilities, target: Option<f64>) -> Option<u8> {
+pub fn clip_seconds(
+    capabilities: &VideoCapabilities,
+    target: Option<f64>,
+    dialogue_ms: Option<u32>,
+) -> Option<u8> {
     let shortest = capabilities.nearest_clip_seconds(0.0)?;
-    Some(target.map_or(shortest, |target| {
+    let wanted = target.map_or(shortest, |target| {
         capabilities
             .nearest_clip_seconds(target)
             .unwrap_or(shortest)
-    }))
+    });
+    let Some(dialogue_ms) = dialogue_ms.filter(|ms| u32::from(wanted) * 1000 < *ms) else {
+        return Some(wanted);
+    };
+    let needed = f64::from(dialogue_ms) / 1000.0;
+    let holding = if capabilities.clip_seconds.is_empty() {
+        let longest = capabilities.max_duration_ms.map(|ms| ms / 1000)?;
+        // Within a declared range, any whole second can be asked for.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let seconds = needed.ceil() as u64;
+        (seconds <= longest)
+            .then(|| u8::try_from(seconds).ok())
+            .flatten()
+    } else {
+        capabilities
+            .clip_seconds
+            .iter()
+            .copied()
+            .filter(|seconds| f64::from(*seconds) >= needed)
+            .min()
+    };
+    holding.or_else(|| {
+        capabilities.clip_seconds.iter().copied().max().or_else(|| {
+            capabilities
+                .max_duration_ms
+                .and_then(|ms| u8::try_from(ms / 1000).ok())
+        })
+    })
 }
 
 /// A part the prompt cannot do without; an empty text is said by another
@@ -419,6 +466,7 @@ mod tests {
             successor: None,
             notes: &[],
             style: None,
+            dialogue_ms: None,
         }
     }
 
@@ -594,6 +642,46 @@ mod tests {
         let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
         assert!(!applied(&plain).contains(&"style.locked"));
         assert_ne!(styled.prompt_hash, plain.prompt_hash);
+    }
+
+    #[test]
+    fn the_clip_holds_the_shots_dialogue_or_says_it_cannot() {
+        let mut shot = shot();
+        shot.dialogue = Some("Was it worth it?".to_owned());
+        let listed = capabilities(CameraControl::Parametric);
+        let at = |capabilities: &VideoCapabilities, dialogue_ms| {
+            compile(VideoPromptInput {
+                dialogue_ms,
+                ..input(&shot, capabilities, Some("Push in"))
+            })
+            .unwrap()
+        };
+        // Four seconds asked for: 6 s holds 3 s of dialogue, not 7 s.
+        assert_eq!(at(&listed, Some(3_000)).duration_seconds, 6);
+        assert_eq!(at(&listed, Some(7_000)).duration_seconds, 10);
+        let long = at(&listed, Some(12_000));
+        assert_eq!(long.duration_seconds, 10);
+        assert!(
+            dropped(&long)
+                .iter()
+                .any(|(constraint, _)| *constraint == "shot.dialogue_duration")
+        );
+        assert!(
+            !dropped(&at(&listed, Some(7_000)))
+                .iter()
+                .any(|(constraint, _)| *constraint == "shot.dialogue_duration")
+        );
+
+        let ranged = VideoCapabilities {
+            clip_seconds: std::collections::BTreeSet::new(),
+            min_duration_ms: Some(1_000),
+            max_duration_ms: Some(8_000),
+            ..listed.clone()
+        };
+        assert_eq!(clip_seconds(&ranged, Some(4.0), None), Some(4));
+        assert_eq!(clip_seconds(&ranged, Some(4.0), Some(5_200)), Some(6));
+        assert_eq!(clip_seconds(&ranged, Some(4.0), Some(9_000)), Some(8));
+        assert_eq!(clip_seconds(&listed, None, Some(7_000)), Some(10));
     }
 
     #[test]

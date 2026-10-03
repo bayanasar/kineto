@@ -298,7 +298,7 @@ Representative record:
   "input_hash": "sha256:...",
   "provider": "example-video",
   "model": "model-x",
-  "compiler_version": "video-prompt/3",
+  "compiler_version": "video-prompt/4",
   "compiled_prompt": "verbatim provider input used for this generation",
   "prompt_hash": "sha256:...",
   "dropped_constraints": [],

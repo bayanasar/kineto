@@ -1,6 +1,7 @@
 pub mod bible;
 pub mod bootstrap;
 pub mod cast;
+pub mod dialogue;
 pub mod documents;
 pub mod export;
 pub mod generation;

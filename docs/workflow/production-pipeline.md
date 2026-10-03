@@ -123,6 +123,14 @@ How it works now (`kineto_core::voice`):
 4. The director selects one audition and locks it. The lock fixes the provider, the voice ID, the language, the delivery, the rate and the pitch.
 5. Lines are spoken with the locked voice from then on. When the character's bible entry or cast changes, the voice is stale until it is cast again.
 
+Dialogue duration (`kineto_core::dialogue`):
+
+- **Line length.** Every line of the screenplay has a length. Until it is voiced, it is estimated at the speaker's locked voice rate, or the normal rate while the speaker has no voice: about 2.6 words or 4 Chinese or Japanese characters a second. Such a length is marked as an estimate.
+- **Planning.** Shot planning (`shot-plan/2`, `shot-plan-scene/2`) is given each line's length between `<line_durations>` and `</line_durations>`, and asked to give a shot that carries dialogue at least as long. The plan's input label names the hash of those lengths.
+- **A shot's dialogue.** Its length is the sum of the screenplay lines it holds verbatim, with a 250 ms breath between them. Any other words are estimated, and a speaker's name before a colon is not said.
+- **Short shots.** A planned shot shorter than its dialogue is published as a short shot. It is reported, not refused.
+- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/4`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
+
 ## Stage 8 — Scene breakdown and shot planning
 
 For each scene, generate explicit shots with:

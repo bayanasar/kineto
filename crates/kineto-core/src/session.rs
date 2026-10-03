@@ -48,7 +48,7 @@ use kineto_project::{
 use kineto_providers::Price;
 
 use crate::{
-    bible, cast,
+    bible, cast, dialogue,
     documents::{self, DOCUMENT_PROVIDERS},
     export,
     generation::{
@@ -477,6 +477,11 @@ pub struct PublishedDocuments {
     pub shot_plan_stale: Vec<shot_plan_document::StaleCause>,
     /// Estimated cost of the next shot plan, likewise.
     pub shot_plan_cost: Option<u64>,
+    /// Every line of the screenplay work builds on, with how long it takes
+    /// to say.
+    pub line_durations: Vec<dialogue::LineDuration>,
+    /// Shots of the plan in play too short for the dialogue they carry.
+    pub short_shots: Vec<dialogue::ShortShot>,
     /// The documents could not be read; why.
     pub damaged: Option<String>,
 }
@@ -2271,10 +2276,25 @@ impl Worker {
             .iter()
             .find(|record| record.status == revisions::RevisionStatus::Locked)
             .map(|record| record.revision);
+        let line_durations =
+            match revisions::current(project, DocumentKind::Screenplay).map_err(revision_error)? {
+                Some(record) => dialogue::line_durations(
+                    project,
+                    &revisions::read::<Screenplay>(project, &record).map_err(revision_error)?,
+                )
+                .map_err(generation_error)?,
+                None => Vec::new(),
+            };
+        let short_shots = shot_plan
+            .as_ref()
+            .map(|(_, plan)| dialogue::short_shots(plan, &line_durations))
+            .unwrap_or_default();
         let info = self.model.info();
         let ready = self.model.describe().ready;
         Ok(PublishedDocuments {
             source_revision: Some(source.revision),
+            line_durations,
+            short_shots,
             shot_plan_cost: if ready && bible_locked.is_some() && locked.is_some() {
                 shot_plan::plan_cost(project, &info).ok().flatten()
             } else {
@@ -2600,8 +2620,21 @@ impl Worker {
                             (record, media)
                         })
                         .collect(),
-                    video_estimate: video_provider
-                        .estimate(shot.intent()?.and_then(|intent| intent.duration_target)),
+                    video_estimate: {
+                        let intent = shot.intent()?;
+                        video_provider.estimate(
+                            intent.as_ref().and_then(|intent| intent.duration_target),
+                            dialogue::shot_dialogue_ms(
+                                project,
+                                key.scene(),
+                                intent
+                                    .as_ref()
+                                    .and_then(|intent| intent.dialogue.as_deref()),
+                            )
+                            .ok()
+                            .flatten(),
+                        )
+                    },
                 })
             })
         }))
@@ -4703,6 +4736,19 @@ mod tests {
             let (session, events) = written(&target, &fake);
 
             let documents = session.documents().unwrap();
+            // The screenplay's one line, estimated before anyone is voiced.
+            assert_eq!(
+                documents.line_durations,
+                [dialogue::LineDuration {
+                    scene_id: documents.line_durations[0].scene_id.clone(),
+                    line: 1,
+                    character: Some("interviewer".to_owned()),
+                    text: "Was it worth it?".to_owned(),
+                    duration_ms: 1520,
+                    source: dialogue::DurationSource::Estimated,
+                }]
+            );
+            assert!(documents.short_shots.is_empty());
             let (revision, bible) = documents.bible.as_ref().unwrap();
             assert_eq!(*revision, 1);
             assert_eq!(bible.characters[0].id, "filmmaker");
