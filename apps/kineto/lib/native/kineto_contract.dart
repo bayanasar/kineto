@@ -113,6 +113,18 @@ final class KinetoNativeContract {
   static const int _takeTextKind = 37;
   static const int _takeStatusKind = 38;
   static const int _videoProviderKind = 39;
+  static const int _videoTakeCountKind = 40;
+  static const int _videoTakeValueKind = 41;
+  static const int _videoTakeTextKind = 42;
+  static const int _progressValueKind = 43;
+  static const int _progressTextKind = 44;
+  static const int _stageKind = 45;
+  static const int _storageCommandKind = 46;
+  static const int _mediaValueKind = 47;
+  static const int _mediaListKind = 48;
+  static const int _mediaTextKind = 49;
+  static const int _exportValueKind = 50;
+  static const int _exportTextKind = 51;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -169,6 +181,18 @@ final class KinetoNativeContract {
   Map<String, int> get takeTexts => _table(_takeTextKind);
   Map<String, int> get takeStatuses => _table(_takeStatusKind);
   Map<String, int> get videoProviders => _table(_videoProviderKind);
+  Map<String, int> get videoTakeCounts => _table(_videoTakeCountKind);
+  Map<String, int> get videoTakeValues => _table(_videoTakeValueKind);
+  Map<String, int> get videoTakeTexts => _table(_videoTakeTextKind);
+  Map<String, int> get progressValues => _table(_progressValueKind);
+  Map<String, int> get progressTexts => _table(_progressTextKind);
+  Map<String, int> get stages => _table(_stageKind);
+  Map<String, int> get storageCommands => _table(_storageCommandKind);
+  Map<String, int> get mediaValues => _table(_mediaValueKind);
+  Map<String, int> get mediaLists => _table(_mediaListKind);
+  Map<String, int> get mediaTexts => _table(_mediaTextKind);
+  Map<String, int> get exportValues => _table(_exportValueKind);
+  Map<String, int> get exportTexts => _table(_exportTextKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

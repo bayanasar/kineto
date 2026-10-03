@@ -194,6 +194,92 @@ const VIDEO_PROVIDERS: [(&str, u32); 2] = [
     ("minimax", VIDEO_PROVIDER_MINIMAX),
 ];
 
+/// What `kineto_project_video_take_count` counts.
+pub(crate) const VIDEO_TAKE_COUNTS: [(&str, u32); 3] =
+    [("video_history", 1), ("video_notes", 2), ("video_stale", 3)];
+
+/// Number fields `kineto_project_video_take_value` reads. A candidate is its
+/// place in its generation from 1; 0 for a video made before generations had
+/// several. Statuses are `take_status` codes.
+pub(crate) const VIDEO_TAKE_VALUES: [(&str, u32); 3] = [
+    ("video_generation", 1),
+    ("video_candidate", 2),
+    ("video_status", 3),
+];
+
+/// Text fields `kineto_project_video_take_text_copy` copies.
+pub(crate) const VIDEO_TAKE_TEXTS: [(&str, u32); 7] = [
+    ("video_id", 1),
+    ("video_media", 2),
+    ("video_provider", 3),
+    ("video_model", 4),
+    ("video_note", 5),
+    ("video_branched_from", 6),
+    ("video_stale_reason", 7),
+];
+
+/// Number fields `kineto_project_progress_value` reads.
+pub(crate) const PROGRESS_VALUES: [(&str, u32); 3] = [
+    ("scene_complete", 1),
+    ("keyframe_stage", 2),
+    ("video_stage", 3),
+];
+
+/// Text fields `kineto_project_progress_text_copy` copies.
+pub(crate) const PROGRESS_TEXTS: [(&str, u32); 2] = [("scene_id", 1), ("shot_id", 2)];
+
+/// How far a shot's keyframe or video has come.
+pub(crate) const STAGES: [(&str, u32); 4] =
+    [("missing", 0), ("made", 1), ("locked", 2), ("stale", 3)];
+
+/// Storage commands `kineto_project_storage` takes.
+pub(crate) const STORAGE_COMMANDS: [(&str, u32); 3] =
+    [("plan_collection", 1), ("collect", 2), ("verify", 3)];
+
+/// Number fields `kineto_project_media_value` reads.
+pub(crate) const MEDIA_VALUES: [(&str, u32); 5] = [
+    ("usage_bytes", 1),
+    ("recent_takes", 2),
+    ("planned", 3),
+    ("plan_bytes", 4),
+    ("media_damaged", 5),
+];
+
+/// Lists `kineto_project_media_count` counts and its item reads index.
+pub(crate) const MEDIA_LISTS: [(&str, u32); 4] = [
+    ("plan", 1),
+    ("missing", 2),
+    ("mismatched", 3),
+    ("owners", 4),
+];
+
+/// Text fields `kineto_project_media_text_copy` copies from a list item.
+pub(crate) const MEDIA_TEXTS: [(&str, u32); 4] = [
+    ("media_artifact", 1),
+    ("media_owner", 2),
+    ("media_reason", 3),
+    ("media_problem", 4),
+];
+
+/// Number fields `kineto_project_export_value` reads.
+pub(crate) const EXPORT_VALUES: [(&str, u32); 7] = [
+    ("export_ready", 1),
+    ("export_missing", 2),
+    ("export_complete", 3),
+    ("last_export", 4),
+    ("last_shots", 5),
+    ("last_complete", 6),
+    ("last_bytes", 7),
+];
+
+/// Text fields `kineto_project_export_text_copy` copies.
+pub(crate) const EXPORT_TEXTS: [(&str, u32); 4] = [
+    ("missing_scene", 1),
+    ("missing_shot", 2),
+    ("missing_reason", 3),
+    ("last_path", 4),
+];
+
 /// Language model codes returned by `kineto_project_llm_provider`.
 pub(crate) const LLM_PROVIDERS: [(&str, u32); 4] =
     [("none", 0), ("kimi_code", 1), ("kimi", 2), ("local", 3)];
@@ -717,6 +803,18 @@ const ENTRY_TAKE_VALUE: u32 = 36;
 const ENTRY_TAKE_TEXT: u32 = 37;
 const ENTRY_TAKE_STATUS: u32 = 38;
 const ENTRY_VIDEO_PROVIDER: u32 = 39;
+const ENTRY_VIDEO_TAKE_COUNT: u32 = 40;
+const ENTRY_VIDEO_TAKE_VALUE: u32 = 41;
+const ENTRY_VIDEO_TAKE_TEXT: u32 = 42;
+const ENTRY_PROGRESS_VALUE: u32 = 43;
+const ENTRY_PROGRESS_TEXT: u32 = 44;
+const ENTRY_STAGE: u32 = 45;
+const ENTRY_STORAGE_COMMAND: u32 = 46;
+const ENTRY_MEDIA_VALUE: u32 = 47;
+const ENTRY_MEDIA_LIST: u32 = 48;
+const ENTRY_MEDIA_TEXT: u32 = 49;
+const ENTRY_EXPORT_VALUE: u32 = 50;
+const ENTRY_EXPORT_TEXT: u32 = 51;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -791,6 +889,18 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_TAKE_TEXT, &TAKE_TEXTS);
         codes(&mut entries, ENTRY_TAKE_STATUS, &TAKE_STATUSES);
         codes(&mut entries, ENTRY_VIDEO_PROVIDER, &VIDEO_PROVIDERS);
+        codes(&mut entries, ENTRY_VIDEO_TAKE_COUNT, &VIDEO_TAKE_COUNTS);
+        codes(&mut entries, ENTRY_VIDEO_TAKE_VALUE, &VIDEO_TAKE_VALUES);
+        codes(&mut entries, ENTRY_VIDEO_TAKE_TEXT, &VIDEO_TAKE_TEXTS);
+        codes(&mut entries, ENTRY_PROGRESS_VALUE, &PROGRESS_VALUES);
+        codes(&mut entries, ENTRY_PROGRESS_TEXT, &PROGRESS_TEXTS);
+        codes(&mut entries, ENTRY_STAGE, &STAGES);
+        codes(&mut entries, ENTRY_STORAGE_COMMAND, &STORAGE_COMMANDS);
+        codes(&mut entries, ENTRY_MEDIA_VALUE, &MEDIA_VALUES);
+        codes(&mut entries, ENTRY_MEDIA_LIST, &MEDIA_LISTS);
+        codes(&mut entries, ENTRY_MEDIA_TEXT, &MEDIA_TEXTS);
+        codes(&mut entries, ENTRY_EXPORT_VALUE, &EXPORT_VALUES);
+        codes(&mut entries, ENTRY_EXPORT_TEXT, &EXPORT_TEXTS);
         entries
     })
 }
@@ -957,9 +1067,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_VIDEO_PROVIDER);
-        assert_eq!(&name[..len as usize], b"minimax");
-        assert_eq!((value, extra), (i64::from(VIDEO_PROVIDER_MINIMAX), 0));
+        assert_eq!(kind, ENTRY_EXPORT_TEXT);
+        assert_eq!(&name[..len as usize], b"last_path");
+        assert_eq!((value, extra), (4, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

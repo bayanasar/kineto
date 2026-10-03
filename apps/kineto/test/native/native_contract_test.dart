@@ -49,6 +49,17 @@ void main() {
     );
   });
 
+  test('handoff codes match the native tables name for name', () {
+    expect(<String>{for (final stage in KinetoStage.values) stage.wireName}, contract.stages.keys.toSet());
+    expect(
+      contract.storageCommands.keys.toSet(),
+      <String>{'plan_collection', 'collect', 'verify'},
+    );
+    expect(contract.mediaLists.keys.toSet(), <String>{'plan', 'missing', 'mismatched', 'owners'});
+    expect(contract.videoTakeCounts.keys.toSet(), <String>{'video_history', 'video_notes', 'video_stale'});
+    expect(contract.exportTexts.keys, containsAll(<String>['missing_reason', 'last_path']));
+  });
+
   test('video provider codes match the native table', () {
     expect(
       <String, int>{

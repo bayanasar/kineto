@@ -338,6 +338,17 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
         () => widget.project.migrateLegacyHashes(_activeShotIndex),
       ),
       videoMedia: widget.project.videoMediaPath(_activeShotIndex),
+      videoTakes: widget.project.videoTakes(_activeShotIndex),
+      onGenerateVideos: (count, note, branch) => _run(
+        () => widget.project.generateShotVideos(
+          _activeShotIndex,
+          count: count,
+          note: note,
+          branchFrom: branch,
+        ),
+        label: 'Asking for the video',
+      ),
+      onSelectVideo: (video) => _run(() => widget.project.selectShotVideo(_activeShotIndex, video)),
       onGenerateVideo: () => _run(
         () => widget.project.generateShotVideo(_activeShotIndex),
         label: 'Submitting video',
@@ -387,6 +398,9 @@ class DemoWorkspaceView extends StatelessWidget {
     ),
     this.candidateMedia = const <String?>[],
     this.videoMedia,
+    this.videoTakes = const <KinetoVideoTake>[],
+    this.onGenerateVideos,
+    this.onSelectVideo,
     this.onGenerateVideo,
     this.onResubmitVideo,
     this.onLockVideo,
@@ -454,6 +468,14 @@ class DemoWorkspaceView extends StatelessWidget {
 
   /// Absolute path of the active shot's current video, if it has one.
   final String? videoMedia;
+
+  /// Every video the active shot has had, oldest generation first.
+  final List<KinetoVideoTake> videoTakes;
+
+  /// Ask for a video generation: how many takes, a note, a take to branch
+  /// from.
+  final void Function(int count, String? note, String? branchFrom)? onGenerateVideos;
+  final ValueChanged<int>? onSelectVideo;
   final VoidCallback? onGenerateVideo;
 
   /// Submit the video again after an unresolved submission, risking a second
@@ -838,10 +860,12 @@ class DemoWorkspaceView extends StatelessWidget {
                     poster: selectedIndex != null && selectedIndex < candidateMedia.length
                         ? candidateMedia[selectedIndex]
                         : null,
-                    video: videoMedia,
+                    takes: videoTakes,
                     blocked: blocked,
-                    onGenerate: onGenerateVideo,
+                    onGenerate: onGenerateVideos ??
+                        (onGenerateVideo == null ? null : (count, note, branch) => onGenerateVideo!()),
                     onResubmit: onResubmitVideo,
+                    onSelect: onSelectVideo,
                     onLock: onLockVideo,
                     onOpen: onOpenVideo,
                   ),
@@ -1000,16 +1024,19 @@ Future<void> openInSystemPlayer(String path) async {
   await Process.start(executable, arguments, mode: ProcessStartMode.detached);
 }
 
-/// The shot's video, once its keyframe is locked.
-class _VideoPanel extends StatelessWidget {
+/// The shot's video, once its keyframe is locked: the latest generation's
+/// takes to compare and choose from, the earlier ones to branch from, and
+/// what a new generation costs.
+class _VideoPanel extends StatefulWidget {
   const _VideoPanel({
     required this.snapshot,
     required this.provider,
     required this.poster,
-    required this.video,
+    required this.takes,
     required this.blocked,
     this.onGenerate,
     this.onResubmit,
+    this.onSelect,
     this.onLock,
     this.onOpen,
   });
@@ -1017,26 +1044,45 @@ class _VideoPanel extends StatelessWidget {
   final KinetoShotSnapshot snapshot;
   final KinetoVideoProvider provider;
   final String? poster;
-  final String? video;
+  final List<KinetoVideoTake> takes;
   final bool blocked;
-  final VoidCallback? onGenerate;
+  final void Function(int count, String? note, String? branchFrom)? onGenerate;
   final VoidCallback? onResubmit;
+  final ValueChanged<int>? onSelect;
   final VoidCallback? onLock;
   final ValueChanged<String>? onOpen;
 
   @override
+  State<_VideoPanel> createState() => _VideoPanelState();
+}
+
+class _VideoPanelState extends State<_VideoPanel> {
+  int _count = 1;
+
+  KinetoVideoProvider get _provider => widget.provider;
+
+  @override
   Widget build(BuildContext context) {
-    final state = snapshot.videoState;
-    final hasFirstFrame = poster != null || !provider.needsFrameImage;
-    final canGenerate = provider.ready &&
+    final state = widget.snapshot.videoState;
+    final current = widget.takes.where((take) => take.current).toList();
+    final earlier = widget.takes.where((take) => !take.current).toList().reversed.toList();
+    final locked = current.any((take) => take.status == KinetoTakeStatus.locked);
+    final hasFirstFrame = widget.poster != null || !_provider.needsFrameImage;
+    final canGenerate = _provider.ready &&
         hasFirstFrame &&
-        !blocked &&
+        !widget.blocked &&
+        !locked &&
         state != KinetoVideoState.generating &&
-        state != KinetoVideoState.locked &&
         state != KinetoVideoState.unresolved;
-    final generateLabel = state == KinetoVideoState.none
-        ? 'Generate video · ${provider.clipSeconds} s · ${provider.costLabel}'
-        : 'Regenerate video · ${provider.costLabel}';
+    final chosen = current.where((take) => take.status == KinetoTakeStatus.selected).firstOrNull ??
+        (current.length == 1 ? current.single : null);
+    final canLock = !widget.blocked &&
+        !locked &&
+        state != KinetoVideoState.generating &&
+        chosen != null &&
+        chosen.stale.isEmpty &&
+        chosen.mediaPath != null;
+    final takes = _count == 1 ? '1 take' : '$_count takes';
     return WabPanel(
       title: 'Video',
       trailing: WabStatusBadge(
@@ -1044,7 +1090,7 @@ class _VideoPanel extends StatelessWidget {
         kind: switch (state) {
           KinetoVideoState.locked => WabBadgeKind.done,
           KinetoVideoState.none => WabBadgeKind.neutral,
-          KinetoVideoState.unresolved => WabBadgeKind.warning,
+          KinetoVideoState.unresolved || KinetoVideoState.stale => WabBadgeKind.warning,
           _ => WabBadgeKind.progress,
         },
       ),
@@ -1052,40 +1098,141 @@ class _VideoPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Text(_explanation(state)),
-          if (poster != null && video != null) ...<Widget>[
+          if (current.isNotEmpty) ...<Widget>[
             const SizedBox(height: 12),
-            SizedBox(width: 480, child: _Keyframe(path: poster!)),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: <Widget>[
+                for (final (index, take) in current.indexed) _take(take, index, current.length, locked),
+              ],
+            ),
           ],
           const SizedBox(height: 12),
           Wrap(
             spacing: 12,
             runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              if (video != null && onOpen != null)
+              if (canLock)
                 WabButton(
+                  key: const ValueKey<String>('lock-video'),
                   kind: WabMaterialKind.seal,
-                  onPressed: () => onOpen!(video!),
+                  onPressed: widget.onLock,
+                  child: Text(chosen.letter.isEmpty ? 'Lock video' : 'Lock take ${chosen.letter}'),
+                ),
+              if (_provider.ready && state == KinetoVideoState.unresolved)
+                WabButton(
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: widget.blocked || !hasFirstFrame ? null : widget.onResubmit,
+                  child: Text('Submit again · may pay twice · ${_provider.costLabel}'),
+                ),
+              if (_provider.ready && !locked && state != KinetoVideoState.unresolved) ...<Widget>[
+                SizedBox(
+                  width: 160,
+                  child: WabDropdown<int>(
+                    key: const ValueKey<String>('video-count'),
+                    value: _count,
+                    items: <int, String>{
+                      for (var count = 1; count <= kinetoMaxVideoCandidates; count++)
+                        count: count == 1 ? '1 take' : '$count takes',
+                    },
+                    onChanged: (count) => setState(() => _count = count ?? _count),
+                  ),
+                ),
+                WabButton(
+                  key: const ValueKey<String>('generate-videos'),
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: canGenerate ? () => widget.onGenerate?.call(_count, null, null) : null,
+                  child: Text(
+                    '${current.isEmpty ? 'Generate' : 'Generate again'} · $takes · '
+                    '${_provider.clipSeconds} s · ${_provider.costFor(_count)}',
+                  ),
+                ),
+                if (current.isNotEmpty)
+                  WabButton(
+                    key: const ValueKey<String>('refine-video'),
+                    kind: WabMaterialKind.paper,
+                    onPressed: canGenerate ? () => _ask(context, null) : null,
+                    child: const Text('Refine with a note…'),
+                  ),
+              ],
+            ],
+          ),
+          if (earlier.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 16),
+            Text('Earlier takes', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            for (final take in earlier)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: <Widget>[
+                    Text(_title(take)),
+                    if (take.notes.isNotEmpty) Text('Notes: ${take.notes.join('; ')}'),
+                    if (take.mediaPath != null && widget.onOpen != null)
+                      WabButton(
+                        kind: WabMaterialKind.paper,
+                        onPressed: () => widget.onOpen!(take.mediaPath!),
+                        child: const Text('Open'),
+                      )
+                    else if (take.mediaPath == null)
+                      const Text('Its clip was let go.'),
+                    WabButton(
+                      key: ValueKey<String>('branch-${take.id}'),
+                      kind: WabMaterialKind.paper,
+                      onPressed: canGenerate ? () => _ask(context, take) : null,
+                      child: const Text('Branch from it…'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _take(KinetoVideoTake take, int index, int takes, bool locked) {
+    final chosen = take.status == KinetoTakeStatus.selected;
+    return SizedBox(
+      width: 260,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (widget.poster != null)
+            _Keyframe(path: widget.poster!)
+          else
+            const AspectRatio(aspectRatio: 16 / 9, child: ColoredBox(color: Colors.black26)),
+          const SizedBox(height: 6),
+          Text(
+            '${_title(take)}'
+            '${take.status == KinetoTakeStatus.locked ? ' · locked' : chosen ? ' · chosen' : ''}',
+          ),
+          if (take.notes.isNotEmpty) Text('Notes: ${take.notes.join('; ')}'),
+          if (take.branchedFrom != null) Text('Branched from ${take.branchedFrom}'),
+          if (take.stale.isNotEmpty) Text('No longer follows: ${take.stale.join(', ')}'),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              if (take.mediaPath != null && widget.onOpen != null)
+                WabButton(
+                  key: ValueKey<String>('open-${take.id}'),
+                  kind: WabMaterialKind.seal,
+                  onPressed: () => widget.onOpen!(take.mediaPath!),
                   child: const Text('Open video'),
                 ),
-              if (state == KinetoVideoState.ready)
+              if (!locked && !chosen && takes > 1)
                 WabButton(
-                  kind: WabMaterialKind.seal,
-                  onPressed: blocked ? null : onLock,
-                  child: const Text('Lock video'),
-                ),
-              if (provider.ready && state == KinetoVideoState.unresolved)
-                WabButton(
-                  kind: WabMaterialKind.zhuwen,
-                  onPressed: blocked || !hasFirstFrame ? null : onResubmit,
-                  child: Text('Submit again · may pay twice · ${provider.costLabel}'),
-                ),
-              if (provider.ready &&
-                  state != KinetoVideoState.locked &&
-                  state != KinetoVideoState.unresolved)
-                WabButton(
-                  kind: WabMaterialKind.zhuwen,
-                  onPressed: canGenerate ? onGenerate : null,
-                  child: Text(generateLabel),
+                  key: ValueKey<String>('choose-${take.id}'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: widget.blocked ? null : () => widget.onSelect?.call(index),
+                  child: const Text('Choose'),
                 ),
             ],
           ),
@@ -1093,6 +1240,34 @@ class _VideoPanel extends StatelessWidget {
       ),
     );
   }
+
+  /// Ask for a note, then a new generation with it: a refinement, or a
+  /// branch from [from].
+  Future<void> _ask(BuildContext context, KinetoVideoTake? from) async {
+    final takes = _count == 1 ? '1 take' : '$_count takes';
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => TextPromptDialog(
+        title: from == null ? 'Refine the video' : 'Branch from ${_title(from)}',
+        width: 520,
+        fieldKey: 'video-note',
+        minLines: 2,
+        maxLines: 4,
+        hint: from == null
+            ? 'What should change, such as "slower, hold on his eyes"'
+            : 'What should change from this take; its own notes are kept',
+        confirmKey: 'video-note-confirm',
+        confirmLabel: 'Generate · $takes · ${_provider.costFor(_count)}',
+      ),
+    );
+    if (note == null) return;
+    final trimmed = note.trim();
+    if (from == null && trimmed.isEmpty) return;
+    widget.onGenerate?.call(_count, trimmed.isEmpty ? null : trimmed, from?.id);
+  }
+
+  static String _title(KinetoVideoTake take) =>
+      take.letter.isEmpty ? 'Generation ${take.generation}' : 'Generation ${take.generation} · take ${take.letter}';
 
   static String _label(KinetoVideoState state) => switch (state) {
         KinetoVideoState.none => 'No video',
@@ -1104,31 +1279,32 @@ class _VideoPanel extends StatelessWidget {
       };
 
   String _explanation(KinetoVideoState state) {
-    if (!provider.ready) {
-      return '${provider.kind.label} has no key configured, so no video can be asked for.';
+    if (!_provider.ready) {
+      return '${_provider.kind.label} has no key configured, so no video can be asked for.';
     }
-    if (poster == null && provider.needsFrameImage) {
+    if (widget.poster == null && _provider.needsFrameImage) {
       return 'The locked keyframe has no image to start a video from; regenerate the keyframes '
           'with an image provider.';
     }
     return switch (state) {
-      KinetoVideoState.none => provider.isPaid
-          ? 'The locked keyframe becomes the first frame of a ${provider.clipSeconds}-second clip, '
-              'generated in the background.'
-          : 'The local demo makes a ${provider.clipSeconds}-second placeholder clip from the locked '
+      KinetoVideoState.none => _provider.isPaid
+          ? 'The locked keyframe becomes the first frame of ${_provider.clipSeconds}-second clips, '
+              'generated in the background. Ask for several takes to compare.'
+          : 'The local demo makes ${_provider.clipSeconds}-second placeholder clips from the locked '
               'keyframe, free and at once.',
       KinetoVideoState.generating =>
-        '${provider.kind.label} is generating the video. It can take a few minutes; you can keep '
+        '${_provider.kind.label} is generating the video. It can take a few minutes; you can keep '
             'working, and closing Kineto does not lose it.',
-      KinetoVideoState.ready => 'The video is ready. Open it, then lock it or generate another.',
+      KinetoVideoState.ready => 'Open the takes, choose one and lock it, refine them with a note, or '
+          'branch from an earlier take.',
       KinetoVideoState.locked => 'The video is locked as production truth.',
       KinetoVideoState.stale =>
         'The video no longer follows the shot: its locked keyframe or its planned intent changed '
-            'since; regenerate it.',
+            'since; generate it again.',
       KinetoVideoState.unresolved =>
-        'The last submission did not finish cleanly, and MiniMax may already have accepted and '
-            'charged for it. Kineto has no record of its task, so it cannot follow it. Check your '
-            'MiniMax account; submit again only if you accept paying twice.',
+        'The last submission did not finish cleanly, and ${_provider.kind.label} may already have '
+            'accepted and charged for it. Kineto has no record of its task, so it cannot follow it. '
+            'Check your account; submit again only if you accept paying twice.',
     };
   }
 }

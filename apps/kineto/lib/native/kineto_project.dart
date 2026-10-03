@@ -405,7 +405,10 @@ final class KinetoVideoProvider {
   bool get needsFrameImage => isPaid;
 
   /// What one clip costs, for example `≈ $0.28`, or `free`.
-  String get costLabel => isPaid ? '≈ ${_dollars(clipCostMicros)}' : 'free';
+  String get costLabel => costFor(1);
+
+  /// What [count] clips cost, for example `≈ $0.56`, or `free`.
+  String costFor(int count) => isPaid ? '≈ ${_dollars(clipCostMicros * count)}' : 'free';
 }
 
 /// Who made a candidate: the provider and model recorded on its artifact.
