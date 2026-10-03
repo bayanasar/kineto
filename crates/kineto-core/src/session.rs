@@ -35,8 +35,8 @@ use kineto_project::{
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
-        self, CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotKey, ShotWorkflow,
-        ShotWorkflowError,
+        self, AttachOutcome, CandidateOrigin, CandidateRecord, ShotApprovalSnapshot, ShotDirection,
+        ShotKey, ShotWorkflow, ShotWorkflowError,
     },
     shot_plan::{self as shot_plan_document, ScenePlan, ShotPlan},
     source::{self, SourceError, SourceFormat},
@@ -72,7 +72,7 @@ pub enum OpenRequest {
 }
 
 /// A state change to one shot. Every command runs on the session worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShotCommand {
     SetDirection(ShotDirection),
     Generate,
@@ -88,6 +88,11 @@ pub enum ShotCommand {
     /// characters without an identity reference where the project's policy
     /// blocks that.
     GenerateConsenting(Consent),
+    /// Generate again as the director's note asks, with what they accepted.
+    Refine {
+        note: String,
+        consent: Consent,
+    },
     /// Submit a video from the locked keyframe. Completes once MiniMax has
     /// accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
@@ -507,6 +512,12 @@ struct PublishedShot {
     origins: Vec<CandidateOrigin>,
     /// A paid keyframe call may have been accepted without leaving its result.
     keyframes_unresolved: bool,
+    /// Why each current candidate is stale, in candidate order; see
+    /// [`generation::keyframe_staleness`].
+    staleness: Vec<Vec<String>>,
+    /// Every candidate the shot has had, oldest first, with its media's
+    /// absolute path.
+    history: Vec<(CandidateRecord, Option<PathBuf>)>,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -782,6 +793,23 @@ impl ProjectSession {
             .map(|(key, _)| key.clone())
     }
 
+    /// Why each current candidate of the shot is stale, in candidate order:
+    /// `intent.<field>` for each intent field changed since, and each lock or
+    /// bible entry followed that changed or went, by artifact ID. Never does
+    /// I/O.
+    pub fn candidate_staleness(&self, shot_index: u32) -> Result<Vec<Vec<String>>, SnapshotError> {
+        self.published(shot_index, |published| published.staleness.clone())
+    }
+
+    /// Every keyframe candidate the shot has had, current or superseded,
+    /// oldest first, with its media's absolute path. Never does I/O.
+    pub fn candidate_history(
+        &self,
+        shot_index: u32,
+    ) -> Result<Vec<(CandidateRecord, Option<PathBuf>)>, SnapshotError> {
+        self.published(shot_index, |published| published.history.clone())
+    }
+
     /// The shot's most recently published snapshot. Never does I/O.
     pub fn snapshot(&self, shot_index: u32) -> Result<ShotApprovalSnapshot, SnapshotError> {
         self.published(shot_index, |published| published.snapshot)
@@ -983,9 +1011,12 @@ fn run(
                 let result = match worker.as_mut() {
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
+                        // Locking a plan rewrites its shots' intent and may
+                        // change which shots are in play.
+                        let rewrites = matches!(command, DocumentCommand::LockShotPlan { .. });
                         let result = worker.apply_document(command, resubmit);
-                        // Locking a plan changes which shots are in play.
-                        if worker.find_shots(false) {
+                        if worker.find_shots(false) || (rewrites && result.is_ok()) {
+                            worker.shots.clear();
                             worker.publish_shots(view);
                         }
                         worker.publish_documents(view);
@@ -1202,6 +1233,7 @@ impl Worker {
             ShotCommand::Generate => self.generate(key, Consent::default()),
             ShotCommand::ResubmitKeyframes => self.generate(key, Consent::RISK_PAYING_TWICE),
             ShotCommand::GenerateConsenting(consent) => self.generate(key, consent),
+            ShotCommand::Refine { note, consent } => self.refine(key, consent, &note),
             ShotCommand::GenerateVideo => self.start_video(key, false),
             ShotCommand::ResubmitVideo => self.start_video(key, true),
             command => self
@@ -1217,6 +1249,7 @@ impl Worker {
                     ShotCommand::Generate
                     | ShotCommand::ResubmitKeyframes
                     | ShotCommand::GenerateConsenting(_)
+                    | ShotCommand::Refine { .. }
                     | ShotCommand::GenerateVideo
                     | ShotCommand::ResubmitVideo => {
                         unreachable!("generation is handled above")
@@ -1287,6 +1320,21 @@ impl Worker {
         let generated = self.with_shot(key, |project, provider, shot| {
             generation::generate_with_consent(project, shot, provider, &mut NoHooks, consent)
         });
+        self.note_keyframes(key, generated)
+    }
+
+    fn refine(&mut self, key: &ShotKey, consent: Consent, note: &str) -> Result<(), SessionError> {
+        let refined = self.with_shot(key, |project, provider, shot| {
+            generation::refine(project, shot, provider, &mut NoHooks, consent, note)
+        });
+        self.note_keyframes(key, refined)
+    }
+
+    fn note_keyframes(
+        &mut self,
+        key: &ShotKey,
+        generated: Result<AttachOutcome, GenerationError>,
+    ) -> Result<(), SessionError> {
         match &generated {
             Ok(_) => {
                 self.keyframes_unresolved.remove(key);
@@ -1925,6 +1973,19 @@ impl Worker {
                     video_unresolved: false,
                     origins: shot.candidate_origins()?,
                     keyframes_unresolved: false,
+                    staleness: generation::keyframe_staleness(project, shot)
+                        .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?,
+                    history: shot
+                        .candidate_history()?
+                        .into_iter()
+                        .map(|record| {
+                            let media = record
+                                .media_path
+                                .as_ref()
+                                .map(|path| project.root().resolve(path));
+                            (record, media)
+                        })
+                        .collect(),
                 })
             })
         }))
@@ -3804,6 +3865,73 @@ mod tests {
                 session.submit(2, ShotCommand::Generate, token + 1),
                 Err(SubmitError::InvalidShot)
             ));
+
+            // A second round, as the director's note asks; the first is kept
+            // to compare against.
+            let token = self::token();
+            session
+                .submit(
+                    1,
+                    ShotCommand::Refine {
+                        note: "Tighter on his hands.".to_owned(),
+                        consent: Consent::default(),
+                    },
+                    token,
+                )
+                .unwrap();
+            assert!(matches!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::Completed { result: Ok(()), .. }
+            ));
+            let history = session.candidate_history(1).unwrap();
+            assert_eq!(history.len(), 6);
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|(record, _)| record.generation)
+                    .collect::<Vec<_>>(),
+                [1, 1, 1, 2, 2, 2]
+            );
+            assert_eq!(
+                history[0].0.status,
+                kineto_project::ArtifactStatus::Superseded
+            );
+            assert!(history[0].1.as_ref().unwrap().is_file());
+            assert!(!history[0].0.applied.contains(&"director.note".to_owned()));
+            assert!(history[5].0.applied.contains(&"director.note".to_owned()));
+            assert!(
+                session
+                    .candidate_staleness(1)
+                    .unwrap()
+                    .iter()
+                    .all(Vec::is_empty)
+            );
+
+            // The plan changes what the shot feels; its takes say so.
+            let documents = session.documents().unwrap();
+            let mut scene = documents.shot_plan.as_ref().unwrap().1.scenes[0].clone();
+            scene.shots[1].emotion = "Nothing shows yet.".to_owned();
+            document(
+                &session,
+                &events,
+                DocumentCommand::SaveScenePlan { based_on: 1, scene },
+            )
+            .unwrap();
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockShotPlan { revision: 2 },
+            )
+            .unwrap();
+            assert!(session.snapshot(1).unwrap().stale);
+            assert_eq!(
+                session.candidate_staleness(1).unwrap(),
+                vec![vec!["intent.emotion".to_owned()]; 3]
+            );
+            assert!(
+                !session.snapshot(0).unwrap().stale,
+                "the other shot is untouched"
+            );
             drop(session);
 
             // Reopened, the plan's shots are still the ones in play.

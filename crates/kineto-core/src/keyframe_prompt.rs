@@ -52,6 +52,9 @@ pub struct Locks<'a> {
     pub characters: &'a [CharacterLock],
     /// The locked bible, whose entries say what carries over.
     pub bible: Option<&'a Bible>,
+    /// The director's note for this generation only, such as "warmer light,
+    /// tighter on his hands".
+    pub note: Option<&'a str>,
 }
 
 /// The bible entries a shot's keyframe reads for continuity: the entry of
@@ -291,6 +294,13 @@ pub fn compile(
             });
         }
     }
+    if let Some(note) = locks.note.map(str::trim).filter(|note| !note.is_empty()) {
+        needed(
+            &mut required,
+            "director.note",
+            format!("Director's note: {}", clause(note)),
+        )?;
+    }
     if let Some(from) = &shot.continuity_from {
         needed(
             &mut required,
@@ -520,6 +530,7 @@ fn canonical_intent(
         field(note.as_bytes());
     }
     field(&optional(&shot.continuity_from));
+    field(&optional(&locks.note.map(str::to_owned)));
     // The entries continuity reads, as they say it now.
     for dependency in continuity_dependencies(scene, Some(shot), locks.bible) {
         field(dependency.artifact_id.as_str().as_bytes());
@@ -711,6 +722,55 @@ mod tests {
             !usual.compiled.prompt().contains("notebook"),
             "the notebook is in another scene"
         );
+    }
+
+    #[test]
+    fn the_directors_note_is_said_for_its_generation_and_changes_the_hash() {
+        let plain = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks::default(),
+            &minimax(),
+        )
+        .unwrap();
+        let noted = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks {
+                note: Some(" Warmer light, tighter on his hands. "),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert!(
+            noted
+                .compiled
+                .prompt()
+                .contains("Director's note: Warmer light, tighter on his hands.")
+        );
+        assert!(
+            noted
+                .compiled
+                .applied_constraints()
+                .iter()
+                .any(|applied| applied.as_str() == "director.note")
+        );
+        assert_ne!(noted.prompt_hash, plain.prompt_hash);
+        let blank = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks {
+                note: Some("  "),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert_eq!(blank.compiled.prompt(), plain.compiled.prompt());
     }
 
     #[test]
@@ -1032,6 +1092,7 @@ mod tests {
                 style: Some(&style),
                 characters: &[],
                 bible: None,
+                note: None,
             },
             &minimax(),
         )
@@ -1064,6 +1125,7 @@ mod tests {
                 style: None,
                 characters: &locks,
                 bible: None,
+                note: None,
             },
             &minimax(),
         )
@@ -1101,6 +1163,7 @@ mod tests {
                 style: None,
                 characters: &recast,
                 bible: None,
+                note: None,
             },
             &minimax(),
         )
@@ -1123,6 +1186,7 @@ mod tests {
                 style: None,
                 characters: &locks,
                 bible: None,
+                note: None,
             },
             &minimax(),
         )
@@ -1168,6 +1232,7 @@ mod tests {
                 style: None,
                 characters: &locks,
                 bible: None,
+                note: None,
             },
             &text_only,
         )
@@ -1204,6 +1269,7 @@ mod tests {
                 style: None,
                 characters: &locks,
                 bible: None,
+                note: None,
             },
             &two,
         )
@@ -1245,6 +1311,7 @@ mod tests {
                 style: None,
                 characters: &locks[1..],
                 bible: None,
+                note: None,
             },
             &three,
         )
@@ -1275,6 +1342,7 @@ mod tests {
                 style: None,
                 characters: &locks,
                 bible: None,
+                note: None,
             },
             &minimax(),
         )

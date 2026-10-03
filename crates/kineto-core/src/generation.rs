@@ -872,6 +872,45 @@ pub fn generate_consenting<G: CandidateGenerator>(
     hooks: &mut dyn GenerationHooks,
     consent: Consent,
 ) -> Result<AttachOutcome, GenerationError> {
+    generate_noted(project, shot, generator, hooks, consent, None)
+}
+
+/// Generate the shot's candidates again as the director's `note` asks,
+/// such as "warmer light, tighter on his hands". The note reaches the
+/// prompt as `director.note` for this generation only; everything else is
+/// as [`generate_with_consent`].
+pub fn refine(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    provider: &ImageProvider,
+    hooks: &mut dyn GenerationHooks,
+    consent: Consent,
+    note: &str,
+) -> Result<AttachOutcome, GenerationError> {
+    match provider {
+        ImageProvider::LocalDemo => {
+            generate_noted(project, shot, LocalDemoAdapter, hooks, consent, Some(note))
+        }
+        ImageProvider::Minimax(client) => generate_noted(
+            project,
+            shot,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+            consent,
+            Some(note),
+        ),
+    }
+}
+
+/// [`generate_consenting`] with the director's note for this generation.
+pub fn generate_noted<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    generator: G,
+    hooks: &mut dyn GenerationHooks,
+    consent: Consent,
+    note: Option<&str>,
+) -> Result<AttachOutcome, GenerationError> {
     let risk_paying_twice = consent.risk_paying_twice;
     shot.plan_generation(project)?;
     // Refuse before writing anything: a provider that cannot be called or a
@@ -880,7 +919,7 @@ pub fn generate_consenting<G: CandidateGenerator>(
         return Err(GenerationError::NotConfigured);
     }
     require_synchronous(&generator.capabilities())?;
-    let prompt = compile_prompt(project, shot, &generator)?;
+    let prompt = compile_prompt(project, shot, &generator, note)?;
     if let Some(prompt) = &prompt
         && !consent.identity_drift
         && identity_policy(project) == IdentityPolicy::Block
@@ -972,6 +1011,7 @@ fn compile_prompt<G: CandidateGenerator>(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
     generator: &G,
+    note: Option<&str>,
 ) -> Result<Option<Arc<KeyframePrompt>>, GenerationError> {
     if !generator.needs_prompt() {
         return Ok(None);
@@ -988,6 +1028,7 @@ fn compile_prompt<G: CandidateGenerator>(
             style: style.as_ref(),
             characters: &characters,
             bible: bible.as_ref(),
+            note,
         },
         &generator.capabilities(),
     )?)))
@@ -1047,9 +1088,10 @@ fn identity_reference(
 }
 
 /// What makes each current candidate of `shot` stale, in candidate order:
-/// each lock its prompt followed that changed or went, and each lock made
-/// since that it did not follow, by artifact ID. Empty for a fresh
-/// candidate and for a demo candidate, which follows no lock.
+/// each intent field changed since it was made (`intent.<field>`), each
+/// lock or bible entry its prompt followed that changed or went, and each
+/// lock made since that it did not follow, by artifact ID. Empty for a
+/// fresh candidate; a demo candidate follows no lock.
 pub fn keyframe_staleness(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
@@ -1068,17 +1110,20 @@ pub fn keyframe_staleness(
         intent.as_ref(),
         locked_bible(project)?.as_ref(),
     ));
+    let intent_changes = shot.candidate_intent_changes()?;
     Ok(shot
         .candidate_dependencies()?
         .iter()
         .zip(shot.candidate_origins()?)
-        .map(|(recorded, origin)| {
-            if origin.provider == DEMO_PROVIDER {
-                return Vec::new();
+        .zip(intent_changes)
+        .map(|((recorded, origin), mut stale)| {
+            // A demo candidate follows no lock, but it was made for an intent.
+            if origin.provider != DEMO_PROVIDER {
+                let recorded: Vec<DependencyRecord> =
+                    recorded.iter().map(DependencyRecord::from).collect();
+                stale.extend(cast::stale_parents(&recorded, &current));
             }
-            let recorded: Vec<DependencyRecord> =
-                recorded.iter().map(DependencyRecord::from).collect();
-            cast::stale_parents(&recorded, &current)
+            stale
         })
         .collect())
 }
@@ -1169,7 +1214,7 @@ fn complete_inner<G: CandidateGenerator>(
             return Err(GenerationError::NotConfigured);
         }
         if prompt.is_none() {
-            prompt = compile_prompt(project, shot, &generator)?;
+            prompt = compile_prompt(project, shot, &generator, None)?;
         }
     }
     let identities = match &prompt {

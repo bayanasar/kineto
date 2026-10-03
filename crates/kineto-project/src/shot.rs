@@ -22,6 +22,26 @@ const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const GENERATED_CANDIDATE_COUNT: usize = 3;
 const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
+/// The intent a candidate records it was made for, by `shot.json` field.
+/// A field whose value changes since makes the candidate stale.
+const INTENT_FIELDS: [&str; 12] = [
+    "direction",
+    "purpose",
+    "action",
+    "framing",
+    "lens",
+    "camera_motion",
+    "emotion",
+    "dialogue",
+    "characters",
+    "duration_target",
+    "continuity",
+    "continuity_from",
+];
+
+/// The artifact field holding a candidate's intent snapshot.
+const INTENT_RECORD: &str = "intent";
+
 /// Provider key recorded on candidates from the deterministic local demo
 /// generator. It stands in for a real image provider until P0.5.
 pub const DEMO_PROVIDER: &str = "local-demo";
@@ -218,6 +238,19 @@ pub struct CandidateOutput {
 pub struct CandidateOrigin {
     pub provider: String,
     pub model: String,
+}
+
+/// One keyframe candidate as the shot's history keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRecord {
+    pub artifact_id: String,
+    /// The generation it came from.
+    pub generation: u16,
+    pub status: ArtifactStatus,
+    pub media_path: Option<ProjectRelativePath>,
+    pub origin: CandidateOrigin,
+    /// The constraints its prompt applied, such as `director.note`.
+    pub applied: Vec<String>,
 }
 
 /// How much a compilation lost, derived from its dropped constraints.
@@ -904,6 +937,50 @@ impl ShotWorkflow {
             .collect()
     }
 
+    /// What changed in the shot's intent since each current candidate was
+    /// made, in candidate order, as `intent.<field>`.
+    pub fn candidate_intent_changes(&self) -> Result<Vec<Vec<String>>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                self.changed_intent(
+                    self.artifact(candidate)
+                        .ok_or(ShotWorkflowError::InvalidCanonicalState)?,
+                )
+            })
+            .collect()
+    }
+
+    /// Every keyframe candidate the shot has had, current or superseded,
+    /// oldest generation first: what the director compares across takes.
+    pub fn candidate_history(&self) -> Result<Vec<CandidateRecord>, ShotWorkflowError> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type == "shot_candidate")
+            .map(|artifact| {
+                let (_, generation) = parse_candidate_id(&artifact.artifact_id)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+                Ok(CandidateRecord {
+                    artifact_id: artifact.artifact_id.clone(),
+                    generation,
+                    status: artifact.status.into(),
+                    media_path: artifact
+                        .media_path
+                        .as_ref()
+                        .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
+                        .transpose()?,
+                    origin: CandidateOrigin {
+                        provider: artifact.provider.clone().unwrap_or_default(),
+                        model: artifact.model.clone().unwrap_or_default(),
+                    },
+                    applied: artifact.applied_constraints.clone().unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
     /// What each current candidate was compiled from, in candidate order,
     /// as its artifact records it.
     pub fn candidate_dependencies(
@@ -1151,7 +1228,7 @@ impl ShotWorkflow {
                         extra: BTreeMap::new(),
                     })
                     .collect(),
-                extra: BTreeMap::new(),
+                extra: BTreeMap::from([(INTENT_RECORD.to_owned(), intent_snapshot(&self.shot)?)]),
             });
             candidate_artifact_ids.push(output.artifact_id.as_str().to_owned());
         }
@@ -1916,12 +1993,48 @@ impl ShotWorkflow {
                 })
                 .collect::<Result<Vec<_>, ShotWorkflowError>>()?;
             let expected = generation_input_hash(&self.shot, &parents)?;
-            if artifact.input_hash.as_deref() != Some(expected.as_str()) {
+            if artifact.input_hash.as_deref() != Some(expected.as_str())
+                || !self.changed_intent(artifact)?.is_empty()
+            {
                 return Ok(true);
             }
         }
         Ok(false)
     }
+
+    /// The intent fields that changed since `artifact` was made, as
+    /// `intent.<field>`; none for a candidate that recorded no intent.
+    fn changed_intent(
+        &self,
+        artifact: &StoredArtifactRecord,
+    ) -> Result<Vec<String>, ShotWorkflowError> {
+        let Some(Value::Object(recorded)) = artifact.extra.get(INTENT_RECORD) else {
+            return Ok(Vec::new());
+        };
+        let Value::Object(current) = intent_snapshot(&self.shot)? else {
+            return Err(ShotWorkflowError::InvalidCanonicalState);
+        };
+        Ok(INTENT_FIELDS
+            .iter()
+            .filter(|field| recorded.get(**field) != current.get(**field))
+            .map(|field| format!("intent.{field}"))
+            .collect())
+    }
+}
+
+/// The intent `shot` is written with now, field by field.
+fn intent_snapshot(shot: &ShotProductionManifest) -> Result<Value, ShotWorkflowError> {
+    let mut snapshot = serde_json::Map::new();
+    snapshot.insert(
+        "direction".to_owned(),
+        serde_json::to_value(shot.direction).map_err(ShotWorkflowError::Json)?,
+    );
+    for field in &INTENT_FIELDS[1..] {
+        if let Some(value) = shot.extra.get(*field) {
+            snapshot.insert((*field).to_owned(), value.clone());
+        }
+    }
+    Ok(Value::Object(snapshot))
 }
 
 /// The input hash of a generation of `shot` compiled from `parents`: the
