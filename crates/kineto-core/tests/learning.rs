@@ -257,11 +257,16 @@ fn choices_become_suggestions_the_director_accepts_rewords_or_turns_down() {
     assert_eq!(learning::unconsidered(&project).unwrap(), 2);
     assert!(!learning::suggestions_ready(&project).unwrap());
 
-    // A suggestion citing what it was not given is asked for again.
-    let made_up = SUGGESTED.replace("voice.interviewer.0002", "shot_009_g0001_candidate_a");
-    let model = FakeLlm::answering([made_up.as_str(), SUGGESTED]);
+    // A suggestion citing work passed over, as if it showed the preference,
+    // is asked for again.
+    let passed_over = SUGGESTED.replace("voice.interviewer.0002", "voice.interviewer.0001");
+    let model = FakeLlm::answering([passed_over.as_str(), SUGGESTED]);
     let record = learning::suggest(&project, &model).unwrap();
     assert_eq!(model.requests().len(), 2);
+    assert!(
+        format!("{:?}", model.requests()[1])
+            .contains("voice.interviewer.0001 was passed over; cite only chosen work")
+    );
     let input = &model.requests()[0].messages[1].content;
     assert!(input.contains("chosen line.office_night.01.0003: delivery angry"));
     assert!(input.contains("passed over voice.interviewer.0001: DEMO_LOW"));
