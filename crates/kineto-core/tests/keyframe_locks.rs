@@ -1,8 +1,9 @@
 //! Keyframes that follow what production has locked, with MiniMax offline:
 //! the locked style leads the prompt, the shot's cast character is shown
 //! from their canonical portrait sent as identity reference, the candidates
-//! depend on both locks and go stale when either changes, and a project
-//! that blocks identity drift waits for the director's consent.
+//! depend on both locks and go stale when either changes, a stale one is
+//! not locked, and a project that blocks identity drift waits for the
+//! director's consent.
 
 use std::{
     collections::BTreeMap,
@@ -41,7 +42,7 @@ use kineto_project::{
         ProjectWorkflow,
     },
     screenplay::SAMPLE_SCREENPLAY_JSON,
-    shot::ShotWorkflow,
+    shot::{ShotWorkflow, ShotWorkflowError},
     story::SAMPLE_ANALYSIS_JSON,
     style as style_document,
 };
@@ -369,7 +370,7 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
     // Candidates made from locks are fresh, so the director can lock one.
     assert!(!shot.snapshot().unwrap().stale);
     shot.select(&project, 1).unwrap();
-    shot.lock(&project).unwrap();
+    generation::lock(&project, &mut shot).unwrap();
     assert!(shot.snapshot().unwrap().locked);
 
     // Another style is locked: every candidate is stale, and kept.
@@ -383,6 +384,38 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
             .all(|causes| causes == &["style_s0001".to_owned(), "style_s0002".to_owned()])
     );
     assert_eq!(shot.candidate_media().unwrap().len(), 3);
+}
+
+#[test]
+fn a_keyframe_made_before_its_character_was_cast_is_not_locked() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, false);
+    let minimax = Minimax::new();
+    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
+        .unwrap();
+    shot.select(&project, 0).unwrap();
+
+    cast_character(&project, &minimax, "filmmaker");
+    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    assert_eq!(
+        generation::keyframe_staleness(&project, &shot).unwrap()[0],
+        ["cast.filmmaker.0001"]
+    );
+    // The shot's intent is unchanged, so only the locks tell it is stale.
+    assert!(!shot.snapshot().unwrap().stale);
+    assert!(matches!(
+        generation::lock(&project, &mut shot),
+        Err(GenerationError::Shot(ShotWorkflowError::StaleSelection))
+    ));
+    assert!(!shot.snapshot().unwrap().locked);
+
+    generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
+        .unwrap();
+    shot.select(&project, 0).unwrap();
+    generation::lock(&project, &mut shot).unwrap();
+    assert!(shot.snapshot().unwrap().locked);
 }
 
 #[test]
