@@ -468,7 +468,7 @@ String _dollars(int amountMicros) {
 }
 
 final class KinetoProjectException implements Exception {
-  const KinetoProjectException(this.code, this.message);
+  const KinetoProjectException(this.code, this.message, {this.reason});
 
   /// An argument the engine cannot take, such as an empty note.
   static const int invalidArgument = 100;
@@ -590,8 +590,16 @@ final class KinetoProjectException implements Exception {
   final int code;
   final String message;
 
+  /// What a provider said when it refused or failed, in its own words, such
+  /// as `MiniMax refused the request (1008): insufficient balance`; null when
+  /// the status says it all.
+  final String? reason;
+
+  /// [message], then the provider's own words when there are any.
+  String get explanation => reason == null ? message : '$message. $reason';
+
   @override
-  String toString() => 'KinetoProjectException($code): $message';
+  String toString() => 'KinetoProjectException($code): $explanation';
 }
 
 /// Thin Dart owner for an opened canonical Kineto project.
@@ -1057,8 +1065,9 @@ final class KinetoProjectSession implements Finalizable {
   }
 }
 
-/// Receives one session's `[kind, token, status, shot]` messages from the
-/// native worker and completes the matching futures.
+/// Receives one session's `[kind, token, status, shot, reason]` messages
+/// from the native worker and completes the matching futures. `reason` is
+/// what a provider said when it refused or failed, or null.
 final class _SessionPort {
   _SessionPort() {
     _raw = RawReceivePort(_onMessage, 'kineto project session');
@@ -1121,15 +1130,17 @@ final class _SessionPort {
   }
 
   void _onMessage(Object? message) {
-    final values = message! as List<int>;
+    final list = message! as List<Object?>;
+    final values = list.take(4).cast<int>().toList(growable: false);
     final status = values[2];
+    final reason = list[4] as String?;
     switch (values[0]) {
       case _opened:
         if (_openCompleter.isCompleted) break;
         if (status == 0) {
           _openCompleter.complete();
         } else {
-          _openCompleter.completeError(_projectException(status));
+          _openCompleter.completeError(_projectException(status, reason));
         }
       case _recovered:
         // Posted before OPENED, so recoveries are complete when open returns.
@@ -1138,6 +1149,7 @@ final class _SessionPort {
             shotIndex: values[3] < 0 ? null : values[3],
             revisionOrCount: values[1],
             errorCode: status,
+            reason: reason,
             document: switch (values[3]) {
               -2 => KinetoDocumentKind.storyAnalysis,
               -3 => KinetoDocumentKind.screenplay,
@@ -1158,6 +1170,7 @@ final class _SessionPort {
             shotIndex: values[3],
             revision: values[1],
             errorCode: status,
+            reason: reason,
           ),
         );
       case _completed:
@@ -1166,7 +1179,7 @@ final class _SessionPort {
         if (status == 0) {
           completer.complete();
         } else {
-          completer.completeError(_projectException(status));
+          completer.completeError(_projectException(status, reason));
         }
     }
     _updateKeepAlive();
@@ -1187,6 +1200,7 @@ final class KinetoVideoEvent {
     required this.shotIndex,
     required this.revision,
     required this.errorCode,
+    this.reason,
   });
 
   final int shotIndex;
@@ -1195,8 +1209,11 @@ final class KinetoVideoEvent {
   /// 0 when the video was attached; otherwise why it was not.
   final int errorCode;
 
+  /// What the provider said, when it refused or failed.
+  final String? reason;
+
   KinetoProjectException? get error =>
-      errorCode == 0 ? null : _projectException(errorCode);
+      errorCode == 0 ? null : _projectException(errorCode, reason);
 }
 
 /// Unfinished work from an earlier session that an open dealt with.
@@ -1205,6 +1222,7 @@ final class KinetoRecovery {
     required this.shotIndex,
     required this.revisionOrCount,
     required this.errorCode,
+    this.reason,
     this.document,
     this.images,
   });
@@ -1227,6 +1245,9 @@ final class KinetoRecovery {
   /// 0 when the generation was completed; otherwise why it was not.
   final int errorCode;
 
+  /// What the provider said, when it refused or failed.
+  final String? reason;
+
   /// The interrupted generation was completed when the project opened.
   bool get completed =>
       (shotIndex != null || document != null || images != null) && errorCode == 0;
@@ -1236,7 +1257,7 @@ final class KinetoRecovery {
 
   /// Why the recovery did not complete, when it did not.
   KinetoProjectException? get error =>
-      errorCode == 0 ? null : _projectException(errorCode);
+      errorCode == 0 ? null : _projectException(errorCode, reason);
 }
 
 /// A queued operation was abandoned because its session was closed first.
@@ -1446,7 +1467,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   199: 'Native project call failed unexpectedly',
 };
 
-KinetoProjectException _projectException(int code) => KinetoProjectException(
+KinetoProjectException _projectException(int code, [String? reason]) => KinetoProjectException(
       code,
       kinetoProjectStatusMessages[code] ?? 'Unknown native project error',
+      reason: reason,
     );

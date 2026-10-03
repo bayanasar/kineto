@@ -98,7 +98,7 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
               'and has been completed.'
         else
           'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '
-              'and could not be completed (${recovery.error!.message}). Kineto tries again the next '
+              'and could not be completed (${recovery.error!.explanation}). Kineto tries again the next '
               'time the project opens.',
     ];
 
@@ -188,7 +188,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
         _shotSnapshots = _readShotSnapshots();
         final error = event.error;
         if (error != null) {
-          (_videoFailures[event.shotIndex] ??= <String>[]).add(error.message);
+          (_videoFailures[event.shotIndex] ??= <String>[]).add(error.explanation);
         }
       });
     });
