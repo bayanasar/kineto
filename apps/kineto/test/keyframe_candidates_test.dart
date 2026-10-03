@@ -320,4 +320,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(notes, <String>['Warmer light.']);
   });
+
+  testWidgets('a selected take whose locks moved on is not offered for locking', (tester) async {
+    var locks = 0;
+    Widget workspace(List<List<String>> staleReasons) => MaterialApp(
+          theme: WabTheme.materialTheme(lightTheme: false),
+          home: DemoWorkspaceView(
+            engineSnapshot: const KinetoEngineSnapshot(abiVersion: 19),
+            imageProvider: _minimax,
+            candidateMedia: const <String?>[null, null, null],
+            staleReasons: staleReasons,
+            shotSnapshot: _threeTakes,
+            shotSnapshots: const <KinetoShotSnapshot>[_threeTakes, _empty],
+            activeShotIndex: 0,
+            onShotChanged: (_) {},
+            onDirectionChanged: (_) {},
+            onGenerate: () {},
+            onSelect: (_) {},
+            onLock: () => locks++,
+            onReset: () {},
+          ),
+        );
+    final lock = find.byKey(const ValueKey<String>('lock-selection'));
+
+    await tester.pumpWidget(workspace(List<List<String>>.filled(3, const <String>['style_s0002'])));
+    expect(find.text('Regenerate before locking'), findsOneWidget);
+    await tester.ensureVisible(lock);
+    await tester.tap(lock, warnIfMissed: false);
+    expect(locks, 0);
+
+    await tester.pumpWidget(workspace(List<List<String>>.filled(3, const <String>[])));
+    expect(find.text('Lock selection'), findsOneWidget);
+    await tester.tap(lock);
+    expect(locks, 1);
+  });
 }

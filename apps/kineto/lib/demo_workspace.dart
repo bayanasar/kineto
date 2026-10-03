@@ -470,11 +470,17 @@ class DemoWorkspaceView extends StatelessWidget {
     final selectedIndex = shotSnapshot.selectedIndex;
     final blocked = shotSnapshot.changesBlocked || working;
     final canGenerate = !blocked && imageProvider.ready && !keyframesUnresolved;
+    // A take made in a style or cast since moved on from is not locked,
+    // even when the shot's own intent is unchanged.
+    final selectedStale = shotSnapshot.stale ||
+        (selectedIndex != null &&
+            selectedIndex < staleReasons.length &&
+            staleReasons[selectedIndex].isNotEmpty);
     final canLock = !blocked &&
         shotSnapshot.generated &&
         selectedIndex != null &&
         !shotSnapshot.locked &&
-        !shotSnapshot.stale;
+        !selectedStale;
     final shot = shots[activeShotIndex];
     final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
 
@@ -790,7 +796,7 @@ class DemoWorkspaceView extends StatelessWidget {
                           child: Text(
                             shotSnapshot.locked
                                 ? 'Selection locked'
-                                : shotSnapshot.stale
+                                : selectedStale
                                     ? 'Regenerate before locking'
                                     : 'Lock selection',
                           ),
