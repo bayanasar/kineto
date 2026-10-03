@@ -1032,19 +1032,7 @@ impl ShotWorkflow {
             .generation_revision
             .checked_add(1)
             .ok_or(ShotWorkflowError::GenerationOverflow)?;
-        let intent = input_hash(&self.shot)?;
-        let input_hash = if parents.is_empty() {
-            intent
-        } else {
-            InputHash::derive(InputHashMaterial {
-                dependencies: parents,
-                canonical_intent: intent.as_str().as_bytes(),
-                provider: "",
-                model: "",
-                canonical_params: b"",
-                compiler_version: "",
-            })
-        };
+        let input_hash = generation_input_hash(&self.shot, parents)?;
         Ok(GenerationPlan {
             shot_number: self.shot_number,
             revision,
@@ -1899,18 +1887,58 @@ impl ShotWorkflow {
             .find(|artifact| artifact.artifact_id == artifact_id.as_str())
     }
 
+    /// Whether a current candidate was generated for another intent than
+    /// the shot's. A candidate made from locks is checked against the hash
+    /// the same locks give the current intent; whether the locks themselves
+    /// changed is the generation layer's to say.
     fn is_stale(&self) -> Result<bool, ShotWorkflowError> {
         let selection = self.selection.domain()?;
-        if selection.candidate_artifact_ids.is_empty() {
-            return Ok(false);
+        for candidate in &selection.candidate_artifact_ids {
+            let Some(artifact) = self.artifact(candidate) else {
+                return Ok(true);
+            };
+            let parents = artifact
+                .dependencies
+                .iter()
+                .map(|dependency| {
+                    Ok(ArtifactDependency {
+                        artifact_id: ArtifactId::new(dependency.artifact_id.clone())
+                            .map_err(ShotWorkflowError::ArtifactId)?,
+                        content_hash: ContentHash::new(dependency.content_hash.clone())
+                            .map_err(ShotWorkflowError::Hash)?,
+                        impact: dependency.impact.into(),
+                        field: dependency.field.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, ShotWorkflowError>>()?;
+            let expected = generation_input_hash(&self.shot, &parents)?;
+            if artifact.input_hash.as_deref() != Some(expected.as_str()) {
+                return Ok(true);
+            }
         }
-        let current_input_hash = input_hash(&self.shot)?;
-        Ok(selection.candidate_artifact_ids.iter().any(|candidate| {
-            self.artifact(candidate).is_none_or(|artifact| {
-                artifact.input_hash.as_deref() != Some(current_input_hash.as_str())
-            })
-        }))
+        Ok(false)
     }
+}
+
+/// The input hash of a generation of `shot` compiled from `parents`: the
+/// intent's alone without any, otherwise derived from both.
+fn generation_input_hash(
+    shot: &ShotProductionManifest,
+    parents: &[ArtifactDependency],
+) -> Result<InputHash, ShotWorkflowError> {
+    let intent = input_hash(shot)?;
+    Ok(if parents.is_empty() {
+        intent
+    } else {
+        InputHash::derive(InputHashMaterial {
+            dependencies: parents,
+            canonical_intent: intent.as_str().as_bytes(),
+            provider: "",
+            model: "",
+            canonical_params: b"",
+            compiler_version: "",
+        })
+    })
 }
 
 /// A candidate's media must be the shot's own keyframe file, present, and

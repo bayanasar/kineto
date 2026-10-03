@@ -366,6 +366,11 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
             .iter()
             .all(Vec::is_empty)
     );
+    // Candidates made from locks are fresh, so the director can lock one.
+    assert!(!shot.snapshot().unwrap().stale);
+    shot.select(&project, 1).unwrap();
+    shot.lock(&project).unwrap();
+    assert!(shot.snapshot().unwrap().locked);
 
     // Another style is locked: every candidate is stale, and kept.
     lock_style(&project, &minimax, "film_realism");
