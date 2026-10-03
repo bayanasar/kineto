@@ -8,7 +8,7 @@
 //! element of it; for takes, the shot index and the take. No record crosses
 //! as JSON; an edited scene's shots arrive as a typed array.
 
-use std::{slice, sync::Arc};
+use std::{collections::BTreeSet, slice, sync::Arc};
 
 use kineto_core::{
     generation::Consent,
@@ -37,7 +37,9 @@ const MAX_SHOTS: u64 = 500;
 const MAX_LIST: u64 = 1_000;
 
 /// One shot of an edited scene, as Dart lays it out. An empty
-/// `continuity_from` means none.
+/// `continuity_from` means none. `added` marks a shot the director added in
+/// this edit: it is a new shot whatever ID it carries, and never takes the
+/// identity or history of a shot of that ID.
 #[repr(C)]
 pub struct KinetoPlannedShot {
     pub id_ptr: *const u8,
@@ -62,6 +64,7 @@ pub struct KinetoPlannedShot {
     pub continuity_count: u64,
     pub continuity_from_ptr: *const u8,
     pub continuity_from_len: u64,
+    pub added: bool,
 }
 
 /// Queue planning the shots of the locked screenplay with the session's
@@ -219,10 +222,16 @@ pub unsafe extern "C" fn kineto_project_save_scene_plan(
             unsafe { slice::from_raw_parts(shots, shot_count as usize) }
         };
         let mut planned = Vec::with_capacity(raw.len());
+        let mut added = BTreeSet::new();
         for shot in raw {
             // SAFETY: forwarded caller contract for each shot.
             match unsafe { planned_shot(shot) } {
-                Ok(shot) => planned.push(shot),
+                Ok(planned_shot) => {
+                    if shot.added {
+                        added.insert(planned_shot.id.clone());
+                    }
+                    planned.push(planned_shot);
+                }
                 Err(code) => return code,
             }
         }
@@ -232,6 +241,7 @@ pub unsafe extern "C" fn kineto_project_save_scene_plan(
                 scene_id,
                 shots: planned,
             },
+            added,
         };
         // SAFETY: forwarded caller contract.
         unsafe { submit(session, command, false, token) }

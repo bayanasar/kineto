@@ -528,6 +528,7 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
           characters: draft.shot.characters,
           continuity: draft.shot.continuity,
           continuityFrom: draft.continuityFrom,
+          added: draft.shot.added,
         ),
       );
     }
@@ -575,18 +576,24 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
               emotion: '',
               durationTarget: like.durationTarget,
               characters: like.characters,
+              added: true,
             ),
           ),
         );
       });
 
-  /// The scene's ID and the first free two-digit number. Never `shot_NNN`,
-  /// which names the bootstrap scene's shots. The editor cannot see shots
-  /// removed earlier; when the number was one of theirs, the engine gives
-  /// the new shot a number no shot has had, so it never inherits a removed
-  /// shot's takes or video.
+  /// The scene's ID and the first number free of every shot the scene had
+  /// when editing began, so a shot removed in this edit keeps its number.
+  /// Never `shot_NNN`, which names the bootstrap scene's shots. The shot is
+  /// sent as added: if its number was a shot's before, even one removed in
+  /// an earlier revision, the engine gives it one no shot has had, so it
+  /// never inherits another shot's takes or video.
   String _newShotId() {
-    final taken = <String>{...widget.otherShots, for (final draft in _shots) draft.shot.id};
+    final taken = <String>{
+      ...widget.otherShots,
+      for (final shot in widget.scene.shots) shot.id,
+      for (final draft in _shots) draft.shot.id,
+    };
     final scene = widget.scene.sceneId;
     final prefix = scene.length > 60 ? scene.substring(0, 60) : scene;
     for (var number = _shots.length + 1;; number++) {

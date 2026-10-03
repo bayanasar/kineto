@@ -10,7 +10,7 @@
 //! A shot's ID is its identity: the takes and videos kept under it are its
 //! own. A shot keeps its ID while it stays in the plan; a removed shot keeps
 //! its ID and its history, and no shot added later ever takes either
-//! ([`with_fresh_ids`]).
+//! ([`with_fresh_ids`]), even one added in the same edit that removed it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -482,15 +482,19 @@ pub fn used_shot_ids(project: &CanonicalProject) -> Result<BTreeSet<String>, Rev
 
 /// `plan` with each shot it adds to `base` (every shot, without one) given
 /// a new ID where the project has used its ID before, so a new shot never
-/// takes the identity, takes or video of a shot removed earlier. The new ID
-/// is the scene's ID and the first number no shot has used; each shot that
-/// continues from a renamed one follows it.
+/// takes the identity, takes or video of a shot removed earlier. A shot is
+/// added when `base` does not have its ID, or when it is in `added`: a
+/// shot the director added in the edit, whatever ID it was given, is new
+/// even if the edit removed a shot of that ID. The new ID is the scene's ID
+/// and the first number no shot has used; each shot that continues from a
+/// renamed one follows it.
 pub fn with_fresh_ids(
     project: &CanonicalProject,
     base: Option<&ShotPlan>,
+    added: &BTreeSet<String>,
     plan: ShotPlan,
 ) -> Result<ShotPlan, RevisionError> {
-    fresh_ids(&used_shot_ids(project)?, base, plan).map_err(RevisionError::InvalidDocument)
+    fresh_ids(&used_shot_ids(project)?, base, added, plan).map_err(RevisionError::InvalidDocument)
 }
 
 /// [`with_fresh_ids`] given the IDs [`used_shot_ids`] read, for a caller
@@ -499,10 +503,16 @@ pub fn with_fresh_ids(
 pub fn fresh_ids(
     used: &BTreeSet<String>,
     base: Option<&ShotPlan>,
+    added: &BTreeSet<String>,
     mut plan: ShotPlan,
 ) -> Result<ShotPlan, String> {
     let kept: BTreeSet<&str> = base
-        .map(|base| base.shots().map(|(_, shot)| shot.id.as_str()).collect())
+        .map(|base| {
+            base.shots()
+                .map(|(_, shot)| shot.id.as_str())
+                .filter(|id| !added.contains(*id))
+                .collect()
+        })
         .unwrap_or_default();
     let reused: Vec<(String, String)> = plan
         .shots()
@@ -550,11 +560,13 @@ fn fresh_id(scene: &str, taken: &BTreeSet<String>) -> Option<String> {
     })
 }
 
-/// The director's edit of one scene's shots.
+/// The director's edit of one scene's shots. `added` names the shots the
+/// director added in the edit, which are new shots whatever IDs they carry.
 pub fn edit_scene(
     project: &CanonicalProject,
     based_on: u32,
     scene: ScenePlan,
+    added: &BTreeSet<String>,
 ) -> Result<RevisionRecord, RevisionError> {
     let latest = revisions::latest(project, DocumentKind::ShotPlan)?
         .ok_or(RevisionError::NoSuchRevision(based_on))?;
@@ -568,7 +580,7 @@ pub fn edit_scene(
     let edited = base
         .with_scene(scene)
         .map_err(RevisionError::InvalidDocument)?;
-    let edited = with_fresh_ids(project, Some(&base), edited)?;
+    let edited = with_fresh_ids(project, Some(&base), added, edited)?;
     check_references(project, &edited)?;
     revisions::save_edit(
         project,
@@ -950,7 +962,7 @@ mod tests {
         // Only the first shot is kept; the second was used before.
         let mut base = plan.clone();
         base.scenes[0].shots.truncate(1);
-        let fresh = fresh_ids(&used, Some(&base), plan.clone()).unwrap();
+        let fresh = fresh_ids(&used, Some(&base), &BTreeSet::new(), plan.clone()).unwrap();
         let shots: Vec<_> = fresh
             .shots()
             .map(|(_, shot)| (shot.id.as_str(), shot.continuity_from.as_deref()))
@@ -964,16 +976,22 @@ mod tests {
         );
         // Without a base every shot is added; the one continued from is
         // followed under its new ID.
-        let fresh = fresh_ids(&used, None, plan.clone()).unwrap();
+        let fresh = fresh_ids(&used, None, &BTreeSet::new(), plan.clone()).unwrap();
         assert_eq!(
             fresh.scenes[0].shots[1].continuity_from.as_deref(),
             Some(fresh.scenes[0].shots[0].id.as_str())
         );
         // A plan that reuses nothing is returned as it is.
         assert_eq!(
-            fresh_ids(&BTreeSet::new(), None, plan.clone()).unwrap(),
+            fresh_ids(&BTreeSet::new(), None, &BTreeSet::new(), plan.clone()).unwrap(),
             plan
         );
+        // A shot the director added is new although the base has its ID: the
+        // edit removed that shot and gave the new one its number.
+        let added: BTreeSet<String> = ["office_night_02".to_owned()].into();
+        let fresh = fresh_ids(&used, Some(&plan), &added, plan.clone()).unwrap();
+        let ids: Vec<_> = fresh.shots().map(|(_, shot)| shot.id.as_str()).collect();
+        assert_eq!(ids, ["office_night_01", "office_night_04"]);
         // A long scene ID is cut so the shot ID still fits.
         let long = "s".repeat(80);
         let id = fresh_id(&long, &BTreeSet::new()).unwrap();

@@ -2,6 +2,8 @@
 //! planned by a language model from that screenplay and the locked bible,
 //! and kept as a document revision.
 
+use std::collections::BTreeSet;
+
 use kineto_llm::{LlmBackend, LlmBackendInfo};
 use kineto_project::{
     DependencyImpact,
@@ -140,7 +142,7 @@ pub fn write<B: LlmBackend>(
     let used = document::used_shot_ids(project).map_err(document_error)?;
     documents::generate::<B, ShotPlan, ShotPlan>(project, backend, prepared.spec()?, |plan| {
         plan.check_against(screenplay, bible)?;
-        document::fresh_ids(&used, None, plan)
+        document::fresh_ids(&used, None, &BTreeSet::new(), plan)
     })
 }
 
@@ -209,7 +211,7 @@ pub fn replan_scene<B: LlmBackend>(
             next.check_against(screenplay, bible)?;
             // A shot it keeps keeps its ID; a shot it adds takes none a
             // removed shot had.
-            document::fresh_ids(&used, Some(&base), next)
+            document::fresh_ids(&used, Some(&base), &BTreeSet::new(), next)
         },
     )
 }

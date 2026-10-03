@@ -74,6 +74,9 @@ final class _NativePlannedShot extends Struct {
 
   @Uint64()
   external int continuityFromLength;
+
+  @Bool()
+  external bool added;
 }
 
 @Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>, Uint64, Pointer<_NativePlannedShot>, Uint64, Uint64)>(
@@ -233,6 +236,7 @@ final class KinetoPlannedShot {
     this.characters = const <String>[],
     this.continuity = const <String>[],
     this.continuityFrom,
+    this.added = false,
   });
 
   final String id;
@@ -262,6 +266,11 @@ final class KinetoPlannedShot {
 
   /// The earlier shot this one continues from.
   final String? continuityFrom;
+
+  /// Added by the director in the edit being saved: a new shot whatever ID
+  /// it carries. The engine never gives it the identity or history of a
+  /// shot that had that ID.
+  final bool added;
 
   KinetoPlannedShot copyWith({
     String? purpose,
@@ -534,7 +543,8 @@ extension KinetoProjectPlanning on KinetoProjectSession {
             ..continuity = texts(shot.continuity)
             ..continuityCount = shot.continuity.length
             ..continuityFrom = from.pointer
-            ..continuityFromLength = from.length;
+            ..continuityFromLength = from.length
+            ..added = shot.added;
         }
         final sceneId = _encodeUtf8(arena, scene.sceneId);
         return _kinetoProjectSaveScenePlan(

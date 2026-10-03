@@ -233,6 +233,25 @@ void main() {
     expect(added.characters, <String>['filmmaker', 'interviewer']);
     expect(added.continuityFrom, 'office_night_01');
     expect(added.continuity, isEmpty);
+    expect(added.added, isTrue);
+    expect(saved.shots[0].added, isFalse);
+  });
+
+  testWidgets('a shot removed and another added in one edit never shares its number', (tester) async {
+    final calls = await _pump(tester, editing: 'office_night');
+    await _tap(tester, find.byKey(_key('shot-office_night_02-remove')));
+    await _tap(tester, find.byKey(_key('shot-office_night_01-add-after')));
+    // Not office_night_02, which the removed shot keeps with its takes.
+    expect(find.text('2. office_night_03'), findsOneWidget);
+    await tester.enterText(find.byKey(_key('shot-office_night_03-purpose')), 'Show the empty chair.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-action')), 'The chair is empty.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-emotion')), 'Absence.');
+    await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
+    final saved = calls.saved!;
+    expect(saved.shots.map((shot) => (shot.id, shot.added)), <(String, bool)>[
+      ('office_night_01', false),
+      ('office_night_03', true),
+    ]);
   });
 
   testWidgets('while something is planned every change waits', (tester) async {
