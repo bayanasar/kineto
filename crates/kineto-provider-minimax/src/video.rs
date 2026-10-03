@@ -62,6 +62,24 @@ pub fn video_capabilities() -> VideoCapabilities {
     }
 }
 
+/// Hailuo's bracketed camera command for a planned camera motion, where it
+/// has one. A slow move keeps its pace in the words beside the command.
+#[must_use]
+pub fn camera_command(motion: &str) -> Option<&'static str> {
+    Some(match motion {
+        "static" => "Static shot",
+        "slow_dolly_in" | "dolly_in" => "Push in",
+        "slow_dolly_out" | "dolly_out" => "Pull out",
+        "pan_left" => "Pan left",
+        "pan_right" => "Pan right",
+        "tilt_up" => "Tilt up",
+        "tilt_down" => "Tilt down",
+        "tracking" => "Tracking shot",
+        "handheld" => "Shake",
+        _ => return None,
+    })
+}
+
 /// Published price of one Hailuo-02 clip.
 const fn clip_price_micros(duration: VideoDuration, resolution: VideoResolution) -> u64 {
     match (resolution, duration) {
@@ -482,6 +500,27 @@ mod tests {
             );
         }
         assert_eq!(capabilities.clip_seconds.len(), 2);
+    }
+
+    #[test]
+    fn every_planned_camera_motion_has_a_command() {
+        for motion in [
+            "static",
+            "slow_dolly_in",
+            "dolly_in",
+            "slow_dolly_out",
+            "dolly_out",
+            "pan_left",
+            "pan_right",
+            "tilt_up",
+            "tilt_down",
+            "tracking",
+            "handheld",
+        ] {
+            assert!(camera_command(motion).is_some(), "{motion}");
+        }
+        assert_eq!(camera_command("slow_dolly_in"), Some("Push in"));
+        assert_eq!(camera_command("restrained_pan"), None);
     }
 
     #[test]

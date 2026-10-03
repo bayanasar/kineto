@@ -514,6 +514,10 @@ pub struct VideoOutput {
     pub provenance: Option<PromptProvenance>,
     /// The keyframe the video was generated from.
     pub keyframe: ArtifactDependency,
+    /// The shot's intent when the video was asked for, as
+    /// [`ShotWorkflow::intent_record`] gave it; a field changed since makes
+    /// the video stale.
+    pub intent: Option<Value>,
 }
 
 /// Output of the deterministic local demo generator for one candidate.
@@ -1395,19 +1399,49 @@ impl ShotWorkflow {
         let Some(video) = self.current_video() else {
             return Ok(VideoState::None);
         };
-        // Staleness is computed: the video's keyframe dependency must still
-        // be the locked keyframe, with the same bytes.
-        let current = self.locked_keyframe().is_some_and(|keyframe| {
-            video.dependencies.iter().any(|dependency| {
-                dependency.artifact_id == keyframe.artifact_id
-                    && dependency.content_hash == keyframe.content_hash
-            })
-        });
+        let current = self.video_stale_causes(video)?.is_empty();
         Ok(match (current, video.status) {
             (false, _) => VideoState::Stale,
             (true, StoredArtifactStatus::Locked) => VideoState::Locked,
             (true, _) => VideoState::Ready,
         })
+    }
+
+    /// Why the current video no longer follows the shot: `first_frame` when
+    /// it was not made from the locked keyframe's bytes, and each intent
+    /// field changed since it was asked for, as `intent.<field>`. Empty
+    /// without a video, or for one that is current.
+    pub fn video_staleness(&self) -> Result<Vec<String>, ShotWorkflowError> {
+        match self.current_video() {
+            Some(video) => self.video_stale_causes(video),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Staleness is computed: the video's keyframe dependency must still be
+    /// the locked keyframe, with the same bytes, and the intent it recorded
+    /// must still be the shot's.
+    fn video_stale_causes(
+        &self,
+        video: &StoredArtifactRecord,
+    ) -> Result<Vec<String>, ShotWorkflowError> {
+        let from_locked_keyframe = self.locked_keyframe().is_some_and(|keyframe| {
+            video.dependencies.iter().any(|dependency| {
+                dependency.artifact_id == keyframe.artifact_id
+                    && dependency.content_hash == keyframe.content_hash
+            })
+        });
+        let mut causes = Vec::new();
+        if !from_locked_keyframe {
+            causes.push("first_frame".to_owned());
+        }
+        causes.extend(self.changed_intent(video)?);
+        Ok(causes)
+    }
+
+    /// The shot's intent as a generation records it, field by field.
+    pub fn intent_record(&self) -> Result<Value, ShotWorkflowError> {
+        intent_snapshot(&self.shot)
     }
 
     /// The locked keyframe a video would start from, as the dependency the
@@ -1564,7 +1598,11 @@ impl ShotWorkflow {
                 field: output.keyframe.field.clone(),
                 extra: BTreeMap::new(),
             }],
-            extra: BTreeMap::new(),
+            extra: output
+                .intent
+                .iter()
+                .map(|intent| (INTENT_RECORD.to_owned(), intent.clone()))
+                .collect(),
         });
 
         // The revision is published first; a video revision without its
@@ -1606,6 +1644,7 @@ impl ShotWorkflow {
             || record.model.as_deref() != Some(output.model.as_str())
             || record.media_path.as_deref() != Some(media_path.as_str())
             || record.prompt_hash.as_deref() != prompt_hash
+            || record.extra.get(INTENT_RECORD) != output.intent.as_ref()
             || !depends_on_keyframe
         {
             return Err(ShotWorkflowError::AttachedRecordMismatch(
@@ -2457,7 +2496,8 @@ impl fmt::Display for ShotWorkflowError {
             Self::VideoLocked => formatter.write_str("the shot's video is locked"),
             Self::NoVideo => formatter.write_str("generate a video before locking it"),
             Self::StaleVideo => formatter.write_str(
-                "the video was made from a keyframe that is no longer locked; regenerate it",
+                "the video no longer follows the shot: its locked keyframe or its intent changed \
+                 since; regenerate it",
             ),
             Self::MediaMismatch(path) => write!(
                 formatter,
@@ -2721,6 +2761,7 @@ mod tests {
             media_path,
             provenance: None,
             keyframe: plan.keyframe().unwrap().0.clone(),
+            intent: None,
         }
     }
 

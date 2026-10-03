@@ -210,6 +210,17 @@ The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.r
 
 The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 
+The video compiler is `video-prompt/2` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
+
+- The first frame carries framing, lens, setting, the characters' look and the shot it continues from; those are applied through it, not restated.
+- Camera motion is said in the provider's own command where its control is parametric and it has one (MiniMax's bracketed commands, such as `[Push in]`), in words where it takes words, and reported as a cosmetic drop where it takes neither.
+- The clip is the declared length nearest the plan's duration; a difference is reported.
+- Dialogue is reported as dropped: no provider here speaks.
+- Mood, the shot's direction and its continuity notes are said while the prompt has room, cut by rank (continuity notes first, mood last) and reported when cut; a prompt whose required parts do not fit is refused.
+- When the next shot in play continues from this one, its locked keyframe could close this clip as a last frame. No provider here takes one, so the compiler reports why it was not used (`continuity.end_frame`).
+
+A video records the shot's intent when it was asked for, carried in the job's receipt, under `intent`. It is stale when its keyframe dependency no longer names the locked keyframe's bytes (`first_frame`) or an intent field changed since (`intent.<field>`), and a stale video cannot be locked.
+
 Projects created by the desktop app start with the bootstrap scene (`kineto-core/src/bootstrap.rs`) written into these files, published atomically with the project.
 
 ## Paid job safety

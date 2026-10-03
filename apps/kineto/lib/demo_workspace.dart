@@ -1123,7 +1123,8 @@ class _VideoPanel extends StatelessWidget {
       KinetoVideoState.ready => 'The video is ready. Open it, then lock it or generate another.',
       KinetoVideoState.locked => 'The video is locked as production truth.',
       KinetoVideoState.stale =>
-        'The video was made from a keyframe that is no longer locked; regenerate it.',
+        'The video no longer follows the shot: its locked keyframe or its planned intent changed '
+            'since; regenerate it.',
       KinetoVideoState.unresolved =>
         'The last submission did not finish cleanly, and MiniMax may already have accepted and '
             'charged for it. Kineto has no record of its task, so it cannot follow it. Check your '

@@ -1382,7 +1382,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   128: 'Lock a keyframe before generating video',
   129: "This shot's video is locked",
   130: 'Generate a video before locking it',
-  131: 'The video was made from a keyframe that is no longer locked; regenerate it',
+  131: 'The video no longer follows the shot: its locked keyframe or its planned intent changed; regenerate it',
   132: 'The locked keyframe has no image to start a video from',
   133: 'Analyse the story before writing the screenplay',
   134: 'Write the screenplay before rewriting a scene',

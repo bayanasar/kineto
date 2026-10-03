@@ -400,6 +400,7 @@ fn shot_video_records_match_committed_schemas() {
             media_path,
             provenance: None,
             keyframe: plan.keyframe().expect("plan names its keyframe").0.clone(),
+            intent: Some(shot.intent_record().expect("the shot has an intent")),
         },
     )
     .expect("the video should attach");

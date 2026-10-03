@@ -216,3 +216,85 @@ fn a_demo_video_left_between_submission_and_attach_is_finished_after_a_restart()
     shot.lock_video(&project).unwrap();
     assert_eq!(shot.snapshot().unwrap().video, VideoState::Locked);
 }
+
+fn edit_intent(target: &Path, shot: &str, field: &str, value: serde_json::Value) {
+    let path = target.join(format!("scenes/scene_001/shots/{shot}/shot.json"));
+    let mut intent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent[field] = value;
+    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+}
+
+fn make_demo_video(project: &CanonicalProject, shot: &mut ShotWorkflow) {
+    let job = video::start(project, shot, &LocalDemoVideos).unwrap();
+    let done = video::watch(
+        &LocalDemoVideos,
+        project.root(),
+        job,
+        &AtomicBool::new(false),
+        Duration::ZERO,
+    )
+    .unwrap();
+    video::finish(project, shot, done).unwrap();
+}
+
+#[test]
+fn a_video_says_what_its_provider_could_not_do_and_goes_stale_when_the_plan_moves() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let (project, shot) = film(&target);
+    drop(shot);
+    // The second shot continues from the first.
+    edit_intent(&target, "shot_002", "continuity_from", "shot_001".into());
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    make_demo_video(&project, &mut shot);
+
+    let artifacts: serde_json::Value = serde_json::from_slice(
+        &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+    )
+    .unwrap();
+    let record = artifacts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["type"] == "shot_video")
+        .unwrap();
+    assert_eq!(record["compiler_version"], "video-prompt/2");
+    let dropped: Vec<(&str, &str)> = record["dropped_constraints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|dropped| {
+            (
+                dropped["constraint"].as_str().unwrap(),
+                dropped["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // The demo cannot move its camera and takes no last frame.
+    assert!(
+        dropped
+            .iter()
+            .any(|(constraint, reason)| *constraint == "shot.camera_motion"
+                && reason.starts_with("the provider cannot direct the camera"))
+    );
+    assert!(dropped.contains(&(
+        "continuity.end_frame",
+        "shot_002 continues from this shot, but the provider takes no last frame"
+    )));
+    assert_eq!(record["intent"], shot.intent_record().unwrap());
+    assert!(shot.video_staleness().unwrap().is_empty());
+
+    // The plan's mood for the shot changes: the video no longer follows it,
+    // says why, and is not locked.
+    edit_intent(&target, "shot_001", "emotion", "Relief, at last.".into());
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    assert_eq!(shot.video_staleness().unwrap(), ["intent.emotion"]);
+    assert_eq!(shot.snapshot().unwrap().video, VideoState::Stale);
+    assert!(shot.lock_video(&project).is_err());
+
+    // Made again for the new mood, it is locked.
+    make_demo_video(&project, &mut shot);
+    assert!(shot.video_staleness().unwrap().is_empty());
+    shot.lock_video(&project).unwrap();
+    assert_eq!(shot.snapshot().unwrap().video, VideoState::Locked);
+}

@@ -61,11 +61,12 @@ use kineto_project::{
         AttachOutcome, DEMO_PROVIDER, PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec,
         VideoOutput, VideoPlan, locate, video_media_path,
     },
+    shot_plan::shots_in_play,
 };
 use kineto_provider_minimax::{
     MinimaxClient, MinimaxError, PROVIDER as MINIMAX_PROVIDER, SharedTransport, Transport,
-    VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask, VideoTaskState, sniff,
-    video_capabilities,
+    VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask, VideoTaskState,
+    camera_command, sniff, video_capabilities,
 };
 use kineto_providers::{
     CameraControl, ImageFormat, Price, VideoCapabilities, VideoContainer, VideoMode,
@@ -76,7 +77,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{GenerationError, NoHooks, ProviderSelectionError, parse_job_key, provenance_of},
-    video_prompt::{self, VIDEO_COMPILER_VERSION},
+    video_prompt::{self, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
 };
 
 /// The capability a shot video is generated with.
@@ -152,6 +153,11 @@ pub trait VideoGenerator {
     fn needs_frame_image(&self) -> bool {
         true
     }
+    /// Its own command for a planned camera motion, where its camera
+    /// control is parametric and it has one.
+    fn camera_command(&self, _motion: &str) -> Option<&'static str> {
+        None
+    }
     /// The parameters a submission of `clip_seconds` is made with, as they
     /// enter the input hash.
     fn canonical_params(&self, clip_seconds: u8) -> String;
@@ -178,6 +184,10 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
 
     fn capabilities(&self) -> VideoCapabilities {
         video_capabilities()
+    }
+
+    fn camera_command(&self, motion: &str) -> Option<&'static str> {
+        camera_command(motion)
     }
 
     fn canonical_params(&self, clip_seconds: u8) -> String {
@@ -488,6 +498,10 @@ struct Receipt {
     /// Set by the watcher once the video is on disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_hash: Option<String>,
+    /// The shot's intent when the video was asked for, which the video
+    /// records so a later change says it is stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intent: Option<serde_json::Value>,
 }
 
 fn receipt_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, VideoError> {
@@ -885,7 +899,37 @@ fn check_capabilities(
     }
 }
 
+/// The shot in play that continues from `key`, and whether its keyframe is
+/// locked.
+fn successor(
+    project: &CanonicalProject,
+    key: &ShotKey,
+) -> Result<Option<(String, bool)>, GenerationError> {
+    let in_play = shots_in_play(project).map_err(|error| GenerationError::Provider {
+        source: Box::new(error),
+        class: ErrorClass::Terminal,
+    })?;
+    for other in in_play {
+        if &other == key {
+            continue;
+        }
+        let next = ShotWorkflow::load(project, &other)?;
+        if next
+            .intent()?
+            .and_then(|intent| intent.continuity_from)
+            .is_some_and(|from| from == key.shot())
+        {
+            return Ok(Some((
+                other.shot().to_owned(),
+                next.first_frame()?.is_some(),
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// The clip lengths `capabilities` render, shortest first.
+#[cfg(test)]
 fn clip_lengths(capabilities: &VideoCapabilities) -> Vec<u8> {
     if !capabilities.clip_seconds.is_empty() {
         return capabilities.clip_seconds.iter().copied().collect();
@@ -931,13 +975,24 @@ fn submit<G: VideoGenerator>(
     };
     let capabilities = generator.capabilities();
     check_capabilities(&capabilities, frame.as_ref())?;
-    let prompt = video_prompt::compile(
-        shot.intent()?.as_ref(),
-        shot.direction(),
-        keyframe.content_hash.as_str(),
-        &clip_lengths(&capabilities),
-        capabilities.max_prompt_chars.unwrap_or(usize::MAX),
-    )?;
+    let intent = shot.intent()?;
+    let successor = successor(project, shot.key())?;
+    let prompt = video_prompt::compile(VideoPromptInput {
+        shot: intent.as_ref(),
+        direction: shot.direction(),
+        keyframe_hash: keyframe.content_hash.as_str(),
+        capabilities: &capabilities,
+        camera_command: intent
+            .as_ref()
+            .and_then(|intent| intent.camera_motion.as_deref())
+            .and_then(|motion| generator.camera_command(motion)),
+        successor: successor
+            .as_ref()
+            .map(|(shot_id, keyframe_locked)| Successor {
+                shot_id,
+                keyframe_locked: *keyframe_locked,
+            }),
+    })?;
     let params = generator.canonical_params(prompt.duration_seconds);
     let plan = shot.plan_video(
         project,
@@ -1009,6 +1064,7 @@ fn submit<G: VideoGenerator>(
                 task_id: None,
                 refused_attempt: None,
                 content_hash: None,
+                intent: Some(shot.intent_record()?),
             },
         )
         .map_err(video_error)?;
@@ -1207,6 +1263,7 @@ pub fn finish(
             media_path: video_media_path(shot.key(), &done.job.artifact_id)?,
             provenance: Some(receipt.provenance),
             keyframe,
+            intent: receipt.intent,
         },
     )?;
     let _ = runtime.acknowledge_result(&job_id)?;
