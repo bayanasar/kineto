@@ -18,7 +18,9 @@
 //! character wears in this scene, how the location looks and what never
 //! changes there, the props the scene holds, the shot's own continuity
 //! notes, and the shot it continues from. Each is said as long as the prompt
-//! has room; a cut one is reported. Nothing is truncated.
+//! has room; a cut one is reported, props first, then the location, then
+//! wardrobe and notes, and a cast character's forbidden changes last.
+//! Nothing is truncated.
 
 use std::{error::Error, fmt};
 
@@ -289,7 +291,8 @@ pub fn compile(
                         .collect::<Vec<_>>()
                         .join("; ")
                 )),
-                rank: 0,
+                // Identity outlasts every continuity part when room runs out.
+                rank: 3,
                 degradation: DegradationLevel::IdentityAffecting,
             });
         }
@@ -771,6 +774,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(blank.compiled.prompt(), plain.compiled.prompt());
+    }
+
+    #[test]
+    fn identity_is_cut_after_every_continuity_part() {
+        let bible = dressed_bible();
+        let casts = [cast("filmmaker", "The Filmmaker")];
+        let locks = Locks {
+            characters: &casts,
+            bible: Some(&bible),
+            ..Locks::default()
+        };
+        let full = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            locks,
+            &minimax(),
+        )
+        .unwrap();
+        let forbidden = "The Filmmaker, always: Grey at the temples.";
+        assert!(full.compiled.prompt().contains(forbidden));
+        // Room for everything but the prop and one more part: the second
+        // to go is a continuity part, not the forbidden change.
+        let prop = "The notebook: A small black notebook with a red elastic band.";
+        assert!(full.compiled.prompt().contains(prop));
+        let tight = ImageCapabilities {
+            max_prompt_chars: Some(
+                full.compiled.prompt().chars().count() - prop.chars().count() - 2,
+            ),
+            ..minimax()
+        };
+        let cut = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            locks,
+            &tight,
+        )
+        .unwrap();
+        assert!(cut.compiled.prompt().contains(forbidden));
+        assert!(!cut.compiled.prompt().contains(prop));
+        assert_eq!(
+            cut.compiled.dropped_constraints().len(),
+            full.compiled.dropped_constraints().len() + 2
+        );
+        let identity_cut = cut
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .filter(|dropped| dropped.degradation == DegradationLevel::IdentityAffecting)
+            .count();
+        assert_eq!(identity_cut, 0);
     }
 
     #[test]
