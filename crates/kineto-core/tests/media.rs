@@ -246,3 +246,244 @@ fn identical_media_is_stored_once_and_changed_media_is_left_alone() {
             .is_empty()
     );
 }
+
+fn record(
+    owner: MediaOwner,
+    id: &str,
+    kind: MediaKind,
+    standing: Standing,
+    dependencies: &[&str],
+) -> media::MediaRecord {
+    media::MediaRecord {
+        owner,
+        artifact_id: id.to_owned(),
+        kind,
+        path: kineto_project::fs::ProjectRelativePath::new(format!("media/{id}.bin")).unwrap(),
+        content_hash: kineto_project::ContentHash::of(id.as_bytes()),
+        state: MediaState::Present,
+        standing,
+        dependencies: dependencies.iter().map(|id| (*id).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn locked_work_and_everything_it_was_made_from_is_never_collectable() {
+    use media::RetentionClass::{Archived, Collectable, Pinned, Recent};
+    let shot = || MediaOwner::Shot(ShotKey::new("scene_a", "shot_a").unwrap());
+    let records = vec![
+        // A style sample turned down after a portrait was made from it.
+        record(
+            MediaOwner::Style,
+            "style_s0001",
+            MediaKind::StyleSample,
+            Standing::Passed,
+            &[],
+        ),
+        record(
+            MediaOwner::Style,
+            "style_s0002",
+            MediaKind::StyleSample,
+            Standing::Passed,
+            &[],
+        ),
+        record(
+            MediaOwner::Character("filmmaker".to_owned()),
+            "cast.filmmaker.0001",
+            MediaKind::Cast,
+            Standing::Passed,
+            &["style_s0001"],
+        ),
+        // Keyframes: an old superseded generation the locked video still
+        // starts from, and two more superseded takes.
+        record(
+            shot(),
+            "shot_a_g0001_candidate_a",
+            MediaKind::Keyframe,
+            Standing::Passed,
+            &["cast.filmmaker.0001"],
+        ),
+        record(
+            shot(),
+            "shot_a_g0001_candidate_b",
+            MediaKind::Keyframe,
+            Standing::Passed,
+            &[],
+        ),
+        record(
+            shot(),
+            "shot_a_g0002_candidate_a",
+            MediaKind::Keyframe,
+            Standing::Passed,
+            &[],
+        ),
+        record(
+            shot(),
+            "shot_a_g0003_candidate_a",
+            MediaKind::Keyframe,
+            Standing::Candidate,
+            &[],
+        ),
+        record(
+            shot(),
+            "shot_a_v0001_candidate_a",
+            MediaKind::Video,
+            Standing::Locked,
+            &["shot_a_g0001_candidate_a"],
+        ),
+        media::MediaRecord {
+            state: MediaState::Evicted,
+            ..record(
+                shot(),
+                "shot_a_v0000_candidate_a",
+                MediaKind::Video,
+                Standing::Passed,
+                &[],
+            )
+        },
+    ];
+    let classes: Vec<_> = media::retention(&records, 1)
+        .into_iter()
+        .map(|retention| (retention.record.artifact_id, retention.class))
+        .collect();
+    let class = |id: &str| classes.iter().find(|(found, _)| found == id).unwrap().1;
+    // Locked, and its ancestry three steps back.
+    assert_eq!(class("shot_a_v0001_candidate_a"), Pinned);
+    assert_eq!(class("shot_a_g0001_candidate_a"), Pinned);
+    assert_eq!(class("cast.filmmaker.0001"), Pinned);
+    assert_eq!(class("style_s0001"), Pinned);
+    // The latest style sample is the one recent take kept.
+    assert_eq!(class("style_s0002"), Recent);
+    // Undecided takes are kept whatever their age; older passed ones go.
+    assert_eq!(class("shot_a_g0003_candidate_a"), Recent);
+    assert_eq!(class("shot_a_g0002_candidate_a"), Collectable);
+    assert_eq!(class("shot_a_g0001_candidate_b"), Collectable);
+    assert_eq!(class("shot_a_v0000_candidate_a"), Archived);
+    // A wider window keeps more.
+    assert!(
+        media::retention(&records, 6)
+            .iter()
+            .all(|retention| retention.class != Collectable)
+    );
+}
+
+#[test]
+fn a_dry_run_says_what_collecting_frees_and_collecting_does_exactly_that() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = CanonicalProject::create_with_files(
+        &target,
+        manifest(),
+        b"A filmmaker waits.\n",
+        &bootstrap::scene_files(),
+    )
+    .unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    shot.generate(&project).unwrap();
+    shot.select(&project, 0).unwrap();
+    shot.lock(&project).unwrap();
+    for _ in 0..4 {
+        demo_video(&project, &mut shot);
+    }
+    // The last take is locked; the three before it were superseded.
+    shot.lock_video(&project).unwrap();
+    let records = media::catalog(&project).unwrap();
+    // The two latest takes are kept: the locked one and the one before it.
+    let plan = media::plan(&project, &records, 2);
+    let planned: Vec<_> = plan
+        .items
+        .iter()
+        .map(|item| item.record.artifact_id.as_str())
+        .collect();
+    assert_eq!(
+        planned,
+        ["shot_001_v0001_candidate_a", "shot_001_v0002_candidate_a"]
+    );
+    assert!(
+        plan.items
+            .iter()
+            .all(|item| item.reason.contains("latest 2"))
+    );
+    assert_eq!(plan.bytes, 2 * DEMO_CLIP.len() as u64);
+
+    // Once the identical clips are one file, the locked take holds it, so
+    // collecting frees nothing.
+    media::dedupe(&project, &records).unwrap();
+    assert_eq!(media::plan(&project, &records, 2).bytes, 0);
+    let usage = media::usage(&project, &records);
+    assert_eq!(usage.bytes, DEMO_CLIP.len() as u64);
+    assert_eq!(usage.by_owner.len(), 1);
+
+    // A wider window than the dry run's keeps everything it listed.
+    let skipped = media::collect(&project, &plan, 10).unwrap();
+    assert!(skipped.evicted.is_empty());
+    assert_eq!(skipped.skipped, planned);
+    assert_eq!(media::catalog(&project).unwrap(), records);
+
+    let done = media::collect(&project, &plan, 2).unwrap();
+    assert_eq!(done.evicted, planned);
+    let after = media::catalog(&project).unwrap();
+    for record in &after {
+        let file = project.root().resolve(&record.path);
+        if planned.contains(&record.artifact_id.as_str()) {
+            assert_eq!(record.state, MediaState::Evicted);
+            assert!(!file.exists());
+        } else {
+            assert_eq!(record.state, MediaState::Present);
+            assert_eq!(fs::read(file).unwrap(), DEMO_CLIP);
+        }
+    }
+    // The records, their prompts and order stay; their media is gone.
+    let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    let history = shot.video_history().unwrap();
+    assert_eq!(history.len(), 4);
+    assert!(history[0].media_path.is_none() && history[1].media_path.is_none());
+    assert!(history[3].media_path.is_some());
+    assert!(
+        media::retention(&after, 2)
+            .iter()
+            .filter(|retention| retention.class == media::RetentionClass::Archived)
+            .count()
+            == 2
+    );
+    // Nothing is left to collect, and the classes come from the records
+    // alone.
+    fs::remove_dir_all(target.join(".kineto")).ok();
+    assert!(media::plan(&project, &after, 2).items.is_empty());
+}
+
+#[test]
+fn an_interrupted_collection_is_finished_when_reconciled() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = CanonicalProject::create_with_files(
+        &target,
+        manifest(),
+        b"A filmmaker waits.\n",
+        &bootstrap::scene_files(),
+    )
+    .unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    shot.generate(&project).unwrap();
+    shot.select(&project, 0).unwrap();
+    shot.lock(&project).unwrap();
+    demo_video(&project, &mut shot);
+    demo_video(&project, &mut shot);
+    // Stopped after the record said evicted, before the file was removed.
+    shot.evict_media(&project, &["shot_001_v0001_candidate_a".to_owned()])
+        .unwrap();
+    let records = media::catalog(&project).unwrap();
+    let evicted = records
+        .iter()
+        .find(|record| record.state == MediaState::Evicted)
+        .unwrap();
+    assert!(project.root().resolve(&evicted.path).is_file());
+    // A file the records call evicted is no one's to report as missing.
+    assert!(media::check(&project, &records, true).unwrap().is_clean());
+    assert_eq!(media::reconcile(&project, &records).unwrap(), 1);
+    assert!(!project.root().resolve(&evicted.path).exists());
+    assert_eq!(media::reconcile(&project, &records).unwrap(), 0);
+    assert_eq!(
+        fs::read(project.root().resolve(&records.last().unwrap().path)).unwrap(),
+        DEMO_CLIP
+    );
+}

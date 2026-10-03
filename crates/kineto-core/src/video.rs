@@ -619,10 +619,17 @@ fn provider_key(provider: &'static str) -> ProviderKey {
     ProviderKey::new(provider).expect("static provider key is valid")
 }
 
-fn policy() -> JobRuntimePolicy {
+/// How video jobs of `provider` run: two submissions at once to a paid
+/// provider; the free demo answers at once, so it is not held back.
+fn policy(provider: &str) -> JobRuntimePolicy {
+    let concurrency = if provider == DEMO_VIDEO_PROVIDER {
+        64
+    } else {
+        2
+    };
     JobRuntimePolicy {
         execution: ProviderExecutionPolicy::new(
-            NonZeroU16::new(2).expect("static concurrency is non-zero"),
+            NonZeroU16::new(concurrency).expect("static concurrency is non-zero"),
             BackoffPolicy::new(2_000, 30_000, 3).expect("static backoff policy is valid"),
         ),
         // A video is an explicit, chosen spend; nothing falls back to it.
@@ -635,7 +642,7 @@ fn policy() -> JobRuntimePolicy {
 }
 
 fn runtime<'a>(project: &'a CanonicalProject, provider: &'static str) -> JobRuntime<'a> {
-    JobRuntime::new(project, provider_key(provider), policy())
+    JobRuntime::new(project, provider_key(provider), policy(provider))
 }
 
 /// Submits a planned video and records its task.

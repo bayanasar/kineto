@@ -321,7 +321,14 @@ The records are the authority for media (`kineto_project::media`). The catalog l
 
 Generated media is deduplicated by content: after the session makes media, files whose bytes are the same, verified by hashing both, become hard links to one another. Each record keeps its own path beside its owner; a file system without hard links keeps the copies. A finished video's download link that has expired or is refused is retrieved again on the next look at the task, without paying again.
 
-Future GC must be dependency-aware, provide dry-run reporting, and never collect an ancestor required by a pinned artifact. Generated media should use content-addressed deduplication where practical.
+Retention classes are computed from the records on every read, never stored (`kineto_project::media::retention`):
+
+- `pinned`: a locked artifact (a locked keyframe or video, the locked style sample, a locked cast's portrait and pack) and every artifact it was made from, followed through dependencies however far back: a locked video's first frame, that keyframe's cast portrait, the style sample the portrait followed.
+- `recent`: among the latest takes of its owner (a shot, a character, the style) and kind, or not decided on yet. How many latest takes are kept is `recent_takes` under `[workflow]` in `project.toml`, 6 by default.
+- `archived`: its bytes were let go (`media_state: evicted`); its record, prompt and provenance stay, and it shows no file.
+- `collectable`: superseded or rejected, older than the latest takes, and needed by nothing locked.
+
+Collecting is dependency-aware and has a dry run. The dry run lists every collectable file with why and the bytes it frees; a file deduplicated with one that is kept frees nothing. Collecting lets go of what the dry run listed and nothing else, each item only if it is still collectable with the same bytes, and never a pinned one. Each owner's records are marked evicted before their files are removed, so an interruption leaves at most a record that says evicted beside a file still there; opening the project removes it. Disk use is reported for the project and per owner, each file counted once however many records name it.
 
 ## Scene schema
 

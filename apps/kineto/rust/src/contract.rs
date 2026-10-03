@@ -70,10 +70,12 @@ pub(crate) const PROJECT_ERR_PACK_INCOMPLETE: i32 = 153;
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_BIBLE: i32 = 154;
 pub(crate) const PROJECT_ERR_NEEDS_SHOT_PLAN: i32 = 155;
 pub(crate) const PROJECT_ERR_PROVIDER_INCAPABLE: i32 = 156;
+pub(crate) const PROJECT_ERR_MEDIA_UNREADABLE: i32 = 157;
+pub(crate) const PROJECT_ERR_NO_COLLECTION_PLAN: i32 = 158;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 59] = [
+const STATUSES: [(&str, i32); 61] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -144,6 +146,8 @@ const STATUSES: [(&str, i32); 59] = [
     ("needs_locked_bible", PROJECT_ERR_NEEDS_LOCKED_BIBLE),
     ("needs_shot_plan", PROJECT_ERR_NEEDS_SHOT_PLAN),
     ("provider_incapable", PROJECT_ERR_PROVIDER_INCAPABLE),
+    ("media_unreadable", PROJECT_ERR_MEDIA_UNREADABLE),
+    ("no_collection_plan", PROJECT_ERR_NO_COLLECTION_PLAN),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

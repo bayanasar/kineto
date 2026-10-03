@@ -82,6 +82,8 @@ pub struct MediaRecord {
     pub content_hash: ContentHash,
     pub state: MediaState,
     pub standing: Standing,
+    /// The artifacts it was made from, by ID.
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -166,6 +168,11 @@ pub fn catalog(project: &CanonicalProject) -> Result<Vec<MediaRecord>, MediaErro
                     .map_err(|_| MediaError::Cast(cast::CastError::InvalidLog))?,
                 state: image.media_state.unwrap_or_default(),
                 standing,
+                dependencies: image
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.artifact_id.clone())
+                    .collect(),
             });
         }
     }
@@ -193,6 +200,11 @@ pub fn catalog(project: &CanonicalProject) -> Result<Vec<MediaRecord>, MediaErro
                 .map_err(|_| MediaError::Style(style::StyleError::InvalidLog))?,
             state: sample.media_state.unwrap_or_default(),
             standing,
+            dependencies: sample
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.artifact_id.clone())
+                .collect(),
         });
     }
     Ok(records)
@@ -388,5 +400,285 @@ impl From<ArtifactStatus> for Standing {
             ArtifactStatus::Draft | ArtifactStatus::Candidate => Self::Candidate,
             ArtifactStatus::Superseded => Self::Passed,
         }
+    }
+}
+
+/// How many of each owner's latest takes of one kind are kept by default,
+/// whatever the director decided on them: two generations of keyframes.
+pub const DEFAULT_RECENT: usize = 6;
+
+/// How many of each owner's latest takes of one kind the project keeps:
+/// `recent_takes` under `[workflow]` in `project.toml`, at least 1.
+#[must_use]
+pub fn recent_window(project: &CanonicalProject) -> usize {
+    project
+        .manifest()
+        .workflow
+        .extra
+        .get("recent_takes")
+        .and_then(|value| value.as_integer())
+        .and_then(|value| usize::try_from(value).ok())
+        .map_or(DEFAULT_RECENT, |value| value.max(1))
+}
+
+/// Whether a media file's bytes may be let go, computed from the records on
+/// every read and never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RetentionClass {
+    /// Locked, or required by something locked: never collected.
+    Pinned,
+    /// Among its owner's latest takes, or still undecided: kept.
+    Recent,
+    /// Its bytes were let go; its record, prompt and provenance are kept.
+    Archived,
+    /// Replaced or turned down, outside the recent takes, and needed by
+    /// nothing locked: its bytes may be let go.
+    Collectable,
+}
+
+/// A media file's retention class and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retention {
+    pub record: MediaRecord,
+    pub class: RetentionClass,
+    pub reason: String,
+}
+
+/// The retention class of every record, with `recent` latest takes kept per
+/// owner and kind.
+#[must_use]
+pub fn retention(records: &[MediaRecord], recent: usize) -> Vec<Retention> {
+    // Locked work and everything it was made from, transitively.
+    let by_id: BTreeMap<&str, &MediaRecord> = records
+        .iter()
+        .map(|record| (record.artifact_id.as_str(), record))
+        .collect();
+    let mut pinned: BTreeMap<&str, String> = BTreeMap::new();
+    let mut stack: Vec<(&str, String)> = records
+        .iter()
+        .filter(|record| record.standing == Standing::Locked)
+        .map(|record| (record.artifact_id.as_str(), "locked".to_owned()))
+        .collect();
+    while let Some((id, reason)) = stack.pop() {
+        if pinned.contains_key(id) {
+            continue;
+        }
+        if let Some(record) = by_id.get(id) {
+            for parent in &record.dependencies {
+                stack.push((parent.as_str(), format!("{id} was made from it")));
+            }
+        }
+        pinned.insert(id, reason);
+    }
+    // The latest `recent` of each owner's takes of one kind, in the order
+    // they were made.
+    let mut seen: BTreeMap<(&MediaOwner, MediaKind), usize> = BTreeMap::new();
+    let mut latest = vec![false; records.len()];
+    for (index, record) in records.iter().enumerate().rev() {
+        let count = seen.entry((&record.owner, record.kind)).or_default();
+        latest[index] = *count < recent;
+        *count += 1;
+    }
+    records
+        .iter()
+        .zip(latest)
+        .map(|(record, latest)| {
+            let (class, reason) = if let Some(reason) = pinned.get(record.artifact_id.as_str()) {
+                (RetentionClass::Pinned, reason.clone())
+            } else if record.state == MediaState::Evicted {
+                (RetentionClass::Archived, "its bytes were let go".to_owned())
+            } else if record.standing != Standing::Passed {
+                (RetentionClass::Recent, "not decided on yet".to_owned())
+            } else if latest {
+                (
+                    RetentionClass::Recent,
+                    format!("among the latest {recent} takes"),
+                )
+            } else {
+                (
+                    RetentionClass::Collectable,
+                    format!("replaced or turned down, and older than the latest {recent} takes"),
+                )
+            };
+            Retention {
+                record: record.clone(),
+                class,
+                reason,
+            }
+        })
+        .collect()
+}
+
+/// How much of the disk the project's media takes, each file counted once
+/// however many records name it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub bytes: u64,
+    /// By owner, in owner order; a file two owners share counts for both.
+    pub by_owner: Vec<(MediaOwner, u64)>,
+}
+
+/// The disk the present media of `records` takes.
+#[must_use]
+pub fn usage(project: &CanonicalProject, records: &[MediaRecord]) -> Usage {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut by_owner: BTreeMap<MediaOwner, (Vec<PathBuf>, u64)> = BTreeMap::new();
+    let mut bytes = 0;
+    for record in records
+        .iter()
+        .filter(|record| record.state == MediaState::Present)
+    {
+        let file = project.root().resolve(&record.path);
+        let Ok(metadata) = std::fs::metadata(&file) else {
+            continue;
+        };
+        if !seen.iter().any(|other| same_file(other, &file)) {
+            bytes += metadata.len();
+            seen.push(file.clone());
+        }
+        let (files, owned) = by_owner.entry(record.owner.clone()).or_default();
+        if !files.iter().any(|other| same_file(other, &file)) {
+            *owned += metadata.len();
+            files.push(file);
+        }
+    }
+    Usage {
+        bytes,
+        by_owner: by_owner
+            .into_iter()
+            .map(|(owner, (_, owned))| (owner, owned))
+            .collect(),
+    }
+}
+
+/// What collecting would let go, worked out without touching anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Collection {
+    /// Every collectable file, in catalog order.
+    pub items: Vec<Retention>,
+    /// The bytes freed: a file is freed only when every record naming it
+    /// is collected.
+    pub bytes: u64,
+}
+
+/// A dry run: what collecting `records` would let go, with `recent` takes
+/// kept per owner and kind.
+#[must_use]
+pub fn plan(project: &CanonicalProject, records: &[MediaRecord], recent: usize) -> Collection {
+    let classes = retention(records, recent);
+    let items: Vec<Retention> = classes
+        .iter()
+        .filter(|retention| retention.class == RetentionClass::Collectable)
+        .cloned()
+        .collect();
+    // A file is freed when no record that keeps its bytes names it.
+    let kept: Vec<PathBuf> = classes
+        .iter()
+        .filter(|retention| {
+            retention.class != RetentionClass::Collectable
+                && retention.record.state == MediaState::Present
+        })
+        .map(|retention| project.root().resolve(&retention.record.path))
+        .collect();
+    let mut freed: Vec<PathBuf> = Vec::new();
+    let mut bytes = 0;
+    for item in &items {
+        let file = project.root().resolve(&item.record.path);
+        let Ok(metadata) = std::fs::metadata(&file) else {
+            continue;
+        };
+        if kept.iter().any(|other| same_file(other, &file))
+            || freed.iter().any(|other| same_file(other, &file))
+        {
+            continue;
+        }
+        bytes += metadata.len();
+        freed.push(file);
+    }
+    Collection { items, bytes }
+}
+
+/// What a collection did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// The records marked evicted and whose files were removed, by ID.
+    pub evicted: Vec<String>,
+    /// Planned records that are no longer collectable, left as they are.
+    pub skipped: Vec<String>,
+}
+
+/// Let go of the bytes `approved` lists, as a dry run showed them, and of
+/// nothing else: each item is collected only if it is still collectable,
+/// the same file with the same bytes. Each owner's records are marked
+/// evicted first and the files removed after, so an interruption leaves at
+/// worst a record that says evicted beside a file still there, which
+/// [`reconcile`] removes.
+pub fn collect(
+    project: &CanonicalProject,
+    approved: &Collection,
+    recent: usize,
+) -> Result<Collected, MediaError> {
+    let current = retention(&catalog(project)?, recent);
+    let mut done = Collected::default();
+    let mut by_owner: BTreeMap<MediaOwner, Vec<MediaRecord>> = BTreeMap::new();
+    for item in &approved.items {
+        let still = current.iter().any(|now| {
+            now.class == RetentionClass::Collectable
+                && now.record.artifact_id == item.record.artifact_id
+                && now.record.path == item.record.path
+                && now.record.content_hash == item.record.content_hash
+        });
+        if still {
+            by_owner
+                .entry(item.record.owner.clone())
+                .or_default()
+                .push(item.record.clone());
+        } else {
+            done.skipped.push(item.record.artifact_id.clone());
+        }
+    }
+    for (owner, records) in by_owner {
+        let ids: Vec<String> = records
+            .iter()
+            .map(|record| record.artifact_id.clone())
+            .collect();
+        match &owner {
+            MediaOwner::Shot(key) => {
+                ShotWorkflow::load(project, key)?.evict_media(project, &ids)?
+            }
+            MediaOwner::Character(character) => {
+                cast::evict(project, character, &ids).map_err(MediaError::Cast)?;
+            }
+            MediaOwner::Style => style::evict(project, &ids).map_err(MediaError::Style)?,
+        }
+        for record in records {
+            remove(project, &record)?;
+            done.evicted.push(record.artifact_id);
+        }
+    }
+    Ok(done)
+}
+
+/// Remove the files of evicted records that are still there, as an
+/// interrupted collection leaves them. Returns how many were removed.
+pub fn reconcile(project: &CanonicalProject, records: &[MediaRecord]) -> Result<usize, MediaError> {
+    let mut removed = 0;
+    for record in records
+        .iter()
+        .filter(|record| record.state == MediaState::Evicted)
+    {
+        if project.root().resolve(&record.path).is_file() {
+            remove(project, record)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn remove(project: &CanonicalProject, record: &MediaRecord) -> Result<(), MediaError> {
+    match std::fs::remove_file(project.root().resolve(&record.path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MediaError::Fs(ProjectFsError::Io(error))),
     }
 }

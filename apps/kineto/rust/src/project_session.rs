@@ -1212,6 +1212,8 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
         SessionError::Production(ProductionError::Style(error)) => style_error_code(error),
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
+        SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
+        SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,

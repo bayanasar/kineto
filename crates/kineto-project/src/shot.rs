@@ -679,6 +679,13 @@ struct StoredArtifactRecord {
 }
 
 impl StoredArtifactRecord {
+    /// Where its media is, unless its bytes were let go.
+    fn kept_media(&self) -> Option<&String> {
+        self.media_path
+            .as_ref()
+            .filter(|_| self.media_state != Some(MediaState::Evicted))
+    }
+
     fn validate_structure(&self) -> Result<(), ShotWorkflowError> {
         if self.schema_version == 0 || self.artifact_type.trim().is_empty() {
             return Err(ShotWorkflowError::InvalidCanonicalState);
@@ -964,8 +971,7 @@ impl ShotWorkflow {
             .map(|candidate| {
                 self.artifact(candidate)
                     .ok_or(ShotWorkflowError::InvalidCanonicalState)?
-                    .media_path
-                    .as_ref()
+                    .kept_media()
                     .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
                     .transpose()
             })
@@ -1002,8 +1008,7 @@ impl ShotWorkflow {
                     generation,
                     status: artifact.status.into(),
                     media_path: artifact
-                        .media_path
-                        .as_ref()
+                        .kept_media()
                         .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
                         .transpose()?,
                     origin: CandidateOrigin {
@@ -1855,8 +1860,7 @@ impl ShotWorkflow {
                     candidate,
                     status: artifact.status.into(),
                     media_path: artifact
-                        .media_path
-                        .as_ref()
+                        .kept_media()
                         .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
                         .transpose()?,
                     origin: CandidateOrigin {
@@ -1877,6 +1881,37 @@ impl ShotWorkflow {
             (left.generation, left.candidate).cmp(&(right.generation, right.candidate))
         });
         Ok(history)
+    }
+
+    /// Mark the media of `artifact_ids` as let go. Their records stay,
+    /// with their prompts and provenance; the caller removes the files
+    /// after.
+    pub fn evict_media(
+        &mut self,
+        project: &CanonicalProject,
+        artifact_ids: &[String],
+    ) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
+        project
+            .validate_for_write()
+            .map_err(ShotWorkflowError::Manifest)?;
+        let mut next_artifacts = self.artifacts.clone();
+        for artifact_id in artifact_ids {
+            let artifact =
+                find_artifact_mut(&mut next_artifacts, &ArtifactId::new(artifact_id.clone())?)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+            if artifact.media_path.is_none() {
+                return Err(ShotWorkflowError::InvalidCanonicalState);
+            }
+            artifact.media_state = Some(MediaState::Evicted);
+        }
+        write_json(
+            project,
+            &shot_path(&self.key, "artifacts.json")?,
+            &next_artifacts,
+        )?;
+        self.artifacts = next_artifacts;
+        Ok(())
     }
 
     /// Every media file the shot's records name: its keyframes and videos,
@@ -1902,6 +1937,11 @@ impl ShotWorkflow {
                         .map_err(ShotWorkflowError::Hash)?,
                     state: artifact.media_state.unwrap_or_default(),
                     standing: ArtifactStatus::from(artifact.status).into(),
+                    dependencies: artifact
+                        .dependencies
+                        .iter()
+                        .map(|dependency| dependency.artifact_id.clone())
+                        .collect(),
                 })
             })
             .collect()
@@ -1910,7 +1950,7 @@ impl ShotWorkflow {
     /// Absolute-path-free location of the current video's media, if any.
     pub fn video_media(&self) -> Result<Option<ProjectRelativePath>, ShotWorkflowError> {
         self.current_video()
-            .and_then(|video| video.media_path.as_ref())
+            .and_then(StoredArtifactRecord::kept_media)
             .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
             .transpose()
     }

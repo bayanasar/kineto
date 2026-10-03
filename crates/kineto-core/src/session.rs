@@ -284,6 +284,11 @@ pub enum SessionError {
     Document(DocumentError),
     /// A style or casting change was refused.
     Production(ProductionError),
+    /// The project's media could not be listed or collected.
+    Media(media::MediaError),
+    /// Collecting was asked for before a dry run showed what it would let
+    /// go.
+    NoCollectionPlan,
     /// A command arrived for a session whose open had failed.
     NotOpen,
     /// The shot already has a video being generated.
@@ -301,6 +306,10 @@ impl fmt::Display for SessionError {
             Self::Generation(error) => error.fmt(formatter),
             Self::Document(error) => error.fmt(formatter),
             Self::Production(error) => error.fmt(formatter),
+            Self::Media(error) => error.fmt(formatter),
+            Self::NoCollectionPlan => {
+                formatter.write_str("work out what collecting would let go before collecting it")
+            }
             Self::NotOpen => formatter.write_str("project session is not open"),
             Self::VideoInFlight => {
                 formatter.write_str("this shot's video is still being generated")
@@ -318,7 +327,8 @@ impl Error for SessionError {
             Self::Generation(error) => Some(error),
             Self::Document(error) => Some(error),
             Self::Production(error) => Some(error),
-            Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
+            Self::Media(error) => Some(error),
+            Self::NoCollectionPlan | Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
 }
@@ -559,6 +569,15 @@ pub struct PublishedMedia {
     /// Records that say their bytes are kept, whose file is gone. Found at
     /// open and after the session made media; reported, never rewritten.
     pub missing: Vec<MediaRecord>,
+    /// Records whose file's bytes no longer hash as recorded, as the last
+    /// [`StorageCommand::Verify`] found them.
+    pub mismatched: Vec<MediaRecord>,
+    /// The disk the media takes, each file counted once.
+    pub usage: media::Usage,
+    /// How many of each owner's latest takes are kept.
+    pub recent: usize,
+    /// The last dry run, until the media changes or it is collected.
+    pub plan: Option<media::Collection>,
     /// Why the media could not be listed, such as a damaged record.
     pub problem: Option<String>,
 }
@@ -615,6 +634,19 @@ enum Work {
         command: ProductionCommand,
         submission: Submission,
     },
+    Storage(StorageCommand),
+}
+
+/// Work on the project's stored media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageCommand {
+    /// Work out what collecting would let go, touching nothing: the dry
+    /// run the director looks at before collecting.
+    PlanCollection,
+    /// Let go of what the last dry run listed, and nothing else.
+    Collect,
+    /// Read every kept file and check its bytes against its record.
+    Verify,
 }
 
 struct Envelope {
@@ -771,6 +803,15 @@ impl ProjectSession {
                 command,
                 submission: Submission::Once,
             },
+        })
+    }
+
+    /// Queue work on the project's stored media. Its result arrives through
+    /// [`SessionSink::document_completed`].
+    pub fn submit_storage(&self, command: StorageCommand, token: u64) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Storage(command),
         })
     }
 
@@ -1040,6 +1081,7 @@ fn run(
             worker.publish_documents(view);
             worker.publish_production(view);
             worker.publish_workflow(view);
+            worker.reconcile_media();
             worker.tend_media(view, false);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
@@ -1144,6 +1186,25 @@ fn run(
                         if makes_media {
                             worker.tend_media(view, true);
                         }
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Some(Envelope {
+                token,
+                work: Work::Storage(command),
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.apply_storage(command);
+                        if command == StorageCommand::Collect {
+                            worker.shots.clear();
+                            worker.publish_shots(view);
+                            worker.publish_production(view);
+                        }
+                        worker.tend_media(view, false);
                         result
                     }
                 };
@@ -1283,6 +1344,11 @@ struct Worker {
     provider: ImageProvider,
     model: DocumentModel,
     videos: Videos,
+    /// The last dry run of a collection, which [`StorageCommand::Collect`]
+    /// carries out.
+    collection: Option<media::Collection>,
+    /// What the last verification found.
+    mismatched: Vec<MediaRecord>,
     /// The shots in play, in order; a shot index names one of them.
     keys: Vec<ShotKey>,
     // Canonical JSON is loaded once per shot per session; reads then stay
@@ -1328,6 +1394,8 @@ impl Worker {
             keyframes_unresolved: BTreeSet::new(),
             style_unresolved: false,
             cast_unresolved: BTreeSet::new(),
+            collection: None,
+            mismatched: Vec::new(),
         }
     }
 
@@ -2035,29 +2103,80 @@ impl Worker {
     /// List the project's media, link files whose bytes are the same when
     /// `dedupe`, and publish which present files are gone. Storage upkeep:
     /// it never fails a command.
-    fn tend_media(&self, view: &View, dedupe: bool) {
+    fn tend_media(&mut self, view: &View, dedupe: bool) {
+        // New media may change what a collection would let go; the dry run
+        // is asked for again.
+        if dedupe {
+            self.collection = None;
+        }
+        let recent = media::recent_window(&self.project);
         let tended = panic::catch_unwind(AssertUnwindSafe(|| {
             let records = media::catalog(&self.project)?;
             if dedupe && !self.project.is_read_only() {
                 media::dedupe(&self.project, &records)?;
             }
-            media::check(&self.project, &records, false)
+            Ok::<_, media::MediaError>((
+                media::check(&self.project, &records, false)?,
+                media::usage(&self.project, &records),
+            ))
         }));
-        let published = match tended {
-            Ok(Ok(report)) => PublishedMedia {
-                missing: report.missing,
-                problem: None,
-            },
-            Ok(Err(error)) => PublishedMedia {
-                missing: Vec::new(),
-                problem: Some(error.to_string()),
-            },
-            Err(_) => PublishedMedia {
-                missing: Vec::new(),
-                problem: Some("checking the media panicked".to_owned()),
-            },
+        let (missing, usage, problem) = match tended {
+            Ok(Ok((report, usage))) => (report.missing, usage, None),
+            Ok(Err(error)) => (Vec::new(), media::Usage::default(), Some(error.to_string())),
+            Err(_) => (
+                Vec::new(),
+                media::Usage::default(),
+                Some("checking the media panicked".to_owned()),
+            ),
+        };
+        let published = PublishedMedia {
+            missing,
+            mismatched: self.mismatched.clone(),
+            usage,
+            recent,
+            plan: self.collection.clone(),
+            problem,
         };
         *lock(&view.media) = Some(Arc::new(published));
+    }
+
+    /// Finish a collection an earlier session left interrupted.
+    fn reconcile_media(&self) {
+        if self.project.is_read_only() {
+            return;
+        }
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            media::catalog(&self.project)
+                .and_then(|records| media::reconcile(&self.project, &records))
+        }));
+    }
+
+    fn apply_storage(&mut self, command: StorageCommand) -> Result<(), SessionError> {
+        let recent = media::recent_window(&self.project);
+        let applied = panic::catch_unwind(AssertUnwindSafe(|| match command {
+            StorageCommand::PlanCollection => {
+                let records = media::catalog(&self.project).map_err(SessionError::Media)?;
+                self.collection = Some(media::plan(&self.project, &records, recent));
+                Ok(())
+            }
+            StorageCommand::Collect => {
+                let plan = self
+                    .collection
+                    .take()
+                    .ok_or(SessionError::NoCollectionPlan)?;
+                media::collect(&self.project, &plan, recent)
+                    .map(|_| ())
+                    .map_err(SessionError::Media)
+            }
+            StorageCommand::Verify => {
+                let records = media::catalog(&self.project).map_err(SessionError::Media)?;
+                self.mismatched = media::check(&self.project, &records, true)
+                    .map_err(SessionError::Media)?
+                    .mismatched;
+                Ok(())
+            }
+        }));
+        applied.unwrap_or(Err(SessionError::Panicked))
     }
 
     fn publish_workflow(&self, view: &View) {
@@ -3369,6 +3488,103 @@ mod tests {
             assert_eq!(missing[0].artifact_id, "shot_001_v0001_candidate_b");
             // Reported, not rewritten: the take still says its bytes are kept.
             assert_eq!(reopened.video_history(0).unwrap().len(), 2);
+        }
+
+        fn storage(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            token: u64,
+            command: StorageCommand,
+        ) -> Result<(), String> {
+            session.submit_storage(command, token).unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::DocumentCompleted {
+                    token: actual,
+                    result,
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a storage result, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_director_sees_what_collecting_lets_go_before_it_does() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            for (token, command) in [
+                (1, ShotCommand::Generate),
+                (2, ShotCommand::Select(0)),
+                (3, ShotCommand::Lock),
+            ] {
+                command_ok(&session, &events, token, command);
+            }
+            for token in 4..7 {
+                command_ok(&session, &events, token, ask(1, None, None));
+                videos_finished(&events, 1);
+            }
+            command_ok(&session, &events, 7, ShotCommand::LockVideo);
+            assert_eq!(session.media().unwrap().recent, media::DEFAULT_RECENT);
+            drop(session);
+
+            // The project keeps only the latest take of each kind.
+            let manifest = target.join("project.toml");
+            let text = fs::read_to_string(&manifest).unwrap().replace(
+                "recipe_version = 1\n",
+                "recipe_version = 1\nrecent_takes = 1\n",
+            );
+            fs::write(&manifest, text).unwrap();
+            let (sink, events) = sink();
+            let session = ProjectSession::spawn(
+                OpenRequest::Open {
+                    path: target.clone(),
+                },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            let media = session.media().unwrap();
+            assert_eq!(media.recent, 1);
+            assert!(media.plan.is_none());
+            assert!(media.usage.bytes > 0);
+            assert_eq!(
+                storage(&session, &events, 8, StorageCommand::Collect),
+                Err("NoCollectionPlan".to_owned())
+            );
+
+            storage(&session, &events, 9, StorageCommand::PlanCollection).unwrap();
+            let plan = session.media().unwrap().plan.clone().unwrap();
+            let planned: Vec<_> = plan
+                .items
+                .iter()
+                .map(|item| item.record.artifact_id.as_str())
+                .collect();
+            assert_eq!(
+                planned,
+                ["shot_001_v0001_candidate_a", "shot_001_v0002_candidate_a"]
+            );
+            // Nothing is touched by the dry run.
+            assert!(session.video_history(0).unwrap()[0].1.is_some());
+
+            storage(&session, &events, 10, StorageCommand::Collect).unwrap();
+            let media = session.media().unwrap();
+            assert!(media.plan.is_none() && media.missing.is_empty());
+            let history = session.video_history(0).unwrap();
+            assert!(history[0].1.is_none() && history[1].1.is_none());
+            let locked = history[2].1.clone().unwrap();
+            assert_eq!(fs::read(&locked).unwrap(), video::DEMO_CLIP);
+            assert_eq!(history.len(), 3, "the records stay");
+
+            // The locked take's bytes are changed behind Kineto's back.
+            fs::write(&locked, b"\0\0\0\x18ftypisom-changed").unwrap();
+            assert!(session.media().unwrap().mismatched.is_empty());
+            storage(&session, &events, 11, StorageCommand::Verify).unwrap();
+            let mismatched = &session.media().unwrap().mismatched;
+            assert_eq!(mismatched.len(), 1);
+            assert_eq!(mismatched[0].artifact_id, "shot_001_v0003_candidate_a");
         }
 
         fn command_ok(

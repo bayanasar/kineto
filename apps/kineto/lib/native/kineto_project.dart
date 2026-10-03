@@ -566,6 +566,12 @@ final class KinetoProjectException implements Exception {
   /// video from the locked keyframe.
   static const int providerIncapable = 156;
 
+  /// The project's media records could not be read.
+  static const int mediaUnreadable = 157;
+
+  /// Collecting was asked for before a dry run showed what it lets go.
+  static const int noCollectionPlan = 158;
+
   final int code;
   final String message;
 
@@ -1345,6 +1351,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'needs_locked_bible': 154,
   'needs_shot_plan': 155,
   'provider_incapable': 156,
+  'media_unreadable': 157,
+  'no_collection_plan': 158,
   'panic': 199,
 };
 
@@ -1410,6 +1418,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   154: 'Lock the bible before planning shots',
   155: 'Plan the shots before planning a scene again',
   156: 'The provider cannot do what this needs, such as start a video from the locked keyframe',
+  157: 'The project\'s media records could not be read',
+  158: 'Work out what collecting would let go before collecting it',
   199: 'Native project call failed unexpectedly',
 };
 

@@ -132,6 +132,8 @@ void main() {
       KinetoProjectException.needsLockedBible: 'needs_locked_bible',
       KinetoProjectException.needsShotPlan: 'needs_shot_plan',
       KinetoProjectException.providerIncapable: 'provider_incapable',
+      KinetoProjectException.mediaUnreadable: 'media_unreadable',
+      KinetoProjectException.noCollectionPlan: 'no_collection_plan',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);
