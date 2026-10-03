@@ -136,9 +136,11 @@ pub fn write<B: LlmBackend>(
 ) -> Result<RevisionRecord, GenerationError> {
     let prepared = Prepared::gather(project)?;
     let (screenplay, bible) = (&prepared.screenplay.1, &prepared.bible.1);
+    // A new plan's shots are new: none takes an ID a shot had before.
+    let used = document::used_shot_ids(project).map_err(document_error)?;
     documents::generate::<B, ShotPlan, ShotPlan>(project, backend, prepared.spec()?, |plan| {
         plan.check_against(screenplay, bible)?;
-        Ok(plan)
+        document::fresh_ids(&used, None, plan)
     })
 }
 
@@ -171,6 +173,7 @@ pub fn replan_scene<B: LlmBackend>(
             .map_err(document_error)?,
     );
     let (screenplay, bible) = (&prepared.screenplay.1, &prepared.bible.1);
+    let used = document::used_shot_ids(project).map_err(document_error)?;
     documents::generate::<B, ScenePlan, ShotPlan>(
         project,
         backend,
@@ -204,7 +207,9 @@ pub fn replan_scene<B: LlmBackend>(
             }
             let next = base.with_scene(scene)?;
             next.check_against(screenplay, bible)?;
-            Ok(next)
+            // A shot it keeps keeps its ID; a shot it adds takes none a
+            // removed shot had.
+            document::fresh_ids(&used, Some(&base), next)
         },
     )
 }

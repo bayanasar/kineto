@@ -581,7 +581,10 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
       });
 
   /// The scene's ID and the first free two-digit number. Never `shot_NNN`,
-  /// which names the bootstrap scene's shots.
+  /// which names the bootstrap scene's shots. The editor cannot see shots
+  /// removed earlier; when the number was one of theirs, the engine gives
+  /// the new shot a number no shot has had, so it never inherits a removed
+  /// shot's takes or video.
   String _newShotId() {
     final taken = <String>{...widget.otherShots, for (final draft in _shots) draft.shot.id};
     final scene = widget.scene.sceneId;
