@@ -53,6 +53,8 @@ my-film/
 │       │       ├── videos/
 │       │       └── artifacts.json
 │       └── voice/
+│           ├── lines.json
+│           └── line.scene_001.01.0001.mp3
 ├── prompts/
 └── .kineto/
     ├── project.db
@@ -143,7 +145,33 @@ Rules for asking:
 
 Work spoken in a character's voice records the lock as a dependency: the audition's ID and the hash of `voice.json`, `field: voice.<id>`.
 
-## `project.toml`
+## Dubbing
+
+`scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every take of the scene's lines in the order made, as `line.<scene>.<NN>.<TTTT>`: line `NN` of the scene (its place among the scene's dialogue blocks), take `TTTT` of that line. The audio sits beside it.
+
+A take records:
+
+- the line as the screenplay had it: its speaker, its words and its parenthetical;
+- its status: candidate, selected (one per line) or rejected;
+- the voice that spoke it, with the delivery and rate it was asked for;
+- the director's note;
+- its hashes, provider, model, parameters, measured length and sentence timings;
+- its provenance (`speech-prompt/1`: what was applied and what was dropped);
+- its dependency on the speaker's voice lock;
+- its `media_state`.
+
+`locks` names, per line, the take it is locked to.
+
+A take goes stale when:
+
+- the current screenplay changes the line's words (`line.text`) or its direction (`line.parenthetical`);
+- the line is gone (`line.missing`);
+- the speaker's voice is locked again (`voice.<character>`).
+
+A stale selection is not locked. Takes are paid speech in their provider's `line` partition, numbered per line. Asking for `n` takes keeps the unrejected takes already made the same way and makes the rest. Takes are the scene's media (`MediaKind::Line`, owned by the scene): a locked take is pinned.
+
+A locked line's length is its take's measured length; any other line's length is an estimate.
+
 
 Minimum fields:
 

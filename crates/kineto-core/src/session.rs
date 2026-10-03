@@ -30,6 +30,7 @@ use kineto_llm::LlmBackend;
 use kineto_project::{
     bible::{self as bible_document, Bible, EntryEdit, StaleCause},
     cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
+    dubbing::{self as dubbing_document, DubbingError},
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     media::{self, MediaRecord},
@@ -50,6 +51,7 @@ use kineto_providers::Price;
 use crate::{
     bible, cast, dialogue,
     documents::{self, DOCUMENT_PROVIDERS},
+    dubbing::{self, DubRequest, DubbedLine},
     export,
     generation::{
         self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
@@ -245,6 +247,24 @@ pub enum ProductionCommand {
     LockVoice {
         character: String,
     },
+    /// Paid: have takes of line `line` of `scene` as `request` says.
+    DubLine {
+        scene: String,
+        line: u32,
+        request: DubRequest,
+    },
+    SelectTake {
+        scene: String,
+        take: String,
+    },
+    RejectTake {
+        scene: String,
+        take: String,
+    },
+    LockLine {
+        scene: String,
+        line: u32,
+    },
 }
 
 /// Why a style, casting or voice change was refused.
@@ -253,6 +273,7 @@ pub enum ProductionError {
     Style(StyleError),
     Cast(CastError),
     Voice(VoiceError),
+    Dubbing(DubbingError),
 }
 
 impl fmt::Display for ProductionError {
@@ -261,6 +282,7 @@ impl fmt::Display for ProductionError {
             Self::Style(error) => error.fmt(formatter),
             Self::Cast(error) => error.fmt(formatter),
             Self::Voice(error) => error.fmt(formatter),
+            Self::Dubbing(error) => error.fmt(formatter),
         }
     }
 }
@@ -271,6 +293,7 @@ impl Error for ProductionError {
             Self::Style(error) => Some(error),
             Self::Cast(error) => Some(error),
             Self::Voice(error) => Some(error),
+            Self::Dubbing(error) => Some(error),
         }
     }
 }
@@ -396,6 +419,7 @@ pub enum ImageWork {
     StyleSample,
     Casting,
     VoiceAudition,
+    LineTake,
 }
 
 /// Receives a session's outcomes on the worker thread.
@@ -501,6 +525,19 @@ pub struct PublishedCharacter {
     pub voice: PublishedVoice,
 }
 
+/// A line and where its dubbing stands.
+#[derive(Debug, Clone)]
+pub struct PublishedLine {
+    pub dubbed: DubbedLine,
+    /// Where each take's audio is, in take order.
+    pub media: Vec<PathBuf>,
+    /// A take of this line may have been charged without its audio.
+    pub unresolved: bool,
+    /// What one take of it costs with the session's speech provider, in
+    /// USD micros; `None` when the provider does not say.
+    pub take_cost_micros: Option<u64>,
+}
+
 /// Where casting a character's voice stands.
 #[derive(Debug, Clone, Default)]
 pub struct PublishedVoice {
@@ -528,6 +565,8 @@ pub struct PublishedProduction {
     pub style_unresolved: bool,
     /// The characters worth casting, in bible order.
     pub characters: Vec<PublishedCharacter>,
+    /// Every line of the screenplay work builds on, with its takes.
+    pub lines: Vec<PublishedLine>,
     /// The voices the speech provider offers, once asked for.
     pub voices: Vec<Voice>,
     /// Why the voices could not be listed, when they could not.
@@ -1281,6 +1320,7 @@ fn run(
                                 | ProductionCommand::Audition { .. }
                                 | ProductionCommand::MakePack { .. }
                                 | ProductionCommand::AuditionVoices { .. }
+                                | ProductionCommand::DubLine { .. }
                         );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
@@ -1491,6 +1531,9 @@ struct Worker {
     /// The voices the speech provider offers, or why they could not be
     /// listed; `None` until asked for.
     voices: Option<Result<Vec<Voice>, String>>,
+    /// Lines, by scene and number, a take of which may have been charged
+    /// without its audio.
+    lines_unresolved: BTreeSet<(String, u32)>,
 }
 
 impl Worker {
@@ -1530,6 +1573,7 @@ impl Worker {
             speech,
             voice_unresolved: BTreeSet::new(),
             voices: None,
+            lines_unresolved: BTreeSet::new(),
             collection: None,
             mismatched: Vec::new(),
             last_export: None,
@@ -1926,6 +1970,7 @@ impl Worker {
         let style_error = |error| SessionError::Production(ProductionError::Style(error));
         let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
         let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
+        let dubbing_error = |error| SessionError::Production(ProductionError::Dubbing(error));
         let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
         let mut hooks = NoHooks;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match &command {
@@ -2040,6 +2085,37 @@ impl Worker {
             ProductionCommand::LockVoice { character } => voice::lock(project, character)
                 .map(|_| ())
                 .map_err(generation_error),
+            ProductionCommand::DubLine {
+                scene,
+                line,
+                request,
+            } => paid(
+                match &self.speech {
+                    SpeechProvider::LocalDemo => dubbing::dub(
+                        project,
+                        &LocalDemoVoices,
+                        scene,
+                        *line,
+                        request,
+                        submission,
+                        &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(Some(client)) => dubbing::dub(
+                        project, client, scene, *line, request, submission, &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                }
+                .map(|_| ()),
+            ),
+            ProductionCommand::SelectTake { scene, take } => {
+                dubbing_document::select(project, scene, take).map_err(dubbing_error)
+            }
+            ProductionCommand::RejectTake { scene, take } => {
+                dubbing_document::reject(project, scene, take).map_err(dubbing_error)
+            }
+            ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
+                .map(|_| ())
+                .map_err(generation_error),
         }))
         .unwrap_or(Err(SessionError::Panicked));
         // A paid call cut short may have been charged without its result;
@@ -2052,6 +2128,7 @@ impl Worker {
                 self.note_unresolved_casting();
             }
             ProductionCommand::AuditionVoices { .. } => self.note_unresolved_voices(),
+            ProductionCommand::DubLine { .. } => self.note_unresolved_lines(),
             _ => {}
         }
         outcome
@@ -2097,10 +2174,29 @@ impl Worker {
             }
             Err(_) => attention += 1,
         }
+        match dubbing::recover(&self.project) {
+            Ok(recovery) => {
+                attention += recovery.needs_attention;
+                if !recovery.attached.is_empty() {
+                    recoveries.push(Recovery::Images {
+                        kind: ImageWork::LineTake,
+                        count: recovery.attached.len(),
+                    });
+                }
+                self.lines_unresolved = unresolved_lines(&recovery.unresolved);
+            }
+            Err(_) => attention += 1,
+        }
         if attention > 0 {
             recoveries.push(Recovery::NeedsAttention { count: attention });
         }
         recoveries
+    }
+
+    fn note_unresolved_lines(&mut self) {
+        if let Ok(recovery) = dubbing::recover(&self.project) {
+            self.lines_unresolved = unresolved_lines(&recovery.unresolved);
+        }
     }
 
     fn note_unresolved_voices(&mut self) {
@@ -2126,6 +2222,9 @@ impl Worker {
             ImageWork::StyleSample => self.style_unresolved = !recovery.unresolved.is_empty(),
             ImageWork::VoiceAudition => {
                 self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+            }
+            ImageWork::LineTake => {
+                self.lines_unresolved = unresolved_lines(&recovery.unresolved);
             }
             ImageWork::Casting => {
                 self.cast_unresolved = recovery
@@ -2528,6 +2627,27 @@ impl Worker {
                 voice,
             });
         }
+        let lines = dubbing::dubbed_lines(project)
+            .map_err(generation_error)?
+            .into_iter()
+            .map(|dubbed| {
+                let media = dubbed
+                    .takes
+                    .iter()
+                    .map(|take| at(&take.media_path))
+                    .collect();
+                let take_cost_micros = self.speech.estimate(&dubbed.line.text);
+                let unresolved = self
+                    .lines_unresolved
+                    .contains(&(dubbed.line.scene_id.clone(), dubbed.line.line));
+                PublishedLine {
+                    dubbed,
+                    media,
+                    unresolved,
+                    take_cost_micros,
+                }
+            })
+            .collect();
         let (voices, voices_problem) = match &self.voices {
             Some(Ok(voices)) => (voices.clone(), None),
             Some(Err(problem)) => (Vec::new(), Some(problem.clone())),
@@ -2538,6 +2658,7 @@ impl Worker {
             style: style_document::locked(project).map_err(style_error)?,
             style_unresolved: self.style_unresolved,
             characters,
+            lines,
             voices,
             voices_problem,
             damaged: None,
@@ -2681,6 +2802,15 @@ fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
         ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
         ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
     }
+}
+
+/// The lines `unresolved` takes belong to.
+fn unresolved_lines(unresolved: &[String]) -> BTreeSet<(String, u32)> {
+    unresolved
+        .iter()
+        .filter_map(|id| dubbing_document::line_of(id))
+        .map(|(scene, line)| (scene.to_owned(), line))
+        .collect()
 }
 
 /// The characters `unresolved` auditions belong to.
@@ -4977,6 +5107,29 @@ mod tests {
                 fake.calls.load(Ordering::SeqCst),
                 11,
                 "speech is the demo's"
+            );
+
+            // The screenplay's one line is published for dubbing; its
+            // speaker has no voice yet.
+            let lines = session.production().unwrap().lines.clone();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].dubbed.line.text, "Was it worth it?");
+            assert!(lines[0].dubbed.takes.is_empty() && !lines[0].unresolved);
+            assert_eq!(lines[0].take_cost_micros, Some(0));
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::DubLine {
+                        scene: lines[0].dubbed.line.scene_id.clone(),
+                        line: 1,
+                        request: DubRequest {
+                            takes: 1,
+                            ..DubRequest::default()
+                        },
+                    }
+                ),
+                Err("Generation(Prerequisite(LockedVoice))".to_owned())
             );
 
             // Casting follows the locked bible: an edit of the entry the

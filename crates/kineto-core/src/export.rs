@@ -9,8 +9,14 @@
 //! ├── manifest.json
 //! ├── <scene>_<shot>.mp4
 //! ├── <scene>_<shot>.json
-//! └── <scene>_<shot>_first_frame.<ext>   (when the keyframe has an image)
+//! ├── <scene>_<shot>_first_frame.<ext>   (when the keyframe has an image)
+//! └── <scene>_<shot>_line<NN>.<ext>      (each locked line the shot carries)
 //! ```
+//!
+//! A shot carries the screenplay lines its dialogue holds verbatim. Their
+//! locked takes go with it, named by the line's place in its scene. Under a
+//! recipe with a dialogue step, a shot whose lines are not all locked, or
+//! whose locked takes no longer fit, is not ready.
 //!
 //! Only locked videos that still follow their shot are exported, each
 //! checked against its recorded hash. A shot that is not ready is reported
@@ -27,15 +33,23 @@ use std::{
 
 use kineto_project::{
     ContentHash,
+    fs::ProjectRelativePath,
     manifest::CanonicalProject,
+    recipe::{self, ArtifactKind},
     revisions::RevisionError,
     shot::{LockedVideo, ShotKey, ShotWorkflow, ShotWorkflowError, VideoState, load_scene_intent},
     shot_plan::shots_in_play,
 };
 use serde_json::{Value, json};
 
-/// The manifest and sidecar schema version this module writes.
-pub const EXPORT_SCHEMA_VERSION: u32 = 1;
+use crate::{
+    dubbing::{self, DubbedLine},
+    generation::GenerationError,
+};
+
+/// The manifest and sidecar schema version this module writes: 2 adds the
+/// lines each shot carries.
+pub const EXPORT_SCHEMA_VERSION: u32 = 2;
 
 /// A shot in play that is not in the package, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +91,8 @@ pub enum ExportError {
     Exists(PathBuf),
     /// A file's bytes are not what its record says.
     Mismatch(String),
+    /// The lines and their takes could not be read.
+    Lines(Box<GenerationError>),
     Io(std::io::Error),
 }
 
@@ -99,6 +115,7 @@ impl fmt::Display for ExportError {
             Self::InvalidName(name) => write!(formatter, "{name:?} is not a folder name"),
             Self::Exists(path) => write!(formatter, "{} exists already", path.display()),
             Self::Mismatch(path) => write!(formatter, "{path} is not what its record says"),
+            Self::Lines(error) => error.fmt(formatter),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -109,6 +126,7 @@ impl Error for ExportError {
         match self {
             Self::Shot(error) => Some(error),
             Self::Plan(error) => Some(error),
+            Self::Lines(error) => Some(error.as_ref()),
             Self::Io(error) => Some(error),
             _ => None,
         }
@@ -131,6 +149,14 @@ impl From<std::io::Error> for ExportError {
 /// others do not. Reads no media bytes.
 pub fn readiness(project: &CanonicalProject) -> Result<Readiness, ExportError> {
     let mut readiness = Readiness::default();
+    let lines = dubbed_lines(project)?;
+    // An unknown recipe asks for nothing it cannot name.
+    let lines_required = recipe::of(project).is_ok_and(|recipe| {
+        recipe
+            .steps
+            .iter()
+            .any(|step| step.produces == ArtifactKind::Line)
+    });
     for (index, key) in shots_in_play(project)
         .map_err(ExportError::Plan)?
         .into_iter()
@@ -151,6 +177,24 @@ pub fn readiness(project: &CanonicalProject) -> Result<Readiness, ExportError> {
                 None => Some("its locked video's bytes were let go".to_owned()),
                 Some(video) if !project.root().resolve(&video.media_path).is_file() => {
                     Some("its locked video's file is missing".to_owned())
+                }
+                Some(_) if lines_required => {
+                    let dialogue = shot.intent()?.and_then(|intent| intent.dialogue);
+                    carried(&lines, key.scene(), dialogue.as_deref())
+                        .into_iter()
+                        .find_map(|line| match &line.lock {
+                            None => {
+                                Some(format!("line {} is not dubbed and locked", line.line.line))
+                            }
+                            Some(_) if !line.stale.is_empty() => Some(format!(
+                                "the locked take of line {} no longer fits: {}",
+                                line.line.line,
+                                line.stale.join(", ")
+                            )),
+                            Some(lock) => present(project, &lock.media_path)
+                                .is_none()
+                                .then(|| format!("line {}'s take is missing", line.line.line)),
+                        })
                 }
                 Some(_) => None,
             },
@@ -267,6 +311,7 @@ fn write_package(
     let mut bytes = 0;
     let mut scenes: Vec<(String, Vec<Value>)> = Vec::new();
     let mut runtime: u64 = 0;
+    let lines = dubbed_lines(project)?;
     for (key, order) in &readiness.ready {
         let shot = ShotWorkflow::load(project, key)?;
         let video = shot
@@ -298,8 +343,54 @@ fn write_package(
             }
             None => None,
         };
+        let dialogue = shot.intent()?.and_then(|intent| intent.dialogue);
+        let mut line_files = Vec::new();
+        let mut spoken = Vec::new();
+        for line in carried(&lines, key.scene(), dialogue.as_deref()) {
+            let (Some(lock), true) = (&line.lock, line.stale.is_empty()) else {
+                continue;
+            };
+            let Some(take) = line
+                .takes
+                .iter()
+                .find(|take| take.artifact_id == lock.artifact_id)
+            else {
+                continue;
+            };
+            let Some(path) = present(project, &lock.media_path) else {
+                continue;
+            };
+            let extension = path
+                .as_path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("audio");
+            let file = format!("{stem}_line{:02}.{extension}", line.line.line);
+            bytes += copy_checked(
+                project,
+                &path,
+                &ContentHash::new(lock.content_hash.clone())
+                    .map_err(|_| ExportError::Mismatch(lock.media_path.clone()))?,
+                &folder.join(&file),
+            )?;
+            spoken.push(json!({
+                "line": line.line.line,
+                "character": take.character,
+                "text": take.text,
+                "file": file,
+                "artifact_id": take.artifact_id,
+                "content_hash": take.content_hash,
+                "duration_ms": take.duration_ms,
+                "provider": take.provider,
+                "model": take.model,
+                "voice_id": take.voice.voice_id,
+                "emotion": take.voice.emotion,
+                "speed_permille": take.voice.speed_permille,
+            }));
+            line_files.push(file);
+        }
         let sidecar_file = format!("{stem}.json");
-        let sidecar = sidecar(
+        let mut sidecar = sidecar(
             &shot,
             key,
             *order,
@@ -307,6 +398,7 @@ fn write_package(
             &video_file,
             first_frame_file.as_deref(),
         )?;
+        sidecar["lines"] = Value::Array(spoken);
         bytes += write_json(&folder.join(&sidecar_file), &sidecar)?;
         runtime += u64::from(video.clip_seconds.unwrap_or(0));
         let entry = json!({
@@ -316,6 +408,7 @@ fn write_package(
             "sidecar": sidecar_file,
             "first_frame": first_frame_file,
             "duration_seconds": video.clip_seconds,
+            "lines": line_files,
         });
         match scenes.last_mut() {
             Some((scene, shots)) if scene == key.scene() => shots.push(entry),
@@ -412,6 +505,36 @@ fn sidecar(
         "notes": video.notes,
         "branched_from": video.branched_from,
     }))
+}
+
+fn dubbed_lines(project: &CanonicalProject) -> Result<Vec<DubbedLine>, ExportError> {
+    dubbing::dubbed_lines(project).map_err(|error| ExportError::Lines(Box::new(error)))
+}
+
+/// A recorded media path, if it is valid and its file is there.
+fn present(project: &CanonicalProject, path: &str) -> Option<ProjectRelativePath> {
+    ProjectRelativePath::new(path)
+        .ok()
+        .filter(|path| project.root().resolve(path).is_file())
+}
+
+/// The lines of `scene_id` a shot's `dialogue` holds verbatim, in the order
+/// it says them.
+fn carried<'a>(
+    lines: &'a [DubbedLine],
+    scene_id: &str,
+    dialogue: Option<&str>,
+) -> Vec<&'a DubbedLine> {
+    let Some(dialogue) = dialogue.filter(|text| !text.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(usize, &DubbedLine)> = lines
+        .iter()
+        .filter(|line| line.line.scene_id == scene_id && !line.line.text.is_empty())
+        .filter_map(|line| dialogue.find(&line.line.text).map(|at| (at, line)))
+        .collect();
+    found.sort_by_key(|(at, line)| (*at, line.line.line));
+    found.into_iter().map(|(_, line)| line).collect()
 }
 
 /// A shot's files are named `<scene>_<shot>`, or by the shot ID alone when

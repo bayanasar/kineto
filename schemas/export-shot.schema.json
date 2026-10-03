@@ -19,7 +19,11 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ],
+      "description": "2 adds the shot's spoken lines."
     },
     "kind": {
       "const": "kineto.export.shot"
@@ -260,6 +264,78 @@
         "string",
         "null"
       ]
+    },
+    "lines": {
+      "type": "array",
+      "description": "The locked lines the shot carries, verbatim from the screenplay, in the order they are said: who says each, what, how long it takes, the take and the voice it was spoken in, and its audio file.",
+      "items": {
+        "type": "object",
+        "required": [
+          "line",
+          "character",
+          "text",
+          "file",
+          "artifact_id",
+          "content_hash",
+          "duration_ms",
+          "provider",
+          "model",
+          "voice_id"
+        ],
+        "properties": {
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "character": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "emotion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "speed_permille": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false

@@ -1,5 +1,6 @@
 pub mod bible;
 pub mod cast;
+pub mod dubbing;
 pub mod fs;
 pub mod manifest;
 pub mod media;

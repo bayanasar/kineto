@@ -764,6 +764,7 @@ fn owner_label(owner: &MediaOwner) -> String {
         MediaOwner::Shot(key) => format!("shot {}/{}", key.scene(), key.shot()),
         MediaOwner::Character(id) => format!("character {id}"),
         MediaOwner::Style => "style".to_owned(),
+        MediaOwner::Scene(id) => format!("scene {id}"),
     }
 }
 

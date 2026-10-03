@@ -184,6 +184,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "export-manifest.schema.json",
             "export-shot.schema.json",
             "job.schema.json",
+            "lines.schema.json",
             "project.schema.json",
             "recipe.schema.json",
             "revisions.schema.json",
@@ -214,7 +215,7 @@ fn every_shipped_recipe_matches_the_committed_schema() {
     let root = repo_root().join("recipes");
     let mut files = Vec::new();
     collect_files(&root, &root, &mut files);
-    assert_eq!(files, ["default-film-1.json"]);
+    assert_eq!(files, ["default-film-1.json", "default-film-2.json"]);
     for file in files {
         validate(&recipe_schema, &json_file(&root.join(&file)), &file);
     }

@@ -519,7 +519,8 @@ final class KinetoImageCost {
 enum KinetoImageWork {
   styleSamples('style sample(s)'),
   casting('casting image(s)'),
-  voiceAuditions('voice audition(s)');
+  voiceAuditions('voice audition(s)'),
+  lineTakes('line take(s)');
 
   const KinetoImageWork(this.label);
 

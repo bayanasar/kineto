@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/lines.schema.json",
+  "title": "Kineto Scene Lines",
+  "description": "Every take of a scene's lines, as line.<scene>.<NN>.<TTTT> (line NN of the scene, take TTTT of that line), its audio beside it under the scene's voice/. A take records the line as the screenplay had it, the voice that spoke it with its delivery and rate, the director's note, its provenance and dependencies. Each is a candidate, the one selected for its line, or rejected; nothing is deleted. locks names the take each locked line is locked to.",
+  "type": "object",
+  "required": ["schema_version", "scene_id", "takes", "locks"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "scene_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "takes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "line", "character", "text", "status", "voice", "content_hash", "input_hash", "provider", "model", "parameters", "media_path", "duration_ms", "provenance", "dependencies"],
+        "properties": {
+          "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "line": {"type": "integer", "minimum": 1},
+          "character": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "text": {"type": "string", "minLength": 1},
+          "parenthetical": {"type": "string", "minLength": 1},
+          "status": {"enum": ["candidate", "selected", "rejected"]},
+          "voice": {
+            "type": "object",
+            "required": ["voice_id", "language", "speed_permille", "pitch_semitones"],
+            "properties": {
+              "voice_id": {"type": "string", "minLength": 1},
+              "language": {"type": "string", "minLength": 2, "maxLength": 3},
+              "emotion": {"enum": ["happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent", "whisper"]},
+              "speed_permille": {"type": "integer", "minimum": 1, "maximum": 65535},
+              "pitch_semitones": {"type": "integer", "minimum": -128, "maximum": 127}
+            },
+            "additionalProperties": false
+          },
+          "note": {"type": "string", "minLength": 1},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "provider": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1},
+          "parameters": {"type": "string"},
+          "media_path": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
+          "duration_ms": {"type": "integer", "minimum": 0},
+          "sentences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["text", "start_ms", "end_ms"],
+              "properties": {
+                "text": {"type": "string"},
+                "start_ms": {"type": "integer", "minimum": 0},
+                "end_ms": {"type": "integer", "minimum": 0}
+              },
+              "additionalProperties": false
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "required": ["compiler_version", "compiled_prompt", "prompt_hash", "applied_constraints", "dropped_constraints"],
+            "properties": {
+              "compiler_version": {"type": "string", "minLength": 1},
+              "compiled_prompt": {"type": "string", "minLength": 1},
+              "prompt_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "applied_constraints": {"type": "array", "items": {"type": "string"}},
+              "dropped_constraints": {"type": "array"}
+            },
+            "additionalProperties": true
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["artifact_id", "content_hash", "impact"],
+              "properties": {
+                "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
+                "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "impact": {"enum": ["semantic", "cosmetic"]},
+                "field": {"type": "string"}
+              },
+              "additionalProperties": true
+            }
+          },
+          "media_state": {"enum": ["present", "evicted"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "locks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["line", "artifact_id", "content_hash", "media_path", "duration_ms"],
+        "properties": {
+          "line": {"type": "integer", "minimum": 1},
+          "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "media_path": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
+          "duration_ms": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

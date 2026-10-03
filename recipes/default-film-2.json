@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "recipe_id": "default-film",
+  "recipe_version": 2,
+  "name": "Default film",
+  "steps": [
+    {
+      "id": "source",
+      "produces": "source",
+      "after": [],
+      "approval": false,
+      "description": "Import the story to adapt."
+    },
+    {
+      "id": "story_analysis",
+      "produces": "story_analysis",
+      "after": ["source"],
+      "approval": false,
+      "description": "Analyse the story into characters, locations and candidate scenes."
+    },
+    {
+      "id": "screenplay",
+      "produces": "screenplay",
+      "after": ["story_analysis"],
+      "approval": true,
+      "description": "Write, edit and lock the screenplay."
+    },
+    {
+      "id": "bible",
+      "produces": "bible",
+      "after": ["screenplay"],
+      "approval": true,
+      "description": "Write, edit and lock the world and character bible."
+    },
+    {
+      "id": "style",
+      "produces": "style",
+      "after": ["screenplay"],
+      "approval": true,
+      "description": "Sample style directions and lock one."
+    },
+    {
+      "id": "casting",
+      "produces": "cast",
+      "after": ["bible", "style"],
+      "approval": true,
+      "description": "Cast every main character from a portrait and its reference pack."
+    },
+    {
+      "id": "voices",
+      "produces": "voice",
+      "after": ["casting"],
+      "approval": true,
+      "description": "Cast the voice of every character who speaks and lock one each."
+    },
+    {
+      "id": "shot_plan",
+      "produces": "shot_plan",
+      "after": ["screenplay", "bible", "casting"],
+      "approval": true,
+      "description": "Plan and lock the shots of every scene."
+    },
+    {
+      "id": "keyframes",
+      "produces": "keyframe",
+      "after": ["shot_plan", "style", "casting"],
+      "approval": true,
+      "description": "Generate keyframe candidates and lock one per shot."
+    },
+    {
+      "id": "video",
+      "produces": "video",
+      "after": ["keyframes"],
+      "approval": true,
+      "description": "Generate a video from each locked keyframe and lock it."
+    },
+    {
+      "id": "dialogue",
+      "produces": "line",
+      "after": ["voices", "screenplay"],
+      "approval": true,
+      "description": "Dub every line in its character's locked voice and lock a take of each."
+    }
+  ]
+}

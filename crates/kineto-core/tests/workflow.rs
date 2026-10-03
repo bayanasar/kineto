@@ -196,14 +196,14 @@ fn a_recipe_this_build_does_not_ship_is_refused_not_replaced() {
     let temp = TempDir::new();
     let project = CanonicalProject::create(
         temp.0.join("film"),
-        manifest(2),
+        manifest(99),
         b"A filmmaker hears the last line.\n",
     )
     .unwrap();
     assert!(matches!(
         workflow::status(&project),
         Err(WorkflowError::Recipe(RecipeError::Unknown {
-            version: 2,
+            version: 99,
             ..
         }))
     ));

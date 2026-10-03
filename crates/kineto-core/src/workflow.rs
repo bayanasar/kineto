@@ -13,10 +13,10 @@ use kineto_project::{
     recipe::{self, ArtifactKind, RecipeError},
     revisions::{self, DocumentKind, RevisionStatus},
     shot::{ShotWorkflow, VideoState},
-    shot_plan as shot_plan_document, source, style as style_document,
+    shot_plan as shot_plan_document, source, style as style_document, voice as voice_document,
 };
 
-use crate::{cast, generation};
+use crate::{cast, dubbing, generation, voice};
 
 /// Where one step stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,66 @@ fn progress(project: &CanonicalProject, kind: ArtifactKind) -> Result<Progress, 
         ArtifactKind::Cast => casting(project),
         ArtifactKind::ShotPlan => shot_plan(project),
         ArtifactKind::Keyframe | ArtifactKind::Video => shots(project, kind),
+        ArtifactKind::Voice => voices(project),
+        ArtifactKind::Line => lines(project),
     }
+}
+
+/// Done when every character who speaks has a fresh locked voice, and at
+/// once when no one speaks; stale for each voice whose character changed,
+/// named `<character>: <parent>`.
+fn voices(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
+    let mut speakers: Vec<String> = dubbing::current_lines(project)
+        .map_err(unreadable)?
+        .into_iter()
+        .filter_map(|line| line.character)
+        .collect();
+    speakers.sort();
+    speakers.dedup();
+    let mut progress = Progress {
+        made: speakers.is_empty(),
+        approved: true,
+        stale: Vec::new(),
+    };
+    for character in &speakers {
+        let locked = voice_document::locked(project, character)
+            .map_err(unreadable)?
+            .is_some();
+        progress.approved &= locked;
+        progress.made |= locked
+            || !voice_document::auditions(project, character)
+                .map_err(unreadable)?
+                .is_empty();
+        progress.stale.extend(
+            voice::staleness(project, character)
+                .map_err(unreadable)?
+                .into_iter()
+                .map(|parent| format!("{character}: {parent}")),
+        );
+    }
+    Ok(progress)
+}
+
+/// Done when every line has a locked take that still fits it, and at once
+/// when no one speaks; stale for each locked line that changed, named
+/// `<scene> line <n>: <cause>`.
+fn lines(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
+    let dubbed = dubbing::dubbed_lines(project).map_err(unreadable)?;
+    let mut progress = Progress {
+        made: dubbed.is_empty(),
+        approved: true,
+        stale: Vec::new(),
+    };
+    for line in &dubbed {
+        progress.made |= !line.takes.is_empty();
+        progress.approved &= line.lock.is_some();
+        progress.stale.extend(
+            line.stale
+                .iter()
+                .map(|cause| format!("{} line {}: {cause}", line.line.scene_id, line.line.line)),
+        );
+    }
+    Ok(progress)
 }
 
 fn story_analysis(project: &CanonicalProject) -> Result<Progress, WorkflowError> {

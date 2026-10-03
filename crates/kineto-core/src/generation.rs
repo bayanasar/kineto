@@ -679,6 +679,10 @@ pub enum Prerequisite {
     ShotPlan,
     /// A character's voice is cast after its look is locked.
     LockedCast,
+    /// A line is dubbed in its character's locked voice.
+    LockedVoice,
+    /// The scene has no line with the number asked for, or no one says it.
+    Line,
 }
 
 impl fmt::Display for Prerequisite {
@@ -704,6 +708,8 @@ impl fmt::Display for Prerequisite {
             Self::LockedBible => "lock the bible first",
             Self::ShotPlan => "plan the shots before planning a scene again",
             Self::LockedCast => "lock the character's cast before casting its voice",
+            Self::LockedVoice => "lock the character's voice before dubbing its lines",
+            Self::Line => "the scene has no line with that number spoken by a character",
         })
     }
 }

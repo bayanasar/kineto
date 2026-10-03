@@ -9,6 +9,7 @@
 //! dialogue is reported, never refused: the director decides.
 
 use kineto_project::{
+    dubbing as dubbing_document,
     manifest::CanonicalProject,
     revisions::{self, DocumentKind},
     screenplay::{BlockKind, Screenplay},
@@ -48,32 +49,55 @@ pub struct LineDuration {
     pub source: DurationSource,
 }
 
-/// Every line of `screenplay`, in order, with how long it takes to say.
+/// Every line of `screenplay`, in order, with how long it takes to say: the
+/// length of its locked take while that take still says it, otherwise an
+/// estimate.
 pub fn line_durations(
     project: &CanonicalProject,
     screenplay: &Screenplay,
 ) -> Result<Vec<LineDuration>, GenerationError> {
     let mut lines = Vec::new();
     for scene in &screenplay.scenes {
+        let takes = dubbing_document::takes(project, &scene.id).map_err(document_error)?;
+        let locks = dubbing_document::locks(project, &scene.id).map_err(document_error)?;
         for (line, block) in (1..).zip(
             scene
                 .blocks
                 .iter()
                 .filter(|block| block.kind == BlockKind::Dialogue),
         ) {
-            let speed = match &block.character {
-                Some(character) => voice_document::locked(project, character)
-                    .map_err(document_error)?
-                    .map_or(NORMAL_SPEED, |lock| lock.voice.speed_permille),
-                None => NORMAL_SPEED,
+            let text = block.text.trim();
+            let measured = locks
+                .iter()
+                .find(|lock| lock.line == line)
+                .and_then(|lock| {
+                    takes
+                        .iter()
+                        .find(|take| take.artifact_id == lock.artifact_id)
+                })
+                .filter(|take| take.text == text);
+            let (duration_ms, source) = match measured {
+                Some(take) => (take.duration_ms, DurationSource::Measured),
+                None => {
+                    let speed = match &block.character {
+                        Some(character) => voice_document::locked(project, character)
+                            .map_err(document_error)?
+                            .map_or(NORMAL_SPEED, |lock| lock.voice.speed_permille),
+                        None => NORMAL_SPEED,
+                    };
+                    (
+                        speech::estimate_duration_ms(&block.text, speed),
+                        DurationSource::Estimated,
+                    )
+                }
             };
             lines.push(LineDuration {
                 scene_id: scene.id.clone(),
                 line,
                 character: block.character.clone(),
-                text: block.text.trim().to_owned(),
-                duration_ms: speech::estimate_duration_ms(&block.text, speed),
-                source: DurationSource::Estimated,
+                text: text.to_owned(),
+                duration_ms,
+                source,
             });
         }
     }

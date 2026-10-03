@@ -21,7 +21,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ArtifactStatus, ContentHash, cast,
+    ArtifactStatus, ContentHash, cast, dubbing,
     fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
     manifest::CanonicalProject,
     shot::{ShotKey, ShotWorkflow, ShotWorkflowError},
@@ -46,6 +46,8 @@ pub enum MediaOwner {
     Shot(ShotKey),
     Character(String),
     Style,
+    /// A scene's spoken lines.
+    Scene(String),
 }
 
 /// What a media file is.
@@ -58,6 +60,8 @@ pub enum MediaKind {
     StyleSample,
     /// An audition of a character's voice.
     Voice,
+    /// A take of a line of dialogue.
+    Line,
 }
 
 /// Where the director stands on what a media file shows, as far as keeping
@@ -94,6 +98,7 @@ pub enum MediaError {
     Cast(cast::CastError),
     Style(style::StyleError),
     Voice(voice::VoiceError),
+    Dubbing(dubbing::DubbingError),
     Path(ProjectPathError),
     Fs(ProjectFsError),
 }
@@ -105,6 +110,7 @@ impl fmt::Display for MediaError {
             Self::Cast(error) => error.fmt(formatter),
             Self::Style(error) => error.fmt(formatter),
             Self::Voice(error) => error.fmt(formatter),
+            Self::Dubbing(error) => error.fmt(formatter),
             Self::Path(error) => error.fmt(formatter),
             Self::Fs(error) => error.fmt(formatter),
         }
@@ -118,6 +124,7 @@ impl Error for MediaError {
             Self::Cast(error) => Some(error),
             Self::Style(error) => Some(error),
             Self::Voice(error) => Some(error),
+            Self::Dubbing(error) => Some(error),
             Self::Path(error) => Some(error),
             Self::Fs(error) => Some(error),
         }
@@ -131,7 +138,8 @@ impl From<ShotWorkflowError> for MediaError {
 }
 
 /// Every media file the project's records name, shots first (by scene and
-/// shot), then characters, then the style samples.
+/// shot), then characters, then the style samples, then scenes' spoken
+/// lines.
 pub fn catalog(project: &CanonicalProject) -> Result<Vec<MediaRecord>, MediaError> {
     let mut records = Vec::new();
     for key in shots_on_disk(project)? {
@@ -241,6 +249,40 @@ pub fn catalog(project: &CanonicalProject) -> Result<Vec<MediaRecord>, MediaErro
                 .map(|dependency| dependency.artifact_id.clone())
                 .collect(),
         });
+    }
+    for scene in dubbing::scenes(project).map_err(MediaError::Dubbing)? {
+        let locked: Vec<String> = dubbing::locks(project, &scene)
+            .map_err(MediaError::Dubbing)?
+            .into_iter()
+            .map(|lock| lock.artifact_id)
+            .collect();
+        for take in dubbing::takes(project, &scene).map_err(MediaError::Dubbing)? {
+            let standing = if locked.contains(&take.artifact_id) {
+                Standing::Locked
+            } else {
+                match take.status {
+                    dubbing::TakeStatus::Selected => Standing::Chosen,
+                    dubbing::TakeStatus::Rejected => Standing::Passed,
+                    dubbing::TakeStatus::Candidate => Standing::Candidate,
+                }
+            };
+            records.push(MediaRecord {
+                owner: MediaOwner::Scene(scene.clone()),
+                artifact_id: take.artifact_id,
+                kind: MediaKind::Line,
+                path: ProjectRelativePath::new(&take.media_path)
+                    .map_err(|error| MediaError::Dubbing(dubbing::DubbingError::Path(error)))?,
+                content_hash: ContentHash::new(take.content_hash)
+                    .map_err(|_| MediaError::Dubbing(dubbing::DubbingError::InvalidLog))?,
+                state: take.media_state.unwrap_or_default(),
+                standing,
+                dependencies: take
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.artifact_id.clone())
+                    .collect(),
+            });
+        }
     }
     Ok(records)
 }
@@ -700,6 +742,9 @@ pub fn collect(
                 }
             }
             MediaOwner::Style => style::evict(project, &ids).map_err(MediaError::Style)?,
+            MediaOwner::Scene(scene) => {
+                dubbing::evict(project, scene, &ids).map_err(MediaError::Dubbing)?;
+            }
         }
         for record in records {
             remove(project, &record)?;

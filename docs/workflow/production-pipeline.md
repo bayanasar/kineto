@@ -123,6 +123,14 @@ How it works now (`kineto_core::voice`):
 4. The director selects one audition and locks it. The lock fixes the provider, the voice ID, the language, the delivery, the rate and the pitch.
 5. Lines are spoken with the locked voice from then on. When the character's bible entry or cast changes, the voice is stale until it is cast again.
 
+Dubbing (`kineto_core::dubbing`):
+
+- **What is spoken.** Each line of the screenplay is spoken in its character's locked voice, by that voice's provider; another provider cannot speak a voice it did not list.
+- **The parenthetical.** It becomes a delivery when a word of it names one the provider takes (`speech-prompt/1`: `quietly` is calm, `whispering` a whisper). Otherwise it is reported as dropped.
+- **Refining.** A take may be asked for with the director's delivery and rate, which replace the voice's, and a note. The note is kept with the take; the provider never hears it.
+- **Choosing.** The director selects a take per line and locks it.
+- **The recipe.** `default-film` v2, which new projects follow, adds a `voices` step (the voice of every character who speaks) and a `dialogue` step (a locked take of every line). Both are done at once when no one speaks; v1 projects keep v1.
+
 Dialogue duration (`kineto_core::dialogue`):
 
 - **Line length.** Every line of the screenplay has a length. Until it is voiced, it is estimated at the speaker's locked voice rate, or the normal rate while the speaker has no voice: about 2.6 words or 4 Chinese or Japanese characters a second. Such a length is marked as an estimate.
@@ -238,7 +246,15 @@ dailies/
 └── scene_001_shot_002_first_frame.jpg
 ```
 
-Voice files join it when P5 brings voice.
+A shot carries the screenplay lines its dialogue holds verbatim. Each line's locked take goes into the package as `<scene>_<shot>_line<NN>.<ext>`. The sidecar's `lines` names, for each line:
+
+- the line, its speaker and its words;
+- its file, take, hash and length;
+- the provider, model, voice ID, delivery and rate that spoke it.
+
+The manifest lists the shot's line files. Packages are schema version 2.
+
+Under a recipe with a dialogue step (`default-film` v2), a shot is not ready while a line it carries is not locked, or its locked take no longer fits.
 
 Each shot's sidecar (`schemas/export-shot.schema.json`) says which take was locked and what made it:
 
