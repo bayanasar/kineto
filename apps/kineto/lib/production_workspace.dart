@@ -1,0 +1,1041 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:wabisabi/wabisabi.dart';
+
+import 'native/kineto_engine.dart';
+import 'screenplay_workspace.dart';
+
+/// What paid images cost with the session's image provider, as it declares.
+final class ProductionPrices {
+  const ProductionPrices({this.sample, this.portrait, this.pack});
+
+  final KinetoImageCost? sample;
+  final KinetoImageCost? portrait;
+  final KinetoImageCost? pack;
+}
+
+/// What asking for [cost] costs, in words.
+String imageCostLabel(KinetoImageCost? cost) {
+  if (cost == null) return 'cost unknown';
+  final images = cost.images == 1 ? '1 image' : '${cost.images} images';
+  return '$images ≈ ${formatDollars(cost.micros)}';
+}
+
+/// [cost] for [count] images of the same price.
+KinetoImageCost? timesImages(KinetoImageCost? cost, int count) => cost == null
+    ? null
+    : KinetoImageCost(micros: cost.micros ~/ cost.images * count, images: count);
+
+/// How many portrait candidates an audition asks to have.
+const List<int> auditionSizes = <int>[1, 2, 3, 4, 6];
+
+class ProductionWorkspaceScreen extends StatefulWidget {
+  const ProductionWorkspaceScreen({
+    required this.project,
+    this.navigation,
+    this.isDarkMode = true,
+    this.onThemeToggle,
+    super.key,
+  });
+
+  final KinetoProjectSession project;
+
+  /// Switches to the other workspaces, shown above the bible.
+  final Widget? navigation;
+  final bool isDarkMode;
+  final VoidCallback? onThemeToggle;
+
+  @override
+  State<ProductionWorkspaceScreen> createState() => _ProductionWorkspaceScreenState();
+}
+
+class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
+  late final KinetoLanguageModel _model;
+  late final ProductionPrices _prices;
+  late KinetoProduction _production;
+  late bool _screenplayLocked;
+  int? _bibleCost;
+  bool _working = false;
+  String _workingLabel = 'Working';
+  String? _error;
+
+  /// Asks again for what the last command asked for although its paid
+  /// request may already have been charged; offered only after that refusal.
+  VoidCallback? _resubmit;
+  String? _editingEntry;
+
+  @override
+  void initState() {
+    super.initState();
+    _model = widget.project.languageModel;
+    _prices = ProductionPrices(
+      sample: widget.project.imageCost(KinetoImageCostKind.sample),
+      portrait: widget.project.imageCost(KinetoImageCostKind.portrait),
+      pack: widget.project.imageCost(KinetoImageCostKind.pack),
+    );
+    _read();
+  }
+
+  void _read() {
+    _production = widget.project.production;
+    _screenplayLocked = widget.project.documents.screenplayLocked;
+    _bibleCost = widget.project.documentCostMicros(KinetoDocumentKind.bible);
+  }
+
+  // The bible, the style and the cast are made on the project's worker; this
+  // isolate only waits. One command at a time keeps the page honest about
+  // what it shows.
+  Future<void> _run(
+    Future<void> Function() action,
+    String label, {
+    VoidCallback? onDone,
+    Future<void> Function()? resubmit,
+  }) async {
+    if (_working) return;
+    setState(() {
+      _working = true;
+      _workingLabel = label;
+      _error = null;
+      _resubmit = null;
+    });
+    String? error;
+    VoidCallback? offer;
+    try {
+      await action();
+      onDone?.call();
+    } on KinetoProjectException catch (failure) {
+      error = failure.message;
+      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
+        offer = () => _run(resubmit, label, onDone: onDone);
+      }
+    } on Object catch (failure) {
+      error = failure.toString();
+    }
+    if (!mounted) return;
+    setState(() {
+      _working = false;
+      _read();
+      _error = error;
+      _resubmit = offer;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final project = widget.project;
+    return ProductionWorkspaceView(
+      production: _production,
+      model: _model,
+      prices: _prices,
+      screenplayLocked: _screenplayLocked,
+      bibleCostMicros: _bibleCost,
+      working: _working,
+      workingLabel: _workingLabel,
+      error: _error,
+      onResubmit: _resubmit,
+      editingEntry: _editingEntry,
+      navigation: widget.navigation,
+      isDarkMode: widget.isDarkMode,
+      onThemeToggle: widget.onThemeToggle,
+      onWriteBible: () => _run(
+        project.writeBible,
+        'Writing the bible with ${_model.kind.label}',
+        resubmit: () => project.writeBible(resubmit: true),
+      ),
+      onEditEntry: (key) => setState(() {
+        _editingEntry = key;
+        _error = null;
+        _resubmit = null;
+      }),
+      onSaveEntry: (edit) => _run(
+        () => project.saveBibleEntry(_production.bible!.revision, edit),
+        'Saving',
+        onDone: () => _editingEntry = null,
+      ),
+      onLockBible: (revision) => _run(() => project.lockBible(revision), 'Locking'),
+      onSample: (preset, note) => _run(
+        () => project.sampleStyle(preset, note: note),
+        'Sampling the style',
+        resubmit: () => project.sampleStyle(preset, note: note, resubmit: true),
+      ),
+      onRefine: (sample, note) => _run(
+        () => project.refineStyle(sample, note),
+        'Refining the style',
+        resubmit: () => project.refineStyle(sample, note, resubmit: true),
+      ),
+      onSelectStyle: (sample) => _run(() => project.selectStyle(sample), 'Selecting'),
+      onRejectStyle: (sample) => _run(() => project.rejectStyle(sample), 'Rejecting'),
+      onLockStyle: (sample) => _run(() => project.lockStyle(sample), 'Locking'),
+      onAudition: (character, count) => _run(
+        () => project.audition(character, count),
+        'Casting',
+        resubmit: () => project.audition(character, count, resubmit: true),
+      ),
+      onMakePack: (character, remake) => _run(
+        () => project.makePack(character, remake: remake),
+        'Making the reference pack',
+        resubmit: () => project.makePack(character, remake: remake, resubmit: true),
+      ),
+      onSelectPortrait: (character, portrait) =>
+          _run(() => project.selectPortrait(character, portrait), 'Selecting'),
+      onRejectPortrait: (character, portrait) =>
+          _run(() => project.rejectPortrait(character, portrait), 'Rejecting'),
+      onLockCast: (character) => _run(() => project.lockCharacter(character), 'Locking'),
+    );
+  }
+}
+
+class ProductionWorkspaceView extends StatelessWidget {
+  const ProductionWorkspaceView({
+    required this.production,
+    required this.model,
+    required this.onWriteBible,
+    required this.onEditEntry,
+    required this.onSaveEntry,
+    required this.onLockBible,
+    required this.onSample,
+    required this.onRefine,
+    required this.onSelectStyle,
+    required this.onRejectStyle,
+    required this.onLockStyle,
+    required this.onAudition,
+    required this.onMakePack,
+    required this.onSelectPortrait,
+    required this.onRejectPortrait,
+    required this.onLockCast,
+    this.prices = const ProductionPrices(),
+    this.screenplayLocked = false,
+    this.bibleCostMicros,
+    this.working = false,
+    this.workingLabel = 'Working',
+    this.error,
+    this.onResubmit,
+    this.editingEntry,
+    this.navigation,
+    this.isDarkMode = true,
+    this.onThemeToggle,
+    super.key,
+  });
+
+  final KinetoProduction production;
+  final KinetoLanguageModel model;
+  final ProductionPrices prices;
+
+  /// The bible is written from the locked screenplay.
+  final bool screenplayLocked;
+  final int? bibleCostMicros;
+
+  /// A command is running on the project's worker; changes wait for it.
+  final bool working;
+  final String workingLabel;
+  final String? error;
+
+  /// Asks again at the risk of paying twice; set only when [error] says the
+  /// last paid request may have been charged without its result.
+  final VoidCallback? onResubmit;
+
+  /// The bible entry being edited, as `<kind>-<id>`, if any.
+  final String? editingEntry;
+  final Widget? navigation;
+  final bool isDarkMode;
+  final VoidCallback? onThemeToggle;
+
+  final VoidCallback onWriteBible;
+
+  /// Start editing an entry, or stop with null.
+  final ValueChanged<String?> onEditEntry;
+  final ValueChanged<KinetoBibleEntryEdit> onSaveEntry;
+  final ValueChanged<int> onLockBible;
+  final void Function(String preset, String? note) onSample;
+  final void Function(String sample, String note) onRefine;
+  final ValueChanged<String> onSelectStyle;
+  final ValueChanged<String> onRejectStyle;
+  final ValueChanged<String> onLockStyle;
+  final void Function(String character, int count) onAudition;
+  final void Function(String character, List<KinetoCastImageKind> remake) onMakePack;
+  final void Function(String character, String portrait) onSelectPortrait;
+  final void Function(String character, String portrait) onRejectPortrait;
+  final ValueChanged<String> onLockCast;
+
+  bool get _idle => !working && editingEntry == null;
+
+  @override
+  Widget build(BuildContext context) => WabScaffold(
+        appBar: WabAppBar(
+          title: const Text('Kineto'),
+          action: onThemeToggle == null
+              ? null
+              : WabToggleButton(
+                  text: const Text('Dark mode'),
+                  isOn: isDarkMode,
+                  pair: WabTogglePair.sealZhuwen,
+                  callback: onThemeToggle,
+                ),
+        ),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1040),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
+                  if (working) ...<Widget>[
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
+                  if (production.damaged) ...<Widget>[
+                    const WabPanel(
+                      title: 'The bible, style or cast cannot be read',
+                      child: Text(
+                        "A stored record no longer matches its files. Nothing was changed; restore the "
+                        "project's files from a backup or version control.",
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                  ],
+                  _biblePanel(context),
+                  const SizedBox(height: 20),
+                  _stylePanel(context),
+                  const SizedBox(height: 20),
+                  _castPanel(context),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+  Widget _errorPanel() => WabPanel(
+        title: 'That did not work',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(error!),
+            if (onResubmit != null) ...<Widget>[
+              const SizedBox(height: 12),
+              const Text(
+                'The provider may have answered the last request, and charged for it, without the '
+                'answer reaching Kineto. Check your account before asking again.',
+              ),
+              const SizedBox(height: 12),
+              WabButton(
+                key: const ValueKey<String>('resubmit-paid'),
+                kind: WabMaterialKind.zhuwen,
+                onPressed: working ? null : onResubmit,
+                child: const Text('Ask again · may pay twice'),
+              ),
+            ],
+          ],
+        ),
+      );
+
+  // ---------------------------------------------------------------- bible
+
+  Widget _biblePanel(BuildContext context) {
+    final bible = production.bible;
+    final problem = languageModelProblem(model);
+    final (status, kind) = bible == null
+        ? ('None yet', WabBadgeKind.neutral)
+        : production.bibleIsLocked
+            ? (production.bibleStale.isEmpty ? 'Locked' : 'Locked · screenplay changed since', WabBadgeKind.done)
+            : production.bibleStale.isNotEmpty
+                ? ('Screenplay changed since', WabBadgeKind.warning)
+                : ('Draft', WabBadgeKind.progress);
+    return WabPanel(
+      title: bible == null ? 'Bible' : 'Bible · revision ${bible.revision}',
+      trailing: WabStatusBadge(status, kind: kind),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (bible == null)
+            Text(
+              screenplayLocked
+                  ? 'Not written yet. The bible describes the world, every character, location and '
+                      'prop so that every image shows the same ones.'
+                  : 'Lock a screenplay first; the bible is written from it.',
+            )
+          else ...<Widget>[
+            if (production.bibleStale.isNotEmpty) ...<Widget>[
+              Text('May no longer match the locked screenplay: '
+                  '${production.bibleStale.map((cause) => cause.description).join('; ')}.'),
+              const SizedBox(height: 12),
+            ],
+            Text(bible.setting, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(bible.period),
+            for (final rule in <String>[...bible.visualRules, ...bible.continuityRules])
+              Text('· $rule'),
+            const SizedBox(height: 16),
+            for (final entry in <KinetoBibleEntry>[...bible.characters, ...bible.locations, ...bible.props])
+              _entryKey(entry) == editingEntry
+                  ? BibleEntryEditor(
+                      key: ValueKey<String>('entry-editor-${bible.revision}-${_entryKey(entry)}'),
+                      entry: entry,
+                      working: working,
+                      onCancel: () => onEditEntry(null),
+                      onSave: onSaveEntry,
+                    )
+                  : _entry(context, entry),
+          ],
+          const SizedBox(height: 12),
+          if (problem != null) ...<Widget>[Text(problem), const SizedBox(height: 12)],
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              WabButton(
+                key: const ValueKey<String>('write-bible'),
+                kind: WabMaterialKind.seal,
+                onPressed: _idle && model.ready && screenplayLocked ? onWriteBible : null,
+                child: Text(bible == null ? 'Write the bible' : 'Write it again'),
+              ),
+              if (bible != null && !production.bibleIsLocked)
+                WabButton(
+                  key: const ValueKey<String>('lock-bible'),
+                  kind: WabMaterialKind.seal,
+                  onPressed: _idle ? () => onLockBible(bible.revision) : null,
+                  child: Text('Lock revision ${bible.revision}'),
+                ),
+              Text('${model.kind.label} · ${documentCostLabel(model, bibleCostMicros)}'),
+            ],
+          ),
+          if (production.bibleRevisions.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            for (final revision in production.bibleRevisions.reversed) Text(describeRevision(revision)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _entryKey(KinetoBibleEntry entry) => '${entry.kind.wireName}-${entry.id}';
+
+  Widget _entry(BuildContext context, KinetoBibleEntry entry) => Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    '${entry.name} · ${entry.kind.wireName}',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                WabButton(
+                  key: ValueKey<String>('edit-${_entryKey(entry)}'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: _idle ? () => onEditEntry(_entryKey(entry)) : null,
+                  child: const Text('Edit'),
+                ),
+              ],
+            ),
+            Text(entry.description),
+            Text(entry.appearance),
+            if (entry.wardrobe.isNotEmpty) Text('Wardrobe: ${entry.wardrobe}'),
+            for (final change in entry.wardrobeChanges) Text('In ${change.scenes}: ${change.wardrobe}'),
+            if (entry.forbiddenChanges.isNotEmpty)
+              Text('Never changes: ${entry.forbiddenChanges.join(' ')}'),
+          ],
+        ),
+      );
+
+  // ---------------------------------------------------------------- style
+
+  Widget _stylePanel(BuildContext context) {
+    final style = production.style;
+    return WabPanel(
+      title: 'Style',
+      trailing: style == null
+          ? const WabStatusBadge('Not locked', kind: WabBadgeKind.neutral)
+          : WabStatusBadge('Locked · ${style.preset}', kind: WabBadgeKind.done),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (production.styleUnresolved) ...<Widget>[
+            const Text(
+              'A style sample did not finish cleanly, and MiniMax may already have charged for an '
+              'image Kineto never received. Check your MiniMax account; sample again only if you '
+              'accept paying twice.',
+            ),
+            const SizedBox(height: 12),
+          ],
+          StyleComposer(
+            presets: production.presets,
+            cost: prices.sample,
+            enabled: _idle && prices.sample != null,
+            onSample: onSample,
+          ),
+          if (prices.sample == null) ...<Widget>[
+            const SizedBox(height: 8),
+            const Text('Style samples need MiniMax: set KINETO_IMAGE_PROVIDER=minimax and its key, then reopen Kineto.'),
+          ],
+          if (production.samples.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 16,
+              runSpacing: 16,
+              children: <Widget>[
+                for (final sample in production.samples.reversed) _sample(context, sample),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _sample(BuildContext context, KinetoStyleSample sample) {
+    final locked = production.style?.sampleId == sample.id;
+    final rejected = sample.status == KinetoChoiceStatus.rejected;
+    final selected = sample.status == KinetoChoiceStatus.selected;
+    return SizedBox(
+      width: 300,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Opacity(opacity: rejected ? .45 : 1, child: MediaFrame(path: sample.mediaPath, aspectRatio: 16 / 9)),
+          const SizedBox(height: 8),
+          Text(
+            '${sample.id} · ${sample.preset}${locked ? ' · locked' : selected ? ' · selected' : rejected ? ' · rejected' : ''}',
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          if (sample.note != null) Text(sample.note!),
+          if (sample.refines != null) Text('Refines ${sample.refines}'),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              if (!selected && !rejected)
+                WabButton(
+                  key: ValueKey<String>('select-${sample.id}'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: _idle ? () => onSelectStyle(sample.id) : null,
+                  child: const Text('Select'),
+                ),
+              if (selected && !locked)
+                WabButton(
+                  key: ValueKey<String>('lock-${sample.id}'),
+                  kind: WabMaterialKind.seal,
+                  onPressed: _idle ? () => onLockStyle(sample.id) : null,
+                  child: const Text('Lock style'),
+                ),
+              if (!rejected && !locked)
+                WabButton(
+                  key: ValueKey<String>('reject-${sample.id}'),
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: _idle ? () => onRejectStyle(sample.id) : null,
+                  child: const Text('Reject'),
+                ),
+              WabButton(
+                key: ValueKey<String>('refine-${sample.id}'),
+                kind: WabMaterialKind.paper,
+                onPressed: _idle && prices.sample != null ? () => _refineDialog(context, sample) : null,
+                child: const Text('Refine'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _refineDialog(BuildContext context, KinetoStyleSample sample) async {
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => TextPromptDialog(
+        title: 'Refine ${sample.id}',
+        width: 520,
+        fieldKey: 'refine-note',
+        minLines: 2,
+        maxLines: 4,
+        hint: 'What should change, such as "warmer light, less grain"',
+        confirmKey: 'refine-confirm',
+        confirmLabel: 'Sample · ${imageCostLabel(prices.sample)}',
+      ),
+    );
+    if (note == null || note.trim().isEmpty) return;
+    onRefine(sample.id, note.trim());
+  }
+
+  // ----------------------------------------------------------------- cast
+
+  Widget _castPanel(BuildContext context) => WabPanel(
+        title: 'Cast',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            if (production.characters.isEmpty)
+              const Text('Write the bible first; the characters worth casting come from it.')
+            else if (production.style == null)
+              const Text('Lock a style first; every portrait follows it.'),
+            for (final character in production.characters) ...<Widget>[
+              const SizedBox(height: 12),
+              CastingCard(
+                character: character,
+                prices: prices,
+                enabled: _idle && production.style != null,
+                onAudition: (count) => onAudition(character.id, count),
+                onMakePack: (remake) => onMakePack(character.id, remake),
+                onSelectPortrait: (portrait) => onSelectPortrait(character.id, portrait),
+                onRejectPortrait: (portrait) => onRejectPortrait(character.id, portrait),
+                onLock: () => onLockCast(character.id),
+              ),
+            ],
+          ],
+        ),
+      );
+}
+
+/// An image on disk, or a plain frame saying it cannot be read.
+class MediaFrame extends StatelessWidget {
+  const MediaFrame({required this.path, required this.aspectRatio, super.key});
+
+  final String path;
+  final double aspectRatio;
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: AspectRatio(
+          aspectRatio: aspectRatio,
+          child: Image.file(
+            File(path),
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => const ColoredBox(
+              color: Colors.black26,
+              child: Center(child: Text('Image unavailable')),
+            ),
+          ),
+        ),
+      );
+}
+
+/// Chooses a style preset and asks for a sample of it.
+class StyleComposer extends StatefulWidget {
+  const StyleComposer({
+    required this.presets,
+    required this.cost,
+    required this.enabled,
+    required this.onSample,
+    super.key,
+  });
+
+  final List<KinetoStylePreset> presets;
+  final KinetoImageCost? cost;
+  final bool enabled;
+  final void Function(String preset, String? note) onSample;
+
+  @override
+  State<StyleComposer> createState() => _StyleComposerState();
+}
+
+class _StyleComposerState extends State<StyleComposer> {
+  final TextEditingController _note = TextEditingController();
+  String? _preset;
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preset = _preset ?? (widget.presets.isEmpty ? null : widget.presets.first.id);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            for (final option in widget.presets)
+              WabButton(
+                key: ValueKey<String>('preset-${option.id}'),
+                kind: option.id == preset ? WabMaterialKind.seal : WabMaterialKind.paper,
+                onPressed: () => setState(() => _preset = option.id),
+                child: Text(option.name),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const ValueKey<String>('style-note'),
+          controller: _note,
+          style: TextStyle(color: WabTheme.textColor),
+          decoration: wabInputDecoration(hintText: 'A note for this sample (optional)'),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: WabButton(
+            key: const ValueKey<String>('sample-style'),
+            kind: WabMaterialKind.seal,
+            onPressed: widget.enabled && preset != null
+                ? () {
+                    final note = _note.text.trim();
+                    widget.onSample(preset, note.isEmpty ? null : note);
+                  }
+                : null,
+            child: Text('Sample · ${imageCostLabel(widget.cost)}'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One character's casting: portrait candidates, the reference pack of the
+/// selected one, and the lock.
+class CastingCard extends StatefulWidget {
+  const CastingCard({
+    required this.character,
+    required this.prices,
+    required this.enabled,
+    required this.onAudition,
+    required this.onMakePack,
+    required this.onSelectPortrait,
+    required this.onRejectPortrait,
+    required this.onLock,
+    super.key,
+  });
+
+  final KinetoCastCharacter character;
+  final ProductionPrices prices;
+  final bool enabled;
+  final ValueChanged<int> onAudition;
+  final ValueChanged<List<KinetoCastImageKind>> onMakePack;
+  final ValueChanged<String> onSelectPortrait;
+  final ValueChanged<String> onRejectPortrait;
+  final VoidCallback onLock;
+
+  @override
+  State<CastingCard> createState() => _CastingCardState();
+}
+
+class _CastingCardState extends State<CastingCard> {
+  int _have = 3;
+
+  @override
+  Widget build(BuildContext context) {
+    final character = widget.character;
+    final id = character.id;
+    final enabled = widget.enabled;
+    final selected = character.selectedPortrait;
+    final pack = character.pack;
+    final packCount = widget.prices.pack?.images ?? KinetoCastImageKind.values.length - 1;
+    final kept = character.portraits.where((image) => image.status != KinetoChoiceStatus.rejected).length;
+    final toMake = _have > kept ? _have - kept : 0;
+    final missing = packCount - pack.length;
+    final (status, kind) = character.locked
+        ? character.stale.isEmpty
+            ? ('Cast', WabBadgeKind.done)
+            : ('Cast · changed since: ${character.stale.join(', ')}', WabBadgeKind.warning)
+        : selected == null
+            ? ('Not cast', WabBadgeKind.neutral)
+            : ('Portrait chosen', WabBadgeKind.progress);
+    return WabPanel(
+      title: character.name,
+      trailing: WabStatusBadge(status, kind: kind),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (character.unresolved) ...<Widget>[
+            Text(
+              'An image of ${character.name} did not finish cleanly, and MiniMax may already have '
+              'charged for it. Check your MiniMax account; ask again only if you accept paying twice.',
+            ),
+            const SizedBox(height: 12),
+          ],
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              const Text('Have'),
+              SizedBox(
+                width: 96,
+                child: WabDropdown<int>(
+                  key: ValueKey<String>('audition-count-$id'),
+                  value: _have,
+                  items: <int, String>{for (final size in auditionSizes) size: '$size'},
+                  onChanged: (size) => setState(() => _have = size ?? _have),
+                ),
+              ),
+              WabButton(
+                key: ValueKey<String>('audition-$id'),
+                kind: WabMaterialKind.seal,
+                onPressed: enabled && toMake > 0 && widget.prices.portrait != null
+                    ? () => widget.onAudition(_have)
+                    : null,
+                child: Text(
+                  toMake == 0
+                      ? 'Portraits ready'
+                      : 'Audition · ${imageCostLabel(timesImages(widget.prices.portrait, toMake))}',
+                ),
+              ),
+            ],
+          ),
+          if (character.portraits.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: <Widget>[
+                for (final portrait in character.portraits) _portrait(portrait),
+              ],
+            ),
+          ],
+          if (selected != null) ...<Widget>[
+            const SizedBox(height: 16),
+            Text('Reference pack of ${selected.id}', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            if (pack.isNotEmpty)
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: <Widget>[
+                  for (final reference in pack.values) _reference(reference),
+                ],
+              ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: <Widget>[
+                if (missing > 0)
+                  WabButton(
+                    key: ValueKey<String>('pack-$id'),
+                    kind: WabMaterialKind.seal,
+                    onPressed: enabled && widget.prices.portrait != null
+                        ? () => widget.onMakePack(const <KinetoCastImageKind>[])
+                        : null,
+                    child: Text('Make the pack · ${imageCostLabel(timesImages(widget.prices.portrait, missing))}'),
+                  ),
+                if (missing <= 0 && character.lockedPortrait != selected.id)
+                  WabButton(
+                    key: ValueKey<String>('lock-cast-$id'),
+                    kind: WabMaterialKind.seal,
+                    onPressed: enabled ? widget.onLock : null,
+                    child: Text('Lock ${character.name}'),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _portrait(KinetoCastImage portrait) {
+    final rejected = portrait.status == KinetoChoiceStatus.rejected;
+    final selected = portrait.status == KinetoChoiceStatus.selected;
+    final locked = widget.character.lockedPortrait == portrait.id;
+    return SizedBox(
+      width: 180,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Opacity(opacity: rejected ? .45 : 1, child: MediaFrame(path: portrait.mediaPath, aspectRatio: 1)),
+          const SizedBox(height: 6),
+          Text('${portrait.id}${locked ? ' · cast' : selected ? ' · selected' : rejected ? ' · rejected' : ''}'),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              if (!selected && !rejected)
+                WabButton(
+                  key: ValueKey<String>('select-${portrait.id}'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: widget.enabled ? () => widget.onSelectPortrait(portrait.id) : null,
+                  child: const Text('Select'),
+                ),
+              if (!rejected && !locked)
+                WabButton(
+                  key: ValueKey<String>('reject-${portrait.id}'),
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: widget.enabled ? () => widget.onRejectPortrait(portrait.id) : null,
+                  child: const Text('Reject'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _reference(KinetoCastImage reference) => SizedBox(
+        width: 140,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            MediaFrame(
+              path: reference.mediaPath,
+              aspectRatio: reference.kind == KinetoCastImageKind.fullBody ||
+                      reference.kind == KinetoCastImageKind.costume
+                  ? 9 / 16
+                  : 1,
+            ),
+            const SizedBox(height: 4),
+            Text(reference.kind.label),
+            WabButton(
+              key: ValueKey<String>('remake-${widget.character.id}-${reference.kind.wireName}'),
+              kind: WabMaterialKind.paper,
+              onPressed: widget.enabled && widget.prices.portrait != null
+                  ? () => _confirmRemake(reference.kind)
+                  : null,
+              child: const Text('Remake…'),
+            ),
+          ],
+        ),
+      );
+
+  /// A remade reference is a paid image: its price is shown before it is
+  /// asked for.
+  Future<void> _confirmRemake(KinetoCastImageKind kind) async {
+    final cost = imageCostLabel(timesImages(widget.prices.portrait, 1));
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Remake the ${kind.label.toLowerCase()} reference of ${widget.character.name}?'),
+        content: Text('The image is made again from the chosen portrait: $cost.'),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            key: const ValueKey<String>('remake-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Remake · $cost'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed ?? false) widget.onMakePack(<KinetoCastImageKind>[kind]);
+  }
+}
+
+/// Edits one bible entry: what it looks like and what must never change.
+class BibleEntryEditor extends StatefulWidget {
+  const BibleEntryEditor({
+    required this.entry,
+    required this.onCancel,
+    required this.onSave,
+    this.working = false,
+    super.key,
+  });
+
+  final KinetoBibleEntry entry;
+  final bool working;
+  final VoidCallback onCancel;
+  final ValueChanged<KinetoBibleEntryEdit> onSave;
+
+  @override
+  State<BibleEntryEditor> createState() => _BibleEntryEditorState();
+}
+
+class _BibleEntryEditorState extends State<BibleEntryEditor> {
+  late final TextEditingController _description = TextEditingController(text: widget.entry.description);
+  late final TextEditingController _appearance = TextEditingController(text: widget.entry.appearance);
+  late final TextEditingController _wardrobe = TextEditingController(text: widget.entry.wardrobe);
+  late final TextEditingController _forbidden =
+      TextEditingController(text: widget.entry.forbiddenChanges.join('\n'));
+  String? _problem;
+
+  bool get _character => widget.entry.kind == KinetoBibleEntryKind.character;
+
+  @override
+  void dispose() {
+    _description.dispose();
+    _appearance.dispose();
+    _wardrobe.dispose();
+    _forbidden.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final description = _description.text.trim();
+    final appearance = _appearance.text.trim();
+    final wardrobe = _wardrobe.text.trim();
+    if (description.isEmpty || appearance.isEmpty || (_character && wardrobe.isEmpty)) {
+      setState(() => _problem = _character
+          ? 'A character needs a description, an appearance and a wardrobe.'
+          : 'An entry needs a description and an appearance.');
+      return;
+    }
+    setState(() => _problem = null);
+    widget.onSave(
+      KinetoBibleEntryEdit(
+        kind: widget.entry.kind,
+        id: widget.entry.id,
+        description: description,
+        appearance: appearance,
+        wardrobe: wardrobe,
+        forbiddenChanges: <String>[
+          for (final line in _forbidden.text.split('\n'))
+            if (line.trim().isNotEmpty) line.trim(),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(String key, String label, TextEditingController controller, {int lines = 2}) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: TextField(
+          key: ValueKey<String>(key),
+          controller: controller,
+          minLines: lines,
+          maxLines: lines + 4,
+          style: TextStyle(color: WabTheme.textColor),
+          decoration: wabInputDecoration(hintText: label),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final id = widget.entry.id;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: WabPanel(
+        title: 'Editing ${widget.entry.name}',
+        trailing: const WabStatusBadge('Editing', kind: WabBadgeKind.warning),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            _field('entry-$id-description', 'Description', _description),
+            _field('entry-$id-appearance', 'Appearance', _appearance, lines: 3),
+            if (_character) _field('entry-$id-wardrobe', 'Usual wardrobe', _wardrobe),
+            _field('entry-$id-forbidden', 'Never changes, one per line', _forbidden, lines: 3),
+            if (_problem != null) ...<Widget>[Text(_problem!), const SizedBox(height: 12)],
+            Wrap(
+              spacing: 12,
+              children: <Widget>[
+                WabButton(
+                  key: ValueKey<String>('save-entry-$id'),
+                  kind: WabMaterialKind.seal,
+                  onPressed: widget.working ? null : _save,
+                  child: const Text('Save as a new revision'),
+                ),
+                WabButton(
+                  kind: WabMaterialKind.zhuwen,
+                  onPressed: widget.working ? null : widget.onCancel,
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

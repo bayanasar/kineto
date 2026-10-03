@@ -199,7 +199,8 @@ external int _kinetoProjectDocumentCost(
 /// A document the engine writes with a language model.
 enum KinetoDocumentKind {
   storyAnalysis('analysis', 'Story analysis'),
-  screenplay('screenplay', 'Screenplay');
+  screenplay('screenplay', 'Screenplay'),
+  bible('bible', 'Bible');
 
   const KinetoDocumentKind(this.wireName, this.label);
 
@@ -638,7 +639,8 @@ extension KinetoProjectDocuments on KinetoProjectSession {
       if (code == 0) return out.value;
       if (code == KinetoProjectException.costUnknown ||
           code == KinetoProjectException.modelNotConfigured ||
-          code == KinetoProjectException.needsAnalysis) {
+          code == KinetoProjectException.needsAnalysis ||
+          code == KinetoProjectException.needsLockedScreenplay) {
         return null;
       }
       throw _projectException(code);

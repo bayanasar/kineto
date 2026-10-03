@@ -89,6 +89,9 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
         else if (recovery.document != null)
           '${recovery.document!.label} revision ${recovery.revisionOrCount} was answered before Kineto '
               'closed and has been kept.'
+        else if (recovery.images != null)
+          '${recovery.revisionOrCount} ${recovery.images!.label} MiniMax answered before Kineto '
+              'closed have been kept.'
         else if (recovery.completed)
           'Generation ${recovery.revisionOrCount} of ${_shotLabel(recovery.shotIndex!)} was interrupted '
               'and has been completed.'
@@ -131,6 +134,10 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   bool _working = false;
   String _workingLabel = 'Working';
   String? _error;
+
+  /// Generates although a character would be shown without an identity
+  /// reference; offered only after the project's policy refused that.
+  VoidCallback? _identityDriftConsent;
   late List<String> _recoveryNotes;
   StreamSubscription<KinetoVideoEvent>? _videoEvents;
 
@@ -190,19 +197,30 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   // Native work runs on the project's worker thread; this isolate only waits
   // for the answer. One command at a time keeps the UI honest about which
   // state the director is looking at.
+  //
+  // [consenting] generates despite identity drift; it is offered when
+  // [action] is refused because the project's policy blocks that.
   Future<void> _run(
     Future<void> Function() action, {
     String label = 'Working',
+    Future<void> Function()? consenting,
   }) async {
     if (_working) return;
     setState(() {
       _working = true;
       _workingLabel = label;
       _error = null;
+      _identityDriftConsent = null;
     });
     String? error;
+    VoidCallback? consent;
     try {
       await action();
+    } on KinetoProjectException catch (failure) {
+      error = failure.toString();
+      if (failure.code == KinetoProjectException.identityDrift && consenting != null) {
+        consent = () => _run(consenting, label: label);
+      }
     } on Object catch (failure) {
       error = failure.toString();
     }
@@ -211,6 +229,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       _working = false;
       _shotSnapshots = _readShotSnapshots();
       _error = error;
+      _identityDriftConsent = consent;
     });
   }
 
@@ -241,7 +260,12 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onGenerate: () => _run(
         () => widget.project.generateShotCandidates(_activeShotIndex),
         label: 'Generating',
+        consenting: () => widget.project.generateShotCandidatesConsenting(
+          _activeShotIndex,
+          identityDrift: true,
+        ),
       ),
+      onGenerateDespiteIdentityDrift: _identityDriftConsent,
       onResubmitKeyframes: () => _run(
         () => widget.project.resubmitShotKeyframes(_activeShotIndex),
         label: 'Generating',
@@ -293,6 +317,7 @@ class DemoWorkspaceView extends StatelessWidget {
     this.onMigrate,
     this.keyframesUnresolved = false,
     this.onResubmitKeyframes,
+    this.onGenerateDespiteIdentityDrift,
     this.imageProvider = const KinetoImageProvider(
       kind: KinetoImageProviderKind.localDemo,
       ready: true,
@@ -337,6 +362,10 @@ class DemoWorkspaceView extends StatelessWidget {
   /// director's explicit decision to risk paying twice.
   final bool keyframesUnresolved;
   final VoidCallback? onResubmitKeyframes;
+
+  /// Generates although a character would be shown without an identity
+  /// reference; set only after the project's policy refused that.
+  final VoidCallback? onGenerateDespiteIdentityDrift;
 
   /// Who generates candidates for this session, and what one generation costs.
   final KinetoImageProvider imageProvider;
@@ -712,7 +741,27 @@ class DemoWorkspaceView extends StatelessWidget {
                   const SizedBox(height: 20),
                   WabPanel(
                     title: 'Native operation failed',
-                    child: Text(error!),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(error!),
+                        if (onGenerateDespiteIdentityDrift != null) ...<Widget>[
+                          const SizedBox(height: 12),
+                          const Text(
+                            "This project keeps every character's identity from their locked cast. "
+                            'Generate anyway only if a different-looking person is acceptable for '
+                            'these keyframes.',
+                          ),
+                          const SizedBox(height: 12),
+                          WabButton(
+                            key: const ValueKey<String>('generate-despite-drift'),
+                            kind: WabMaterialKind.zhuwen,
+                            onPressed: blocked ? null : onGenerateDespiteIdentityDrift,
+                            child: const Text('Generate anyway'),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
               ],

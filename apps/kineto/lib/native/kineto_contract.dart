@@ -42,6 +42,7 @@ final class KinetoNativeContract {
     this.snapshotSample,
     this._codes,
     this._documentFields,
+    this._productionFields,
   );
 
   /// Loaded once, on first use, after the ABI revision check.
@@ -74,6 +75,7 @@ final class KinetoNativeContract {
 
   final Map<int, Map<String, int>> _codes;
   final Map<String, (int, int)> _documentFields;
+  final Map<String, (int, int)> _productionFields;
 
   static const int _llmProviderKind = 6;
   static const int _documentFieldKind = 7;
@@ -86,6 +88,16 @@ final class KinetoNativeContract {
   static const int _originKind = 14;
   static const int _sourceFormatKind = 15;
   static const int _documentCostKind = 16;
+  static const int _productionFieldKind = 17;
+  static const int _productionCountKind = 18;
+  static const int _productionValueKind = 19;
+  static const int _productionTextKind = 20;
+  static const int _staleCauseKind = 21;
+  static const int _choiceStatusKind = 22;
+  static const int _castImageKindKind = 23;
+  static const int _entryKindKind = 24;
+  static const int _decisionKind = 25;
+  static const int _imageCostKind = 26;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -107,6 +119,35 @@ final class KinetoNativeContract {
   Map<String, int> get origins => _table(_originKind);
   Map<String, int> get sourceFormats => _table(_sourceFormatKind);
   Map<String, int> get documentCosts => _table(_documentCostKind);
+
+  /// What `kineto_project_production_count` counts, by name.
+  Map<String, int> get productionCounts => _table(_productionCountKind);
+
+  /// Number fields of the published bible, style and cast, by name.
+  Map<String, int> get productionValues => _table(_productionValueKind);
+
+  /// Text fields of the published bible, style and cast, by name.
+  Map<String, int> get productionTexts => _table(_productionTextKind);
+
+  Map<String, int> get staleCauses => _table(_staleCauseKind);
+  Map<String, int> get choiceStatuses => _table(_choiceStatusKind);
+  Map<String, int> get castImageKinds => _table(_castImageKindKind);
+  Map<String, int> get entryKinds => _table(_entryKindKind);
+  Map<String, int> get decisions => _table(_decisionKind);
+  Map<String, int> get imageCosts => _table(_imageCostKind);
+
+  /// Names of the packed production state's fields.
+  Iterable<String> get productionFields => _productionFields.keys;
+
+  /// Read the named field out of a packed production state.
+  int productionField(int bits, String name) {
+    final layout = _productionFields[name];
+    if (layout == null) {
+      throw StateError('Kineto native production state has no field "$name"');
+    }
+    final (shift, width) = layout;
+    return (bits >>> shift) & ((1 << width) - 1);
+  }
 
   /// Names of the packed documents state's fields.
   Iterable<String> get documentFields => _documentFields.keys;
@@ -166,6 +207,7 @@ final class KinetoNativeContract {
     final fields = <String, (int, int)>{};
     final codes = <int, Map<String, int>>{};
     final documentFields = <String, (int, int)>{};
+    final productionFields = <String, (int, int)>{};
     final arena = Arena();
     try {
       final kind = arena<Uint32>();
@@ -192,6 +234,8 @@ final class KinetoNativeContract {
             videoStates[entryName] = value.value;
           case _documentFieldKind:
             documentFields[entryName] = (value.value, extra.value);
+          case _productionFieldKind:
+            productionFields[entryName] = (value.value, extra.value);
           default:
             (codes[kind.value] ??= <String, int>{})[entryName] = value.value;
         }
@@ -210,6 +254,7 @@ final class KinetoNativeContract {
         for (final entry in codes.entries) entry.key: Map.unmodifiable(entry.value),
       }),
       Map.unmodifiable(documentFields),
+      Map.unmodifiable(productionFields),
     );
   }
 }

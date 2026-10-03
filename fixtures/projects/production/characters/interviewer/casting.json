@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "character_id": "interviewer",
+  "images": [
+    {
+      "artifact_id": "cast.interviewer.0001",
+      "kind": "portrait",
+      "status": "candidate",
+      "content_hash": "sha256:7c612e2faa98fbc146bb12e1268806a1faf2751f69f477f41c1792883e263ea1",
+      "input_hash": "sha256:12eadd828165555b58a575bbe896f9eab367734d05eb30478c85d73d667864cb",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/interviewer/candidates/cast.interviewer.0001.jpg",
+      "provenance": {
+        "compiler_version": "cast-portrait/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Interviewer: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A woman in her thirties, short black hair, round glasses. Wardrobe: A grey blazer, a notebook always in hand. Always: Round glasses.",
+        "prompt_hash": "sha256:1490a2a9ac8364bd43abe80e65f7ed86d84163d064deb06c2fbf8370c300a699",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.portrait",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.interviewer",
+          "content_hash": "sha256:9ae690ce1072772bdde85f7485489841c21b4623bd83ebbdc78f5a5840bebbea",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        }
+      ]
+    }
+  ]
+}

@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = MinimaxClient::new(key).generate_image(&ImageRequest {
         prompt,
         aspect_ratio: AspectRatio::Landscape16x9,
+        subject_reference: None,
     })?;
     std::fs::write(&output, &image.bytes)?;
     println!(

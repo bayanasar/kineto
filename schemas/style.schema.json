@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/style.schema.json",
+  "title": "Kineto Locked Style",
+  "description": "The style production follows: the locked sample by its stable artifact ID and the hash of its image, and the style itself (preset, version, directives and the director's note) verbatim, so later visual work reads it without the preset table of the build it runs on.",
+  "type": "object",
+  "required": ["schema_version", "artifact_id", "content_hash", "preset", "preset_version", "directives"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "preset": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "preset_version": {"type": "integer", "minimum": 1},
+    "directives": {"type": "string", "minLength": 1},
+    "note": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

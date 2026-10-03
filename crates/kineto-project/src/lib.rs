@@ -1,3 +1,5 @@
+pub mod bible;
+pub mod cast;
 pub mod fs;
 pub mod manifest;
 pub mod revisions;
@@ -5,6 +7,7 @@ pub mod screenplay;
 pub mod shot;
 pub mod source;
 pub mod story;
+pub mod style;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 

@@ -77,6 +77,46 @@ void main() {
     expect(KinetoProjectException.costUnknown, contract.statuses['cost_unknown']);
   });
 
+  test('production codes match the native tables name for name', () {
+    Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
+        <String>{for (final value in values) wireName(value)};
+    expect(names(KinetoBibleEntryKind.values, (kind) => kind.wireName), contract.entryKinds.keys.toSet());
+    expect(names(KinetoBibleStaleCause.values, (cause) => cause.wireName), contract.staleCauses.keys.toSet());
+    expect(names(KinetoChoiceStatus.values, (status) => status.wireName), contract.choiceStatuses.keys.toSet());
+    expect(names(KinetoCastImageKind.values, (kind) => kind.wireName), contract.castImageKinds.keys.toSet());
+    expect(names(KinetoImageCostKind.values, (kind) => kind.wireName), contract.imageCosts.keys.toSet());
+    expect(contract.decisions.keys.toSet(), <String>{'select', 'reject', 'lock'});
+    expect(
+      contract.productionFields,
+      containsAll(<String>[
+        'bible_revision',
+        'bible_locked_revision',
+        'bible_stale',
+        'style_locked',
+        'style_unresolved',
+        'production_damaged',
+      ]),
+    );
+    final statuses = <int, String>{
+      KinetoProjectException.locked: 'locked',
+      KinetoProjectException.invalidDocument: 'invalid_document',
+      KinetoProjectException.identityDrift: 'identity_drift',
+      KinetoProjectException.needsLockedScreenplay: 'needs_locked_screenplay',
+      KinetoProjectException.imageProviderUnsuitable: 'image_provider_unsuitable',
+      KinetoProjectException.noSuchArtifact: 'no_such_artifact',
+      KinetoProjectException.needsBible: 'needs_bible',
+      KinetoProjectException.needsLockedStyle: 'needs_locked_style',
+      KinetoProjectException.needsSelectedPortrait: 'needs_selected_portrait',
+      KinetoProjectException.noIdentityReference: 'no_identity_reference',
+      KinetoProjectException.rejected: 'rejected',
+      KinetoProjectException.packIncomplete: 'pack_incomplete',
+    };
+    for (final MapEntry(key: code, value: name) in statuses.entries) {
+      expect(code, contract.statuses[name], reason: name);
+      expect(kinetoProjectStatusMessages[code], isNotNull, reason: name);
+    }
+  });
+
   test('shot direction wire codes match the native table', () {
     expect(
       <String, int>{

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "artifact_id": "style_s0001",
+  "content_hash": "sha256:2bdf02ec8cf600bd032157aee62781334dee220c6fc8f23aa6fdd24393676f9f",
+  "preset": "film_noir",
+  "preset_version": 1,
+  "directives": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition"
+}

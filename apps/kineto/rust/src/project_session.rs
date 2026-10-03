@@ -15,16 +15,17 @@ use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
 use kineto_core::{
-    generation::{GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
+    generation::{Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
     keyframe_prompt::KeyframePromptError,
     llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
     session::{
-        DocumentError, OpenRequest, ProjectSession, Recovery, SessionError, SessionOptions,
-        SessionSink, ShotCommand, SnapshotError, SubmitError,
+        DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Recovery,
+        SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError, SubmitError,
     },
 };
 use kineto_jobs::ErrorClass;
 use kineto_project::{
+    cast::CastError,
     fs::ProjectFsError,
     manifest::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
@@ -33,6 +34,7 @@ use kineto_project::{
     revisions::{DocumentKind, RevisionError},
     shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
     source::SourceError,
+    style::StyleError,
 };
 use kineto_providers::secret::EnvSecretSource;
 
@@ -48,10 +50,15 @@ const MESSAGE_VIDEO: i64 = 4;
 /// The `shot` of a `RECOVERED` message for unplaced job records, and of a
 /// `COMPLETED` message for a document command.
 const NO_SHOT: i64 = -1;
-/// The `shot` of a `RECOVERED` message for a story analysis or screenplay
-/// revision kept from an interrupted session.
+/// The `shot` of a `RECOVERED` message for a story analysis, screenplay or
+/// bible revision kept from an interrupted session.
 const RECOVERED_ANALYSIS: i64 = -2;
 const RECOVERED_SCREENPLAY: i64 = -3;
+const RECOVERED_BIBLE: i64 = -4;
+/// The `shot` of a `RECOVERED` message for style samples or casting images
+/// kept from an interrupted session; the count stands where a revision would.
+const RECOVERED_STYLE_SAMPLES: i64 = -5;
+const RECOVERED_CASTING_IMAGES: i64 = -6;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -141,6 +148,16 @@ impl SessionSink for DartPort {
                 match kind {
                     DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
                     DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
+                    DocumentKind::Bible => RECOVERED_BIBLE,
+                },
+            ],
+            Recovery::Images { kind, count } => [
+                MESSAGE_RECOVERED,
+                i64::try_from(*count).unwrap_or(i64::MAX),
+                i64::from(PROJECT_OK),
+                match kind {
+                    ImageWork::StyleSample => RECOVERED_STYLE_SAMPLES,
+                    ImageWork::Casting => RECOVERED_CASTING_IMAGES,
                 },
             ],
         });
@@ -853,6 +870,37 @@ pub unsafe extern "C" fn kineto_project_shot_resubmit_keyframes(
     })
 }
 
+/// Queue generating the shot's candidates with what the director explicitly
+/// accepted: `risk_paying_twice` as for
+/// [`kineto_project_shot_resubmit_keyframes`], and `identity_drift` to show
+/// characters without an identity reference although the project's policy
+/// blocks that (status `144`). Otherwise as [`kineto_project_shot_generate`].
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_generate_consenting(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    risk_paying_twice: bool,
+    identity_drift: bool,
+    token: u64,
+) -> i32 {
+    let consent = Consent {
+        risk_paying_twice,
+        identity_drift,
+    };
+    // SAFETY: forwarded caller contract.
+    guarded(PROJECT_ERR_PANIC, || unsafe {
+        submit(
+            session,
+            shot_index,
+            ShotCommand::GenerateConsenting(consent),
+            token,
+        )
+    })
+}
+
 /// Queue a candidate selection. Returns once queued.
 ///
 /// # Safety
@@ -1035,6 +1083,8 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Generation(error) => generation_error_code(error),
         SessionError::Document(DocumentError::Source(error)) => source_error_code(error),
         SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
+        SessionError::Production(ProductionError::Style(error)) => style_error_code(error),
+        SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
@@ -1051,12 +1101,41 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         }
         GenerationError::Prompt(_) => PROJECT_ERR_INVALID_SHOT_STATE,
         GenerationError::UnresolvedSubmission => PROJECT_ERR_PAID_CALL_UNRESOLVED,
+        GenerationError::IdentityDrift(_) => PROJECT_ERR_IDENTITY_DRIFT,
+        // Project records refused through a generation say why themselves.
         GenerationError::Provider {
+            source,
             class: ErrorClass::Terminal,
-            ..
-        } => PROJECT_ERR_PROVIDER_REFUSED,
+        } => {
+            if let Some(error) = source.downcast_ref::<StyleError>() {
+                style_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<CastError>() {
+                cast_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<RevisionError>() {
+                revision_error_code(error)
+            } else {
+                PROJECT_ERR_PROVIDER_REFUSED
+            }
+        }
         GenerationError::Prerequisite(Prerequisite::StoryAnalysis) => PROJECT_ERR_NEEDS_ANALYSIS,
         GenerationError::Prerequisite(Prerequisite::Screenplay) => PROJECT_ERR_NEEDS_SCREENPLAY,
+        GenerationError::Prerequisite(Prerequisite::LockedScreenplay) => {
+            PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY
+        }
+        GenerationError::Prerequisite(
+            Prerequisite::RealImageProvider | Prerequisite::SynchronousImageProvider,
+        ) => PROJECT_ERR_IMAGE_PROVIDER_UNSUITABLE,
+        GenerationError::Prerequisite(
+            Prerequisite::StylePreset | Prerequisite::StyleSample | Prerequisite::Character,
+        ) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        GenerationError::Prerequisite(Prerequisite::Bible) => PROJECT_ERR_NEEDS_BIBLE,
+        GenerationError::Prerequisite(Prerequisite::LockedStyle) => PROJECT_ERR_NEEDS_LOCKED_STYLE,
+        GenerationError::Prerequisite(Prerequisite::SelectedPortrait) => {
+            PROJECT_ERR_NEEDS_SELECTED_PORTRAIT
+        }
+        GenerationError::Prerequisite(Prerequisite::IdentityReference) => {
+            PROJECT_ERR_NO_IDENTITY_REFERENCE
+        }
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
@@ -1102,6 +1181,40 @@ fn revision_error_code(error: &RevisionError) -> i32 {
         | RevisionError::Conflict(_)
         | RevisionError::Path(_)
         | RevisionError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
+    }
+}
+
+fn style_error_code(error: &StyleError) -> i32 {
+    match error {
+        StyleError::NoSuchSample(_) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        StyleError::Rejected(_) => PROJECT_ERR_REJECTED,
+        StyleError::NotSelected(_) => PROJECT_ERR_NO_SELECTION,
+        StyleError::Locked(_) => PROJECT_ERR_LOCKED,
+        StyleError::Fs(_) => PROJECT_ERR_IO,
+        StyleError::Manifest(error) => manifest_error_code(error),
+        StyleError::InvalidLog
+        | StyleError::Mismatch(_)
+        | StyleError::Conflict(_)
+        | StyleError::Path(_)
+        | StyleError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
+    }
+}
+
+fn cast_error_code(error: &CastError) -> i32 {
+    match error {
+        CastError::InvalidCharacter(_) | CastError::NoSuchImage(_) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        CastError::NotAPortrait(_) => PROJECT_ERR_INVALID_ARGUMENT,
+        CastError::Rejected(_) => PROJECT_ERR_REJECTED,
+        CastError::Locked(_) => PROJECT_ERR_LOCKED,
+        CastError::NoSelection => PROJECT_ERR_NEEDS_SELECTED_PORTRAIT,
+        CastError::MissingReference(_) => PROJECT_ERR_PACK_INCOMPLETE,
+        CastError::Fs(_) => PROJECT_ERR_IO,
+        CastError::Manifest(error) => manifest_error_code(error),
+        CastError::InvalidLog
+        | CastError::Mismatch(_)
+        | CastError::Conflict(_)
+        | CastError::Path(_)
+        | CastError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
     }
 }
 

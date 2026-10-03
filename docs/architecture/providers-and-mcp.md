@@ -73,6 +73,8 @@ TTS capabilities should cover at least:
 
 Cross-cutting capability metadata includes cost model, concurrency/rate limits, retry semantics, and known provider policy constraints where useful for preflight.
 
+`ImageCapabilities` (`kineto-providers`) is what workflow code reads; an adapter declares it and no workflow code branches on a vendor name. Besides the items above it carries the formats and size limit of reference images, the longest prompt the provider accepts, whether an image arrives in the answer or as a remote job to follow (`async_jobs`), and the price of one image (`price_per_image`, a provider-neutral amount and currency, `None` when unknown). MiniMax `image-01` declares 1:1, 16:9 and 9:16, JPEG output, prompts up to 1500 characters, one identity reference (`subject_reference` of type `character`: a JPG or PNG portrait under 10 MB, best a single front-facing face), the image in its answer, and 0.0035 USD an image (the client sends the identity reference as a `character` data URL and refuses one that is not a JPEG or PNG under 10 MB before calling); it takes no style or composition reference and no seed or negative prompt. The local demo generator declares no references, the image at once, and no cost. `ImageProvider::capabilities` routes to a provider's declaration: the cost the director is shown before generating comes from its price, and keyframes and style samples, which keep the image the provider answers with, refuse a provider of remote jobs (`image.async_jobs`) before anything is written.
+
 ## Initial provider support
 
 Recommended first-wave support:
@@ -194,7 +196,15 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
-The first compiler in use is `keyframe-prompt/1` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json` and compiles a still-image prompt. Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step. Until approved character reference images exist, every named character is an identity-affecting drop. The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it.
+The keyframe compiler is `keyframe-prompt/2` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
+
+- The locked style's directives and note lead the prompt; without a locked style it asks for a photorealistic film still.
+- A character whose cast is locked is shown from their canonical portrait, sent as the identity reference, when the provider takes one. One reference is sent per image, to the first such character of the shot.
+- Every other named character is an identity-affecting drop, and the reason says why: not cast yet, one reference per image, or a provider that takes none.
+- A cast character's forbidden changes are said while the prompt has room; dropping them is identity-affecting too.
+- Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step.
+
+The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 
 Projects created by the desktop app start with the bootstrap scene (`kineto-core/src/bootstrap.rs`) written into these files, published atomically with the project.
 

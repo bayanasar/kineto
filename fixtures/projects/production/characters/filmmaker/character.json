@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "character_id": "filmmaker",
+  "name": "The Filmmaker",
+  "portrait": {
+    "kind": "portrait",
+    "artifact_id": "cast.filmmaker.0002",
+    "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+    "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg"
+  },
+  "references": [
+    {
+      "kind": "front",
+      "artifact_id": "cast.filmmaker.0003",
+      "content_hash": "sha256:b6e08d3b1ed168d3c4516c068822509955935a802db936b8367662907971d43c",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0003.jpg"
+    },
+    {
+      "kind": "profile_left",
+      "artifact_id": "cast.filmmaker.0004",
+      "content_hash": "sha256:b6bbd1e5b128d437414395261f6d81ff4bd1715e1560fda15e8f3625bd7b3191",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0004.jpg"
+    },
+    {
+      "kind": "profile_right",
+      "artifact_id": "cast.filmmaker.0005",
+      "content_hash": "sha256:e2a14bb8b53713bf880a6c11d15d57817c39b1a179adc65cb5efb15b598e2e77",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0005.jpg"
+    },
+    {
+      "kind": "full_body",
+      "artifact_id": "cast.filmmaker.0006",
+      "content_hash": "sha256:4152121c322dfc1776f336011a48fa6630f32745d7d083477d055cf669188ed7",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0006.jpg"
+    },
+    {
+      "kind": "costume",
+      "artifact_id": "cast.filmmaker.0007",
+      "content_hash": "sha256:37e304c786f521f0e8fe4f0f554d3d0e8c17646369c5bd6c74a9e975fd09da8c",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0007.jpg"
+    },
+    {
+      "kind": "expression_smile",
+      "artifact_id": "cast.filmmaker.0008",
+      "content_hash": "sha256:1ec2f1736c1ebbad74038b3a6eff98ed27e61bda091d981fd550668f5751ecf4",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0008.jpg"
+    },
+    {
+      "kind": "expression_tense",
+      "artifact_id": "cast.filmmaker.0009",
+      "content_hash": "sha256:8d37fa4be8db332add22de3ddfcb40051a897c2a4c3de3d190cd5a2012bcf2b2",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0009.jpg"
+    }
+  ],
+  "provider_reference": {
+    "provider": "minimax",
+    "mechanism": "subject_reference",
+    "role": "identity",
+    "artifact_id": "cast.filmmaker.0002"
+  },
+  "forbidden_changes": [
+    "Grey at the temples.",
+    "Never without the coat."
+  ],
+  "dependencies": [
+    {
+      "artifact_id": "bible_character.filmmaker",
+      "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+      "impact": "semantic"
+    },
+    {
+      "artifact_id": "style_s0001",
+      "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+      "impact": "semantic"
+    }
+  ]
+}

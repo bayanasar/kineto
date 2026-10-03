@@ -57,10 +57,20 @@ pub(crate) const PROJECT_ERR_MODEL_NOT_CONFIGURED: i32 = 140;
 pub(crate) const PROJECT_ERR_MODEL_UNKNOWN: i32 = 141;
 pub(crate) const PROJECT_ERR_DOCUMENT_DAMAGED: i32 = 142;
 pub(crate) const PROJECT_ERR_COST_UNKNOWN: i32 = 143;
+pub(crate) const PROJECT_ERR_IDENTITY_DRIFT: i32 = 144;
+pub(crate) const PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY: i32 = 145;
+pub(crate) const PROJECT_ERR_IMAGE_PROVIDER_UNSUITABLE: i32 = 146;
+pub(crate) const PROJECT_ERR_NO_SUCH_ARTIFACT: i32 = 147;
+pub(crate) const PROJECT_ERR_NEEDS_BIBLE: i32 = 148;
+pub(crate) const PROJECT_ERR_NEEDS_LOCKED_STYLE: i32 = 149;
+pub(crate) const PROJECT_ERR_NEEDS_SELECTED_PORTRAIT: i32 = 150;
+pub(crate) const PROJECT_ERR_NO_IDENTITY_REFERENCE: i32 = 151;
+pub(crate) const PROJECT_ERR_REJECTED: i32 = 152;
+pub(crate) const PROJECT_ERR_PACK_INCOMPLETE: i32 = 153;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 46] = [
+const STATUSES: [(&str, i32); 56] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -109,6 +119,25 @@ const STATUSES: [(&str, i32); 46] = [
     ("model_unknown", PROJECT_ERR_MODEL_UNKNOWN),
     ("document_damaged", PROJECT_ERR_DOCUMENT_DAMAGED),
     ("cost_unknown", PROJECT_ERR_COST_UNKNOWN),
+    ("identity_drift", PROJECT_ERR_IDENTITY_DRIFT),
+    (
+        "needs_locked_screenplay",
+        PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY,
+    ),
+    (
+        "image_provider_unsuitable",
+        PROJECT_ERR_IMAGE_PROVIDER_UNSUITABLE,
+    ),
+    ("no_such_artifact", PROJECT_ERR_NO_SUCH_ARTIFACT),
+    ("needs_bible", PROJECT_ERR_NEEDS_BIBLE),
+    ("needs_locked_style", PROJECT_ERR_NEEDS_LOCKED_STYLE),
+    (
+        "needs_selected_portrait",
+        PROJECT_ERR_NEEDS_SELECTED_PORTRAIT,
+    ),
+    ("no_identity_reference", PROJECT_ERR_NO_IDENTITY_REFERENCE),
+    ("rejected", PROJECT_ERR_REJECTED),
+    ("pack_incomplete", PROJECT_ERR_PACK_INCOMPLETE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -146,7 +175,8 @@ pub(crate) const LLM_PROVIDERS: [(&str, u32); 4] =
 pub(crate) const SOURCE_FORMATS: [(&str, u32); 2] = [("text", 1), ("markdown", 2)];
 
 /// Documents whose cost `kineto_project_document_cost` estimates.
-pub(crate) const DOCUMENT_COSTS: [(&str, u32); 2] = [("analysis", 1), ("screenplay", 2)];
+pub(crate) const DOCUMENT_COSTS: [(&str, u32); 3] =
+    [("analysis", 1), ("screenplay", 2), ("bible", 3)];
 
 /// What `kineto_project_screenplay_count` counts.
 pub(crate) const SCREENPLAY_COUNTS: [(&str, u32); 6] = [
@@ -198,6 +228,128 @@ pub(crate) const REVISION_STATUSES: [(&str, u32); 3] =
     [("candidate", 1), ("locked", 2), ("superseded", 3)];
 
 pub(crate) const ORIGINS: [(&str, u32); 2] = [("generated", 1), ("edited", 2)];
+
+/// What `kineto_project_production_count` counts; `group` selects the entry,
+/// sample or character for per-group counts.
+pub(crate) const PRODUCTION_COUNTS: [(&str, u32); 18] = [
+    ("bible_revisions", 1),
+    ("world_visual_rules", 2),
+    ("world_continuity_rules", 3),
+    ("bible_characters", 4),
+    ("character_forbidden", 5),
+    ("character_notes", 6),
+    ("character_wardrobe_changes", 7),
+    ("bible_locations", 8),
+    ("location_forbidden", 9),
+    ("bible_props", 10),
+    ("prop_forbidden", 11),
+    ("bible_stale_causes", 12),
+    ("style_presets", 13),
+    ("style_samples", 14),
+    ("cast_characters", 15),
+    ("cast_images", 16),
+    ("cast_stale", 17),
+    ("cast_lock_references", 18),
+];
+
+/// Number fields `kineto_project_production_value` reads.
+pub(crate) const PRODUCTION_VALUES: [(&str, u32); 10] = [
+    ("bible_revision_number", 1),
+    ("bible_revision_status", 2),
+    ("bible_revision_origin", 3),
+    ("bible_revision_based_on", 4),
+    ("bible_stale_cause", 5),
+    ("sample_status", 6),
+    ("cast_image_kind", 7),
+    ("cast_image_status", 8),
+    ("cast_locked", 9),
+    ("cast_unresolved", 10),
+];
+
+/// Text fields `kineto_project_production_text_copy` copies.
+pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 47] = [
+    ("world_setting", 1),
+    ("world_period", 2),
+    ("world_visual_rule", 3),
+    ("world_continuity_rule", 4),
+    ("character_id", 5),
+    ("character_name", 6),
+    ("character_description", 7),
+    ("character_appearance", 8),
+    ("character_wardrobe", 9),
+    ("character_forbidden", 10),
+    ("character_note", 11),
+    ("character_wardrobe_change_scenes", 12),
+    ("character_wardrobe_change", 13),
+    ("location_id", 14),
+    ("location_name", 15),
+    ("location_description", 16),
+    ("location_appearance", 17),
+    ("location_forbidden", 18),
+    ("prop_id", 19),
+    ("prop_name", 20),
+    ("prop_description", 21),
+    ("prop_appearance", 22),
+    ("prop_forbidden", 23),
+    ("bible_revision_provider", 24),
+    ("bible_revision_model", 25),
+    ("bible_stale_subject", 26),
+    ("preset_id", 27),
+    ("preset_name", 28),
+    ("sample_id", 29),
+    ("sample_preset", 30),
+    ("sample_note", 31),
+    ("sample_refines", 32),
+    ("sample_scene", 33),
+    ("sample_media", 34),
+    ("sample_provider", 35),
+    ("sample_model", 36),
+    ("style_lock_sample", 37),
+    ("style_lock_preset", 38),
+    ("style_lock_note", 39),
+    ("cast_character_id", 40),
+    ("cast_character_name", 41),
+    ("cast_image_id", 42),
+    ("cast_image_media", 43),
+    ("cast_image_identity_reference", 44),
+    ("cast_lock_portrait", 45),
+    ("cast_lock_reference", 46),
+    ("cast_stale", 47),
+];
+
+/// Why a bible may no longer describe the locked screenplay.
+pub(crate) const STALE_CAUSES: [(&str, u32); 5] = [
+    ("no_locked_screenplay", 1),
+    ("material", 2),
+    ("scene_changed", 3),
+    ("scene_removed", 4),
+    ("scene_added", 5),
+];
+
+/// A style sample's or a portrait's standing; 0 is none, for an image that
+/// is not a portrait.
+pub(crate) const CHOICE_STATUSES: [(&str, u32); 3] =
+    [("candidate", 1), ("selected", 2), ("rejected", 3)];
+
+pub(crate) const CAST_IMAGE_KINDS: [(&str, u32); 8] = [
+    ("portrait", 1),
+    ("front", 2),
+    ("profile_left", 3),
+    ("profile_right", 4),
+    ("full_body", 5),
+    ("costume", 6),
+    ("expression_smile", 7),
+    ("expression_tense", 8),
+];
+
+/// Which list of the bible an edited entry is in.
+pub(crate) const ENTRY_KINDS: [(&str, u32); 3] = [("character", 1), ("location", 2), ("prop", 3)];
+
+/// What the director decides about a style sample or a portrait.
+pub(crate) const DECISIONS: [(&str, u32); 3] = [("select", 1), ("reject", 2), ("lock", 3)];
+
+/// Paid images whose cost `kineto_project_image_cost` gives.
+pub(crate) const IMAGE_COSTS: [(&str, u32); 3] = [("sample", 1), ("portrait", 2), ("pack", 3)];
 
 /// The code `table` gives `name`.
 pub(crate) fn code(table: &[(&str, u32)], name: &str) -> u32 {
@@ -275,6 +427,24 @@ const DOCUMENT_FIELDS: [Field; 7] = [
     ANALYSIS_STALE,
     SCREENPLAY_STALE,
     DOCUMENTS_DAMAGED,
+];
+
+/// The latest bible revision still in play.
+pub(crate) const BIBLE_REVISION: Field = field("bible_revision", 0, 14);
+pub(crate) const BIBLE_LOCKED_REVISION: Field = field("bible_locked_revision", 14, 14);
+pub(crate) const BIBLE_STALE: Field = field("bible_stale", 28, 1);
+pub(crate) const STYLE_LOCKED: Field = field("style_locked", 29, 1);
+pub(crate) const STYLE_UNRESOLVED: Field = field("style_unresolved", 30, 1);
+pub(crate) const PRODUCTION_DAMAGED: Field = field("production_damaged", 31, 1);
+
+/// The packed `u64` production state; 0 in a revision field means none.
+const PRODUCTION_FIELDS: [Field; 6] = [
+    BIBLE_REVISION,
+    BIBLE_LOCKED_REVISION,
+    BIBLE_STALE,
+    STYLE_LOCKED,
+    STYLE_UNRESOLVED,
+    PRODUCTION_DAMAGED,
 ];
 
 /// Pack `(field, value)` pairs; values wider than their field are cut.
@@ -356,6 +526,16 @@ const ENTRY_REVISION_STATUS: u32 = 13;
 const ENTRY_ORIGIN: u32 = 14;
 const ENTRY_SOURCE_FORMAT: u32 = 15;
 const ENTRY_DOCUMENT_COST: u32 = 16;
+const ENTRY_PRODUCTION_FIELD: u32 = 17;
+const ENTRY_PRODUCTION_COUNT: u32 = 18;
+const ENTRY_PRODUCTION_VALUE: u32 = 19;
+const ENTRY_PRODUCTION_TEXT: u32 = 20;
+const ENTRY_STALE_CAUSE: u32 = 21;
+const ENTRY_CHOICE_STATUS: u32 = 22;
+const ENTRY_CAST_IMAGE_KIND: u32 = 23;
+const ENTRY_ENTRY_KIND: u32 = 24;
+const ENTRY_DECISION: u32 = 25;
+const ENTRY_IMAGE_COST: u32 = 26;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -407,6 +587,16 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_ORIGIN, &ORIGINS);
         codes(&mut entries, ENTRY_SOURCE_FORMAT, &SOURCE_FORMATS);
         codes(&mut entries, ENTRY_DOCUMENT_COST, &DOCUMENT_COSTS);
+        fields(&mut entries, ENTRY_PRODUCTION_FIELD, &PRODUCTION_FIELDS);
+        codes(&mut entries, ENTRY_PRODUCTION_COUNT, &PRODUCTION_COUNTS);
+        codes(&mut entries, ENTRY_PRODUCTION_VALUE, &PRODUCTION_VALUES);
+        codes(&mut entries, ENTRY_PRODUCTION_TEXT, &PRODUCTION_TEXTS);
+        codes(&mut entries, ENTRY_STALE_CAUSE, &STALE_CAUSES);
+        codes(&mut entries, ENTRY_CHOICE_STATUS, &CHOICE_STATUSES);
+        codes(&mut entries, ENTRY_CAST_IMAGE_KIND, &CAST_IMAGE_KINDS);
+        codes(&mut entries, ENTRY_ENTRY_KIND, &ENTRY_KINDS);
+        codes(&mut entries, ENTRY_DECISION, &DECISIONS);
+        codes(&mut entries, ENTRY_IMAGE_COST, &IMAGE_COSTS);
         entries
     })
 }
@@ -466,9 +656,22 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    fn is_field_kind(kind: u32) -> bool {
+        [
+            ENTRY_SNAPSHOT_FIELD,
+            ENTRY_DOCUMENT_FIELD,
+            ENTRY_PRODUCTION_FIELD,
+        ]
+        .contains(&kind)
+    }
+
     #[test]
     fn packed_fields_do_not_overlap_and_fit_in_u64() {
-        for table in [&SNAPSHOT_FIELDS[..], &DOCUMENT_FIELDS[..]] {
+        for table in [
+            &SNAPSHOT_FIELDS[..],
+            &DOCUMENT_FIELDS[..],
+            &PRODUCTION_FIELDS[..],
+        ] {
             let mut used = 0_u64;
             for field in table {
                 assert!(
@@ -494,14 +697,14 @@ mod tests {
         assert!(entry(count).is_none());
         let codes_per_kind = entries()
             .iter()
-            .filter(|(kind, ..)| *kind != ENTRY_SNAPSHOT_FIELD && *kind != ENTRY_DOCUMENT_FIELD)
+            .filter(|(kind, ..)| !is_field_kind(*kind))
             .map(|(kind, _, value, _)| (*kind, *value))
             .collect::<BTreeSet<_>>();
         assert_eq!(
             codes_per_kind.len(),
             entries()
                 .iter()
-                .filter(|(kind, ..)| *kind != ENTRY_SNAPSHOT_FIELD && *kind != ENTRY_DOCUMENT_FIELD)
+                .filter(|(kind, ..)| !is_field_kind(*kind))
                 .count(),
             "no two names of one kind share a code"
         );
@@ -558,9 +761,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_DOCUMENT_COST);
-        assert_eq!(&name[..len as usize], b"screenplay");
-        assert_eq!((value, extra), (2, 0));
+        assert_eq!(kind, ENTRY_IMAGE_COST);
+        assert_eq!(&name[..len as usize], b"pack");
+        assert_eq!((value, extra), (3, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

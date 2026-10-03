@@ -13,6 +13,7 @@
 //! released before the drop returns.
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt,
     panic::{self, AssertUnwindSafe},
@@ -27,20 +28,29 @@ use std::{
 
 use kineto_llm::LlmBackend;
 use kineto_project::{
-    fs::ProjectRoot,
+    bible::{self as bible_document, Bible, EntryEdit, StaleCause},
+    cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
+    fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
     source::{self, SourceError, SourceFormat},
     story::StoryAnalysis,
+    style::{self as style_document, StyleError, StyleLock, StyleSample},
 };
+use kineto_providers::Price;
 
 use crate::{
+    bible, cast,
     documents::{self, DOCUMENT_PROVIDERS},
-    generation::{self, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished},
+    generation::{
+        self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
+    },
     llm::{DocumentModel, DocumentModelInfo},
+    paid_image::{ImageRecovery, Submission},
     screenplay, story,
+    style::{self, SampleRequest},
     video::{self, VideoClient, VideoDone, VideoJob},
 };
 
@@ -73,6 +83,10 @@ pub enum ShotCommand {
     /// accepted, and charged for, without leaving its result. The director's
     /// explicit decision to risk paying twice.
     ResubmitKeyframes,
+    /// Generate with what the director explicitly accepted, such as showing
+    /// characters without an identity reference where the project's policy
+    /// blocks that.
+    GenerateConsenting(Consent),
     /// Submit a video from the locked keyframe. Completes once MiniMax has
     /// accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
@@ -110,6 +124,87 @@ pub enum DocumentCommand {
     LockScreenplay {
         revision: u32,
     },
+    /// Write a bible of the locked screenplay.
+    WriteBible,
+    /// Save the director's edit of one entry of bible revision `based_on`,
+    /// which must be the latest.
+    SaveBibleEntry {
+        based_on: u32,
+        edit: EntryEdit,
+    },
+    LockBible {
+        revision: u32,
+    },
+}
+
+/// A change to the style or the cast. Every command runs on the session
+/// worker and completes through [`SessionSink::document_completed`]. Paid
+/// commands are refused while an image of theirs may have been charged
+/// without its result, unless submitted with
+/// [`ProjectSession::resubmit_production`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductionCommand {
+    /// Paid: one sample of a style preset.
+    SampleStyle {
+        preset: String,
+        note: Option<String>,
+    },
+    /// Paid: a sample of an earlier one's preset, with a note.
+    RefineStyle {
+        sample: String,
+        note: String,
+    },
+    SelectStyle(String),
+    RejectStyle(String),
+    LockStyle(String),
+    /// Paid: have `count` portrait candidates of `character`, making only
+    /// those missing.
+    Audition {
+        character: String,
+        count: u32,
+    },
+    /// Paid: complete the reference pack of `character`'s selected
+    /// portrait, making `remake` again although the pack holds them.
+    MakePack {
+        character: String,
+        remake: Vec<CastImageKind>,
+    },
+    SelectPortrait {
+        character: String,
+        portrait: String,
+    },
+    RejectPortrait {
+        character: String,
+        portrait: String,
+    },
+    LockCharacter {
+        character: String,
+    },
+}
+
+/// Why a style or casting change was refused.
+#[derive(Debug)]
+pub enum ProductionError {
+    Style(StyleError),
+    Cast(CastError),
+}
+
+impl fmt::Display for ProductionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Style(error) => error.fmt(formatter),
+            Self::Cast(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ProductionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Style(error) => Some(error),
+            Self::Cast(error) => Some(error),
+        }
+    }
 }
 
 /// Why a document change was refused.
@@ -148,6 +243,8 @@ pub enum SessionError {
     Generation(GenerationError),
     /// A document change was refused.
     Document(DocumentError),
+    /// A style or casting change was refused.
+    Production(ProductionError),
     /// A command arrived for a session whose open had failed.
     NotOpen,
     /// The shot already has a video being generated.
@@ -164,6 +261,7 @@ impl fmt::Display for SessionError {
             Self::Shot(error) => error.fmt(formatter),
             Self::Generation(error) => error.fmt(formatter),
             Self::Document(error) => error.fmt(formatter),
+            Self::Production(error) => error.fmt(formatter),
             Self::NotOpen => formatter.write_str("project session is not open"),
             Self::VideoInFlight => {
                 formatter.write_str("this shot's video is still being generated")
@@ -180,6 +278,7 @@ impl Error for SessionError {
             Self::Shot(error) => Some(error),
             Self::Generation(error) => Some(error),
             Self::Document(error) => Some(error),
+            Self::Production(error) => Some(error),
             Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
@@ -204,6 +303,15 @@ pub enum Recovery {
     /// A document a model answered before an interruption was kept as this
     /// revision.
     Document { kind: DocumentKind, revision: u32 },
+    /// Paid images MiniMax answered before an interruption were kept.
+    Images { kind: ImageWork, count: usize },
+}
+
+/// A kind of paid image work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageWork {
+    StyleSample,
+    Casting,
 }
 
 /// Receives a session's outcomes on the worker thread.
@@ -264,8 +372,57 @@ pub struct PublishedDocuments {
     pub analysis_cost: Option<u64>,
     /// Estimated cost of the next screenplay, likewise.
     pub screenplay_cost: Option<u64>,
+    /// Every bible revision, oldest first.
+    pub bible_revisions: Vec<RevisionRecord>,
+    /// The latest bible revision still in play, and what it says.
+    pub bible: Option<(u32, Bible)>,
+    /// The locked bible revision, which casting and keyframes follow.
+    pub bible_locked: Option<u32>,
+    /// Why the bible in play may no longer describe the locked screenplay.
+    pub bible_stale: Vec<StaleCause>,
+    /// Estimated cost of the next bible, likewise.
+    pub bible_cost: Option<u64>,
     /// The documents could not be read; why.
     pub damaged: Option<String>,
+}
+
+/// One character worth casting, as last published.
+#[derive(Debug, Clone)]
+pub struct PublishedCharacter {
+    pub id: String,
+    pub name: String,
+    /// Every casting image, oldest first, with where its image is.
+    pub images: Vec<(CastImage, PathBuf)>,
+    pub lock: Option<CharacterLock>,
+    /// The parents of the locked cast that changed, went or came.
+    pub stale: Vec<String>,
+    /// An image of this character may have been charged without its result.
+    pub unresolved: bool,
+}
+
+/// What the worker last published about the style and the cast. Reads
+/// never do I/O.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedProduction {
+    /// Every style sample, oldest first, with where its image is.
+    pub samples: Vec<(StyleSample, PathBuf)>,
+    pub style: Option<StyleLock>,
+    /// A style sample may have been charged without its result.
+    pub style_unresolved: bool,
+    /// The characters worth casting, in bible order.
+    pub characters: Vec<PublishedCharacter>,
+    /// The style or the cast could not be read; why.
+    pub damaged: Option<String>,
+}
+
+/// What paid images cost with the session's image provider, as it declares.
+/// Fixed at spawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImagePrices {
+    pub sample: Option<Price>,
+    pub portrait: Option<Price>,
+    /// How many images a reference pack takes, and what they cost.
+    pub pack: Option<(usize, Price)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +487,7 @@ struct View {
     metadata: OnceLock<ProjectMetadata>,
     shots: Mutex<[ShotSlot; SHOT_COUNT]>,
     documents: Mutex<Option<Arc<PublishedDocuments>>>,
+    production: Mutex<Option<Arc<PublishedProduction>>>,
 }
 
 struct Gate {
@@ -367,6 +525,10 @@ enum Work {
         /// The director chose to risk paying twice.
         resubmit: bool,
     },
+    Production {
+        command: ProductionCommand,
+        submission: Submission,
+    },
 }
 
 struct Envelope {
@@ -381,6 +543,7 @@ struct Envelope {
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
+    image_prices: ImagePrices,
     document_model: DocumentModelInfo,
     view: Arc<View>,
     gate: Arc<Gate>,
@@ -417,6 +580,11 @@ impl ProjectSession {
         options: SessionOptions,
     ) -> std::io::Result<Self> {
         let image_provider = provider.info();
+        let image_prices = ImagePrices {
+            sample: style::sample_cost(&provider),
+            portrait: cast::audition_cost(&provider, 1),
+            pack: cast::pack_cost(&provider),
+        };
         let document_model = model.describe();
         let (commands, inbox) = mpsc::channel();
         let view = Arc::new(View::default());
@@ -436,6 +604,7 @@ impl ProjectSession {
         Ok(Self {
             commands: Some(commands),
             image_provider,
+            image_prices,
             document_model,
             view,
             gate,
@@ -492,6 +661,39 @@ impl ProjectSession {
         })
     }
 
+    /// Queue a style or casting command. Returns without waiting for it to
+    /// run.
+    pub fn submit_production(
+        &self,
+        command: ProductionCommand,
+        token: u64,
+    ) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Production {
+                command,
+                submission: Submission::Once,
+            },
+        })
+    }
+
+    /// Queue a paid style or casting command although an image of its own
+    /// may have been charged without its result being kept, so this one may
+    /// pay twice. Only on the director's explicit decision.
+    pub fn resubmit_production(
+        &self,
+        command: ProductionCommand,
+        token: u64,
+    ) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Production {
+                command,
+                submission: Submission::RiskPayingTwice,
+            },
+        })
+    }
+
     fn send(&self, envelope: Envelope) -> Result<(), SubmitError> {
         self.commands
             .as_ref()
@@ -505,6 +707,20 @@ impl ProjectSession {
         lock(&self.view.documents)
             .clone()
             .ok_or(SnapshotError::NotOpen)
+    }
+
+    /// The style and the cast as last published. Never does I/O.
+    pub fn production(&self) -> Result<Arc<PublishedProduction>, SnapshotError> {
+        lock(&self.view.production)
+            .clone()
+            .ok_or(SnapshotError::NotOpen)
+    }
+
+    /// What paid images cost with this session's image provider. Fixed at
+    /// spawn.
+    #[must_use]
+    pub const fn image_prices(&self) -> ImagePrices {
+        self.image_prices
     }
 
     /// The model this session writes documents with. Fixed at spawn.
@@ -651,6 +867,10 @@ fn run(
                 panic::catch_unwind(AssertUnwindSafe(|| worker.recover_documents()))
                     .unwrap_or_else(|_| vec![Recovery::NeedsAttention { count: 1 }]),
             );
+            recoveries.extend(
+                panic::catch_unwind(AssertUnwindSafe(|| worker.recover_images()))
+                    .unwrap_or_else(|_| vec![Recovery::NeedsAttention { count: 1 }]),
+            );
             let project = &worker.project;
             let _ = view.metadata.set(ProjectMetadata {
                 project_id: project.manifest().project_id.clone(),
@@ -662,6 +882,7 @@ fn run(
                 worker.publish(view, shot_index);
             }
             worker.publish_documents(view);
+            worker.publish_production(view);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
             }
@@ -714,6 +935,26 @@ fn run(
                     Some(worker) => {
                         let result = worker.apply_document(command, resubmit);
                         worker.publish_documents(view);
+                        // The bible says who is cast.
+                        worker.publish_production(view);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Some(Envelope {
+                token,
+                work:
+                    Work::Production {
+                        command,
+                        submission,
+                    },
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.apply_production(command, submission);
+                        worker.publish_production(view);
                         result
                     }
                 };
@@ -830,6 +1071,11 @@ struct Worker {
     /// Shots whose last generation is unresolved; see
     /// [`ShotCommand::ResubmitKeyframes`].
     keyframes_unresolved: [bool; SHOT_COUNT],
+    /// A style sample may have been charged without its result.
+    style_unresolved: bool,
+    /// Characters an image of which may have been charged without its
+    /// result.
+    cast_unresolved: BTreeSet<String>,
 }
 
 impl Worker {
@@ -860,6 +1106,8 @@ impl Worker {
             },
             shots: [None, None],
             keyframes_unresolved: [false, false],
+            style_unresolved: false,
+            cast_unresolved: BTreeSet::new(),
         }
     }
 
@@ -901,25 +1149,33 @@ impl Worker {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
             // Generation runs as write-ahead jobs so an interruption is
             // recoverable; every other command is a single canonical update.
-            ShotCommand::Generate => self.generate(shot_index, false),
-            ShotCommand::ResubmitKeyframes => self.generate(shot_index, true),
+            ShotCommand::Generate => self.generate(shot_index, Consent::default()),
+            ShotCommand::ResubmitKeyframes => self.generate(shot_index, Consent::RISK_PAYING_TWICE),
+            ShotCommand::GenerateConsenting(consent) => self.generate(shot_index, consent),
             ShotCommand::GenerateVideo => self.start_video(shot_index, false),
             ShotCommand::ResubmitVideo => self.start_video(shot_index, true),
+            // A keyframe of a style or cast since moved on from is not locked.
+            ShotCommand::Lock => self
+                .with_shot(shot_index, |project, _, shot| {
+                    generation::lock(project, shot)
+                })
+                .map_err(generation_error),
             command => self
                 .with_shot(shot_index, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
                     ShotCommand::Select(candidate) => shot.select(project, candidate),
-                    ShotCommand::Lock => shot.lock(project),
                     ShotCommand::Reset => shot.reset(project),
                     ShotCommand::MigrateLegacyHashes => {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
                     ShotCommand::LockVideo => shot.lock_video(project),
                     ShotCommand::Generate
+                    | ShotCommand::Lock
                     | ShotCommand::ResubmitKeyframes
+                    | ShotCommand::GenerateConsenting(_)
                     | ShotCommand::GenerateVideo
                     | ShotCommand::ResubmitVideo => {
-                        unreachable!("generation is handled above")
+                        unreachable!("handled above")
                     }
                 })
                 .map_err(SessionError::Shot),
@@ -991,13 +1247,9 @@ impl Worker {
         }
     }
 
-    fn generate(&mut self, shot_index: usize, risk_paying_twice: bool) -> Result<(), SessionError> {
+    fn generate(&mut self, shot_index: usize, consent: Consent) -> Result<(), SessionError> {
         let generated = self.with_shot(shot_index, |project, provider, shot| {
-            if risk_paying_twice {
-                generation::resubmit(project, shot, provider, &mut NoHooks)
-            } else {
-                generation::generate(project, shot, provider, &mut NoHooks)
-            }
+            generation::generate_with_consent(project, shot, provider, &mut NoHooks, consent)
         });
         match &generated {
             Ok(_) => self.keyframes_unresolved[shot_index] = false,
@@ -1156,8 +1408,173 @@ impl Worker {
             DocumentCommand::LockScreenplay { revision } => {
                 screenplay_document::lock(project, revision).map_err(revision_error)
             }
+            DocumentCommand::WriteBible => {
+                ask(DocumentKind::Bible, &|| bible::write(project, model))
+            }
+            DocumentCommand::SaveBibleEntry { based_on, edit } => {
+                let latest = revisions::latest(project, DocumentKind::Bible)
+                    .map_err(revision_error)?
+                    .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
+                if latest.revision != based_on {
+                    return Err(revision_error(RevisionError::NotLatest {
+                        based_on,
+                        latest: latest.revision,
+                    }));
+                }
+                let base: Bible = revisions::read(project, &latest).map_err(revision_error)?;
+                let edited = base
+                    .with_entry_edit(edit)
+                    .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
+                bible_document::edit(project, based_on, &edited)
+                    .map(|_| ())
+                    .map_err(revision_error)
+            }
+            DocumentCommand::LockBible { revision } => {
+                bible_document::lock(project, revision).map_err(revision_error)
+            }
         }))
         .unwrap_or(Err(SessionError::Panicked))
+    }
+
+    fn apply_production(
+        &mut self,
+        command: ProductionCommand,
+        submission: Submission,
+    ) -> Result<(), SessionError> {
+        let project = &self.project;
+        let provider = &self.provider;
+        let style_error = |error| SessionError::Production(ProductionError::Style(error));
+        let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
+        let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
+        let mut hooks = NoHooks;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match &command {
+            ProductionCommand::SampleStyle { preset, note } => paid(
+                style::sample(
+                    project,
+                    provider,
+                    SampleRequest {
+                        preset,
+                        note: note.as_deref(),
+                        scene_id: None,
+                    },
+                    submission,
+                    &mut hooks,
+                )
+                .map(|_| ()),
+            ),
+            ProductionCommand::RefineStyle { sample, note } => paid(
+                style::refine(project, provider, sample, note, submission, &mut hooks).map(|_| ()),
+            ),
+            ProductionCommand::SelectStyle(sample) => {
+                style_document::select(project, sample).map_err(style_error)
+            }
+            ProductionCommand::RejectStyle(sample) => {
+                style_document::reject(project, sample).map_err(style_error)
+            }
+            ProductionCommand::LockStyle(sample) => style_document::lock(project, sample)
+                .map(|_| ())
+                .map_err(style_error),
+            ProductionCommand::Audition { character, count } => paid(
+                cast::audition(
+                    project,
+                    provider,
+                    character,
+                    usize::try_from(*count).unwrap_or(usize::MAX),
+                    submission,
+                    &mut hooks,
+                )
+                .map(|_| ()),
+            ),
+            ProductionCommand::MakePack { character, remake } => paid(
+                cast::remake_pack(project, provider, character, remake, submission, &mut hooks)
+                    .map(|_| ()),
+            ),
+            ProductionCommand::SelectPortrait {
+                character,
+                portrait,
+            } => cast_document::select(project, character, portrait).map_err(cast_error),
+            ProductionCommand::RejectPortrait {
+                character,
+                portrait,
+            } => cast_document::reject(project, character, portrait).map_err(cast_error),
+            ProductionCommand::LockCharacter { character } => {
+                cast::lock(project, provider, character)
+                    .map(|_| ())
+                    .map_err(generation_error)
+            }
+        }))
+        .unwrap_or(Err(SessionError::Panicked));
+        // A paid call cut short may have been charged without its result;
+        // what the partitions now hold says so, whichever way it ended.
+        match command {
+            ProductionCommand::SampleStyle { .. } | ProductionCommand::RefineStyle { .. } => {
+                self.note_unresolved_samples();
+            }
+            ProductionCommand::Audition { .. } | ProductionCommand::MakePack { .. } => {
+                self.note_unresolved_casting();
+            }
+            _ => {}
+        }
+        outcome
+    }
+
+    /// Record style samples and casting images MiniMax answered before an
+    /// interruption, and note those that may have been charged without
+    /// their result. Never calls MiniMax.
+    fn recover_images(&mut self) -> Vec<Recovery> {
+        if self.project.is_read_only() {
+            return Vec::new();
+        }
+        let mut recoveries = Vec::new();
+        let mut attention = 0;
+        for (kind, recovered) in [
+            (ImageWork::StyleSample, style::recover(&self.project)),
+            (ImageWork::Casting, cast::recover(&self.project)),
+        ] {
+            match recovered {
+                Ok(recovery) => {
+                    attention += recovery.needs_attention;
+                    if !recovery.attached.is_empty() {
+                        recoveries.push(Recovery::Images {
+                            kind,
+                            count: recovery.attached.len(),
+                        });
+                    }
+                    self.note_unresolved(kind, &recovery);
+                }
+                Err(_) => attention += 1,
+            }
+        }
+        if attention > 0 {
+            recoveries.push(Recovery::NeedsAttention { count: attention });
+        }
+        recoveries
+    }
+
+    fn note_unresolved_samples(&mut self) {
+        if let Ok(recovery) = style::recover(&self.project) {
+            self.note_unresolved(ImageWork::StyleSample, &recovery);
+        }
+    }
+
+    fn note_unresolved_casting(&mut self) {
+        if let Ok(recovery) = cast::recover(&self.project) {
+            self.note_unresolved(ImageWork::Casting, &recovery);
+        }
+    }
+
+    fn note_unresolved(&mut self, kind: ImageWork, recovery: &ImageRecovery) {
+        match kind {
+            ImageWork::StyleSample => self.style_unresolved = !recovery.unresolved.is_empty(),
+            ImageWork::Casting => {
+                self.cast_unresolved = recovery
+                    .unresolved
+                    .iter()
+                    .filter_map(|id| cast_document::character_of(id))
+                    .map(str::to_owned)
+                    .collect();
+            }
+        }
     }
 
     /// Keep the documents models answered before an interruption, whichever
@@ -1179,14 +1596,10 @@ impl Worker {
                 Ok((completed, needs_attention)) => {
                     attention += needs_attention;
                     for record in completed {
-                        let kind = if record
-                            .artifact_id
-                            .starts_with(DocumentKind::Screenplay.id_prefix())
-                        {
-                            DocumentKind::Screenplay
-                        } else {
-                            DocumentKind::StoryAnalysis
-                        };
+                        let kind = [DocumentKind::Screenplay, DocumentKind::Bible]
+                            .into_iter()
+                            .find(|kind| record.artifact_id.starts_with(kind.id_prefix()))
+                            .unwrap_or(DocumentKind::StoryAnalysis);
                         recoveries.push(Recovery::Document {
                             kind,
                             revision: record.revision,
@@ -1258,10 +1671,38 @@ impl Worker {
                         && dependency.content_hash == current.content_hash
                 }),
             });
+        let bible_revisions =
+            revisions::revisions(project, DocumentKind::Bible).map_err(revision_error)?;
+        let bible_latest =
+            revisions::latest(project, DocumentKind::Bible).map_err(revision_error)?;
+        let bible_stale = match &bible_latest {
+            None => Vec::new(),
+            Some(record) => bible_document::staleness(project, record).map_err(revision_error)?,
+        };
+        let bible = match &bible_latest {
+            None => None,
+            Some(record) => Some((
+                record.revision,
+                revisions::read::<Bible>(project, record).map_err(revision_error)?,
+            )),
+        };
+        let bible_locked = bible_revisions
+            .iter()
+            .find(|record| record.status == revisions::RevisionStatus::Locked)
+            .map(|record| record.revision);
         let info = self.model.info();
         let ready = self.model.describe().ready;
         Ok(PublishedDocuments {
             source_revision: Some(source.revision),
+            bible_cost: if ready && locked.is_some() {
+                bible::bible_cost(project, &info).ok().flatten()
+            } else {
+                None
+            },
+            bible_revisions,
+            bible,
+            bible_locked,
+            bible_stale,
             analysis_cost: if ready {
                 story::analysis_cost(project, &info).ok().flatten()
             } else {
@@ -1278,6 +1719,71 @@ impl Worker {
             locked,
             analysis_stale,
             screenplay_stale,
+            damaged: None,
+        })
+    }
+
+    fn publish_production(&self, view: &View) {
+        let published = panic::catch_unwind(AssertUnwindSafe(|| self.read_production()))
+            .unwrap_or_else(|_| Err(SessionError::Panicked))
+            .unwrap_or_else(|error| PublishedProduction {
+                damaged: Some(error.to_string()),
+                ..PublishedProduction::default()
+            });
+        *lock(&view.production) = Some(Arc::new(published));
+    }
+
+    fn read_production(&self) -> Result<PublishedProduction, SessionError> {
+        let project = &self.project;
+        let style_error = |error| SessionError::Production(ProductionError::Style(error));
+        let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
+        // Media paths were checked when their records were read.
+        let at = |media_path: &str| {
+            ProjectRelativePath::new(media_path)
+                .map(|path| project.root().resolve(&path))
+                .unwrap_or_default()
+        };
+        let samples = style_document::samples(project)
+            .map_err(style_error)?
+            .into_iter()
+            .map(|sample| {
+                let media = at(&sample.media_path);
+                (sample, media)
+            })
+            .collect();
+        let bible = revisions::current(project, DocumentKind::Bible)
+            .map_err(|error| SessionError::Document(DocumentError::Revision(error)))?
+            .map(|record| revisions::read::<Bible>(project, &record))
+            .transpose()
+            .map_err(|error| SessionError::Document(DocumentError::Revision(error)))?;
+        let mut characters = Vec::new();
+        for id in cast::main_characters(project).map_err(generation_error)? {
+            let name = bible
+                .as_ref()
+                .and_then(|bible| bible.characters.iter().find(|character| character.id == id))
+                .map_or_else(|| id.clone(), |character| character.name.clone());
+            let images = cast_document::images(project, &id)
+                .map_err(cast_error)?
+                .into_iter()
+                .map(|image| {
+                    let media = at(&image.media_path);
+                    (image, media)
+                })
+                .collect();
+            characters.push(PublishedCharacter {
+                lock: cast_document::locked(project, &id).map_err(cast_error)?,
+                stale: cast::staleness(project, &id).map_err(generation_error)?,
+                unresolved: self.cast_unresolved.contains(&id),
+                id,
+                name,
+                images,
+            });
+        }
+        Ok(PublishedProduction {
+            samples,
+            style: style_document::locked(project).map_err(style_error)?,
+            style_unresolved: self.style_unresolved,
+            characters,
             damaged: None,
         })
     }
@@ -2608,6 +3114,527 @@ mod tests {
                     .revision,
                 1
             );
+        }
+    }
+
+    mod production {
+        use super::*;
+        use kineto_llm::fake::FakeLlm;
+        use kineto_project::{
+            bible::{EntryKind, SAMPLE_BIBLE_JSON},
+            cast::PortraitStatus,
+            revisions::Origin,
+            screenplay::SAMPLE_SCREENPLAY_JSON,
+            story::SAMPLE_ANALYSIS_JSON,
+            style::SampleStatus,
+        };
+        use kineto_provider_minimax::{
+            HttpResponse, MinimaxClient, SharedTransport, Transport, TransportFailure,
+        };
+        use kineto_providers::secret::SecretString;
+        use std::sync::atomic::AtomicU32;
+
+        /// MiniMax `image-01`, offline: a distinct JPEG per call.
+        #[derive(Default)]
+        struct FakeImages {
+            calls: AtomicU32,
+            /// Calls to time out after sending, leaving them unresolved.
+            time_out: AtomicU32,
+        }
+
+        impl Transport for FakeImages {
+            fn post_json(
+                &self,
+                _url: &str,
+                _api_key: &SecretString,
+                _body: &[u8],
+            ) -> Result<HttpResponse, TransportFailure> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if self
+                    .time_out
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    return Err(TransportFailure::Timeout);
+                }
+                let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x52, u8::try_from(call).unwrap()];
+                use base64::Engine as _;
+                Ok(HttpResponse {
+                    status: 200,
+                    body: format!(
+                        r#"{{"id":"i","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0}}}}"#,
+                        base64::engine::general_purpose::STANDARD.encode(jpeg)
+                    )
+                    .into_bytes(),
+                })
+            }
+
+            fn get(&self, url: &str, _: &SecretString) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("images make no GET request: {url}")
+            }
+
+            fn download(&self, url: &str, _: u64) -> Result<HttpResponse, TransportFailure> {
+                unreachable!("images download nothing: {url}")
+            }
+        }
+
+        fn spawn(
+            request: OpenRequest,
+            fake: &Arc<FakeImages>,
+            model: DocumentModel,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let transport: SharedTransport = Arc::clone(fake) as SharedTransport;
+            let provider = ImageProvider::Minimax(Some(MinimaxClient::with_transport(
+                transport,
+                SecretString::new("sk-test".to_owned()).unwrap(),
+                "https://example.test",
+            )));
+            let (sink, events) = sink();
+            let session = ProjectSession::spawn_with_model(
+                request,
+                provider,
+                model,
+                sink,
+                SessionOptions::default(),
+            )
+            .unwrap();
+            (session, events)
+        }
+
+        fn token() -> u64 {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        }
+
+        fn completion(events: &Receiver<Event>, token: u64) -> Result<(), String> {
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::DocumentCompleted {
+                    token: actual,
+                    result,
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a completion, got {other:?}"),
+            }
+        }
+
+        fn document(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: DocumentCommand,
+        ) -> Result<(), String> {
+            let token = token();
+            session.submit_document(command, token).unwrap();
+            completion(events, token)
+        }
+
+        fn produce(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: ProductionCommand,
+        ) -> Result<(), String> {
+            let token = token();
+            session.submit_production(command, token).unwrap();
+            completion(events, token)
+        }
+
+        fn risk(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: ProductionCommand,
+        ) -> Result<(), String> {
+            let token = token();
+            session.resubmit_production(command, token).unwrap();
+            completion(events, token)
+        }
+
+        fn audition(character: &str, count: u32) -> ProductionCommand {
+            ProductionCommand::Audition {
+                character: character.to_owned(),
+                count,
+            }
+        }
+
+        /// A new film whose screenplay is locked and whose bible is written.
+        fn written(
+            target: &std::path::Path,
+            fake: &Arc<FakeImages>,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let model = DocumentModel::Fake(FakeLlm::answering([
+                SAMPLE_ANALYSIS_JSON,
+                SAMPLE_SCREENPLAY_JSON,
+                SAMPLE_BIBLE_JSON,
+            ]));
+            let (session, events) = spawn(
+                OpenRequest::CreateText {
+                    path: target.to_path_buf(),
+                    manifest: Box::new(manifest()),
+                    source: b"A filmmaker hears the last line and leaves.\n".to_vec(),
+                },
+                fake,
+                model,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            document(&session, &events, DocumentCommand::AnalyzeStory).unwrap();
+            document(&session, &events, DocumentCommand::WriteScreenplay).unwrap();
+            assert_eq!(
+                session.documents().unwrap().bible_cost,
+                None,
+                "nothing locked yet"
+            );
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockScreenplay { revision: 1 },
+            )
+            .unwrap();
+            document(&session, &events, DocumentCommand::WriteBible).unwrap();
+            (session, events)
+        }
+
+        fn entry(appearance: &str) -> EntryEdit {
+            EntryEdit {
+                kind: EntryKind::Character,
+                id: "filmmaker".to_owned(),
+                description: "A documentary filmmaker in his fifties.".to_owned(),
+                appearance: appearance.to_owned(),
+                wardrobe: "A worn grey overcoat.".to_owned(),
+                forbidden_changes: vec!["Never without the coat.".to_owned()],
+            }
+        }
+
+        #[test]
+        fn the_director_writes_a_bible_locks_a_style_and_casts_a_character() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeImages::default());
+            let (session, events) = written(&target, &fake);
+
+            let documents = session.documents().unwrap();
+            let (revision, bible) = documents.bible.as_ref().unwrap();
+            assert_eq!(*revision, 1);
+            assert_eq!(bible.characters[0].id, "filmmaker");
+            assert!(documents.bible_stale.is_empty());
+            assert_eq!(documents.bible_locked, None);
+            assert_eq!(documents.bible_revisions[0].origin, Origin::Generated);
+
+            document(
+                &session,
+                &events,
+                DocumentCommand::SaveBibleEntry {
+                    based_on: 1,
+                    edit: entry("Grey at the temples, a scar over one eyebrow."),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                document(
+                    &session,
+                    &events,
+                    DocumentCommand::SaveBibleEntry {
+                        based_on: 1,
+                        edit: entry("Older."),
+                    },
+                ),
+                Err("Document(Revision(NotLatest { based_on: 1, latest: 2 }))".to_owned())
+            );
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockBible { revision: 2 },
+            )
+            .unwrap();
+            let documents = session.documents().unwrap();
+            assert_eq!(documents.bible_locked, Some(2));
+            assert_eq!(documents.bible_revisions[1].origin, Origin::Edited);
+            assert!(
+                documents.bible.as_ref().unwrap().1.characters[0]
+                    .appearance
+                    .contains("scar")
+            );
+
+            let prices = session.image_prices();
+            assert_eq!(prices.sample.unwrap().amount_micros, 3_500);
+            assert_eq!(prices.pack.unwrap().0, 7);
+            let production = session.production().unwrap();
+            assert_eq!(
+                production
+                    .characters
+                    .iter()
+                    .map(|character| character.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["filmmaker", "interviewer"]
+            );
+            assert!(production.samples.is_empty() && production.style.is_none());
+
+            // Casting follows a locked style.
+            assert_eq!(
+                produce(&session, &events, audition("filmmaker", 1)),
+                Err("Generation(Prerequisite(LockedStyle))".to_owned())
+            );
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SampleStyle {
+                    preset: "film_noir".to_owned(),
+                    note: None,
+                },
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::RefineStyle {
+                    sample: "style_s0001".to_owned(),
+                    note: "Harder shadows.".to_owned(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::LockStyle("style_s0002".to_owned())
+                ),
+                Err("Production(Style(NotSelected(\"style_s0002\")))".to_owned())
+            );
+            produce(
+                &session,
+                &events,
+                ProductionCommand::RejectStyle("style_s0001".to_owned()),
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SelectStyle("style_s0002".to_owned()),
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::LockStyle("style_s0002".to_owned()),
+            )
+            .unwrap();
+            let production = session.production().unwrap();
+            let statuses: Vec<_> = production
+                .samples
+                .iter()
+                .map(|(sample, _)| sample.status)
+                .collect();
+            assert_eq!(statuses, [SampleStatus::Rejected, SampleStatus::Selected]);
+            assert!(production.samples[1].1.is_file());
+            assert!(production.samples[1].1.starts_with(&target));
+            assert_eq!(
+                production.style.as_ref().unwrap().artifact_id,
+                "style_s0002"
+            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+
+            produce(&session, &events, audition("filmmaker", 2)).unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SelectPortrait {
+                    character: "filmmaker".to_owned(),
+                    portrait: "cast.filmmaker.0002".to_owned(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::LockCharacter {
+                        character: "filmmaker".to_owned()
+                    }
+                ),
+                Err(
+                    "Generation(Provider { source: MissingReference(Front), class: Terminal })"
+                        .to_owned()
+                )
+            );
+            produce(
+                &session,
+                &events,
+                ProductionCommand::MakePack {
+                    character: "filmmaker".to_owned(),
+                    remake: Vec::new(),
+                },
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::LockCharacter {
+                    character: "filmmaker".to_owned(),
+                },
+            )
+            .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 11);
+            let production = session.production().unwrap();
+            let filmmaker = &production.characters[0];
+            assert_eq!(filmmaker.name, "The Filmmaker");
+            assert_eq!(filmmaker.images.len(), 9);
+            assert_eq!(filmmaker.images[1].0.status, Some(PortraitStatus::Selected));
+            let lock = filmmaker.lock.as_ref().unwrap();
+            assert_eq!(lock.portrait.artifact_id, "cast.filmmaker.0002");
+            assert_eq!(lock.references.len(), 7);
+            assert!(filmmaker.stale.is_empty() && !filmmaker.unresolved);
+
+            // Casting follows the locked bible: an edit of the entry the
+            // cast was made from makes it stale once it is locked.
+            document(
+                &session,
+                &events,
+                DocumentCommand::SaveBibleEntry {
+                    based_on: 2,
+                    edit: entry("Grey at the temples, clean-shaven."),
+                },
+            )
+            .unwrap();
+            assert!(session.production().unwrap().characters[0].stale.is_empty());
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockBible { revision: 3 },
+            )
+            .unwrap();
+            assert_eq!(
+                session.production().unwrap().characters[0].stale,
+                ["bible_character.filmmaker"]
+            );
+
+            // Keyframes with what the director accepted.
+            on_shot(
+                &session,
+                &events,
+                ShotCommand::GenerateConsenting(Consent::default()),
+            )
+            .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 14);
+            on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
+
+            // Another style is locked before the keyframe is: it was made in
+            // the style the director moved on from, so it is not locked.
+            for command in [
+                ProductionCommand::SampleStyle {
+                    preset: "film_realism".to_owned(),
+                    note: None,
+                },
+                ProductionCommand::SelectStyle("style_s0003".to_owned()),
+                ProductionCommand::LockStyle("style_s0003".to_owned()),
+            ] {
+                produce(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                on_shot(&session, &events, ShotCommand::Lock),
+                Err("Shot(StaleSelection)".to_owned())
+            );
+            assert!(!session.snapshot(0).unwrap().locked);
+
+            // Made again in the new style, it is.
+            on_shot(
+                &session,
+                &events,
+                ShotCommand::GenerateConsenting(Consent::default()),
+            )
+            .unwrap();
+            on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
+            on_shot(&session, &events, ShotCommand::Lock).unwrap();
+            assert!(session.snapshot(0).unwrap().locked);
+        }
+
+        /// Submit `command` to the first shot and wait for its result.
+        fn on_shot(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: ShotCommand,
+        ) -> Result<(), String> {
+            let token = token();
+            session.submit(0, command, token).unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Completed {
+                    token: actual,
+                    result,
+                    ..
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a shot completion, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn an_unresolved_portrait_waits_for_its_own_character_only_and_survives_reopening() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeImages::default());
+            let (session, events) = written(&target, &fake);
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockBible { revision: 1 },
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SampleStyle {
+                    preset: "film_noir".to_owned(),
+                    note: None,
+                },
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SelectStyle("style_s0001".to_owned()),
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::LockStyle("style_s0001".to_owned()),
+            )
+            .unwrap();
+
+            fake.time_out.store(1, Ordering::SeqCst);
+            assert!(produce(&session, &events, audition("filmmaker", 1)).is_err());
+            let unresolved = |session: &ProjectSession| {
+                session
+                    .production()
+                    .unwrap()
+                    .characters
+                    .iter()
+                    .map(|character| character.unresolved)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(unresolved(&session), [true, false]);
+            assert_eq!(
+                produce(&session, &events, audition("filmmaker", 1)),
+                Err("Generation(UnresolvedSubmission)".to_owned())
+            );
+            produce(&session, &events, audition("interviewer", 1)).unwrap();
+            assert_eq!(unresolved(&session), [true, false]);
+            drop(session);
+
+            let (session, events) = spawn(
+                OpenRequest::Open {
+                    path: target.clone(),
+                },
+                &fake,
+                DocumentModel::None,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(unresolved(&session), [true, false]);
+            assert!(!session.production().unwrap().style_unresolved);
+            let calls = fake.calls.load(Ordering::SeqCst);
+            risk(&session, &events, audition("filmmaker", 1)).unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), calls + 1);
+            assert_eq!(unresolved(&session), [false, false]);
         }
     }
 }

@@ -142,6 +142,17 @@ external int _kinetoProjectShotResubmitKeyframes(
   int token,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Bool, Bool, Uint64)>(
+  symbol: 'kineto_project_shot_generate_consenting',
+)
+external int _kinetoProjectShotGenerateConsenting(
+  Pointer<Void> session,
+  int shotIndex,
+  bool riskPayingTwice,
+  bool identityDrift,
+  int token,
+);
+
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(
   symbol: 'kineto_project_shot_select',
 )
@@ -386,6 +397,9 @@ final class KinetoProjectException implements Exception {
   /// The create target already exists; nothing was overwritten.
   static const int alreadyExists = 103;
 
+  /// The shot selection, sample or portrait is locked.
+  static const int locked = 111;
+
   /// Another live session holds the project's single-writer lock.
   static const int busy = 117;
 
@@ -421,8 +435,11 @@ final class KinetoProjectException implements Exception {
   /// A screenplay is written from a story analysis, which does not exist yet.
   static const int needsAnalysis = 133;
 
-  /// A newer screenplay revision exists than the one the edit started from.
+  /// A newer revision exists than the one the edit started from.
   static const int notLatest = 136;
+
+  /// The edit would leave the document invalid.
+  static const int invalidDocument = 137;
 
   /// No language model is configured for documents.
   static const int modelNotConfigured = 140;
@@ -430,6 +447,38 @@ final class KinetoProjectException implements Exception {
   /// The language model's cost is not known, as for an agent on a
   /// subscription.
   static const int costUnknown = 143;
+
+  /// A keyframe would show a character without an identity reference, which
+  /// the project's policy refuses unless the director consents.
+  static const int identityDrift = 144;
+
+  /// The bible is written from the locked screenplay.
+  static const int needsLockedScreenplay = 145;
+
+  /// The image provider cannot make this, such as the free local demo.
+  static const int imageProviderUnsuitable = 146;
+
+  /// There is no style preset, sample, character or image with that ID.
+  static const int noSuchArtifact = 147;
+
+  /// Casting is done from the bible, which does not exist yet.
+  static const int needsBible = 148;
+
+  /// Casting follows the locked style.
+  static const int needsLockedStyle = 149;
+
+  /// A reference pack is made from, and a cast locked with, the selected
+  /// portrait.
+  static const int needsSelectedPortrait = 150;
+
+  /// The image provider takes no identity reference, or not this portrait.
+  static const int noIdentityReference = 151;
+
+  /// A rejected sample or portrait cannot be chosen.
+  static const int rejected = 152;
+
+  /// The selected portrait's reference pack is not complete.
+  static const int packIncomplete = 153;
 
   final int code;
   final String message;
@@ -767,6 +816,27 @@ final class KinetoProjectSession implements Finalizable {
         (token) => _kinetoProjectShotResubmitKeyframes(_handle, shotIndex, token),
       );
 
+  /// Generate the shot's candidates with what the director explicitly
+  /// accepted: [riskPayingTwice] as for [resubmitShotKeyframes], and
+  /// [identityDrift] to show characters without an identity reference
+  /// although the project's policy refuses that with
+  /// [KinetoProjectException.identityDrift].
+  Future<void> generateShotCandidatesConsenting(
+    int shotIndex, {
+    bool riskPayingTwice = false,
+    bool identityDrift = false,
+  }) =>
+      _submit(
+        shotIndex,
+        (token) => _kinetoProjectShotGenerateConsenting(
+          _handle,
+          shotIndex,
+          riskPayingTwice,
+          identityDrift,
+          token,
+        ),
+      );
+
   Future<void> selectShotCandidate(int shotIndex, int candidateIndex) {
     if (candidateIndex < 0) {
       throw RangeError.value(
@@ -926,6 +996,12 @@ final class _SessionPort {
             document: switch (values[3]) {
               -2 => KinetoDocumentKind.storyAnalysis,
               -3 => KinetoDocumentKind.screenplay,
+              -4 => KinetoDocumentKind.bible,
+              _ => null,
+            },
+            images: switch (values[3]) {
+              -5 => KinetoImageWork.styleSamples,
+              -6 => KinetoImageWork.casting,
               _ => null,
             },
           ),
@@ -984,15 +1060,20 @@ final class KinetoRecovery {
     required this.revisionOrCount,
     required this.errorCode,
     this.document,
+    this.images,
   });
 
-  /// The shot whose interrupted generation this was; null for a document and
-  /// for job records the engine could not read or place.
+  /// The shot whose interrupted generation this was; null for a document,
+  /// for paid images and for job records the engine could not read or place.
   final int? shotIndex;
 
   /// The document a model answered before the interruption, kept as
   /// revision [revisionOrCount] when the project opened.
   final KinetoDocumentKind? document;
+
+  /// The paid images MiniMax answered before the interruption,
+  /// [revisionOrCount] of them, kept when the project opened.
+  final KinetoImageWork? images;
 
   /// The generation or document revision, or the number of unplaced records.
   final int revisionOrCount;
@@ -1001,10 +1082,11 @@ final class KinetoRecovery {
   final int errorCode;
 
   /// The interrupted generation was completed when the project opened.
-  bool get completed => (shotIndex != null || document != null) && errorCode == 0;
+  bool get completed =>
+      (shotIndex != null || document != null || images != null) && errorCode == 0;
 
   /// Job records that could not be read or placed; nothing was changed.
-  bool get needsAttention => shotIndex == null && document == null;
+  bool get needsAttention => shotIndex == null && document == null && images == null;
 
   /// Why the recovery did not complete, when it did not.
   KinetoProjectException? get error =>
@@ -1125,6 +1207,16 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'model_unknown': 141,
   'document_damaged': 142,
   'cost_unknown': 143,
+  'identity_drift': 144,
+  'needs_locked_screenplay': 145,
+  'image_provider_unsuitable': 146,
+  'no_such_artifact': 147,
+  'needs_bible': 148,
+  'needs_locked_style': 149,
+  'needs_selected_portrait': 150,
+  'no_identity_reference': 151,
+  'rejected': 152,
+  'pack_incomplete': 153,
   'panic': 199,
 };
 
@@ -1167,14 +1259,26 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   133: 'Analyse the story before writing the screenplay',
   134: 'Write the screenplay before rewriting a scene',
   135: 'The screenplay has no scene with that id',
-  136: 'A newer screenplay revision exists; review it before saving',
-  137: 'The edit breaks the screenplay: every line of dialogue needs a cast member, and no block may be empty',
-  138: 'Only the latest screenplay revision can be locked',
+  136: 'A newer revision exists; review it before saving',
+  137: 'The edit leaves the document invalid: every line of dialogue needs a cast member, and no '
+      'block or description may be empty',
+  138: 'Only the latest revision can be locked',
   139: 'The source must be non-empty text of at most 8 MiB',
   140: 'No language model is configured; set KINETO_LLM_PROVIDER',
   141: 'KINETO_LLM_PROVIDER names a language model this Kineto build does not have',
   142: 'A stored document no longer matches its record',
   143: "This model's cost is not known",
+  144: 'A character in this shot has no locked cast to keep their identity; generate anyway only '
+      'if a different-looking person is acceptable',
+  145: 'Lock the screenplay before writing the bible',
+  146: 'The image provider cannot make this; set KINETO_IMAGE_PROVIDER=minimax with its key',
+  147: 'There is nothing with that id',
+  148: 'Write the bible before casting',
+  149: 'Lock a style before casting',
+  150: 'Select a portrait first',
+  151: 'The image provider cannot take this portrait as an identity reference',
+  152: 'A rejected sample or portrait cannot be chosen',
+  153: "The selected portrait's reference pack is not complete; make the pack first",
   199: 'Native project call failed unexpectedly',
 };
 

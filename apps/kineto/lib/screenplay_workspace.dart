@@ -20,7 +20,8 @@ final class SceneDraft {
   final List<KinetoScreenplayBlock> blocks;
 }
 
-String _dollars(int micros) {
+/// [micros] USD as dollars, for example `$0.0035`.
+String formatDollars(int micros) {
   final dollars = micros ~/ 1000000;
   final fraction = (micros % 1000000).toString().padLeft(6, '0').replaceFirst(RegExp(r'0+$'), '');
   return fraction.isEmpty ? '\$$dollars' : '\$$dollars.$fraction';
@@ -32,7 +33,7 @@ String documentCostLabel(KinetoLanguageModel model, int? micros) {
   if (model.isAgent) return 'cost unknown: billed by the Kimi Code subscription';
   if (micros == null) return 'cost unknown';
   if (micros == 0) return 'free';
-  return 'at most ${_dollars(micros)}';
+  return 'at most ${formatDollars(micros)}';
 }
 
 /// Why documents cannot be asked for, when they cannot.
@@ -534,7 +535,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
   Future<void> _importDialog(BuildContext context) async {
     final text = await showDialog<String>(
       context: context,
-      builder: (context) => const _TextDialog(
+      builder: (context) => const TextPromptDialog(
         title: 'Import story text',
         width: 640,
         fieldKey: 'import-text',
@@ -551,7 +552,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
   Future<void> _rewriteDialog(BuildContext context, KinetoScene scene) async {
     final direction = await showDialog<String>(
       context: context,
-      builder: (context) => _TextDialog(
+      builder: (context) => TextPromptDialog(
         title: 'Rewrite “${scene.heading}”',
         width: 560,
         fieldKey: 'rewrite-direction',
@@ -571,8 +572,9 @@ class ScreenplayWorkspaceView extends StatelessWidget {
 /// A dialog asking for one piece of text. It owns its controller: the field
 /// is still built while the dialog animates out, so the controller may only
 /// be disposed with the dialog itself.
-class _TextDialog extends StatefulWidget {
-  const _TextDialog({
+class TextPromptDialog extends StatefulWidget {
+  const TextPromptDialog({
+    super.key,
     required this.title,
     required this.width,
     required this.fieldKey,
@@ -593,10 +595,10 @@ class _TextDialog extends StatefulWidget {
   final String confirmLabel;
 
   @override
-  State<_TextDialog> createState() => _TextDialogState();
+  State<TextPromptDialog> createState() => _TextPromptDialogState();
 }
 
-class _TextDialogState extends State<_TextDialog> {
+class _TextPromptDialogState extends State<TextPromptDialog> {
   final TextEditingController _controller = TextEditingController();
 
   @override

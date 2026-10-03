@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "samples": [
+    {
+      "artifact_id": "style_s0001",
+      "preset": "film_noir",
+      "preset_version": 1,
+      "directives": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition",
+      "scene_id": "office_night",
+      "status": "selected",
+      "content_hash": "sha256:2bdf02ec8cf600bd032157aee62781334dee220c6fc8f23aa6fdd24393676f9f",
+      "input_hash": "sha256:3e581a5e537897d6d09b86b74d8ee79a969302390ef9b8584f63c38c8429ffe5",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "style/samples/style_s0001.jpg",
+      "provenance": {
+        "compiler_version": "style-sample/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Scene: INT. SMALL OFFICE - NIGHT, night. One table, two chairs, a rain-streaked window, a single desk lamp. One table, two chairs. Rain on the window. The Filmmaker: A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. The Interviewer: A woman in her thirties, short black hair, round glasses. Wardrobe: A grey blazer, a notebook always in hand. Practical light only: desk lamps, street light through windows.",
+        "prompt_hash": "sha256:a641b88c5c0625e9be6184f0d985a9c4e79989e822bf9ed7577977a430025895",
+        "applied_constraints": [
+          "style.preset",
+          "scene.setting",
+          "bible.location",
+          "scene.action",
+          "character.filmmaker",
+          "character.filmmaker.detail",
+          "character.interviewer",
+          "character.interviewer.detail",
+          "bible.world"
+        ],
+        "dropped_constraints": [
+          {
+            "constraint": "style.avoid",
+            "reason": "the provider takes no negative prompt",
+            "degradation": "cosmetic"
+          }
+        ]
+      },
+      "dependencies": [
+        {
+          "artifact_id": "screenplay_scene.office_night",
+          "content_hash": "sha256:4ebac8c73300a5dcf29515512935b6de768f03cf15b3954a476115a15822a29d",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "bible_r0001",
+          "content_hash": "sha256:80eea131ed6758d99f8feeafe054f598e5fb666d1f55cbcd0265055206c07af1",
+          "impact": "semantic"
+        }
+      ]
+    },
+    {
+      "artifact_id": "style_s0002",
+      "preset": "film_realism",
+      "preset_version": 1,
+      "directives": "Photorealistic film still shot on 35mm colour negative film: natural motivated light, fine grain, true-to-life muted colour, gentle contrast, shallow depth of field",
+      "scene_id": "office_night",
+      "status": "candidate",
+      "content_hash": "sha256:9397552fd33f5dcc1b1901ef5b26cb313e442bcd238cefa563f6f8c3d8d129c4",
+      "input_hash": "sha256:002980ef690599ae989b4d5000fc1401d4451657af9ed8ee6e6e7770a7867fe8",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "style/samples/style_s0002.jpg",
+      "provenance": {
+        "compiler_version": "style-sample/1",
+        "compiled_prompt": "Photorealistic film still shot on 35mm colour negative film: natural motivated light, fine grain, true-to-life muted colour, gentle contrast, shallow depth of field. Scene: INT. SMALL OFFICE - NIGHT, night. One table, two chairs, a rain-streaked window, a single desk lamp. One table, two chairs. Rain on the window. The Filmmaker: A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. The Interviewer: A woman in her thirties, short black hair, round glasses. Wardrobe: A grey blazer, a notebook always in hand. Practical light only: desk lamps, street light through windows.",
+        "prompt_hash": "sha256:02314e2ba38c6dcea0da6222e8cd73e0053eef9d9ea30c6366bb85e6c5d66019",
+        "applied_constraints": [
+          "style.preset",
+          "scene.setting",
+          "bible.location",
+          "scene.action",
+          "character.filmmaker",
+          "character.filmmaker.detail",
+          "character.interviewer",
+          "character.interviewer.detail",
+          "bible.world"
+        ],
+        "dropped_constraints": [
+          {
+            "constraint": "style.avoid",
+            "reason": "the provider takes no negative prompt",
+            "degradation": "cosmetic"
+          }
+        ]
+      },
+      "dependencies": [
+        {
+          "artifact_id": "screenplay_scene.office_night",
+          "content_hash": "sha256:4ebac8c73300a5dcf29515512935b6de768f03cf15b3954a476115a15822a29d",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "bible_r0001",
+          "content_hash": "sha256:80eea131ed6758d99f8feeafe054f598e5fb666d1f55cbcd0265055206c07af1",
+          "impact": "semantic"
+        }
+      ]
+    }
+  ]
+}

@@ -178,6 +178,9 @@ fn committed_schema_inventory_is_explicit_and_supported() {
         files,
         [
             "artifact.schema.json",
+            "bible.schema.json",
+            "casting.schema.json",
+            "character.schema.json",
             "job.schema.json",
             "project.schema.json",
             "revisions.schema.json",
@@ -188,6 +191,8 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "shot.schema.json",
             "source.schema.json",
             "story-analysis.schema.json",
+            "style-samples.schema.json",
+            "style.schema.json",
         ]
     );
 
@@ -534,6 +539,231 @@ fn the_screenplay_schema_rejects_drift() {
         edit(&mut value);
         assert!(validate_value(&screenplay_schema, &value, "$").is_err());
     }
+}
+
+#[test]
+fn generated_and_edited_bibles_and_their_revision_log_match_committed_schemas() {
+    let bible_schema = schema("bible.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    validate(
+        &bible_schema,
+        &serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON)
+            .expect("the sample is JSON"),
+        "sample bible",
+    );
+    let written = kineto_core::bible::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    let mut bible: kineto_project::bible::Bible =
+        kineto_project::revisions::read(&project, &written).expect("the bible is readable");
+    bible.characters[0].wardrobe_changes = vec![kineto_project::bible::WardrobeChange {
+        scenes: vec!["office_night".to_owned()],
+        wardrobe: "Shirtsleeves, the coat over a chair.".to_owned(),
+    }];
+    let edited = kineto_project::bible::edit(&project, 1, &bible).expect("the edit is saved");
+    kineto_project::bible::lock(&project, 2).expect("the bible should lock");
+    for record in [&written, &edited] {
+        validate(
+            &bible_schema,
+            &json_file(&temp.0.join(&record.path)),
+            &record.path,
+        );
+    }
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("bible/revisions.json")),
+        "bible revisions",
+    );
+}
+
+#[test]
+fn the_bible_schema_rejects_drift() {
+    let bible_schema = schema("bible.schema.json");
+    let sample: Value =
+        serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON).expect("the sample is JSON");
+    type Edit = fn(&mut Value);
+    let drift: [Edit; 6] = [
+        |value| value["characters"][0]["age"] = 40.into(),
+        |value| value["characters"] = serde_json::json!([]),
+        |value| value["characters"][0]["id"] = "c".repeat(113).into(),
+        |value| {
+            value["characters"][0]["wardrobe_changes"] =
+                serde_json::json!([{"scenes": [], "wardrobe": "A raincoat."}]);
+        },
+        |value| value["props"][0]["scenes"][0] = "s".repeat(65).into(),
+        |value| {
+            value["world"]
+                .as_object_mut()
+                .expect("the world is an object")
+                .remove("continuity_rules");
+        },
+    ];
+    for edit in drift {
+        let mut value = sample.clone();
+        edit(&mut value);
+        assert!(validate_value(&bible_schema, &value, "$").is_err());
+    }
+}
+
+#[test]
+fn style_samples_and_the_locked_style_match_committed_schemas() {
+    let samples_schema = schema("style-samples.schema.json");
+    let lock_schema = schema("style.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    kineto_core::bible::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    let client = kineto_provider_minimax::MinimaxClient::with_transport(
+        RecordedMinimax,
+        kineto_providers::secret::SecretString::new("sk-contract".to_owned())
+            .expect("test key is not blank"),
+        "https://example.test",
+    );
+    let sample = |note| {
+        kineto_core::style::sample_with(
+            &project,
+            kineto_core::minimax::MinimaxKeyframes::new(&project, Some(&client)),
+            kineto_core::style::SampleRequest {
+                preset: "film_noir",
+                note,
+                scene_id: None,
+            },
+            kineto_core::style::Submission::Once,
+            &mut NoHooks,
+        )
+        .expect("the sample should be recorded")
+    };
+    sample(None);
+    let refined = sample(Some("colder"));
+    kineto_project::style::select(&project, &refined.artifact_id).expect("select");
+    kineto_project::style::reject(&project, "style_s0001").expect("reject");
+    kineto_project::style::lock(&project, &refined.artifact_id).expect("lock");
+    validate(
+        &samples_schema,
+        &json_file(&temp.0.join("style/samples.json")),
+        "style samples",
+    );
+    let lock = json_file(&temp.0.join("bible/style.json"));
+    validate(&lock_schema, &lock, "locked style");
+
+    let mut drifted = lock.clone();
+    drifted["directives"] = "".into();
+    assert!(validate_value(&lock_schema, &drifted, "$").is_err());
+    let mut drifted = json_file(&temp.0.join("style/samples.json"));
+    drifted["samples"][0]["status"] = "locked".into();
+    assert!(validate_value(&samples_schema, &drifted, "$").is_err());
+}
+
+#[test]
+fn casting_records_and_a_locked_character_match_committed_schemas() {
+    let casting_schema = schema("casting.schema.json");
+    let character_schema = schema("character.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    kineto_core::bible::write(
+        &project,
+        &kineto_llm::fake::FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    let client = kineto_provider_minimax::MinimaxClient::with_transport(
+        RecordedMinimax,
+        kineto_providers::secret::SecretString::new("sk-contract".to_owned())
+            .expect("test key is not blank"),
+        "https://example.test",
+    );
+    let adapter = || kineto_core::minimax::MinimaxKeyframes::new(&project, Some(&client));
+    let sample = kineto_core::style::sample_with(
+        &project,
+        adapter(),
+        kineto_core::style::SampleRequest {
+            preset: "film_noir",
+            note: None,
+            scene_id: None,
+        },
+        kineto_core::style::Submission::Once,
+        &mut NoHooks,
+    )
+    .expect("the style sample should be recorded");
+    kineto_project::style::select(&project, &sample.artifact_id).expect("select style");
+    kineto_project::style::lock(&project, &sample.artifact_id).expect("lock style");
+    kineto_core::cast::audition_with(
+        &project,
+        adapter(),
+        "filmmaker",
+        2,
+        kineto_core::style::Submission::Once,
+        &mut NoHooks,
+    )
+    .expect("portraits should be recorded");
+    kineto_project::cast::select(&project, "filmmaker", "cast.filmmaker.0001").expect("select");
+    kineto_project::cast::reject(&project, "filmmaker", "cast.filmmaker.0002").expect("reject");
+    kineto_core::cast::make_pack_with(
+        &project,
+        adapter(),
+        "filmmaker",
+        kineto_core::style::Submission::Once,
+        &mut NoHooks,
+    )
+    .expect("the pack should be recorded");
+    let provider = ImageProvider::Minimax(Some(kineto_provider_minimax::MinimaxClient::shared(
+        kineto_providers::secret::SecretString::new("sk-contract".to_owned())
+            .expect("test key is not blank"),
+    )));
+    kineto_core::cast::lock(&project, &provider, "filmmaker").expect("the cast should lock");
+    let casting = json_file(&temp.0.join("characters/filmmaker/casting.json"));
+    validate(&casting_schema, &casting, "casting record");
+    let character = json_file(&temp.0.join("characters/filmmaker/character.json"));
+    validate(&character_schema, &character, "locked character");
+
+    let mut drifted = casting.clone();
+    drifted["images"][0]["kind"] = "headshot".into();
+    assert!(validate_value(&casting_schema, &drifted, "$").is_err());
+    let mut drifted = character.clone();
+    drifted["provider_reference"]["role"] = "style".into();
+    assert!(validate_value(&character_schema, &drifted, "$").is_err());
 }
 
 #[test]

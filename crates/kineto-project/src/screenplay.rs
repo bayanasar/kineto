@@ -13,7 +13,7 @@ use crate::{
     ArtifactDependency, ArtifactId, ContentHash, DependencyImpact,
     fs::{ProjectFsError, ProjectRelativePath},
     manifest::CanonicalProject,
-    revisions::{self, DocumentKind, Origin, RevisionError, RevisionRecord, RevisionStatus},
+    revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     story::{StoryAnalysis, is_portable_id},
 };
 
@@ -540,42 +540,12 @@ pub fn edit(
     screenplay
         .validate()
         .map_err(RevisionError::InvalidDocument)?;
-    let latest = revisions::latest(project, DocumentKind::Screenplay)?
-        .ok_or(RevisionError::NoSuchRevision(based_on))?;
-    if latest.revision != based_on {
-        return Err(RevisionError::NotLatest {
-            based_on,
-            latest: latest.revision,
-        });
-    }
-    let bytes = revisions::encode(screenplay)?;
-    if ContentHash::of(&bytes).as_str() == latest.content_hash {
-        return Ok(latest);
-    }
-    let next = revisions::next(project, DocumentKind::Screenplay)?;
-    let content_hash = revisions::write_document(project, &next, &bytes)?;
-    let own_revisions = format!("{}_r", DocumentKind::Screenplay.id_prefix());
-    let record = RevisionRecord {
-        revision: next.revision,
-        artifact_id: next.artifact_id.as_str().to_owned(),
-        path: next.path.as_path().to_string_lossy().replace('\\', "/"),
-        status: RevisionStatus::Candidate,
-        origin: Origin::Edited,
-        content_hash: content_hash.as_str().to_owned(),
-        input_hash: None,
-        provider: None,
-        model: None,
-        provenance: None,
-        based_on: Some(based_on),
-        // Still made from the analysis and source the edited revision was;
-        // `based_on` records the lineage.
-        dependencies: latest
-            .dependencies
-            .into_iter()
-            .filter(|dependency| !dependency.artifact_id.starts_with(&own_revisions))
-            .collect(),
-    };
-    revisions::attach(project, DocumentKind::Screenplay, record.clone())?;
+    let record = revisions::save_edit(
+        project,
+        DocumentKind::Screenplay,
+        based_on,
+        &revisions::encode(screenplay)?,
+    )?;
     rerender(project);
     Ok(record)
 }
@@ -646,7 +616,7 @@ mod tests {
             PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
             ProjectWorkflow,
         },
-        revisions::DependencyRecord,
+        revisions::{DependencyRecord, Origin, RevisionStatus},
         story::SAMPLE_ANALYSIS_JSON,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};

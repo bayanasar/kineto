@@ -570,6 +570,16 @@ impl<'project> JobRuntime<'project> {
         })
     }
 
+    /// Give up on a prepared intent that was never invoked, so the same job
+    /// can be prepared afresh, possibly for another input. No provider call
+    /// was made, so nothing is lost. The removal order is that of
+    /// [`Self::retire_failed`].
+    pub fn retire_unattempted(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
+        self.retire_where(job_id, |record| {
+            record.intent.state() == IntentState::Prepared && record.attempts == 0
+        })
+    }
+
     fn retire_where(
         &self,
         job_id: &JobId,
@@ -2677,6 +2687,41 @@ mod tests {
         assert!(
             !runtime.retire_unresolved(&job_id).unwrap(),
             "an invoked intent has a result to follow"
+        );
+    }
+
+    #[test]
+    fn an_intent_never_invoked_can_be_retired_for_another_input() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let runtime = JobRuntime::new(
+            &project,
+            ProviderKey::new("fake-image-unattempted").unwrap(),
+            policy(1, 3),
+        );
+        let job_id = JobId::new("job_unattempted").unwrap();
+        let prepare = |hash| {
+            runtime.prepare(
+                job_id.clone(),
+                "image.generate",
+                input_hash(hash),
+                artifact("image_candidate_unattempted"),
+            )
+        };
+        created(prepare('7').unwrap());
+        assert!(matches!(
+            prepare('8'),
+            Err(JobRuntimeError::JobIdAlreadyExists)
+        ));
+        assert!(runtime.retire_unattempted(&job_id).unwrap());
+        created(prepare('8').unwrap());
+
+        let mut adapter = FakeAdapter::completed(temp.0.clone());
+        adapter.invocation = Err(FakeError::Retryable);
+        let _ = runtime.invoke_prepared(&job_id, &mut adapter, &1);
+        assert!(
+            !runtime.retire_unattempted(&job_id).unwrap(),
+            "an attempted call may have been charged"
         );
     }
 

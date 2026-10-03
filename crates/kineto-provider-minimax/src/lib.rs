@@ -19,7 +19,9 @@ use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass};
-use kineto_providers::{ImageFormat, secret::SecretString};
+use kineto_providers::{
+    ImageCapabilities, ImageFormat, Price, ReferenceRole, secret::SecretString,
+};
 use serde::{Deserialize, Serialize};
 
 mod video;
@@ -48,6 +50,31 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_STATUS_MESSAGE_CHARS: usize = 200;
 
+/// What `image-01` can preserve, as MiniMax documents it. A subject reference
+/// (`subject_reference`, type `character`) is the one reference kind: an
+/// identity portrait, JPG or PNG, under 10 MB, best a single front-facing
+/// face. The client sends none yet; the declaration is what prompt
+/// compilation and routing read instead of the vendor's name.
+#[must_use]
+pub fn image_capabilities() -> ImageCapabilities {
+    ImageCapabilities {
+        aspect_ratios: [(1, 1), (16, 9), (9, 16)]
+            .into_iter()
+            .filter_map(|(width, height)| kineto_providers::AspectRatio::new(width, height))
+            .collect(),
+        max_reference_images: 1,
+        reference_roles: [ReferenceRole::Identity].into_iter().collect(),
+        reference_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
+        max_reference_bytes: Some(MAX_REFERENCE_BYTES as u64),
+        output_formats: [ImageFormat::Jpeg].into_iter().collect(),
+        max_prompt_chars: Some(MAX_PROMPT_CHARS),
+        // The image comes back base64 in the answer to the request.
+        async_jobs: false,
+        price_per_image: Some(Price::usd(IMAGE_PRICE_MICROS)),
+        ..ImageCapabilities::default()
+    }
+}
+
 /// Aspect ratios `image-01` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AspectRatio {
@@ -66,11 +93,27 @@ impl AspectRatio {
     }
 }
 
+/// A picture of the person an image must show, sent as `subject_reference`
+/// of type `character`: a JPEG or PNG under 10 MB, best a single
+/// front-facing portrait.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SubjectReference(pub Vec<u8>);
+
+impl fmt::Debug for SubjectReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "SubjectReference({} bytes)", self.0.len())
+    }
+}
+
+/// Largest subject reference MiniMax accepts.
+pub const MAX_REFERENCE_BYTES: usize = 10 * 1024 * 1024 - 1;
+
 /// One image to generate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRequest {
     pub prompt: String,
     pub aspect_ratio: AspectRatio,
+    pub subject_reference: Option<SubjectReference>,
 }
 
 /// The image MiniMax returned.
@@ -352,6 +395,15 @@ struct WireRequest<'a> {
     response_format: &'a str,
     n: u8,
     prompt_optimizer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_reference: Option<[WireSubject; 1]>,
+}
+
+#[derive(Serialize)]
+struct WireSubject {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    image_file: String,
 }
 
 #[derive(Deserialize)]
@@ -425,6 +477,32 @@ impl<T: Transport> MinimaxClient<T> {
         if request.prompt.trim().is_empty() || chars > MAX_PROMPT_CHARS {
             return Err(MinimaxError::InvalidPrompt);
         }
+        let subject_reference = match &request.subject_reference {
+            None => None,
+            Some(SubjectReference(bytes)) => {
+                let media_type = match sniff(bytes) {
+                    Some(ImageFormat::Jpeg) => "image/jpeg",
+                    Some(ImageFormat::Png) => "image/png",
+                    _ => {
+                        return Err(MinimaxError::InvalidRequest(
+                            "a subject reference must be a JPEG or PNG",
+                        ));
+                    }
+                };
+                if bytes.len() > MAX_REFERENCE_BYTES {
+                    return Err(MinimaxError::InvalidRequest(
+                        "a subject reference must be under 10 MB",
+                    ));
+                }
+                Some([WireSubject {
+                    kind: "character",
+                    image_file: format!(
+                        "data:{media_type};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    ),
+                }])
+            }
+        };
         let body = serde_json::to_vec(&WireRequest {
             model: IMAGE_MODEL,
             prompt: &request.prompt,
@@ -434,6 +512,7 @@ impl<T: Transport> MinimaxClient<T> {
             response_format: "base64",
             n: 1,
             prompt_optimizer: false,
+            subject_reference,
         })
         .map_err(|_| MinimaxError::InvalidRequest("request did not encode"))?;
         let response = self
@@ -597,7 +676,50 @@ mod tests {
         ImageRequest {
             prompt: "A filmmaker hears the final line.".to_owned(),
             aspect_ratio: AspectRatio::Landscape16x9,
+            subject_reference: None,
         }
+    }
+
+    #[test]
+    fn a_subject_reference_is_sent_as_a_character_data_url_within_its_limits() {
+        let client = client([answer(200, &success(JPEG))]);
+        let mut request = request();
+        request.aspect_ratio = AspectRatio::Portrait9x16;
+        request.subject_reference = Some(SubjectReference(JPEG.to_vec()));
+        client.generate_image(&request).unwrap();
+        let requests = client.transport.requests.lock().unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0].2).unwrap();
+        assert_eq!(sent["aspect_ratio"], "9:16");
+        assert_eq!(
+            sent["subject_reference"],
+            serde_json::json!([{
+                "type": "character",
+                "image_file": format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(JPEG)
+                ),
+            }])
+        );
+        drop(requests);
+
+        // What MiniMax would refuse is refused before any request.
+        let client = self::client([]);
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        webp.resize(64, 0);
+        let mut huge = JPEG.to_vec();
+        huge.resize(MAX_REFERENCE_BYTES + 1, 0);
+        for bytes in [webp, huge, Vec::new()] {
+            let mut refused = request.clone();
+            refused.subject_reference = Some(SubjectReference(bytes));
+            let error = client.generate_image(&refused).unwrap_err();
+            assert!(matches!(error, MinimaxError::InvalidRequest(_)), "{error}");
+            assert!(error.certainly_not_accepted());
+        }
+        assert!(client.transport.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            format!("{:?}", SubjectReference(vec![0; 3])),
+            "SubjectReference(3 bytes)"
+        );
     }
 
     #[test]
@@ -711,12 +833,54 @@ mod tests {
         let unsent = ImageRequest {
             prompt: String::new(),
             aspect_ratio: AspectRatio::Square,
+            subject_reference: None,
         };
         assert!(
             client([])
                 .generate_image(&unsent)
                 .unwrap_err()
                 .certainly_not_accepted()
+        );
+    }
+
+    #[test]
+    fn declared_capabilities_match_what_the_client_sends() {
+        use kineto_providers::{ImageRequirements, SeedSupport, evaluate_image};
+        let capabilities = image_capabilities();
+        // Every declared ratio is one the client can ask for, and back.
+        let sent = [
+            AspectRatio::Square,
+            AspectRatio::Landscape16x9,
+            AspectRatio::Portrait9x16,
+        ]
+        .map(AspectRatio::as_str);
+        assert_eq!(capabilities.aspect_ratios.len(), sent.len());
+        for ratio in &capabilities.aspect_ratios {
+            assert!(sent.contains(&format!("{}:{}", ratio.width, ratio.height).as_str()));
+        }
+        assert_eq!(capabilities.max_prompt_chars, Some(MAX_PROMPT_CHARS));
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Identity), 1);
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Style), 0);
+        assert_eq!(capabilities.reference_limit(ReferenceRole::Composition), 0);
+        assert!(capabilities.max_reference_bytes < Some(10 * 1024 * 1024));
+        let needs = |role| ImageRequirements {
+            required_reference_role: Some(role),
+            minimum_seed_support: SeedSupport::None,
+            requires_negative_prompt: false,
+            requires_mask: false,
+            requires_synchronous: true,
+        };
+        assert!(evaluate_image(needs(ReferenceRole::Identity), &capabilities).is_compatible());
+        assert!(!evaluate_image(needs(ReferenceRole::Style), &capabilities).is_compatible());
+        // The client returns the image itself, at the price it estimates.
+        assert!(!capabilities.async_jobs);
+        let estimate = client([]).estimate_image_cost();
+        assert_eq!(
+            capabilities.price_per_image,
+            Some(Price {
+                amount_micros: estimate.amount_micros,
+                currency: estimate.currency.bytes(),
+            })
         );
     }
 
@@ -742,6 +906,7 @@ mod tests {
             let request = ImageRequest {
                 prompt: prompt.to_owned(),
                 aspect_ratio: AspectRatio::Square,
+                subject_reference: None,
             };
             assert_eq!(
                 client.generate_image(&request),
