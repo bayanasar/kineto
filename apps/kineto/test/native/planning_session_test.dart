@@ -123,15 +123,61 @@ void main() {
       await session.refineShot(0, 'Wider, show the window.');
       expect(session.takes(0), hasLength(3));
       await expectLater(session.refineShot(0, ' '), _refusedWith(KinetoProjectException.invalidArgument));
+
+      // The reaction shot goes first and a new shot closes the scene: the
+      // shots in play follow, each keeping its own takes.
+      final edited = session.planning.scenes.single.shots;
+      await session.saveScenePlan(
+        2,
+        KinetoScenePlan(
+          sceneId: 'office_night',
+          shots: <KinetoPlannedShot>[
+            KinetoPlannedShot(
+              id: edited[1].id,
+              purpose: edited[1].purpose,
+              direction: edited[1].direction,
+              framing: edited[1].framing,
+              lens: edited[1].lens,
+              cameraMotion: edited[1].cameraMotion,
+              action: edited[1].action,
+              dialogue: edited[1].dialogue,
+              emotion: edited[1].emotion,
+              durationTarget: edited[1].durationTarget,
+              characters: edited[1].characters,
+            ),
+            edited[0],
+            const KinetoPlannedShot(
+              id: 'office_night_03',
+              purpose: 'Show the empty chair.',
+              direction: KinetoShotDirection.spatialClarity,
+              framing: KinetoFraming.wide,
+              lens: '28mm',
+              cameraMotion: KinetoCameraMotion.still,
+              action: 'The chair is empty.',
+              emotion: 'Absence.',
+              durationTarget: 3,
+              continuityFrom: 'office_night_01',
+            ),
+          ],
+        ),
+      );
+      await session.lockShotPlan(3);
+      expect(session.shotCount, 3);
+      expect(<String>[for (var index = 0; index < 3; index++) session.shotId(index)],
+          <String>['office_night_02', 'office_night_01', 'office_night_03']);
+      expect(session.takes(0), hasLength(6));
+      expect(session.takes(1), hasLength(3));
+      expect(session.takes(2), isEmpty);
       session.close();
 
       // Every decision is in the project's files.
       Directory([target.path, '.kineto'].join(Platform.pathSeparator)).deleteSync(recursive: true);
       final reopened = await KinetoProjectSession.open(target.path);
-      expect(reopened.planning.lockedRevision, 2);
-      expect(reopened.shotId(1), 'office_night_02');
-      expect(reopened.takes(1), hasLength(6));
-      expect(reopened.staleReasons(1).first, <String>['intent.emotion']);
+      expect(reopened.planning.lockedRevision, 3);
+      expect(reopened.shotId(0), 'office_night_02');
+      expect(reopened.shotId(2), 'office_night_03');
+      expect(reopened.takes(0), hasLength(6));
+      expect(reopened.staleReasons(0).first, contains('intent.emotion'));
       reopened.close();
     } finally {
       sandbox.deleteSync(recursive: true);

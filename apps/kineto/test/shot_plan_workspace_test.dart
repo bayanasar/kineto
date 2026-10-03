@@ -176,13 +176,51 @@ void main() {
     expect(saved.shots.map((shot) => shot.id), <String>['office_night_01', 'office_night_02']);
     expect(saved.shots[1].emotion, 'Nothing shows yet.');
     expect(saved.shots[1].durationTarget, 6.5);
-    expect(saved.shots[1].continuityFrom, 'office_night_01', reason: 'what the editor does not show is kept');
+    expect(saved.shots[1].continuityFrom, 'office_night_01');
+    expect(saved.shots[0].continuity, <String>['Rain on the window.'], reason: 'what the editor does not show is kept');
 
     calls.saved = null;
     await tester.enterText(find.byKey(_key('shot-office_night_01-duration')), 'soon');
     await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
     expect(calls.saved, isNull);
     expect(find.textContaining('a duration in seconds'), findsOneWidget);
+  });
+
+  testWidgets('a scene\'s shots are reordered, added and removed, and continue only from earlier ones', (tester) async {
+    final calls = await _pump(tester, editing: 'office_night');
+    // The reaction shot goes first: it can no longer continue from the wide.
+    await _tap(tester, find.byKey(_key('shot-office_night_02-up')));
+    expect(find.text('1. office_night_02'), findsOneWidget);
+    await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
+    var saved = calls.saved!;
+    expect(saved.shots.map((shot) => shot.id), <String>['office_night_02', 'office_night_01']);
+    expect(saved.shots[0].continuityFrom, isNull);
+
+    // A new shot after the wide, staged like it, is written before saving.
+    calls.saved = null;
+    await _tap(tester, find.byKey(_key('shot-office_night_01-add-after')));
+    expect(find.text('3. office_night_03'), findsOneWidget);
+    await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
+    expect(calls.saved, isNull);
+    await tester.enterText(find.byKey(_key('shot-office_night_03-purpose')), 'Show the empty chair.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-action')), 'The chair is empty.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-emotion')), 'Absence.');
+    await _tap(tester, find.descendant(of: find.byKey(_key('shot-office_night_03-from')), matching: find.byType(DropdownButtonFormField<String>)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('office_night_01').last);
+    await tester.pumpAndSettle();
+
+    // The reaction shot goes.
+    await _tap(tester, find.byKey(_key('shot-office_night_02-remove')));
+    await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
+    saved = calls.saved!;
+    expect(saved.shots.map((shot) => shot.id), <String>['office_night_01', 'office_night_03']);
+    final added = saved.shots[1];
+    expect(added.purpose, 'Show the empty chair.');
+    expect(added.framing, KinetoFraming.wide);
+    expect(added.characters, <String>['filmmaker', 'interviewer']);
+    expect(added.continuityFrom, 'office_night_01');
+    expect(added.continuity, isEmpty);
   });
 
   testWidgets('while something is planned every change waits', (tester) async {

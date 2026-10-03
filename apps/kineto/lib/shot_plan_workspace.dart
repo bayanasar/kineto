@@ -251,6 +251,15 @@ class ShotPlanWorkspaceView extends StatelessWidget {
                         ? ScenePlanEditor(
                             key: ValueKey<String>('plan-editor-${planning.revision}-${scene.sceneId}'),
                             scene: scene,
+                            earlierShots: <String>[
+                              for (final earlier in planning.scenes.takeWhile((other) => other != scene))
+                                for (final shot in earlier.shots) shot.id,
+                            ],
+                            otherShots: <String>{
+                              for (final other in planning.scenes)
+                                if (other != scene)
+                                  for (final shot in other.shots) shot.id,
+                            },
                             working: working,
                             onCancel: () => onEdit(null),
                             onSave: onSave,
@@ -418,18 +427,28 @@ class ShotPlanWorkspaceView extends StatelessWidget {
   }
 }
 
-/// Edits one scene's shots: what each is for, how it is framed and moves,
-/// what happens and is said, the mood and how long it runs.
+/// Edits one scene's shots: which shots there are and in what order, what
+/// each is for, how it is framed and moves, what happens and is said, the
+/// mood, how long it runs and which earlier shot it continues.
 class ScenePlanEditor extends StatefulWidget {
   const ScenePlanEditor({
     required this.scene,
     required this.onCancel,
     required this.onSave,
+    this.earlierShots = const <String>[],
+    this.otherShots = const <String>{},
     this.working = false,
     super.key,
   });
 
   final KinetoScenePlan scene;
+
+  /// The shots of the scenes before this one, in plan order: a shot may
+  /// continue from any of them.
+  final List<String> earlierShots;
+
+  /// Every shot ID of the other scenes, which a new shot must not take.
+  final Set<String> otherShots;
   final bool working;
   final VoidCallback onCancel;
   final ValueChanged<KinetoScenePlan> onSave;
@@ -442,6 +461,7 @@ final class _ShotDraft {
   _ShotDraft(this.shot)
       : framing = shot.framing,
         cameraMotion = shot.cameraMotion,
+        continuityFrom = shot.continuityFrom,
         purpose = TextEditingController(text: shot.purpose),
         action = TextEditingController(text: shot.action),
         dialogue = TextEditingController(text: shot.dialogue),
@@ -452,6 +472,7 @@ final class _ShotDraft {
   final KinetoPlannedShot shot;
   KinetoFraming framing;
   KinetoCameraMotion cameraMotion;
+  String? continuityFrom;
   final TextEditingController purpose;
   final TextEditingController action;
   final TextEditingController dialogue;
@@ -491,8 +512,10 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
         return;
       }
       shots.add(
-        draft.shot.copyWith(
+        KinetoPlannedShot(
+          id: draft.shot.id,
           purpose: purpose,
+          direction: draft.shot.direction,
           framing: draft.framing,
           lens: lens,
           cameraMotion: draft.cameraMotion,
@@ -500,11 +523,71 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
           dialogue: draft.dialogue.text.trim(),
           emotion: emotion,
           durationTarget: duration,
+          characters: draft.shot.characters,
+          continuity: draft.shot.continuity,
+          continuityFrom: draft.continuityFrom,
         ),
       );
     }
     setState(() => _problem = null);
     widget.onSave(KinetoScenePlan(sceneId: widget.scene.sceneId, shots: shots));
+  }
+
+  /// The shots the shot at [index] may continue from: every shot before it.
+  List<String> _before(int index) => <String>[
+        ...widget.earlierShots,
+        for (final draft in _shots.take(index)) draft.shot.id,
+      ];
+
+  /// After shots move or go, a shot continues only from one still before it.
+  void _restructure(void Function() change) => setState(() {
+        change();
+        for (var index = 0; index < _shots.length; index++) {
+          final from = _shots[index].continuityFrom;
+          if (from != null && !_before(index).contains(from)) _shots[index].continuityFrom = null;
+        }
+      });
+
+  void _move(int index, int offset) => _restructure(() {
+        final draft = _shots.removeAt(index);
+        _shots.insert(index + offset, draft);
+      });
+
+  void _remove(int index) => _restructure(() => _shots.removeAt(index).dispose());
+
+  /// A new shot after the one at [index], staged like it and still to be
+  /// written: what it is for, what happens and its mood.
+  void _addAfter(int index) => _restructure(() {
+        final like = _shots[index].shot;
+        _shots.insert(
+          index + 1,
+          _ShotDraft(
+            KinetoPlannedShot(
+              id: _newShotId(),
+              purpose: '',
+              direction: like.direction,
+              framing: like.framing,
+              lens: like.lens,
+              cameraMotion: like.cameraMotion,
+              action: '',
+              emotion: '',
+              durationTarget: like.durationTarget,
+              characters: like.characters,
+            ),
+          ),
+        );
+      });
+
+  /// The scene's ID and the first free two-digit number. Never `shot_NNN`,
+  /// which names the bootstrap scene's shots.
+  String _newShotId() {
+    final taken = <String>{...widget.otherShots, for (final draft in _shots) draft.shot.id};
+    final scene = widget.scene.sceneId;
+    final prefix = scene.length > 60 ? scene.substring(0, 60) : scene;
+    for (var number = _shots.length + 1;; number++) {
+      final id = '${prefix}_${number.toString().padLeft(2, '0')}';
+      if (!taken.contains(id)) return id;
+    }
   }
 
   Widget _field(String key, String label, TextEditingController controller, {int lines = 1}) => Padding(
@@ -526,45 +609,11 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            for (final draft in _shots) ...<Widget>[
-              Text(draft.shot.id, style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 8),
-              _field('shot-${draft.shot.id}-purpose', 'What the shot is for', draft.purpose),
-              _field('shot-${draft.shot.id}-action', 'What happens', draft.action, lines: 2),
-              _field('shot-${draft.shot.id}-dialogue', 'What is said (may be empty)', draft.dialogue),
-              _field('shot-${draft.shot.id}-emotion', 'The mood', draft.emotion),
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                children: <Widget>[
-                  SizedBox(
-                    width: 300,
-                    child: WabDropdown<KinetoFraming>(
-                      key: ValueKey<String>('shot-${draft.shot.id}-framing'),
-                      value: draft.framing,
-                      items: <KinetoFraming, String>{
-                        for (final framing in KinetoFraming.values) framing: framing.label,
-                      },
-                      onChanged: (framing) => setState(() => draft.framing = framing ?? draft.framing),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 300,
-                    child: WabDropdown<KinetoCameraMotion>(
-                      key: ValueKey<String>('shot-${draft.shot.id}-motion'),
-                      value: draft.cameraMotion,
-                      items: <KinetoCameraMotion, String>{
-                        for (final motion in KinetoCameraMotion.values) motion: motion.label,
-                      },
-                      onChanged: (motion) => setState(() => draft.cameraMotion = motion ?? draft.cameraMotion),
-                    ),
-                  ),
-                  SizedBox(width: 120, child: _field('shot-${draft.shot.id}-lens', 'Lens', draft.lens)),
-                  SizedBox(width: 120, child: _field('shot-${draft.shot.id}-duration', 'Seconds', draft.duration)),
-                ],
+            for (final (index, draft) in _shots.indexed)
+              KeyedSubtree(
+                key: ObjectKey(draft),
+                child: _shot(context, index, draft),
               ),
-              const SizedBox(height: 16),
-            ],
             if (_problem != null) ...<Widget>[Text(_problem!), const SizedBox(height: 12)],
             Wrap(
               spacing: 12,
@@ -585,4 +634,104 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
           ],
         ),
       );
+
+  Widget _shot(BuildContext context, int index, _ShotDraft draft) {
+    final id = draft.shot.id;
+    final before = _before(index);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: <Widget>[
+            Text('${index + 1}. $id', style: Theme.of(context).textTheme.titleSmall),
+            WabButton(
+              key: ValueKey<String>('shot-$id-up'),
+              kind: WabMaterialKind.paper,
+              onPressed: index > 0 ? () => _move(index, -1) : null,
+              child: const Text('Earlier'),
+            ),
+            WabButton(
+              key: ValueKey<String>('shot-$id-down'),
+              kind: WabMaterialKind.paper,
+              onPressed: index < _shots.length - 1 ? () => _move(index, 1) : null,
+              child: const Text('Later'),
+            ),
+            WabButton(
+              key: ValueKey<String>('shot-$id-add-after'),
+              kind: WabMaterialKind.paper,
+              onPressed: () => _addAfter(index),
+              child: const Text('Add a shot after'),
+            ),
+            WabButton(
+              key: ValueKey<String>('shot-$id-remove'),
+              kind: WabMaterialKind.zhuwen,
+              onPressed: _shots.length > 1 ? () => _remove(index) : null,
+              child: const Text('Remove'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        _field('shot-$id-purpose', 'What the shot is for', draft.purpose),
+        _field('shot-$id-action', 'What happens', draft.action, lines: 2),
+        _field('shot-$id-dialogue', 'What is said (may be empty)', draft.dialogue),
+        _field('shot-$id-emotion', 'The mood', draft.emotion),
+        Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          children: <Widget>[
+            SizedBox(
+              width: 300,
+              child: WabDropdown<KinetoFraming>(
+                key: ValueKey<String>('shot-$id-framing'),
+                value: draft.framing,
+                items: <KinetoFraming, String>{
+                  for (final framing in KinetoFraming.values) framing: framing.label,
+                },
+                onChanged: (framing) => setState(() => draft.framing = framing ?? draft.framing),
+              ),
+            ),
+            SizedBox(
+              width: 300,
+              child: WabDropdown<KinetoCameraMotion>(
+                key: ValueKey<String>('shot-$id-motion'),
+                value: draft.cameraMotion,
+                items: <KinetoCameraMotion, String>{
+                  for (final motion in KinetoCameraMotion.values) motion: motion.label,
+                },
+                onChanged: (motion) => setState(() => draft.cameraMotion = motion ?? draft.cameraMotion),
+              ),
+            ),
+            SizedBox(width: 120, child: _field('shot-$id-lens', 'Lens', draft.lens)),
+            SizedBox(width: 120, child: _field('shot-$id-duration', 'Seconds', draft.duration)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: <Widget>[
+            const Text('Continues from'),
+            const SizedBox(width: 12),
+            Expanded(
+              key: ValueKey<String>('shot-$id-from'),
+              // Rebuilt whenever what it offers changes: a form field keeps
+              // the value it started with.
+              child: WabDropdown<String>(
+                key: ValueKey<String>('${before.join(',')}|${draft.continuityFrom}'),
+                value: draft.continuityFrom ?? '',
+                items: <String, String>{
+                  '': 'no earlier shot',
+                  for (final earlier in before) earlier: earlier,
+                },
+                onChanged: (from) =>
+                    setState(() => draft.continuityFrom = from == null || from.isEmpty ? null : from),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
 }
