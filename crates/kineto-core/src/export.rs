@@ -272,7 +272,7 @@ fn write_package(
         let video = shot
             .locked_video()?
             .ok_or(ExportError::Mismatch(key.shot().to_owned()))?;
-        let stem = format!("{}_{}", key.scene(), key.shot());
+        let stem = file_stem(key);
         let video_file = format!("{stem}.mp4");
         bytes += copy_checked(
             project,
@@ -414,6 +414,20 @@ fn sidecar(
     }))
 }
 
+/// A shot's files are named `<scene>_<shot>`, or by the shot ID alone when
+/// it already begins with its scene's: shot IDs are unique in a project.
+fn file_stem(key: &ShotKey) -> String {
+    if key
+        .shot()
+        .strip_prefix(key.scene())
+        .is_some_and(|rest| rest.starts_with('_'))
+    {
+        key.shot().to_owned()
+    } else {
+        format!("{}_{}", key.scene(), key.shot())
+    }
+}
+
 /// Copy `source` to `target` after checking its bytes hash to `hash`; the
 /// bytes copied.
 fn copy_checked(
@@ -478,6 +492,18 @@ pub fn rfc3339(time: SystemTime) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_shot_named_after_its_scene_is_not_named_twice() {
+        let named = |scene: &str, shot: &str| file_stem(&ShotKey::new(scene, shot).unwrap());
+        assert_eq!(named("scene_001", "shot_001"), "scene_001_shot_001");
+        assert_eq!(
+            named("scene_the_wait", "scene_the_wait_03"),
+            "scene_the_wait_03"
+        );
+        assert_eq!(named("office_night", "office_night_01"), "office_night_01");
+        assert_eq!(named("office", "night_01"), "office_night_01");
+    }
 
     #[test]
     fn timestamps_are_rfc3339_utc() {
