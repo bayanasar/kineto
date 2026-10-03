@@ -1112,6 +1112,15 @@ pub fn start_videos<G: VideoGenerator>(
     let intent = shot.intent()?;
     let successor = successor(project, shot.key())?;
     let notes = notes_for(shot, ask)?;
+    let style = kineto_project::style::locked(project)
+        .map_err(|error| GenerationError::Provider {
+            source: Box::new(error),
+            class: ErrorClass::Terminal,
+        })?
+        .map(|lock| match lock.note {
+            Some(note) => format!("{}. {note}", lock.directives.trim_end_matches(['.', ' '])),
+            None => lock.directives,
+        });
     let prompt = video_prompt::compile(VideoPromptInput {
         shot: intent.as_ref(),
         direction: shot.direction(),
@@ -1128,6 +1137,7 @@ pub fn start_videos<G: VideoGenerator>(
                 keyframe_locked: *keyframe_locked,
             }),
         notes: &notes,
+        style: style.as_deref(),
     })?;
     let params = generator.canonical_params(prompt.duration_seconds);
     let plans = shot.plan_videos(

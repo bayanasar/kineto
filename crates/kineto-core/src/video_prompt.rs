@@ -17,6 +17,12 @@
 //! - A last frame: when the next shot continues from this one, its locked
 //!   keyframe could close this clip. No provider here takes a last frame
 //!   yet, so the compiler reports why it was not used.
+//!
+//! The first frame alone does not hold a model to it: in the P4 live run,
+//! Hailuo started from a black-and-white noir keyframe and cut within a
+//! second to a colour scene the action's words described. Version 3 leads
+//! with the locked style, to be kept throughout the clip, and asks for one
+//! continuous shot.
 
 use kineto_project::shot::{ShotDirection, ShotIntent};
 use kineto_prompts::{
@@ -32,9 +38,9 @@ use crate::{
 };
 
 /// Version recorded with every video prompt compiled by this module.
-pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/2";
+pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/3";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v2";
+const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v3";
 
 /// Mood is cut last of what is optional, the shot's direction before it,
 /// its continuity notes first: the first frame already holds what carries
@@ -73,6 +79,8 @@ pub struct VideoPromptInput<'a> {
     pub successor: Option<Successor<'a>>,
     /// The director's notes for this generation, oldest first.
     pub notes: &'a [String],
+    /// The locked style's directives, kept throughout the clip.
+    pub style: Option<&'a str>,
 }
 
 /// Compile the video prompt for `input`.
@@ -83,6 +91,16 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
     let mut optional = Vec::new();
     let mut dropped = Vec::new();
 
+    if let Some(style) = input.style.map(str::trim).filter(|style| !style.is_empty()) {
+        needed(
+            &mut required,
+            "style.locked",
+            &format!(
+                "{}, throughout the clip",
+                style.trim_end_matches(['.', ' '])
+            ),
+        )?;
+    }
     needed(&mut required, "shot.action", &sentence_case(&shot.action))?;
     if let Some(motion) = &shot.camera_motion {
         let words = motion.replace('_', " ");
@@ -123,7 +141,8 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
     needed(
         &mut required,
         "keyframe.first_frame",
-        "Keep the subject, framing and light of the first frame; natural, restrained motion",
+        "One continuous shot without cuts. Keep the subject, framing and light of the first \
+         frame; natural, restrained motion",
     )?;
     // Carried by the first frame rather than restated.
     let mut carried: Vec<String> = Vec::new();
@@ -337,6 +356,7 @@ fn canonical_intent(input: &VideoPromptInput<'_>, shot: &ShotIntent, duration: u
     for note in input.notes {
         field(note.as_bytes());
     }
+    field(&optional(input.style));
     field(&[
         input.direction.code(),
         duration,
@@ -398,6 +418,7 @@ mod tests {
             camera_command: command,
             successor: None,
             notes: &[],
+            style: None,
         }
     }
 
@@ -427,9 +448,9 @@ mod tests {
         assert_eq!(
             prompt.compiled.prompt(),
             "A filmmaker hears the final line across the table. Camera: slow dolly in \
-             [Push in]. Keep the subject, framing and light of the first frame; natural, \
-             restrained motion. Mood: a withheld reaction. Let the listener's reaction carry \
-             the moment."
+             [Push in]. One continuous shot without cuts. Keep the subject, framing and light \
+             of the first frame; natural, restrained motion. Mood: a withheld reaction. Let the \
+             listener's reaction carry the moment."
         );
         assert_eq!(prompt.duration_seconds, 6);
         assert_eq!(
@@ -546,15 +567,33 @@ mod tests {
         })
         .unwrap();
         assert!(
-            noted
-                .compiled
-                .prompt()
-                .contains("[Push in]. Director's note: Hold on his eyes; Slower. Keep the subject")
+            noted.compiled.prompt().contains(
+                "[Push in]. Director's note: Hold on his eyes; Slower. One continuous shot"
+            )
         );
         assert!(applied(&noted).contains(&"director.note"));
         let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
         assert!(!applied(&plain).contains(&"director.note"));
         assert_ne!(noted.prompt_hash, plain.prompt_hash);
+    }
+
+    #[test]
+    fn the_locked_style_leads_and_holds_through_the_clip() {
+        let shot = shot();
+        let parametric = capabilities(CameraControl::Parametric);
+        let noir = "Black-and-white film noir still: hard low-key light.";
+        let styled = compile(VideoPromptInput {
+            style: Some(noir),
+            ..input(&shot, &parametric, Some("Push in"))
+        })
+        .unwrap();
+        assert!(styled.compiled.prompt().starts_with(
+            "Black-and-white film noir still: hard low-key light, throughout the clip. A filmmaker"
+        ));
+        assert!(applied(&styled).contains(&"style.locked"));
+        let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
+        assert!(!applied(&plain).contains(&"style.locked"));
+        assert_ne!(styled.prompt_hash, plain.prompt_hash);
     }
 
     #[test]

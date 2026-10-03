@@ -210,8 +210,9 @@ The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.r
 
 The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 
-The video compiler is `video-prompt/2` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
+The video compiler is `video-prompt/3` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
 
+- The locked style leads, to be kept throughout the clip, and the clip is asked for as one continuous shot without cuts. The first frame alone does not hold a model to its look: in the P4 live run, Hailuo started from black-and-white noir keyframes and cut within a second to colour scenes that followed the action's words.
 - The first frame carries framing, lens, setting, the characters' look and the shot it continues from; those are applied through it, not restated.
 - Camera motion is said in the provider's own command where its control is parametric and it has one (MiniMax's bracketed commands, such as `[Push in]`), in words where it takes words, and reported as a cosmetic drop where it takes neither.
 - The clip is the declared length nearest the plan's duration; a difference is reported.

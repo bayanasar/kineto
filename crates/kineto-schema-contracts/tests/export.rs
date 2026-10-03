@@ -186,7 +186,7 @@ fn a_package_holds_the_locked_shots_with_their_sidecars_and_a_manifest() {
     );
     assert_eq!(sidecar["video"]["provider"], "local-demo-video");
     assert_eq!(sidecar["video"]["clip_seconds"], 2);
-    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/2");
+    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/3");
     assert!(sidecar["intent"]["action"].as_str().unwrap().len() > 10);
     assert_eq!(
         sidecar["first_frame"]["artifact_id"],
