@@ -13,7 +13,7 @@
 //! released before the drop returns.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     panic::{self, AssertUnwindSafe},
@@ -34,7 +34,10 @@ use kineto_project::{
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
-    shot::{CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
+    shot::{
+        self, CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotKey, ShotWorkflow,
+        ShotWorkflowError,
+    },
     shot_plan::{self as shot_plan_document, ScenePlan, ShotPlan},
     source::{self, SourceError, SourceFormat},
     story::StoryAnalysis,
@@ -54,9 +57,6 @@ use crate::{
     style::{self, SampleRequest},
     video::{self, VideoClient, VideoDone, VideoJob},
 };
-
-/// Shots addressable in the bootstrap scene.
-pub const SHOT_COUNT: usize = 2;
 
 /// How a session obtains its project.
 #[derive(Debug)]
@@ -514,7 +514,9 @@ type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
 #[derive(Default)]
 struct View {
     metadata: OnceLock<ProjectMetadata>,
-    shots: Mutex<[ShotSlot; SHOT_COUNT]>,
+    /// The shots in play, in order, each with what was last published for
+    /// it; `None` until the open finishes.
+    shots: Mutex<Option<Vec<(ShotKey, ShotSlot)>>>,
     documents: Mutex<Option<Arc<PublishedDocuments>>>,
     production: Mutex<Option<Arc<PublishedProduction>>>,
 }
@@ -648,7 +650,11 @@ impl ProjectSession {
         command: ShotCommand,
         token: u64,
     ) -> Result<(), SubmitError> {
-        if !shot_index_is_valid(shot_index) {
+        // Before the open finishes the shots are not known; the worker
+        // refuses an index that turns out not to name one.
+        if lock(&self.view.shots).as_ref().is_some_and(|shots| {
+            usize::try_from(shot_index).map_or(true, |index| index >= shots.len())
+        }) {
             return Err(SubmitError::InvalidShot);
         }
         self.send(Envelope {
@@ -758,16 +764,27 @@ impl ProjectSession {
         &self.document_model
     }
 
+    /// How many shots are in play: those of the locked shot plan, or of the
+    /// bootstrap scene before one is locked. 0 until the open finishes.
+    /// Never does I/O.
+    #[must_use]
+    pub fn shot_count(&self) -> usize {
+        lock(&self.view.shots).as_ref().map_or(0, Vec::len)
+    }
+
+    /// Which shot index `shot_index` names. Never does I/O.
+    #[must_use]
+    pub fn shot_key(&self, shot_index: u32) -> Option<ShotKey> {
+        let index = usize::try_from(shot_index).ok()?;
+        lock(&self.view.shots)
+            .as_ref()?
+            .get(index)
+            .map(|(key, _)| key.clone())
+    }
+
     /// The shot's most recently published snapshot. Never does I/O.
     pub fn snapshot(&self, shot_index: u32) -> Result<ShotApprovalSnapshot, SnapshotError> {
-        if !shot_index_is_valid(shot_index) {
-            return Err(SnapshotError::InvalidShot);
-        }
-        match &lock(&self.view.shots)[shot_index as usize] {
-            None => Err(SnapshotError::NotOpen),
-            Some(Ok(published)) => Ok(published.snapshot),
-            Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
-        }
+        self.published(shot_index, |published| published.snapshot)
     }
 
     /// Where the shot's candidate `candidate_index` keeps its media, or
@@ -827,10 +844,13 @@ impl ProjectSession {
         shot_index: u32,
         read: impl FnOnce(&PublishedShot) -> R,
     ) -> Result<R, SnapshotError> {
-        if !shot_index_is_valid(shot_index) {
-            return Err(SnapshotError::InvalidShot);
-        }
-        match &lock(&self.view.shots)[shot_index as usize] {
+        let shots = lock(&self.view.shots);
+        let shots = shots.as_ref().ok_or(SnapshotError::NotOpen)?;
+        let (_, slot) = usize::try_from(shot_index)
+            .ok()
+            .and_then(|index| shots.get(index))
+            .ok_or(SnapshotError::InvalidShot)?;
+        match slot {
             None => Err(SnapshotError::NotOpen),
             Some(Ok(published)) => Ok(read(published)),
             Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
@@ -862,10 +882,6 @@ impl Drop for ProjectSession {
     }
 }
 
-fn shot_index_is_valid(shot_index: u32) -> bool {
-    usize::try_from(shot_index).is_ok_and(|index| index < SHOT_COUNT)
-}
-
 fn run(
     request: OpenRequest,
     provider: ImageProvider,
@@ -880,12 +896,18 @@ fn run(
     let mut worker = match opened {
         Ok(project) => {
             let mut worker = Worker::new(project, provider, model, Arc::clone(gate), options);
+            // The locked plan's shots are on disk before anything reads them.
+            let mut recoveries = Vec::new();
+            if panic::catch_unwind(AssertUnwindSafe(|| worker.find_shots(true))).is_err() {
+                recoveries.push(Recovery::NeedsAttention { count: 1 });
+            }
             // Finish what an earlier session left before accepting commands.
-            let mut recoveries = panic::catch_unwind(AssertUnwindSafe(|| worker.recover()))
-                .unwrap_or_else(|_| {
-                    worker.shots = [None, None];
+            recoveries.extend(
+                panic::catch_unwind(AssertUnwindSafe(|| worker.recover())).unwrap_or_else(|_| {
+                    worker.shots.clear();
                     vec![Recovery::NeedsAttention { count: 1 }]
-                });
+                }),
+            );
             // Videos submitted earlier are watched again, never resubmitted.
             let unplaced =
                 panic::catch_unwind(AssertUnwindSafe(|| worker.resume_videos())).unwrap_or(1);
@@ -907,9 +929,7 @@ fn run(
                 format_version: project.manifest().format_version,
                 read_only: project.is_read_only(),
             });
-            for shot_index in 0..SHOT_COUNT {
-                worker.publish(view, shot_index);
-            }
+            worker.publish_shots(view);
             worker.publish_documents(view);
             worker.publish_production(view);
             for recovery in &recoveries {
@@ -948,8 +968,9 @@ fn run(
                 let result = match worker.as_mut() {
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
-                        let result = worker.apply(shot_index as usize, command);
-                        worker.publish(view, shot_index as usize);
+                        let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
+                        let result = worker.apply(index, command);
+                        worker.publish(view, index);
                         result
                     }
                 };
@@ -963,6 +984,10 @@ fn run(
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
                         let result = worker.apply_document(command, resubmit);
+                        // Locking a plan changes which shots are in play.
+                        if worker.find_shots(false) {
+                            worker.publish_shots(view);
+                        }
                         worker.publish_documents(view);
                         // The bible says who is cast.
                         worker.publish_production(view);
@@ -991,9 +1016,13 @@ fn run(
             }
         }
         if let Some(worker) = worker.as_mut() {
-            for (shot_index, revision, result) in worker.finish_videos() {
-                worker.publish(view, shot_index);
-                let shot_index = u32::try_from(shot_index).expect("shot index fits in u32");
+            for (key, revision, result) in worker.finish_videos() {
+                // A shot no longer in play keeps its video; no one is told.
+                let Some(index) = worker.index_of(&key) else {
+                    continue;
+                };
+                worker.publish(view, index);
+                let shot_index = u32::try_from(index).expect("shot index fits in u32");
                 gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
             }
         }
@@ -1027,9 +1056,9 @@ const VIDEO_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 struct Videos {
     client: Option<VideoClient>,
     gate: Arc<Gate>,
-    in_flight: [Option<VideoJob>; SHOT_COUNT],
+    in_flight: BTreeMap<ShotKey, VideoJob>,
     /// Shots whose last submission is unresolved; see [`ShotCommand::ResubmitVideo`].
-    unresolved: [bool; SHOT_COUNT],
+    unresolved: BTreeSet<ShotKey>,
     finished: Arc<Mutex<Vec<VideoDone>>>,
     watchers: Vec<thread::JoinHandle<()>>,
     poll_interval: std::time::Duration,
@@ -1041,13 +1070,8 @@ impl Videos {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let Ok(shot_index) = usize::try_from(job.shot_number - 1) else {
-            return;
-        };
-        if shot_index >= SHOT_COUNT {
-            return;
-        }
-        self.in_flight[shot_index] = Some(job.clone());
+        let shot = job.shot.clone();
+        self.in_flight.insert(shot.clone(), job.clone());
         let gate = Arc::clone(&self.gate);
         let finished = Arc::clone(&self.finished);
         let interval = self.poll_interval;
@@ -1061,7 +1085,9 @@ impl Videos {
         match spawned {
             Ok(handle) => self.watchers.push(handle),
             // Without a watcher the task is followed again on the next open.
-            Err(_) => self.in_flight[shot_index] = None,
+            Err(_) => {
+                self.in_flight.remove(&shot);
+            }
         }
     }
 
@@ -1094,12 +1120,14 @@ struct Worker {
     provider: ImageProvider,
     model: DocumentModel,
     videos: Videos,
+    /// The shots in play, in order; a shot index names one of them.
+    keys: Vec<ShotKey>,
     // Canonical JSON is loaded once per shot per session; reads then stay
     // typed and in memory rather than re-parsing project files.
-    shots: [Option<ShotWorkflow>; SHOT_COUNT],
+    shots: BTreeMap<ShotKey, ShotWorkflow>,
     /// Shots whose last generation is unresolved; see
     /// [`ShotCommand::ResubmitKeyframes`].
-    keyframes_unresolved: [bool; SHOT_COUNT],
+    keyframes_unresolved: BTreeSet<ShotKey>,
     /// A style sample may have been charged without its result.
     style_unresolved: bool,
     /// Characters an image of which may have been charged without its
@@ -1127,64 +1155,57 @@ impl Worker {
             videos: Videos {
                 client,
                 gate,
-                in_flight: [None, None],
-                unresolved: [false, false],
+                in_flight: BTreeMap::new(),
+                unresolved: BTreeSet::new(),
                 finished: Arc::new(Mutex::new(Vec::new())),
                 watchers: Vec::new(),
                 poll_interval: options.video_poll_interval,
             },
-            shots: [None, None],
-            keyframes_unresolved: [false, false],
+            keys: Vec::new(),
+            shots: BTreeMap::new(),
+            keyframes_unresolved: BTreeSet::new(),
             style_unresolved: false,
             cast_unresolved: BTreeSet::new(),
         }
     }
 
     /// Attach (or retire) every video whose watcher has finished.
-    fn finish_videos(&mut self) -> Vec<(usize, u16, Result<(), SessionError>)> {
+    fn finish_videos(&mut self) -> Vec<(ShotKey, u16, Result<(), SessionError>)> {
         let finished = std::mem::take(&mut *lock(&self.videos.finished));
         let mut outcomes = Vec::with_capacity(finished.len());
         for done in finished {
-            let Some(shot_index) = usize::try_from(done.job.shot_number)
-                .ok()
-                .and_then(|number| number.checked_sub(1))
-                .filter(|index| *index < SHOT_COUNT)
-            else {
-                continue;
-            };
-            self.videos.in_flight[shot_index] = None;
+            let key = done.job.shot.clone();
+            self.videos.in_flight.remove(&key);
             let revision = done.job.revision;
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                self.with_shot(shot_index, |project, _, shot| {
-                    video::finish(project, shot, done)
-                })
+                self.with_shot(&key, |project, _, shot| video::finish(project, shot, done))
             }))
             .unwrap_or(Err(GenerationError::Unexpected(
                 "attaching a video panicked",
             )));
             if result.is_err() {
-                self.shots[shot_index] = None;
+                self.shots.remove(&key);
             }
-            outcomes.push((
-                shot_index,
-                revision,
-                result.map(|_| ()).map_err(generation_error),
-            ));
+            outcomes.push((key, revision, result.map(|_| ()).map_err(generation_error)));
         }
         outcomes
     }
 
     fn apply(&mut self, shot_index: usize, command: ShotCommand) -> Result<(), SessionError> {
+        let Some(key) = self.keys.get(shot_index).cloned() else {
+            return Err(SessionError::Shot(ShotWorkflowError::InvalidShotNumber));
+        };
+        let key = &key;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
             // Generation runs as write-ahead jobs so an interruption is
             // recoverable; every other command is a single canonical update.
-            ShotCommand::Generate => self.generate(shot_index, Consent::default()),
-            ShotCommand::ResubmitKeyframes => self.generate(shot_index, Consent::RISK_PAYING_TWICE),
-            ShotCommand::GenerateConsenting(consent) => self.generate(shot_index, consent),
-            ShotCommand::GenerateVideo => self.start_video(shot_index, false),
-            ShotCommand::ResubmitVideo => self.start_video(shot_index, true),
+            ShotCommand::Generate => self.generate(key, Consent::default()),
+            ShotCommand::ResubmitKeyframes => self.generate(key, Consent::RISK_PAYING_TWICE),
+            ShotCommand::GenerateConsenting(consent) => self.generate(key, consent),
+            ShotCommand::GenerateVideo => self.start_video(key, false),
+            ShotCommand::ResubmitVideo => self.start_video(key, true),
             command => self
-                .with_shot(shot_index, |project, _, shot| match command {
+                .with_shot(key, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
                     ShotCommand::Select(candidate) => shot.select(project, candidate),
                     ShotCommand::Lock => shot.lock(project),
@@ -1208,24 +1229,20 @@ impl Worker {
             Err(_) => {
                 // Do not trust a half-applied in-memory shot; reload it from
                 // its canonical files on next use.
-                self.shots[shot_index] = None;
+                self.shots.remove(key);
                 Err(SessionError::Panicked)
             }
         }
     }
 
-    fn start_video(
-        &mut self,
-        shot_index: usize,
-        risk_paying_twice: bool,
-    ) -> Result<(), SessionError> {
-        if self.videos.in_flight[shot_index].is_some() {
+    fn start_video(&mut self, key: &ShotKey, risk_paying_twice: bool) -> Result<(), SessionError> {
+        if self.videos.in_flight.contains_key(key) {
             return Err(SessionError::VideoInFlight);
         }
         let Some(client) = self.videos.client.clone() else {
             return Err(SessionError::Generation(GenerationError::NotConfigured));
         };
-        let started = self.with_shot(shot_index, |project, _, shot| {
+        let started = self.with_shot(key, |project, _, shot| {
             if risk_paying_twice {
                 video::resubmit(project, shot, &client)
             } else {
@@ -1233,8 +1250,12 @@ impl Worker {
             }
         });
         match &started {
-            Ok(_) => self.videos.unresolved[shot_index] = false,
-            Err(GenerationError::UnresolvedSubmission) => self.videos.unresolved[shot_index] = true,
+            Ok(_) => {
+                self.videos.unresolved.remove(key);
+            }
+            Err(GenerationError::UnresolvedSubmission) => {
+                self.videos.unresolved.insert(key.clone());
+            }
             Err(_) => {}
         }
         let job = started.map_err(generation_error)?;
@@ -1255,29 +1276,23 @@ impl Worker {
                     let root = self.project.root().clone();
                     self.videos.watch(job, root);
                 }
-                for shot_number in found.unresolved {
-                    if let Some(unresolved) = usize::try_from(shot_number)
-                        .ok()
-                        .and_then(|number| number.checked_sub(1))
-                        .and_then(|index| self.videos.unresolved.get_mut(index))
-                    {
-                        *unresolved = true;
-                    }
-                }
+                self.videos.unresolved.extend(found.unresolved);
                 found.needs_attention
             }
             Err(_) => 1,
         }
     }
 
-    fn generate(&mut self, shot_index: usize, consent: Consent) -> Result<(), SessionError> {
-        let generated = self.with_shot(shot_index, |project, provider, shot| {
+    fn generate(&mut self, key: &ShotKey, consent: Consent) -> Result<(), SessionError> {
+        let generated = self.with_shot(key, |project, provider, shot| {
             generation::generate_with_consent(project, shot, provider, &mut NoHooks, consent)
         });
         match &generated {
-            Ok(_) => self.keyframes_unresolved[shot_index] = false,
+            Ok(_) => {
+                self.keyframes_unresolved.remove(key);
+            }
             Err(GenerationError::UnresolvedSubmission) => {
-                self.keyframes_unresolved[shot_index] = true;
+                self.keyframes_unresolved.insert(key.clone());
             }
             Err(_) => {}
         }
@@ -1299,6 +1314,7 @@ impl Worker {
         let Self {
             project,
             provider,
+            keys,
             shots,
             keyframes_unresolved,
             ..
@@ -1322,43 +1338,39 @@ impl Worker {
                 }
             };
             unplaced += needs_attention;
-            for shot_number in unresolved {
-                if let Some(flag) = usize::try_from(shot_number)
-                    .ok()
-                    .and_then(|number| number.checked_sub(1))
-                    .and_then(|index| keyframes_unresolved.get_mut(index))
-                {
-                    *flag = true;
-                }
-            }
+            keyframes_unresolved.extend(unresolved);
             for plan in plans {
-                let Some(shot_index) = usize::try_from(plan.shot_number())
-                    .ok()
-                    .and_then(|number| number.checked_sub(1))
-                    .filter(|index| *index < SHOT_COUNT)
-                else {
+                let Ok(Some(key)) = shot::locate(project, plan.shot_id()) else {
                     unplaced += 1;
                     continue;
                 };
-                let result = shot_mut(project, shots, shot_index)
+                let result = shot_mut(project, shots, &key)
                     .map_err(GenerationError::Shot)
                     .and_then(|shot| {
                         generation::complete(project, shot, &plan, provider, &mut NoHooks)
                     });
-                let shot_number = u32::try_from(shot_index).expect("shot index fits in u32");
+                if result.is_err() {
+                    shots.remove(&key);
+                }
+                // A shot no longer in play is completed all the same; no
+                // one is told.
+                let Some(shot_index) = keys
+                    .iter()
+                    .position(|in_play| *in_play == key)
+                    .and_then(|index| u32::try_from(index).ok())
+                else {
+                    continue;
+                };
                 recoveries.push(match result {
                     Ok(_outcome) => Recovery::Completed {
-                        shot_index: shot_number,
+                        shot_index,
                         revision: plan.revision(),
                     },
-                    Err(error) => {
-                        shots[shot_index] = None;
-                        Recovery::Failed {
-                            shot_index: shot_number,
-                            revision: plan.revision(),
-                            error: generation_error(error),
-                        }
-                    }
+                    Err(error) => Recovery::Failed {
+                        shot_index,
+                        revision: plan.revision(),
+                        error: generation_error(error),
+                    },
                 });
             }
         }
@@ -1862,9 +1874,43 @@ impl Worker {
         })
     }
 
+    /// Which shots are in play: those of the locked plan, written into the
+    /// project first when `materialize` (as a project opens), or the
+    /// bootstrap scene's. Returns whether the list changed; a list that
+    /// cannot be read leaves none in play.
+    fn find_shots(&mut self, materialize: bool) -> bool {
+        if materialize && !self.project.is_read_only() {
+            // A plan locked by a session that stopped before writing its
+            // shots gets them now; failure leaves what is on disk.
+            let _ = shot_plan_document::materialize(&self.project);
+        }
+        let keys = shot_plan_document::shots_in_play(&self.project).unwrap_or_default();
+        if keys == self.keys {
+            return false;
+        }
+        self.keys = keys;
+        true
+    }
+
+    fn index_of(&self, key: &ShotKey) -> Option<usize> {
+        self.keys.iter().position(|in_play| in_play == key)
+    }
+
+    /// Publish every shot in play, replacing the list.
+    fn publish_shots(&mut self, view: &View) {
+        let keys = self.keys.clone();
+        *lock(&view.shots) = Some(keys.iter().map(|key| (key.clone(), None)).collect());
+        for index in 0..keys.len() {
+            self.publish(view, index);
+        }
+    }
+
     fn publish(&mut self, view: &View, shot_index: usize) {
+        let Some(key) = self.keys.get(shot_index).cloned() else {
+            return;
+        };
         let published = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_shot(shot_index, |project, _, shot| {
+            self.with_shot(&key, |project, _, shot| {
                 Ok(PublishedShot {
                     snapshot: shot.snapshot()?,
                     media: shot
@@ -1884,21 +1930,27 @@ impl Worker {
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map(|mut published| {
-            published.video_in_flight = self.videos.in_flight[shot_index].is_some();
-            published.video_unresolved = self.videos.unresolved[shot_index];
-            published.keyframes_unresolved = self.keyframes_unresolved[shot_index];
+            published.video_in_flight = self.videos.in_flight.contains_key(&key);
+            published.video_unresolved = self.videos.unresolved.contains(&key);
+            published.keyframes_unresolved = self.keyframes_unresolved.contains(&key);
             published
         })
         .map_err(Arc::new);
-        lock(&view.shots)[shot_index] = Some(published);
+        if let Some(slot) = lock(&view.shots)
+            .as_mut()
+            .and_then(|shots| shots.get_mut(shot_index))
+            .filter(|(published_key, _)| *published_key == key)
+        {
+            slot.1 = Some(published);
+        }
     }
 
     fn with_shot<R, E: From<ShotWorkflowError>>(
         &mut self,
-        shot_index: usize,
+        key: &ShotKey,
         operation: impl FnOnce(&CanonicalProject, &ImageProvider, &mut ShotWorkflow) -> Result<R, E>,
     ) -> Result<R, E> {
-        let shot = shot_mut(&self.project, &mut self.shots, shot_index)?;
+        let shot = shot_mut(&self.project, &mut self.shots, key)?;
         operation(&self.project, &self.provider, shot)
     }
 }
@@ -1906,15 +1958,15 @@ impl Worker {
 /// The shot's cached workflow, loaded from its canonical files on first use.
 fn shot_mut<'a>(
     project: &CanonicalProject,
-    shots: &'a mut [Option<ShotWorkflow>; SHOT_COUNT],
-    shot_index: usize,
+    shots: &'a mut BTreeMap<ShotKey, ShotWorkflow>,
+    key: &ShotKey,
 ) -> Result<&'a mut ShotWorkflow, ShotWorkflowError> {
-    if shots[shot_index].is_none() {
-        let shot_number = u32::try_from(shot_index + 1).expect("shot count fits in u32");
-        shots[shot_index] = Some(ShotWorkflow::load(project, shot_number)?);
+    if !shots.contains_key(key) {
+        let shot = ShotWorkflow::load(project, key)?;
+        shots.insert(key.clone(), shot);
     }
-    Ok(shots[shot_index]
-        .as_mut()
+    Ok(shots
+        .get_mut(key)
         .expect("shot is installed immediately above"))
 }
 
@@ -2200,7 +2252,7 @@ mod tests {
         drop(create(&target));
         {
             let project = CanonicalProject::open(&target).unwrap();
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let client = MinimaxClient::with_transport(
                 OneImage,
                 SecretString::new("sk-test".to_owned()).unwrap(),
@@ -2507,7 +2559,7 @@ mod tests {
             drop(locked_keyframe(&target, &fake));
 
             let project = CanonicalProject::open(&target).unwrap();
-            let shot = ShotWorkflow::load(&project, 1).unwrap();
+            let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
                 unreachable!();
             };
@@ -2536,7 +2588,7 @@ mod tests {
             drop(locked_keyframe(&target, &fake));
             {
                 let project = CanonicalProject::open(&target).unwrap();
-                let shot = ShotWorkflow::load(&project, 1).unwrap();
+                let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                 let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
                     unreachable!();
                 };
@@ -2590,7 +2642,7 @@ mod tests {
             drop(locked_keyframe(&target, &fake));
             {
                 let project = CanonicalProject::open(&target).unwrap();
-                let shot = ShotWorkflow::load(&project, 1).unwrap();
+                let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                 let ImageProvider::Minimax(Some(client)) = minimax(&fake) else {
                     unreachable!();
                 };
@@ -3665,6 +3717,106 @@ mod tests {
                     .len(),
                 1
             );
+        }
+
+        #[test]
+        fn a_locked_plan_puts_its_shots_in_play_and_keyframes_follow_them() {
+            use kineto_project::shot_plan::SAMPLE_SHOT_PLAN_JSON;
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeImages::default());
+            let model = DocumentModel::Fake(FakeLlm::answering([
+                SAMPLE_ANALYSIS_JSON,
+                SAMPLE_SCREENPLAY_JSON,
+                SAMPLE_BIBLE_JSON,
+                SAMPLE_SHOT_PLAN_JSON,
+            ]));
+            let (session, events) = spawn(
+                OpenRequest::CreateText {
+                    path: target.clone(),
+                    manifest: Box::new(manifest()),
+                    source: b"A filmmaker hears the last line and leaves.\n".to_vec(),
+                },
+                &fake,
+                model,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            // The bootstrap scene's shots until a plan is locked.
+            assert_eq!(session.shot_count(), 2);
+            assert_eq!(session.shot_key(1).unwrap(), ShotKey::bootstrap(2));
+            for command in [
+                DocumentCommand::AnalyzeStory,
+                DocumentCommand::WriteScreenplay,
+                DocumentCommand::LockScreenplay { revision: 1 },
+                DocumentCommand::WriteBible,
+                DocumentCommand::LockBible { revision: 1 },
+                DocumentCommand::PlanShots,
+            ] {
+                document(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                session.shot_key(1).unwrap(),
+                ShotKey::bootstrap(2),
+                "an unlocked plan changes nothing"
+            );
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockShotPlan { revision: 1 },
+            )
+            .unwrap();
+            let planned = ShotKey::new("office_night", "office_night_02").unwrap();
+            assert_eq!(session.shot_count(), 2);
+            assert_eq!(session.shot_key(1).unwrap(), planned);
+            let shot: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/office_night/shots/office_night_02/shot.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(shot["characters"], serde_json::json!(["filmmaker"]));
+            assert_eq!(shot["continuity_from"], "office_night_01");
+            let scene: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/office_night/scene.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                scene["shots"],
+                serde_json::json!(["office_night_01", "office_night_02"])
+            );
+
+            let token = token();
+            session.submit(1, ShotCommand::Generate, token).unwrap();
+            assert!(matches!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::Completed {
+                    result: Ok(()),
+                    shot_index: 1,
+                    ..
+                }
+            ));
+            assert!(
+                target
+                    .join("scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0001_candidate_a.jpg")
+                    .is_file()
+            );
+            assert_eq!(session.snapshot(1).unwrap().candidate_count, 3);
+            assert!(matches!(
+                session.submit(2, ShotCommand::Generate, token + 1),
+                Err(SubmitError::InvalidShot)
+            ));
+            drop(session);
+
+            // Reopened, the plan's shots are still the ones in play.
+            fs::remove_dir_all(target.join(".kineto")).unwrap();
+            let (session, events) = spawn(
+                OpenRequest::Open { path: target },
+                &fake,
+                DocumentModel::None,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(session.shot_key(1).unwrap(), planned);
+            assert!(session.snapshot(1).unwrap().generated);
+            assert!(!session.snapshot(0).unwrap().generated);
         }
 
         #[test]

@@ -4,6 +4,7 @@
 //! depend on both locks and go stale when either changes, and a project
 //! that blocks identity drift waits for the director's consent.
 
+use kineto_project::shot::ShotKey;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -326,7 +327,7 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
     let target = temp.0.join("film");
     let project = film(&target, true);
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
         .unwrap();
     assert_eq!(minimax.calls(), 3);
@@ -369,7 +370,7 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
 
     // Another style is locked: every candidate is stale, and kept.
     lock_style(&project, &minimax, "film_realism");
-    let shot = ShotWorkflow::load(&project, 1).unwrap();
+    let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     let stale = generation::keyframe_staleness(&project, &shot).unwrap();
     assert_eq!(stale.len(), 3);
     assert!(
@@ -394,7 +395,7 @@ fn a_provider_that_takes_two_references_is_sent_the_first_two_cast_of_the_shot()
     fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
 
     let generator = TwoFaces::default();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     generation::generate_with(&project, &mut shot, generator.clone(), &mut NoHooks).unwrap();
     let seen = generator.seen.lock().unwrap();
     assert_eq!(seen.len(), 3);
@@ -444,14 +445,14 @@ fn minimax_is_never_sent_more_identity_references_than_it_takes() {
     let request = CandidateRequest {
         artifact_id: ArtifactId::new("shot_001_g0001_candidate_a").unwrap(),
         input_hash: InputHash::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        owner: CandidateOwner::Shot(1),
+        owner: CandidateOwner::Shot(ShotKey::bootstrap(1)),
         aspect_ratio: KEYFRAME_ASPECT,
         identities: vec![reference.clone(), reference],
         prompt: Some(Arc::new(
             kineto_core::keyframe_prompt::compile(
                 None,
                 Some(
-                    &ShotWorkflow::load(&project, 1)
+                    &ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
                         .unwrap()
                         .intent()
                         .unwrap()
@@ -485,7 +486,7 @@ fn a_project_that_blocks_identity_drift_waits_for_consent() {
         generation::IdentityPolicy::Block
     );
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     let Err(GenerationError::IdentityDrift(lost)) =
         generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
     else {
@@ -530,7 +531,7 @@ fn a_portrait_changed_on_disk_is_not_sent() {
         .portrait;
     fs::write(target.join(&portrait.media_path), b"\xff\xd8\xff\xe0edited").unwrap();
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     assert!(
         generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
             .is_err()

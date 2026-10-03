@@ -16,7 +16,7 @@ use kineto_project::{
     shot_plan as shot_plan_document, source, style as style_document,
 };
 
-use crate::{cast, generation, session::SHOT_COUNT};
+use crate::{cast, generation};
 
 /// Where one step stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,18 +294,20 @@ fn casting(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
     Ok(progress)
 }
 
-/// Done when every shot's keyframe (or video) is locked; stale for each
-/// shot whose locked keyframe no longer follows its locks, or whose video
-/// no longer follows its keyframe.
+/// Done when every shot in play has its keyframe (or video) locked; stale
+/// for each shot whose locked keyframe no longer follows its locks, or whose
+/// video no longer follows its keyframe.
 fn shots(project: &CanonicalProject, kind: ArtifactKind) -> Result<Progress, WorkflowError> {
     let mut progress = Progress {
         approved: true,
         ..Progress::default()
     };
-    for number in 1..=u32::try_from(SHOT_COUNT).expect("shot count fits in u32") {
-        let shot = ShotWorkflow::load(project, number).map_err(unreadable)?;
+    let keys = shot_plan_document::shots_in_play(project).map_err(unreadable)?;
+    progress.approved = !keys.is_empty();
+    for key in keys {
+        let shot = ShotWorkflow::load(project, &key).map_err(unreadable)?;
         let snapshot = shot.snapshot().map_err(unreadable)?;
-        let shot_id = format!("shot_{number:03}");
+        let shot_id = key.shot();
         if kind == ArtifactKind::Keyframe {
             progress.made |= snapshot.generated;
             progress.approved &= snapshot.locked;

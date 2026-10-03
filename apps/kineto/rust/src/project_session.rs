@@ -668,6 +668,51 @@ pub unsafe extern "C" fn kineto_project_candidate_media_copy(
     })
 }
 
+/// How many shots are in play: those of the locked shot plan, or of the
+/// bootstrap scene before one is locked. 0 for a null handle or before the
+/// open finishes. Reads published state only; never does I/O.
+///
+/// # Safety
+/// `session` must be null or a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_count(session: *const KinetoProjectSession) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        unsafe { session.as_ref() }.map_or(0, |session| {
+            u32::try_from(session.session.shot_count()).unwrap_or(u32::MAX)
+        })
+    })
+}
+
+/// Copy the ID of shot `shot_index` (`shot`) or of its scene (`scene`) into
+/// caller-owned memory, with the sizing contract of project metadata. Reads
+/// published state only; never does I/O.
+///
+/// # Safety
+/// Same output-buffer contract as [`kineto_project_id_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_id_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    scene: bool,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let Some(key) = session.session.shot_key(shot_index) else {
+            return PROJECT_ERR_INVALID_SHOT;
+        };
+        let id = if scene { key.scene() } else { key.shot() };
+        // SAFETY: forwarded caller-owned output contract.
+        unsafe { copy_utf8(id.as_bytes(), out_buf, out_cap, out_len) }
+    })
+}
+
 /// Write 1 to `out_unresolved` when a paid keyframe call of the shot's last
 /// generation may have been accepted, and charged, without leaving its
 /// result, so generating is refused until the director resubmits; 0

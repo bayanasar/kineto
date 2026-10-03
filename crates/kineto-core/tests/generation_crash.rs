@@ -7,6 +7,7 @@
 //! released only because the OS reclaims it. The parent then opens the project
 //! the way the app does and inspects what the recovery did.
 
+use kineto_project::shot::ShotKey;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -59,7 +60,8 @@ fn crash_child() {
     }
 
     let project = CanonicalProject::open(path).expect("child opens the project");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("child loads shot 1");
+    let mut shot =
+        ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("child loads shot 1");
     let _ = generation::generate(
         &project,
         &mut shot,

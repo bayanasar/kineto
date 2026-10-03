@@ -8,6 +8,7 @@
 //! `std::process::abort()` as soon as MiniMax answers: no destructors, no
 //! rollback. The parent then inspects what is left and asks again.
 
+use kineto_project::shot::ShotKey;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -94,7 +95,8 @@ fn crash_child() {
         return;
     };
     let project = CanonicalProject::open(path).expect("child opens the project");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("child loads shot 1");
+    let mut shot =
+        ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("child loads shot 1");
     let (client, _) = client();
     let abort = || std::process::abort();
     let _ = generation::generate_with(
@@ -262,7 +264,7 @@ fn killed_as_minimax_answered_the_keyframes_wait_for_the_director() {
     drop(session);
 
     let project = CanonicalProject::open(&target).unwrap();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     let (client, calls) = client();
     let minimax = || MinimaxKeyframes::new(&project, Some(&client));
     assert!(matches!(

@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ArtifactDependency, DependencyImpact,
     bible::Bible,
+    fs::ProjectRelativePath,
     manifest::CanonicalProject,
     revisions::{self, DocumentKind, RevisionError, RevisionRecord, RevisionStatus},
     screenplay::{SCENE_ARTIFACT_PREFIX, SceneFreshness, Screenplay},
-    shot::ShotDirection,
+    shot::{BOOTSTRAP_SCENE, BOOTSTRAP_SHOTS, ShotDirection, ShotKey, locate},
     story::is_portable_id,
 };
 
@@ -477,7 +478,186 @@ pub fn lock(project: &CanonicalProject, revision: u32) -> Result<(), RevisionErr
         .ok_or(RevisionError::NoSuchRevision(revision))?;
     let plan: ShotPlan = revisions::read(project, &record)?;
     check_references(project, &plan)?;
-    revisions::lock(project, DocumentKind::ShotPlan, revision)
+    // Shot IDs must not collide with shots another scene already holds.
+    for (scene, shot) in plan.shots() {
+        if let Some(elsewhere) = locate(project, &shot.id).ok().flatten()
+            && elsewhere.scene() != scene
+        {
+            return Err(RevisionError::InvalidDocument(format!(
+                "shot {:?} already exists in scene {:?}",
+                shot.id,
+                elsewhere.scene()
+            )));
+        }
+    }
+    revisions::lock(project, DocumentKind::ShotPlan, revision)?;
+    materialize(project).map(|_| ())
+}
+
+/// Write the shots of the locked plan into the project: each scene's
+/// `scene.json` from the locked screenplay, and each shot's `shot.json`
+/// with the plan's intent. A shot already written keeps its generation and
+/// video revisions; its intent is replaced, so candidates made for another
+/// intent show as stale and are kept. Idempotent; writes nothing when no
+/// plan is locked. Returns the shots in plan order.
+pub fn materialize(project: &CanonicalProject) -> Result<Vec<ShotKey>, RevisionError> {
+    let Some((_, plan)) = locked_plan(project)? else {
+        return Ok(Vec::new());
+    };
+    let (_, screenplay) = crate::bible::locked_screenplay(project)?.ok_or_else(|| {
+        RevisionError::InvalidDocument("the shot plan is locked but no screenplay is".to_owned())
+    })?;
+    let mut keys = Vec::new();
+    for scene_plan in &plan.scenes {
+        let scene = screenplay.scene(&scene_plan.scene_id).ok_or_else(|| {
+            RevisionError::InvalidDocument(format!(
+                "the locked screenplay has no scene {:?}",
+                scene_plan.scene_id
+            ))
+        })?;
+        write_merged(
+            project,
+            &format!("scenes/{}/scene.json", scene.id),
+            serde_json::json!({
+                "scene_id": scene.id,
+                "schema_version": 1,
+                "location": scene.location,
+                "time": scene.time,
+                "characters": scene.characters,
+                "dramatic_goal": scene.dramatic_goal,
+                "shots": scene_plan.shots.iter().map(|shot| shot.id.as_str()).collect::<Vec<_>>(),
+            }),
+        )?;
+        for shot in &scene_plan.shots {
+            let key = ShotKey::new(&scene.id, &shot.id).map_err(|_| {
+                RevisionError::InvalidDocument(format!("{:?} cannot name a shot", shot.id))
+            })?;
+            if let Some(elsewhere) = locate(project, &shot.id).map_err(|_| {
+                RevisionError::InvalidDocument(format!("shot {:?} is damaged", shot.id))
+            })? && elsewhere != key
+            {
+                return Err(RevisionError::InvalidDocument(format!(
+                    "shot {:?} already exists in scene {:?}",
+                    shot.id,
+                    elsewhere.scene()
+                )));
+            }
+            let mut intent = serde_json::json!({
+                "shot_id": shot.id,
+                "schema_version": 1,
+                "purpose": shot.purpose,
+                "direction": shot.direction,
+                "duration_target": shot.duration_target,
+                "characters": shot.characters,
+                "framing": shot.framing.as_str(),
+                "lens": shot.lens,
+                "camera_motion": shot.camera_motion.as_str(),
+                "action": shot.action,
+                "dialogue": shot.dialogue,
+                "emotion": shot.emotion,
+                "continuity": shot.continuity,
+                "continuity_from": shot.continuity_from,
+            });
+            if shot.continuity_from.is_none()
+                && let Some(object) = intent.as_object_mut()
+            {
+                object.remove("continuity_from");
+            }
+            write_merged(
+                project,
+                &format!("scenes/{}/shots/{}/shot.json", scene.id, shot.id),
+                intent,
+            )?;
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// Write `fields` over the JSON object at `path`, keeping its other fields
+/// (such as a shot's generation revision). Writes nothing when nothing
+/// changes.
+fn write_merged(
+    project: &CanonicalProject,
+    path: &str,
+    fields: serde_json::Value,
+) -> Result<(), RevisionError> {
+    let path = ProjectRelativePath::new(path).map_err(RevisionError::Path)?;
+    let mut current = match project.root().read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(RevisionError::Json)?
+        }
+        Err(crate::fs::ProjectFsError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            serde_json::json!({})
+        }
+        Err(error) => return Err(RevisionError::Fs(error)),
+    };
+    let before = current.clone();
+    let (Some(object), serde_json::Value::Object(fields)) = (current.as_object_mut(), fields)
+    else {
+        return Err(RevisionError::InvalidDocument(format!(
+            "{} is not a JSON object",
+            path.as_path().display()
+        )));
+    };
+    for (name, value) in fields {
+        object.insert(name, value);
+    }
+    if current == before {
+        return Ok(());
+    }
+    project
+        .validate_for_write()
+        .map_err(RevisionError::Manifest)?;
+    let mut bytes = serde_json::to_vec_pretty(&current).map_err(RevisionError::Json)?;
+    bytes.push(b'\n');
+    project
+        .root()
+        .write_atomic(&path, &bytes)
+        .map_err(RevisionError::Fs)
+}
+
+/// The shots production works on, in order: those of the locked plan, or,
+/// before any plan is locked, those the bootstrap scene lists, or its
+/// [`BOOTSTRAP_SHOTS`] when it has no `scene.json`.
+pub fn shots_in_play(project: &CanonicalProject) -> Result<Vec<ShotKey>, RevisionError> {
+    if let Some((_, plan)) = locked_plan(project)? {
+        return plan
+            .shots()
+            .map(|(scene, shot)| {
+                ShotKey::new(scene, &shot.id).map_err(|_| {
+                    RevisionError::InvalidDocument(format!("{:?} cannot name a shot", shot.id))
+                })
+            })
+            .collect();
+    }
+    let path = ProjectRelativePath::new(format!("scenes/{BOOTSTRAP_SCENE}/scene.json"))
+        .map_err(RevisionError::Path)?;
+    let bytes = match project.root().read(&path) {
+        Ok(bytes) => bytes,
+        Err(crate::fs::ProjectFsError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok((1..=BOOTSTRAP_SHOTS).map(ShotKey::bootstrap).collect());
+        }
+        Err(error) => return Err(RevisionError::Fs(error)),
+    };
+    #[derive(Deserialize)]
+    struct Scene {
+        #[serde(default)]
+        shots: Vec<String>,
+    }
+    let scene: Scene = serde_json::from_slice(&bytes).map_err(RevisionError::Json)?;
+    scene
+        .shots
+        .iter()
+        .map(|shot| {
+            ShotKey::new(BOOTSTRAP_SCENE, shot)
+                .map_err(|_| RevisionError::InvalidDocument(format!("{shot:?} cannot name a shot")))
+        })
+        .collect()
 }
 
 /// The locked plan and its revision, or `None` when none is locked.

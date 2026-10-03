@@ -101,6 +101,23 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
               'time the project opens.',
     ];
 
+/// What shot [shotId] of scene [sceneId] is: a bootstrap shot's demo
+/// content, or a planned shot named by its IDs.
+DemoShotContent shotContent(String sceneId, String shotId) {
+  final number = sceneId == 'scene_001' && shotId.startsWith('shot_')
+      ? int.tryParse(shotId.substring('shot_'.length))
+      : null;
+  if (number != null && number >= 1 && number <= demoShots.length) {
+    return demoShots[number - 1];
+  }
+  return DemoShotContent(
+    label: shotId,
+    setting: sceneId,
+    description: '',
+    candidates: demoShots.first.candidates,
+  );
+}
+
 String _shotLabel(int shotIndex) =>
     shotIndex < demoShots.length ? demoShots[shotIndex].label : 'Shot ${shotIndex + 1}';
 
@@ -167,7 +184,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 
   List<KinetoShotSnapshot> _readShotSnapshots() =>
       List<KinetoShotSnapshot>.generate(
-        KinetoProjectSession.shotCount,
+        widget.project.shotCount,
         widget.project.shotSnapshot,
         growable: false,
       );
@@ -233,10 +250,18 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     });
   }
 
+  /// What each shot in play is: a bootstrap shot shows its demo content, a
+  /// planned shot its own IDs.
+  List<DemoShotContent> _shots() => <DemoShotContent>[
+        for (var index = 0; index < _shotSnapshots.length; index++)
+          shotContent(widget.project.shotSceneId(index), widget.project.shotId(index)),
+      ];
+
   @override
   Widget build(BuildContext context) {
     final snapshot = _shotSnapshots[_activeShotIndex];
     return DemoWorkspaceView(
+      shots: _shots(),
       engineSnapshot: _engineSnapshot,
       imageProvider: _imageProvider,
       candidateMedia: _candidateMedia(_activeShotIndex),
@@ -318,6 +343,7 @@ class DemoWorkspaceView extends StatelessWidget {
     this.keyframesUnresolved = false,
     this.onResubmitKeyframes,
     this.onGenerateDespiteIdentityDrift,
+    this.shots = demoShots,
     this.imageProvider = const KinetoImageProvider(
       kind: KinetoImageProviderKind.localDemo,
       ready: true,
@@ -367,6 +393,10 @@ class DemoWorkspaceView extends StatelessWidget {
   /// reference; set only after the project's policy refused that.
   final VoidCallback? onGenerateDespiteIdentityDrift;
 
+  /// What each shot in play is, in order: the bootstrap scene's demo shots,
+  /// or the shots of the locked plan.
+  final List<DemoShotContent> shots;
+
   /// Who generates candidates for this session, and what one generation costs.
   final KinetoImageProvider imageProvider;
 
@@ -409,7 +439,7 @@ class DemoWorkspaceView extends StatelessWidget {
         selectedIndex != null &&
         !shotSnapshot.locked &&
         !shotSnapshot.stale;
-    final shot = demoShots[activeShotIndex];
+    final shot = shots[activeShotIndex];
     final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
 
     return WabScaffold(
@@ -486,7 +516,7 @@ class DemoWorkspaceView extends StatelessWidget {
                         spacing: 16,
                         runSpacing: 12,
                         children: <Widget>[
-                          for (var index = 0; index < demoShots.length; index++)
+                          for (var index = 0; index < shots.length; index++)
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
@@ -495,7 +525,7 @@ class DemoWorkspaceView extends StatelessWidget {
                                       ? WabMaterialKind.seal
                                       : WabMaterialKind.zhuwen,
                                   onPressed: () => onShotChanged(index),
-                                  child: Text(demoShots[index].label),
+                                  child: Text(shots[index].label),
                                 ),
                                 const SizedBox(width: 8),
                                 WabStatusBadge(

@@ -16,8 +16,10 @@ use kineto_core::{
 use kineto_llm::fake::FakeLlm;
 use kineto_project::{
     bible::{self, Bible, EntryEdit, EntryKind},
+    fs::ProjectRelativePath,
     manifest::CanonicalProject,
     revisions::{self, DocumentKind, Origin, RevisionError},
+    shot::ShotKey,
     shot_plan::{self as document, SAMPLE_SHOT_PLAN_JSON, ShotPlan, StaleCause},
 };
 
@@ -156,6 +158,32 @@ fn shots_are_planned_from_the_locked_screenplay_and_bible() {
         Err(RevisionError::InvalidDocument(_))
     ));
     document::lock(&project, 3).unwrap();
+    let shot_file = project.root().resolve(
+        &ProjectRelativePath::new("scenes/office_night/shots/office_night_02/shot.json").unwrap(),
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&shot_file).unwrap()).unwrap();
+    assert_eq!(written["duration_target"], 6.0);
+    assert_eq!(
+        document::shots_in_play(&project).unwrap(),
+        [
+            ShotKey::new("office_night", "office_night_01").unwrap(),
+            ShotKey::new("office_night", "office_night_02").unwrap(),
+        ]
+    );
+    // Locking a changed plan again replaces the intent and keeps what the
+    // shot has made.
+    let mut generated = written;
+    generated["generation_revision"] = 4.into();
+    fs::write(&shot_file, serde_json::to_vec_pretty(&generated).unwrap()).unwrap();
+    let mut scene = latest(&project).1.scenes[0].clone();
+    scene.shots[1].emotion = "Nothing shows yet.".to_owned();
+    document::edit_scene(&project, 3, scene).unwrap();
+    document::lock(&project, 4).unwrap();
+    let relocked: serde_json::Value =
+        serde_json::from_slice(&fs::read(&shot_file).unwrap()).unwrap();
+    assert_eq!(relocked["emotion"], "Nothing shows yet.");
+    assert_eq!(relocked["generation_revision"], 4);
     let statuses = workflow::status(&project).unwrap();
     let step = statuses
         .iter()

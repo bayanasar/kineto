@@ -52,8 +52,8 @@ use kineto_project::{
     fs::{ProjectFsError, ProjectRelativePath, ProjectRoot},
     manifest::CanonicalProject,
     shot::{
-        AttachOutcome, PromptProvenance, ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan,
-        video_media_path,
+        AttachOutcome, PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput,
+        VideoPlan, locate, video_media_path,
     },
 };
 use kineto_provider_minimax::{
@@ -102,7 +102,7 @@ impl VideoHooks for NoHooks {
 /// A submitted video, as a watcher follows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoJob {
-    pub shot_number: u32,
+    pub shot: ShotKey,
     pub revision: u16,
     pub artifact_id: ArtifactId,
     pub task: VideoTask,
@@ -421,6 +421,7 @@ impl PaidJobAdapter for Deferred<'_> {
 }
 
 fn job_from_intent(
+    project: &CanonicalProject,
     runtime: &JobRuntime<'_>,
     job_id: &JobId,
 ) -> Result<Option<VideoJob>, JobRuntimeError> {
@@ -434,8 +435,11 @@ fn job_from_intent(
     let Ok(plan) = VideoPlan::for_artifact(artifact_id, intent.input_hash().clone()) else {
         return Ok(None);
     };
+    let Ok(Some(shot)) = locate(project, plan.shot_id()) else {
+        return Ok(None);
+    };
     Ok(VideoTask::new(task.as_str()).ok().map(|task| VideoJob {
-        shot_number: plan.shot_number(),
+        shot,
         revision: plan.revision(),
         artifact_id: artifact_id.clone(),
         task,
@@ -546,7 +550,7 @@ fn submit<T: Transport>(
         IntentState::Prepared => {}
         // Already submitted: follow the task it has.
         IntentState::Invoked => {
-            return job_from_intent(&runtime, &job_id)?
+            return job_from_intent(project, &runtime, &job_id)?
                 .ok_or(GenerationError::Unexpected("a submitted video has no task"));
         }
         IntentState::Reconciled => {
@@ -597,7 +601,7 @@ fn submit<T: Transport>(
         Ok(DispatchOutcome::Pending {
             provider_job_id, ..
         }) => Ok(VideoJob {
-            shot_number: plan.shot_number(),
+            shot: shot.key().clone(),
             revision: plan.revision(),
             artifact_id: plan.artifact_id().clone(),
             task: VideoTask::new(provider_job_id.as_str())
@@ -699,7 +703,7 @@ fn fetch<T: Transport>(
     file_id: &str,
 ) -> Result<(), MinimaxError> {
     let bytes = client.fetch_video(file_id)?;
-    let media = video_media_path(job.shot_number, &job.artifact_id)
+    let media = video_media_path(&job.shot, &job.artifact_id)
         .map_err(|_| MinimaxError::Malformed("video path is invalid"))?;
     root.write_atomic(&media, &bytes)
         .map_err(|_| MinimaxError::Transport(kineto_provider_minimax::TransportFailure::Io))?;
@@ -755,7 +759,7 @@ pub fn finish(
             content_hash,
             provider: VIDEO_PROVIDER.to_owned(),
             model: receipt.model,
-            media_path: video_media_path(plan.shot_number(), &done.job.artifact_id)?,
+            media_path: video_media_path(shot.key(), &done.job.artifact_id)?,
             provenance: Some(receipt.provenance),
             keyframe,
         },
@@ -772,7 +776,7 @@ pub struct InFlight {
     pub jobs: Vec<VideoJob>,
     /// Shots whose last submission may have been accepted but left no task;
     /// see [`resubmit`].
-    pub unresolved: Vec<u32>,
+    pub unresolved: Vec<ShotKey>,
     /// Records this build cannot read or place.
     pub needs_attention: usize,
 }
@@ -785,21 +789,31 @@ pub fn in_flight(project: &CanonicalProject) -> Result<InFlight, JobRuntimeError
     };
     for outcome in runtime.reconcile_startup(&mut deferred)? {
         match outcome {
-            StartupOutcome::StillPending { job_id } => match job_from_intent(&runtime, &job_id)? {
-                Some(job) => found.jobs.push(job),
-                None => found.needs_attention += 1,
-            },
+            StartupOutcome::StillPending { job_id } => {
+                match job_from_intent(project, &runtime, &job_id)? {
+                    Some(job) => found.jobs.push(job),
+                    None => found.needs_attention += 1,
+                }
+            }
             // Never submitted, or MiniMax refused it: the director asks again
             // when they want it. Any other attempt may have been charged.
             StartupOutcome::RetryPrepared { job_id, .. } => {
                 if let Some(record) = runtime.load(&job_id)?
                     && last_attempt(project.root(), &record) == LastAttempt::Unresolved
                 {
-                    match record.intent().artifact_id().and_then(|artifact_id| {
-                        VideoPlan::for_artifact(artifact_id, record.intent().input_hash().clone())
+                    match record
+                        .intent()
+                        .artifact_id()
+                        .and_then(|artifact_id| {
+                            VideoPlan::for_artifact(
+                                artifact_id,
+                                record.intent().input_hash().clone(),
+                            )
                             .ok()
-                    }) {
-                        Some(plan) => found.unresolved.push(plan.shot_number()),
+                        })
+                        .and_then(|plan| locate(project, plan.shot_id()).ok().flatten())
+                    {
+                        Some(shot) => found.unresolved.push(shot),
                         None => found.needs_attention += 1,
                     }
                 }

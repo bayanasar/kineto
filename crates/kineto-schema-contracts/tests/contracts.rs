@@ -16,7 +16,7 @@ use kineto_project::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
-    shot::ShotWorkflow,
+    shot::{ShotKey, ShotWorkflow},
 };
 use serde_json::Value;
 
@@ -299,7 +299,7 @@ fn real_project_and_shot_persistence_match_committed_schemas() {
         "production project.toml",
     );
 
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
     shot.generate(&project)
         .expect("shot generation should persist");
     let shot_root = temp.0.join("scenes/scene_001/shots/shot_001");
@@ -342,7 +342,8 @@ fn bootstrap_scene_written_at_creation_matches_committed_schemas() {
         validate(&shot_schema, &json_file(&shot_json), "bootstrap shot.json");
 
         // A canonical write keeps the intent and still matches the schema.
-        let mut shot = ShotWorkflow::load(&project, shot_number).expect("shot should load");
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(shot_number))
+            .expect("shot should load");
         shot.generate(&project)
             .expect("bootstrap shot should accept a generation");
         let written = json_file(&shot_json);
@@ -362,7 +363,7 @@ fn shot_video_records_match_committed_schemas() {
     let temp = TempDir::new();
     let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
         .expect("test project should be creatable");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
     shot.generate(&project)
         .expect("shot generation should persist");
     shot.select(&project, 0)
@@ -380,8 +381,9 @@ fn shot_video_records_match_committed_schemas() {
             },
         )
         .expect("a video should be plannable from the locked keyframe");
-    let media_path = kineto_project::shot::video_media_path(1, plan.artifact_id())
-        .expect("video path should be valid");
+    let media_path =
+        kineto_project::shot::video_media_path(&ShotKey::bootstrap(1), plan.artifact_id())
+            .expect("video path should be valid");
     let bytes = b"\0\0\0\x18ftypisomschema";
     project
         .root()
@@ -884,7 +886,7 @@ fn production_generation_jobs_and_candidates_match_committed_schemas() {
     let temp = TempDir::new();
     let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
         .expect("test project should be creatable");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
 
     generation::generate(&project, &mut shot, &ImageProvider::LocalDemo, &mut NoHooks)
         .expect("generation should run as write-ahead jobs");
@@ -971,7 +973,7 @@ fn provider_generated_keyframe_candidates_match_committed_schemas() {
             .expect("test key is not blank"),
         "https://example.test",
     );
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
 
     generation::generate_with(
         &project,
