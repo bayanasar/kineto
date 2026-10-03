@@ -71,6 +71,8 @@ pub struct VideoPromptInput<'a> {
     /// one.
     pub camera_command: Option<&'a str>,
     pub successor: Option<Successor<'a>>,
+    /// The director's notes for this generation, oldest first.
+    pub notes: &'a [String],
 }
 
 /// Compile the video prompt for `input`.
@@ -102,6 +104,21 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
                 )?;
             }
         }
+    }
+    if !input.notes.is_empty() {
+        needed(
+            &mut required,
+            "director.note",
+            &format!(
+                "Director's note: {}",
+                input
+                    .notes
+                    .iter()
+                    .map(|note| note.trim().trim_end_matches(['.', ' ']))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )?;
     }
     needed(
         &mut required,
@@ -311,6 +328,10 @@ fn canonical_intent(input: &VideoPromptInput<'_>, shot: &ShotIntent, duration: u
     field(&optional(
         input.successor.map(|successor| successor.shot_id),
     ));
+    field(&(input.notes.len() as u64).to_be_bytes());
+    for note in input.notes {
+        field(note.as_bytes());
+    }
     field(&[
         input.direction.code(),
         duration,
@@ -371,6 +392,7 @@ mod tests {
             capabilities,
             camera_command: command,
             successor: None,
+            notes: &[],
         }
     }
 
@@ -506,6 +528,28 @@ mod tests {
             "continuity.end_frame",
             "office_night_03 continues from this shot, but its keyframe is not locked yet"
         )));
+    }
+
+    #[test]
+    fn the_directors_notes_lead_what_moves_and_change_the_hash() {
+        let shot = shot();
+        let parametric = capabilities(CameraControl::Parametric);
+        let notes = ["Hold on his eyes.".to_owned(), "Slower".to_owned()];
+        let noted = compile(VideoPromptInput {
+            notes: &notes,
+            ..input(&shot, &parametric, Some("Push in"))
+        })
+        .unwrap();
+        assert!(
+            noted
+                .compiled
+                .prompt()
+                .contains("[Push in]. Director's note: Hold on his eyes; Slower. Keep the subject")
+        );
+        assert!(applied(&noted).contains(&"director.note"));
+        let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
+        assert!(!applied(&plain).contains(&"director.note"));
+        assert_ne!(noted.prompt_hash, plain.prompt_hash);
     }
 
     #[test]

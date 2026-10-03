@@ -378,6 +378,8 @@ fn shot_video_records_match_committed_schemas() {
                 model: "clip-1",
                 canonical_params: b"duration=6",
                 compiler_version: "video-prompt/1",
+                notes: &[],
+                branched_from: None,
             },
         )
         .expect("a video should be plannable from the locked keyframe");
@@ -401,6 +403,8 @@ fn shot_video_records_match_committed_schemas() {
             provenance: None,
             keyframe: plan.keyframe().expect("plan names its keyframe").0.clone(),
             intent: Some(shot.intent_record().expect("the shot has an intent")),
+            notes: vec!["Slower.".to_owned()],
+            branched_from: Some("shot_001_v0001_candidate_b".to_owned()),
         },
     )
     .expect("the video should attach");

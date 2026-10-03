@@ -58,8 +58,8 @@ use kineto_project::{
     fs::{ProjectFsError, ProjectRelativePath, ProjectRoot},
     manifest::CanonicalProject,
     shot::{
-        AttachOutcome, DEMO_PROVIDER, PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec,
-        VideoOutput, VideoPlan, locate, video_media_path,
+        AttachOutcome, DEMO_PROVIDER, MAX_VIDEO_CANDIDATES, PromptProvenance, ShotKey,
+        ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan, locate, video_media_path,
     },
     shot_plan::shots_in_play,
 };
@@ -477,7 +477,7 @@ impl fmt::Display for VideoError {
 
 impl Error for VideoError {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Receipt {
     schema_version: u32,
     artifact_id: String,
@@ -502,6 +502,12 @@ struct Receipt {
     /// records so a later change says it is stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intent: Option<serde_json::Value>,
+    /// The director's notes it is made with, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
+    /// The take it branches from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branched_from: Option<String>,
 }
 
 fn receipt_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, VideoError> {
@@ -827,8 +833,40 @@ fn job_from_intent(
     }))
 }
 
-/// Submit the shot's next video. This is the paid call; it returns as soon as
-/// the provider has accepted the task.
+/// What the director asks of a shot's next video generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoAsk {
+    /// How many candidates, from 1 to [`MAX_VIDEO_CANDIDATES`].
+    pub count: u8,
+    /// The director's note, for this generation only.
+    pub note: Option<String>,
+    /// A take to branch from: its notes come before this one's, and the
+    /// new candidates record it.
+    pub branch_from: Option<String>,
+}
+
+impl Default for VideoAsk {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            note: None,
+            branch_from: None,
+        }
+    }
+}
+
+/// What submitting a generation started.
+#[derive(Debug)]
+pub struct Started {
+    /// The candidates submitted, or submitted before and followed again, in
+    /// candidate order.
+    pub jobs: Vec<VideoJob>,
+    /// Why the next candidate, and every one after it, was not submitted.
+    pub error: Option<GenerationError>,
+}
+
+/// Submit the shot's next video, of one candidate. This is the paid call; it
+/// returns as soon as the provider has accepted the task.
 pub fn start<G: VideoGenerator>(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
@@ -844,7 +882,14 @@ pub fn start_with<G: VideoGenerator>(
     generator: &G,
     hooks: &mut impl VideoHooks,
 ) -> Result<VideoJob, GenerationError> {
-    submit(project, shot, generator, hooks, false)
+    single(start_videos(
+        project,
+        shot,
+        generator,
+        &VideoAsk::default(),
+        hooks,
+        false,
+    )?)
 }
 
 /// Submit the shot's video again although its last submission is
@@ -855,7 +900,22 @@ pub fn resubmit<G: VideoGenerator>(
     shot: &ShotWorkflow,
     generator: &G,
 ) -> Result<VideoJob, GenerationError> {
-    submit(project, shot, generator, &mut NoHooks, true)
+    single(start_videos(
+        project,
+        shot,
+        generator,
+        &VideoAsk::default(),
+        &mut NoHooks,
+        true,
+    )?)
+}
+
+fn single(started: Started) -> Result<VideoJob, GenerationError> {
+    match (started.jobs.into_iter().next(), started.error) {
+        (_, Some(error)) => Err(error),
+        (Some(job), None) => Ok(job),
+        (None, None) => Err(GenerationError::Unexpected("nothing was submitted")),
+    }
 }
 
 /// What a shot's video needs of a provider: a clip made from the locked
@@ -944,13 +1004,50 @@ fn clip_lengths(capabilities: &VideoCapabilities) -> Vec<u8> {
     }
 }
 
-fn submit<G: VideoGenerator>(
+/// The notes a generation is made with: those of the take it branches
+/// from, then the director's new note.
+fn notes_for(shot: &ShotWorkflow, ask: &VideoAsk) -> Result<Vec<String>, GenerationError> {
+    let mut notes = match &ask.branch_from {
+        Some(branch) => {
+            shot.video_history()?
+                .into_iter()
+                .find(|take| &take.artifact_id == branch)
+                .ok_or(GenerationError::Shot(
+                    kineto_project::shot::ShotWorkflowError::InvalidCandidate,
+                ))?
+                .notes
+        }
+        None => Vec::new(),
+    };
+    if let Some(note) = ask
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+    {
+        notes.push(note.to_owned());
+    }
+    Ok(notes)
+}
+
+/// Submit the shot's next video generation as `ask` says: each candidate a
+/// paid write-ahead job of its own. A candidate that cannot be submitted
+/// stops the rest; those already submitted are followed. With
+/// `risk_paying_twice`, a candidate whose last submission is unresolved is
+/// submitted again.
+pub fn start_videos<G: VideoGenerator>(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
     generator: &G,
+    ask: &VideoAsk,
     hooks: &mut impl VideoHooks,
     risk_paying_twice: bool,
-) -> Result<VideoJob, GenerationError> {
+) -> Result<Started, GenerationError> {
+    if ask.count == 0 || ask.count > MAX_VIDEO_CANDIDATES {
+        return Err(GenerationError::Shot(
+            kineto_project::shot::ShotWorkflowError::InvalidCandidate,
+        ));
+    }
     let (keyframe, first_frame) = shot.first_frame()?.ok_or(GenerationError::Shot(
         kineto_project::shot::ShotWorkflowError::KeyframeNotLocked,
     ))?;
@@ -977,6 +1074,7 @@ fn submit<G: VideoGenerator>(
     check_capabilities(&capabilities, frame.as_ref())?;
     let intent = shot.intent()?;
     let successor = successor(project, shot.key())?;
+    let notes = notes_for(shot, ask)?;
     let prompt = video_prompt::compile(VideoPromptInput {
         shot: intent.as_ref(),
         direction: shot.direction(),
@@ -992,18 +1090,81 @@ fn submit<G: VideoGenerator>(
                 shot_id,
                 keyframe_locked: *keyframe_locked,
             }),
+        notes: &notes,
     })?;
     let params = generator.canonical_params(prompt.duration_seconds);
-    let plan = shot.plan_video(
+    let plans = shot.plan_videos(
         project,
         VideoGenerationSpec {
             provider: generator.provider(),
             model: generator.model(),
             canonical_params: params.as_bytes(),
             compiler_version: VIDEO_COMPILER_VERSION,
+            notes: &notes,
+            branched_from: ask.branch_from.as_deref(),
         },
+        ask.count,
     )?;
+    let receipt = Receipt {
+        schema_version: RECEIPT_SCHEMA_VERSION,
+        artifact_id: String::new(),
+        input_hash: String::new(),
+        model: generator.model().to_owned(),
+        keyframe_artifact_id: keyframe.artifact_id.as_str().to_owned(),
+        keyframe_content_hash: keyframe.content_hash.as_str().to_owned(),
+        provenance: provenance_of(&prompt.compiled, &prompt.prompt_hash),
+        task_id: None,
+        refused_attempt: None,
+        content_hash: None,
+        intent: Some(shot.intent_record()?),
+        notes,
+        branched_from: ask.branch_from.clone(),
+    };
+    let request = VideoSubmission {
+        prompt: prompt.compiled.prompt().to_owned(),
+        first_frame: frame,
+        clip_seconds: prompt.duration_seconds,
+    };
+    let mut started = Started {
+        jobs: Vec::with_capacity(plans.len()),
+        error: None,
+    };
+    for plan in &plans {
+        let submission = Submission {
+            plan,
+            receipt: &receipt,
+            request: &request,
+            risk_paying_twice,
+        };
+        match submit_one(project, shot, generator, hooks, &submission) {
+            Ok(job) => started.jobs.push(job),
+            Err(error) => {
+                started.error = Some(error);
+                break;
+            }
+        }
+    }
+    Ok(started)
+}
 
+/// One planned candidate and what it is submitted with.
+struct Submission<'a> {
+    plan: &'a VideoPlan,
+    /// The generation's receipt, without the candidate's ID and hash.
+    receipt: &'a Receipt,
+    request: &'a VideoSubmission,
+    risk_paying_twice: bool,
+}
+
+/// Submit one planned candidate, or follow it if it was submitted before.
+fn submit_one<G: VideoGenerator>(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+    generator: &G,
+    hooks: &mut impl VideoHooks,
+    submission: &Submission<'_>,
+) -> Result<VideoJob, GenerationError> {
+    let plan = submission.plan;
     let provider = generator.provider();
     let runtime = runtime(project, provider);
     let job_id = JobId::new(plan.artifact_id().as_str())?;
@@ -1011,14 +1172,21 @@ fn submit<G: VideoGenerator>(
         && record.intent().state() == IntentState::Prepared
     {
         match last_attempt(project.root(), &record) {
+            // Never sent, but planned for other notes or another branch:
+            // nothing reached the provider, so it is planned afresh.
+            LastAttempt::None if record.intent().input_hash() != plan.input_hash() => {
+                if runtime.retire_unattempted(&job_id)? {
+                    remove_receipt(project.root(), plan.artifact_id());
+                }
+            }
             LastAttempt::None | LastAttempt::Accepted => {}
-            // Asking again is what retries a submission MiniMax refused.
+            // Asking again is what retries a submission the provider refused.
             LastAttempt::Refused => {
                 if runtime.retire_failed(&job_id)? {
                     remove_receipt(project.root(), plan.artifact_id());
                 }
             }
-            LastAttempt::Unresolved if risk_paying_twice => {
+            LastAttempt::Unresolved if submission.risk_paying_twice => {
                 runtime.retire_unresolved(&job_id)?;
                 remove_receipt(project.root(), plan.artifact_id());
             }
@@ -1054,27 +1222,14 @@ fn submit<G: VideoGenerator>(
             project.root(),
             plan.artifact_id(),
             &Receipt {
-                schema_version: RECEIPT_SCHEMA_VERSION,
                 artifact_id: plan.artifact_id().as_str().to_owned(),
                 input_hash: plan.input_hash().as_str().to_owned(),
-                model: generator.model().to_owned(),
-                keyframe_artifact_id: keyframe.artifact_id.as_str().to_owned(),
-                keyframe_content_hash: keyframe.content_hash.as_str().to_owned(),
-                provenance: provenance_of(&prompt.compiled, &prompt.prompt_hash),
-                task_id: None,
-                refused_attempt: None,
-                content_hash: None,
-                intent: Some(shot.intent_record()?),
+                ..submission.receipt.clone()
             },
         )
         .map_err(video_error)?;
     }
 
-    let request = VideoSubmission {
-        prompt: prompt.compiled.prompt().to_owned(),
-        first_frame: frame,
-        clip_seconds: prompt.duration_seconds,
-    };
     let mut submit = Submit {
         generator,
         root: project.root(),
@@ -1083,7 +1238,7 @@ fn submit<G: VideoGenerator>(
         attempt: record.attempts().saturating_add(1),
         hooks,
     };
-    match runtime.invoke_prepared(&job_id, &mut submit, &request) {
+    match runtime.invoke_prepared(&job_id, &mut submit, submission.request) {
         Ok(DispatchOutcome::Pending {
             provider_job_id, ..
         }) => Ok(VideoJob {
@@ -1264,6 +1419,8 @@ pub fn finish(
             provenance: Some(receipt.provenance),
             keyframe,
             intent: receipt.intent,
+            notes: receipt.notes,
+            branched_from: receipt.branched_from,
         },
     )?;
     let _ = runtime.acknowledge_result(&job_id)?;
@@ -1307,7 +1464,7 @@ pub fn in_flight(
                 if let Some(record) = runtime.load(&job_id)?
                     && last_attempt(project.root(), &record) == LastAttempt::Unresolved
                 {
-                    match record
+                    let placed = record
                         .intent()
                         .artifact_id()
                         .and_then(|artifact_id| {
@@ -1317,9 +1474,21 @@ pub fn in_flight(
                             )
                             .ok()
                         })
-                        .and_then(|plan| locate(project, plan.shot_id()).ok().flatten())
-                    {
-                        Some(shot) => found.unresolved.push(shot),
+                        .and_then(|plan| {
+                            let shot = locate(project, plan.shot_id()).ok().flatten()?;
+                            let current = ShotWorkflow::load(project, &shot)
+                                .ok()?
+                                .snapshot()
+                                .ok()?
+                                .video_revision;
+                            Some((shot, plan.revision() > current))
+                        });
+                    match placed {
+                        // A candidate of a generation that has a video since
+                        // can no longer become the shot's; asking for another
+                        // video is a new request, not this one again.
+                        Some((_, false)) => {}
+                        Some((shot, true)) => found.unresolved.push(shot),
                         None => found.needs_attention += 1,
                     }
                 }

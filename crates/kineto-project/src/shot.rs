@@ -253,6 +253,28 @@ pub struct CandidateRecord {
     pub applied: Vec<String>,
 }
 
+/// One video as the shot's history keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoRecord {
+    pub artifact_id: String,
+    /// The video generation it came from.
+    pub generation: u16,
+    /// Its place among its generation's candidates; `None` for a video made
+    /// before a generation could have several.
+    pub candidate: Option<u8>,
+    pub status: ArtifactStatus,
+    pub media_path: Option<ProjectRelativePath>,
+    pub origin: CandidateOrigin,
+    /// The director's notes it was made with, oldest first: a branch keeps
+    /// the notes of the take it branched from.
+    pub notes: Vec<String>,
+    /// The take it was branched from.
+    pub branched_from: Option<String>,
+    /// Why it no longer follows the shot; empty when it does, and for a
+    /// superseded video.
+    pub stale: Vec<String>,
+}
+
 /// How much a compilation lost, derived from its dropped constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -422,6 +444,12 @@ pub fn load_scene_intent(
 
 /// Artifact type of a shot's video candidates.
 pub const VIDEO_ARTIFACT_TYPE: &str = "shot_video";
+/// Most video candidates one generation may be asked for.
+pub const MAX_VIDEO_CANDIDATES: u8 = 4;
+/// Artifact fields holding the director's notes a video was made with and
+/// the take it was branched from.
+const NOTES_RECORD: &str = "notes";
+const BRANCH_RECORD: &str = "branched_from";
 
 /// Where a video candidate's bytes live: beside the shot's canonical files,
 /// named by its stable artifact ID.
@@ -441,9 +469,14 @@ pub struct VideoGenerationSpec<'a> {
     /// Deterministic encoding of provider parameters such as clip length.
     pub canonical_params: &'a [u8],
     pub compiler_version: &'a str,
+    /// The director's notes, oldest first.
+    pub notes: &'a [String],
+    /// The take this generation branches from.
+    pub branched_from: Option<&'a str>,
 }
 
-/// One video generation for a shot, decided before anything is written.
+/// One video candidate of a generation for a shot, decided before anything
+/// is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoPlan {
     shot_id: String,
@@ -462,7 +495,7 @@ impl VideoPlan {
         artifact_id: &ArtifactId,
         input_hash: InputHash,
     ) -> Result<Self, ShotWorkflowError> {
-        let (shot_id, revision) = parse_video_id(artifact_id.as_str()).ok_or(
+        let (shot_id, revision, _) = parse_video_id(artifact_id.as_str()).ok_or(
             ShotWorkflowError::InvalidTarget(std::path::PathBuf::from(artifact_id.as_str())),
         )?;
         Ok(Self {
@@ -518,6 +551,10 @@ pub struct VideoOutput {
     /// [`ShotWorkflow::intent_record`] gave it; a field changed since makes
     /// the video stale.
     pub intent: Option<Value>,
+    /// The director's notes it was made with, oldest first.
+    pub notes: Vec<String>,
+    /// The take it was branched from.
+    pub branched_from: Option<String>,
 }
 
 /// Output of the deterministic local demo generator for one candidate.
@@ -1383,16 +1420,35 @@ impl ShotWorkflow {
             .filter(|artifact| artifact.status == StoredArtifactStatus::Locked)
     }
 
-    /// The video of the shot's latest video generation, unless superseded.
-    fn current_video(&self) -> Option<&StoredArtifactRecord> {
+    /// The videos of the shot's latest video generation that are not
+    /// superseded, in candidate order.
+    fn current_videos(&self) -> Vec<&StoredArtifactRecord> {
         if self.shot.video_revision == 0 {
-            return None;
+            return Vec::new();
         }
-        let artifact_id = video_artifact_id(&self.shot.shot_id, self.shot.video_revision).ok()?;
-        self.artifact(&artifact_id).filter(|artifact| {
-            artifact.artifact_type == VIDEO_ARTIFACT_TYPE
-                && artifact.status != StoredArtifactStatus::Superseded
-        })
+        let mut videos: Vec<_> = self
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.artifact_type == VIDEO_ARTIFACT_TYPE
+                    && artifact.status != StoredArtifactStatus::Superseded
+                    && parse_video_id(&artifact.artifact_id)
+                        .is_some_and(|(_, revision, _)| revision == self.shot.video_revision)
+            })
+            .collect();
+        videos.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+        videos
+    }
+
+    /// The video that stands for the shot: the locked one, else the
+    /// selected one, else the first of the latest generation.
+    fn current_video(&self) -> Option<&StoredArtifactRecord> {
+        let videos = self.current_videos();
+        [StoredArtifactStatus::Locked, StoredArtifactStatus::Selected]
+            .iter()
+            .find_map(|status| videos.iter().find(|video| video.status == *status))
+            .or_else(|| videos.first())
+            .copied()
     }
 
     fn video_state(&self) -> Result<VideoState, ShotWorkflowError> {
@@ -1467,13 +1523,29 @@ impl ShotWorkflow {
         Ok(Some((dependency, media)))
     }
 
-    /// Decide the next video generation without writing anything. It starts
-    /// from the locked keyframe.
+    /// Decide the next video generation, of one candidate, without writing
+    /// anything.
     pub fn plan_video(
         &self,
         project: &CanonicalProject,
         spec: VideoGenerationSpec<'_>,
     ) -> Result<VideoPlan, ShotWorkflowError> {
+        self.plan_videos(project, spec, 1)?
+            .pop()
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)
+    }
+
+    /// Decide the next video generation, of `count` candidates, without
+    /// writing anything. It starts from the locked keyframe.
+    pub fn plan_videos(
+        &self,
+        project: &CanonicalProject,
+        spec: VideoGenerationSpec<'_>,
+        count: u8,
+    ) -> Result<Vec<VideoPlan>, ShotWorkflowError> {
+        if count == 0 || count > MAX_VIDEO_CANDIDATES {
+            return Err(ShotWorkflowError::InvalidCandidate);
+        }
         self.ensure_mutation_allowed()?;
         project
             .validate_for_write()
@@ -1492,6 +1564,15 @@ impl ShotWorkflow {
         let mut intent = Vec::with_capacity(self.shot.shot_id.len() + 1);
         intent.extend_from_slice(self.shot.shot_id.as_bytes());
         intent.push(self.shot.direction.code());
+        // Unchanged for a generation without notes or a branch.
+        for note in spec.notes {
+            intent.extend_from_slice(&(note.len() as u64).to_be_bytes());
+            intent.extend_from_slice(note.as_bytes());
+        }
+        if let Some(branch) = spec.branched_from {
+            intent.extend_from_slice(b"branch:");
+            intent.extend_from_slice(branch.as_bytes());
+        }
         let input_hash = InputHash::derive(InputHashMaterial {
             dependencies: std::slice::from_ref(&dependency),
             canonical_intent: &intent,
@@ -1500,21 +1581,23 @@ impl ShotWorkflow {
             canonical_params: spec.canonical_params,
             compiler_version: spec.compiler_version,
         });
-        Ok(VideoPlan {
-            shot_id: self.key.shot.clone(),
-            revision,
-            artifact_id: video_artifact_id(&self.shot.shot_id, revision)?,
-            input_hash,
-            keyframe: Some((dependency, media)),
-        })
+        (0..count)
+            .map(|candidate| {
+                Ok(VideoPlan {
+                    shot_id: self.key.shot.clone(),
+                    revision,
+                    artifact_id: video_artifact_id(&self.shot.shot_id, revision, candidate)?,
+                    input_hash: input_hash.clone(),
+                    keyframe: Some((dependency.clone(), media.clone())),
+                })
+            })
+            .collect()
     }
 
     /// Whether the planned video is already in canonical state.
     #[must_use]
     pub fn is_video_attached(&self, plan: &VideoPlan) -> bool {
-        plan.shot_id == self.key.shot
-            && self.shot.video_revision >= plan.revision
-            && self.artifact(&plan.artifact_id).is_some()
+        plan.shot_id == self.key.shot && self.artifact(&plan.artifact_id).is_some()
     }
 
     /// Publish a planned video. Idempotent, like keyframe attach: a video
@@ -1539,16 +1622,10 @@ impl ShotWorkflow {
             self.verify_attached_video(plan, output)?;
             return Ok(AttachOutcome::AlreadyAttached);
         }
-        if self.shot.video_revision > plan.revision {
-            return Err(ShotWorkflowError::StaleGeneration);
-        }
         if self.shot.video_revision.saturating_add(1) < plan.revision {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
         self.ensure_mutation_allowed()?;
-        if self.video_state()? == VideoState::Locked {
-            return Err(ShotWorkflowError::VideoLocked);
-        }
         project
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
@@ -1569,16 +1646,41 @@ impl ShotWorkflow {
             ));
         }
 
+        // A paid video is never thrown away. A candidate of an older
+        // generation that finishes late, or of a newer one that finishes
+        // after the director locked a video, is kept as superseded.
+        let locked = self
+            .current_videos()
+            .iter()
+            .any(|video| video.status == StoredArtifactStatus::Locked);
+        let late = plan.revision < self.shot.video_revision
+            || (plan.revision > self.shot.video_revision && locked);
         let mut next_shot = self.shot.clone();
-        next_shot.video_revision = plan.revision;
         let mut next_artifacts = self.artifacts.clone();
-        supersede_active_videos(&mut next_artifacts)?;
+        if !late && plan.revision > self.shot.video_revision {
+            next_shot.video_revision = plan.revision;
+            supersede_active_videos(&mut next_artifacts)?;
+        }
+        let mut extra = BTreeMap::new();
+        if let Some(intent) = &output.intent {
+            extra.insert(INTENT_RECORD.to_owned(), intent.clone());
+        }
+        if !output.notes.is_empty() {
+            extra.insert(NOTES_RECORD.to_owned(), serde_json::json!(output.notes));
+        }
+        if let Some(branch) = &output.branched_from {
+            extra.insert(BRANCH_RECORD.to_owned(), Value::String(branch.clone()));
+        }
         let provenance = output.provenance.as_ref();
         next_artifacts.push(StoredArtifactRecord {
             artifact_id: plan.artifact_id.as_str().to_owned(),
             schema_version: ARTIFACT_SCHEMA_VERSION,
             artifact_type: VIDEO_ARTIFACT_TYPE.to_owned(),
-            status: StoredArtifactStatus::Candidate,
+            status: if late {
+                StoredArtifactStatus::Superseded
+            } else {
+                StoredArtifactStatus::Candidate
+            },
             content_hash: output.content_hash.as_str().to_owned(),
             input_hash: Some(plan.input_hash.as_str().to_owned()),
             provider: Some(output.provider.clone()),
@@ -1598,11 +1700,7 @@ impl ShotWorkflow {
                 field: output.keyframe.field.clone(),
                 extra: BTreeMap::new(),
             }],
-            extra: output
-                .intent
-                .iter()
-                .map(|intent| (INTENT_RECORD.to_owned(), intent.clone()))
-                .collect(),
+            extra,
         });
 
         // The revision is published first; a video revision without its
@@ -1645,6 +1743,8 @@ impl ShotWorkflow {
             || record.media_path.as_deref() != Some(media_path.as_str())
             || record.prompt_hash.as_deref() != prompt_hash
             || record.extra.get(INTENT_RECORD) != output.intent.as_ref()
+            || stored_notes(record) != output.notes
+            || stored_branch(record) != output.branched_from
             || !depends_on_keyframe
         {
             return Err(ShotWorkflowError::AttachedRecordMismatch(
@@ -1654,19 +1754,80 @@ impl ShotWorkflow {
         Ok(())
     }
 
-    /// Approve the current video as production truth.
-    pub fn lock_video(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+    /// Choose one of the latest generation's videos, by its place among
+    /// them, to lock. Choosing again moves the choice.
+    pub fn select_video(
+        &mut self,
+        project: &CanonicalProject,
+        index: usize,
+    ) -> Result<(), ShotWorkflowError> {
         self.ensure_mutation_allowed()?;
-        match self.video_state()? {
-            VideoState::None => return Err(ShotWorkflowError::NoVideo),
-            VideoState::Locked => return Err(ShotWorkflowError::AlreadyLocked),
-            VideoState::Stale => return Err(ShotWorkflowError::StaleVideo),
-            VideoState::Ready => {}
+        let videos: Vec<(String, StoredArtifactStatus)> = self
+            .current_videos()
+            .iter()
+            .map(|video| (video.artifact_id.clone(), video.status))
+            .collect();
+        if videos
+            .iter()
+            .any(|(_, status)| *status == StoredArtifactStatus::Locked)
+        {
+            return Err(ShotWorkflowError::VideoLocked);
         }
+        let (chosen, _) = videos
+            .get(index)
+            .ok_or(ShotWorkflowError::InvalidCandidate)?;
         project
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
-        let artifact_id = video_artifact_id(&self.shot.shot_id, self.shot.video_revision)?;
+        let mut next_artifacts = self.artifacts.clone();
+        for (artifact_id, status) in &videos {
+            let target = match (artifact_id == chosen, status) {
+                (true, StoredArtifactStatus::Candidate) => ArtifactStatus::Selected,
+                (false, StoredArtifactStatus::Selected) => ArtifactStatus::Candidate,
+                _ => continue,
+            };
+            find_artifact_mut(&mut next_artifacts, &ArtifactId::new(artifact_id.clone())?)
+                .ok_or(ShotWorkflowError::InvalidCanonicalState)?
+                .transition(target)?;
+        }
+        write_json(
+            project,
+            &shot_path(&self.key, "artifacts.json")?,
+            &next_artifacts,
+        )?;
+        self.artifacts = next_artifacts;
+        Ok(())
+    }
+
+    /// Approve the chosen video, or the only one of the latest generation,
+    /// as production truth.
+    pub fn lock_video(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        self.ensure_mutation_allowed()?;
+        let videos = self.current_videos();
+        if videos.is_empty() {
+            return Err(ShotWorkflowError::NoVideo);
+        }
+        if videos
+            .iter()
+            .any(|video| video.status == StoredArtifactStatus::Locked)
+        {
+            return Err(ShotWorkflowError::AlreadyLocked);
+        }
+        let chosen = match videos
+            .iter()
+            .find(|video| video.status == StoredArtifactStatus::Selected)
+        {
+            Some(video) => *video,
+            None if videos.len() == 1 => videos[0],
+            None => return Err(ShotWorkflowError::NoSelection),
+        };
+        if !self.video_stale_causes(chosen)?.is_empty() {
+            return Err(ShotWorkflowError::StaleVideo);
+        }
+        let artifact_id = ArtifactId::new(chosen.artifact_id.clone())?;
+        project
+            .validate_for_write()
+            .map_err(ShotWorkflowError::Manifest)?;
         let mut next_artifacts = self.artifacts.clone();
         let video = find_artifact_mut(&mut next_artifacts, &artifact_id)
             .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
@@ -1681,6 +1842,47 @@ impl ShotWorkflow {
         )?;
         self.artifacts = next_artifacts;
         Ok(())
+    }
+
+    /// Every video the shot has had, current or superseded, oldest
+    /// generation first and in candidate order within one: what the
+    /// director compares across takes.
+    pub fn video_history(&self) -> Result<Vec<VideoRecord>, ShotWorkflowError> {
+        let mut history = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type == VIDEO_ARTIFACT_TYPE)
+            .map(|artifact| {
+                let (_, generation, candidate) = parse_video_id(&artifact.artifact_id)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+                Ok(VideoRecord {
+                    artifact_id: artifact.artifact_id.clone(),
+                    generation,
+                    candidate,
+                    status: artifact.status.into(),
+                    media_path: artifact
+                        .media_path
+                        .as_ref()
+                        .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
+                        .transpose()?,
+                    origin: CandidateOrigin {
+                        provider: artifact.provider.clone().unwrap_or_default(),
+                        model: artifact.model.clone().unwrap_or_default(),
+                    },
+                    notes: stored_notes(artifact),
+                    branched_from: stored_branch(artifact),
+                    stale: if artifact.status == StoredArtifactStatus::Superseded {
+                        Vec::new()
+                    } else {
+                        self.video_stale_causes(artifact)?
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, ShotWorkflowError>>()?;
+        history.sort_by(|left, right| {
+            (left.generation, left.candidate).cmp(&(right.generation, right.candidate))
+        });
+        Ok(history)
     }
 
     /// Absolute-path-free location of the current video's media, if any.
@@ -2174,8 +2376,35 @@ fn supersede_active_videos(
     Ok(())
 }
 
-fn video_artifact_id(shot_id: &str, revision: u16) -> Result<ArtifactId, ShotWorkflowError> {
-    ArtifactId::new(format!("{shot_id}_v{revision:04}")).map_err(ShotWorkflowError::ArtifactId)
+/// `<shot_id>_vRRRR_candidate_x`, `x` naming the candidate from `a`.
+fn video_artifact_id(
+    shot_id: &str,
+    revision: u16,
+    candidate: u8,
+) -> Result<ArtifactId, ShotWorkflowError> {
+    let letter = char::from(b'a' + candidate.min(MAX_VIDEO_CANDIDATES - 1));
+    ArtifactId::new(format!("{shot_id}_v{revision:04}_candidate_{letter}"))
+        .map_err(ShotWorkflowError::ArtifactId)
+}
+
+/// The director's notes a video record keeps, oldest first.
+fn stored_notes(artifact: &StoredArtifactRecord) -> Vec<String> {
+    match artifact.extra.get(NOTES_RECORD) {
+        Some(Value::Array(notes)) => notes
+            .iter()
+            .filter_map(|note| note.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The take a video record was branched from.
+fn stored_branch(artifact: &StoredArtifactRecord) -> Option<String> {
+    artifact
+        .extra
+        .get(BRANCH_RECORD)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// A four-digit revision from 0001 on.
@@ -2186,10 +2415,22 @@ fn parse_revision(value: &str) -> Option<u16> {
     value.parse::<u16>().ok().filter(|revision| *revision != 0)
 }
 
-/// Parse `<shot_id>_vRRRR` back into its shot ID and video revision.
-fn parse_video_id(value: &str) -> Option<(&str, u16)> {
-    let (shot, revision) = value.rsplit_once("_v")?;
-    ShotKey::is_id(shot).then_some((shot, parse_revision(revision)?))
+/// Parse `<shot_id>_vRRRR_candidate_x`, or a video made before a
+/// generation could have several, `<shot_id>_vRRRR`, into its shot ID,
+/// video revision and candidate.
+fn parse_video_id(value: &str) -> Option<(&str, u16, Option<u8>)> {
+    let (rest, candidate) = match value.rsplit_once("_candidate_") {
+        Some((rest, letter)) => {
+            let [letter] = letter.as_bytes() else {
+                return None;
+            };
+            let candidate = letter.checked_sub(b'a')?;
+            (candidate < MAX_VIDEO_CANDIDATES).then_some((rest, Some(candidate)))?
+        }
+        None => (value, None),
+    };
+    let (shot, revision) = rest.rsplit_once("_v")?;
+    ShotKey::is_id(shot).then_some((shot, parse_revision(revision)?, candidate))
 }
 
 fn input_hash(shot: &ShotProductionManifest) -> Result<InputHash, ShotWorkflowError> {
@@ -2746,6 +2987,8 @@ mod tests {
             model: "clip-1",
             canonical_params: b"duration=6",
             compiler_version: "video-prompt/1",
+            notes: &[],
+            branched_from: None,
         }
     }
 
@@ -2762,6 +3005,8 @@ mod tests {
             provenance: None,
             keyframe: plan.keyframe().unwrap().0.clone(),
             intent: None,
+            notes: Vec::new(),
+            branched_from: None,
         }
     }
 
@@ -2796,7 +3041,7 @@ mod tests {
         ));
 
         let plan = shot.plan_video(&project, spec()).unwrap();
-        assert_eq!(plan.artifact_id().as_str(), "shot_001_v0001");
+        assert_eq!(plan.artifact_id().as_str(), "shot_001_v0001_candidate_a");
         let (keyframe, _) = plan.keyframe().unwrap();
         assert_eq!(keyframe.artifact_id.as_str(), "shot_001_g0001_candidate_b");
         let output = video_output(&project, &plan, b"\0\0\0\x18ftypisom-one");
@@ -2820,7 +3065,9 @@ mod tests {
         assert_eq!(reloaded.snapshot().unwrap().video, VideoState::Locked);
         assert_eq!(
             reloaded.video_media().unwrap().unwrap().as_path(),
-            std::path::Path::new("scenes/scene_001/shots/shot_001/videos/shot_001_v0001.mp4")
+            std::path::Path::new(
+                "scenes/scene_001/shots/shot_001/videos/shot_001_v0001_candidate_a.mp4"
+            )
         );
         assert!(matches!(
             reloaded.plan_video(&project, spec()),
@@ -2839,7 +3086,7 @@ mod tests {
         let first_output = video_output(&project, &first, b"\0\0\0\x18ftypisom-one");
         shot.attach_video(&project, &first, &first_output).unwrap();
         let second = shot.plan_video(&project, spec()).unwrap();
-        assert_eq!(second.artifact_id().as_str(), "shot_001_v0002");
+        assert_eq!(second.artifact_id().as_str(), "shot_001_v0002_candidate_a");
         assert_eq!(
             second.input_hash(),
             first.input_hash(),
@@ -2877,8 +3124,8 @@ mod tests {
         assert_eq!(
             videos,
             [
-                ("shot_001_v0001".into(), "superseded".into()),
-                ("shot_001_v0002".into(), "candidate".into())
+                ("shot_001_v0001_candidate_a".into(), "superseded".into()),
+                ("shot_001_v0002_candidate_a".into(), "candidate".into())
             ]
         );
         assert_eq!(
@@ -2919,6 +3166,157 @@ mod tests {
         let artifacts: Vec<serde_json::Value> =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(artifacts[3]["status"], "superseded");
+    }
+
+    #[test]
+    fn video_ids_name_their_shot_generation_and_candidate() {
+        assert_eq!(
+            parse_video_id("office_night_02_v0003_candidate_c"),
+            Some(("office_night_02", 3, Some(2)))
+        );
+        // A video made before a generation could have several.
+        assert_eq!(
+            parse_video_id("shot_001_v0001"),
+            Some(("shot_001", 1, None))
+        );
+        // A shot ID may itself hold `_v`.
+        assert_eq!(
+            parse_video_id("scene_the_view_01_v0002_candidate_a"),
+            Some(("scene_the_view_01", 2, Some(0)))
+        );
+        for other in [
+            "shot_001_g0001_candidate_a",
+            "shot_001_v0001_candidate_z",
+            "shot_001_v0001_candidate_ab",
+            "shot_001_v0000_candidate_a",
+            "shot_001",
+        ] {
+            assert_eq!(parse_video_id(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_generations_candidates_are_chosen_from_and_late_ones_are_kept_aside() {
+        let temp = TempDir::new();
+        let project = project(&temp.0.join("film"));
+        let mut shot = locked_shot(&project);
+        assert!(matches!(
+            shot.plan_videos(&project, spec(), 0),
+            Err(ShotWorkflowError::InvalidCandidate)
+        ));
+        assert!(matches!(
+            shot.plan_videos(&project, spec(), MAX_VIDEO_CANDIDATES + 1),
+            Err(ShotWorkflowError::InvalidCandidate)
+        ));
+        let first = shot.plan_videos(&project, spec(), 3).unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|plan| (plan.artifact_id().as_str(), plan.revision()))
+                .collect::<Vec<_>>(),
+            [
+                ("shot_001_v0001_candidate_a", 1),
+                ("shot_001_v0001_candidate_b", 1),
+                ("shot_001_v0001_candidate_c", 1),
+            ]
+        );
+        assert!(
+            first
+                .iter()
+                .all(|plan| plan.input_hash() == first[0].input_hash())
+        );
+        // Candidates finish in any order; each joins its generation.
+        for (index, plan) in [(1, &first[1]), (0, &first[0])] {
+            let output = video_output(
+                &project,
+                plan,
+                format!("\0\0\0\x18ftypisom-{index}").as_bytes(),
+            );
+            shot.attach_video(&project, plan, &output).unwrap();
+        }
+        assert_eq!(shot.snapshot().unwrap().video, VideoState::Ready);
+        assert!(matches!(
+            shot.lock_video(&project),
+            Err(ShotWorkflowError::NoSelection)
+        ));
+        assert!(matches!(
+            shot.select_video(&project, 2),
+            Err(ShotWorkflowError::InvalidCandidate)
+        ));
+        shot.select_video(&project, 0).unwrap();
+        shot.select_video(&project, 1).unwrap();
+        let statuses = |shot: &ShotWorkflow| {
+            shot.video_history()
+                .unwrap()
+                .into_iter()
+                .map(|take| (take.artifact_id, take.status))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            statuses(&shot),
+            [
+                (
+                    "shot_001_v0001_candidate_a".to_owned(),
+                    ArtifactStatus::Candidate
+                ),
+                (
+                    "shot_001_v0001_candidate_b".to_owned(),
+                    ArtifactStatus::Selected
+                ),
+            ]
+        );
+
+        // Another generation is asked for before the director locks; it
+        // finishes only after they locked candidate b, so it is kept aside.
+        let second = shot.plan_video(&project, spec()).unwrap();
+        assert_eq!(second.revision(), 2);
+        shot.lock_video(&project).unwrap();
+        assert_eq!(shot.snapshot().unwrap().video, VideoState::Locked);
+        assert!(matches!(
+            shot.select_video(&project, 0),
+            Err(ShotWorkflowError::VideoLocked)
+        ));
+        let output = video_output(&project, &second, b"\0\0\0\x18ftypisom-second");
+        shot.attach_video(&project, &second, &output).unwrap();
+        // The first generation's last candidate, finishing late, joins its
+        // generation beside the locked one.
+        let output = video_output(&project, &first[2], b"\0\0\0\x18ftypisom-late");
+        shot.attach_video(&project, &first[2], &output).unwrap();
+        assert_eq!(
+            shot.attach_video(&project, &first[2], &output).unwrap(),
+            AttachOutcome::AlreadyAttached
+        );
+        let reloaded = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+        assert_eq!(reloaded.snapshot().unwrap().video, VideoState::Locked);
+        assert_eq!(reloaded.snapshot().unwrap().video_revision, 1);
+        assert_eq!(
+            statuses(&reloaded),
+            [
+                (
+                    "shot_001_v0001_candidate_a".to_owned(),
+                    ArtifactStatus::Candidate
+                ),
+                (
+                    "shot_001_v0001_candidate_b".to_owned(),
+                    ArtifactStatus::Locked
+                ),
+                (
+                    "shot_001_v0001_candidate_c".to_owned(),
+                    ArtifactStatus::Candidate
+                ),
+                (
+                    "shot_001_v0002_candidate_a".to_owned(),
+                    ArtifactStatus::Superseded
+                ),
+            ]
+        );
+        assert!(
+            reloaded
+                .video_history()
+                .unwrap()
+                .iter()
+                .all(|take| take.media_path.is_some() && take.stale.is_empty())
+        );
     }
 
     #[test]

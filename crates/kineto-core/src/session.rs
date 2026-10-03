@@ -36,7 +36,7 @@ use kineto_project::{
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
         self, AttachOutcome, CandidateOrigin, CandidateRecord, ShotApprovalSnapshot, ShotDirection,
-        ShotKey, ShotWorkflow, ShotWorkflowError,
+        ShotKey, ShotWorkflow, ShotWorkflowError, VideoRecord,
     },
     shot_plan::{self as shot_plan_document, ScenePlan, ShotPlan},
     source::{self, SourceError, SourceFormat},
@@ -56,7 +56,7 @@ use crate::{
     screenplay, shot_plan, story,
     style::{self, SampleRequest},
     video::{
-        self, LocalDemoVideos, VideoDone, VideoGenerator, VideoJob, VideoProvider,
+        self, LocalDemoVideos, VideoAsk, VideoDone, VideoGenerator, VideoJob, VideoProvider,
         VideoProviderInfo,
     },
     workflow,
@@ -97,14 +97,25 @@ pub enum ShotCommand {
         note: String,
         consent: Consent,
     },
-    /// Submit a video from the locked keyframe. Completes once MiniMax has
-    /// accepted the task; the video arrives later through
+    /// Submit a video from the locked keyframe. Completes once the provider
+    /// has accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
     GenerateVideo,
-    /// Submit the video again although MiniMax may already have accepted,
-    /// and charged for, the last submission that left no record. The
-    /// director's explicit decision to risk paying twice.
+    /// Submit the video again although the provider may already have
+    /// accepted, and charged for, the last submission that left no record.
+    /// The director's explicit decision to risk paying twice.
     ResubmitVideo,
+    /// Submit a video generation as the director asks: several candidates,
+    /// a note, or a branch from an earlier take. Each candidate arrives
+    /// through [`SessionSink::video_finished`].
+    GenerateVideos(VideoAsk),
+    /// [`Self::GenerateVideos`] at the risk of paying twice for a candidate
+    /// whose last submission left no record.
+    ResubmitVideos(VideoAsk),
+    /// Choose one of the latest generation's videos, by its place among
+    /// them, to lock.
+    SelectVideo(usize),
+    /// Lock the chosen video, or the only one of the latest generation.
     LockVideo,
 }
 
@@ -522,6 +533,9 @@ struct PublishedShot {
     /// Every candidate the shot has had, oldest first, with its media's
     /// absolute path.
     history: Vec<(CandidateRecord, Option<PathBuf>)>,
+    /// Every video the shot has had, oldest generation first, with its
+    /// media's absolute path.
+    videos: Vec<(VideoRecord, Option<PathBuf>)>,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -543,6 +557,8 @@ struct View {
 pub struct PublishedWorkflow {
     /// Every step, in recipe order.
     pub steps: Vec<workflow::StepStatus>,
+    /// Every scene with shots in play, and where each shot stands.
+    pub scenes: Vec<workflow::SceneProgress>,
     /// Why the steps could not be worked out, such as a recipe this build
     /// does not ship.
     pub problem: Option<String>,
@@ -841,6 +857,15 @@ impl ProjectSession {
         self.published(shot_index, |published| published.history.clone())
     }
 
+    /// Every video the shot has had, current or superseded, oldest
+    /// generation first, with its media's absolute path. Never does I/O.
+    pub fn video_history(
+        &self,
+        shot_index: u32,
+    ) -> Result<Vec<(VideoRecord, Option<PathBuf>)>, SnapshotError> {
+        self.published(shot_index, |published| published.videos.clone())
+    }
+
     /// The shot's most recently published snapshot. Never does I/O.
     pub fn snapshot(&self, shot_index: u32) -> Result<ShotApprovalSnapshot, SnapshotError> {
         self.published(shot_index, |published| published.snapshot)
@@ -1021,7 +1046,6 @@ fn run(
         if gate.is_closed() {
             break;
         }
-        let envelope_ran = envelope.is_some();
         match envelope {
             None => {}
             Some(Envelope {
@@ -1038,6 +1062,7 @@ fn run(
                         let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
                         let result = worker.apply(index, command);
                         worker.publish(view, index);
+                        worker.publish_workflow(view);
                         result
                     }
                 };
@@ -1061,6 +1086,7 @@ fn run(
                         worker.publish_documents(view);
                         // The bible says who is cast.
                         worker.publish_production(view);
+                        worker.publish_workflow(view);
                         result
                     }
                 };
@@ -1079,14 +1105,12 @@ fn run(
                     Some(worker) => {
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
+                        worker.publish_workflow(view);
                         result
                     }
                 };
                 gate.deliver(|sink| sink.document_completed(token, &result));
             }
-        }
-        if envelope_ran && let Some(worker) = worker.as_ref() {
-            worker.publish_workflow(view);
         }
         if let Some(worker) = worker.as_mut() {
             for (key, revision, result) in worker.finish_videos() {
@@ -1095,6 +1119,7 @@ fn run(
                     continue;
                 };
                 worker.publish(view, index);
+                worker.publish_workflow(view);
                 let shot_index = u32::try_from(index).expect("shot index fits in u32");
                 gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
             }
@@ -1133,7 +1158,9 @@ const VIDEO_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 struct Videos {
     provider: VideoProvider,
     gate: Arc<Gate>,
-    in_flight: BTreeMap<ShotKey, VideoJob>,
+    /// Submitted videos being followed, by artifact ID: a shot may have
+    /// several candidates in flight.
+    in_flight: BTreeMap<String, VideoJob>,
     /// Shots whose last submission is unresolved; see [`ShotCommand::ResubmitVideo`].
     unresolved: BTreeSet<ShotKey>,
     finished: Arc<Mutex<Vec<VideoDone>>>,
@@ -1154,14 +1181,19 @@ impl Videos {
         }
     }
 
+    /// Whether a video of `key` is being followed.
+    fn follows(&self, key: &ShotKey) -> bool {
+        self.in_flight.values().any(|job| &job.shot == key)
+    }
+
     fn spawn_watcher<G: VideoGenerator + Send + 'static>(
         &mut self,
         generator: G,
         job: VideoJob,
         root: ProjectRoot,
     ) {
-        let shot = job.shot.clone();
-        self.in_flight.insert(shot.clone(), job.clone());
+        let artifact = job.artifact_id.as_str().to_owned();
+        self.in_flight.insert(artifact.clone(), job.clone());
         let gate = Arc::clone(&self.gate);
         let finished = Arc::clone(&self.finished);
         let interval = self.poll_interval;
@@ -1176,7 +1208,7 @@ impl Videos {
             Ok(handle) => self.watchers.push(handle),
             // Without a watcher the task is followed again on the next open.
             Err(_) => {
-                self.in_flight.remove(&shot);
+                self.in_flight.remove(&artifact);
             }
         }
     }
@@ -1264,7 +1296,7 @@ impl Worker {
         let mut outcomes = Vec::with_capacity(finished.len());
         for done in finished {
             let key = done.job.shot.clone();
-            self.videos.in_flight.remove(&key);
+            self.videos.in_flight.remove(done.job.artifact_id.as_str());
             let revision = done.job.revision;
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
                 self.with_shot(&key, |project, _, shot| video::finish(project, shot, done))
@@ -1272,8 +1304,15 @@ impl Worker {
             .unwrap_or(Err(GenerationError::Unexpected(
                 "attaching a video panicked",
             )));
-            if result.is_err() {
-                self.shots.remove(&key);
+            match &result {
+                // A video of the shot attached: a candidate of its generation
+                // left unresolved can no longer become the shot's.
+                Ok(_) => {
+                    self.videos.unresolved.remove(&key);
+                }
+                Err(_) => {
+                    self.shots.remove(&key);
+                }
             }
             outcomes.push((key, revision, result.map(|_| ()).map_err(generation_error)));
         }
@@ -1292,8 +1331,10 @@ impl Worker {
             ShotCommand::ResubmitKeyframes => self.generate(key, Consent::RISK_PAYING_TWICE),
             ShotCommand::GenerateConsenting(consent) => self.generate(key, consent),
             ShotCommand::Refine { note, consent } => self.refine(key, consent, &note),
-            ShotCommand::GenerateVideo => self.start_video(key, false),
-            ShotCommand::ResubmitVideo => self.start_video(key, true),
+            ShotCommand::GenerateVideo => self.start_video(key, &VideoAsk::default(), false),
+            ShotCommand::ResubmitVideo => self.start_video(key, &VideoAsk::default(), true),
+            ShotCommand::GenerateVideos(ask) => self.start_video(key, &ask, false),
+            ShotCommand::ResubmitVideos(ask) => self.start_video(key, &ask, true),
             // A keyframe of a style or cast since moved on from is not locked.
             ShotCommand::Lock => self
                 .with_shot(key, |project, _, shot| generation::lock(project, shot))
@@ -1306,6 +1347,7 @@ impl Worker {
                     ShotCommand::MigrateLegacyHashes => {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
+                    ShotCommand::SelectVideo(video) => shot.select_video(project, video),
                     ShotCommand::LockVideo => shot.lock_video(project),
                     ShotCommand::Generate
                     | ShotCommand::Lock
@@ -1313,7 +1355,9 @@ impl Worker {
                     | ShotCommand::GenerateConsenting(_)
                     | ShotCommand::Refine { .. }
                     | ShotCommand::GenerateVideo
-                    | ShotCommand::ResubmitVideo => {
+                    | ShotCommand::ResubmitVideo
+                    | ShotCommand::GenerateVideos(_)
+                    | ShotCommand::ResubmitVideos(_) => {
                         unreachable!("handled above")
                     }
                 })
@@ -1330,46 +1374,52 @@ impl Worker {
         }
     }
 
-    fn start_video(&mut self, key: &ShotKey, risk_paying_twice: bool) -> Result<(), SessionError> {
-        if self.videos.in_flight.contains_key(key) {
+    fn start_video(
+        &mut self,
+        key: &ShotKey,
+        ask: &VideoAsk,
+        risk_paying_twice: bool,
+    ) -> Result<(), SessionError> {
+        if self.videos.follows(key) {
             return Err(SessionError::VideoInFlight);
-        }
-        fn submit<G: VideoGenerator>(
-            project: &CanonicalProject,
-            shot: &ShotWorkflow,
-            generator: &G,
-            risk_paying_twice: bool,
-        ) -> Result<VideoJob, GenerationError> {
-            if risk_paying_twice {
-                video::resubmit(project, shot, generator)
-            } else {
-                video::start(project, shot, generator)
-            }
         }
         let started = match self.videos.provider.clone() {
             VideoProvider::LocalDemo => self.with_shot(key, |project, _, shot| {
-                submit(project, shot, &LocalDemoVideos, risk_paying_twice)
+                video::start_videos(
+                    project,
+                    shot,
+                    &LocalDemoVideos,
+                    ask,
+                    &mut NoHooks,
+                    risk_paying_twice,
+                )
             }),
             VideoProvider::Minimax(Some(client)) => self.with_shot(key, |project, _, shot| {
-                submit(project, shot, &client, risk_paying_twice)
+                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
             }),
             VideoProvider::Minimax(None) => {
                 return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
-        };
-        match &started {
-            Ok(_) => {
-                self.videos.unresolved.remove(key);
-            }
-            Err(GenerationError::UnresolvedSubmission) => {
-                self.videos.unresolved.insert(key.clone());
-            }
-            Err(_) => {}
         }
-        let job = started.map_err(generation_error)?;
+        .map_err(generation_error)?;
+        // Candidates submitted before one could not be are followed whatever
+        // happened to it.
         let root = self.project.root().clone();
-        self.videos.watch(job, root);
-        Ok(())
+        for job in started.jobs {
+            self.videos.watch(job, root.clone());
+        }
+        match started.error {
+            None => {
+                self.videos.unresolved.remove(key);
+                Ok(())
+            }
+            Some(error) => {
+                if matches!(error, GenerationError::UnresolvedSubmission) {
+                    self.videos.unresolved.insert(key.clone());
+                }
+                Err(generation_error(error))
+            }
+        }
     }
 
     /// Watch again the videos an earlier session submitted. Nothing is
@@ -1942,21 +1992,29 @@ impl Worker {
     }
 
     fn publish_workflow(&self, view: &View) {
-        let published =
-            match panic::catch_unwind(AssertUnwindSafe(|| workflow::status(&self.project))) {
-                Ok(Ok(steps)) => PublishedWorkflow {
-                    steps,
-                    problem: None,
-                },
-                Ok(Err(error)) => PublishedWorkflow {
-                    steps: Vec::new(),
-                    problem: Some(error.to_string()),
-                },
-                Err(_) => PublishedWorkflow {
-                    steps: Vec::new(),
-                    problem: Some("working out the steps panicked".to_owned()),
-                },
-            };
+        let read = || -> Result<_, workflow::WorkflowError> {
+            Ok((
+                workflow::status(&self.project)?,
+                workflow::scenes(&self.project)?,
+            ))
+        };
+        let published = match panic::catch_unwind(AssertUnwindSafe(read)) {
+            Ok(Ok((steps, scenes))) => PublishedWorkflow {
+                steps,
+                scenes,
+                problem: None,
+            },
+            Ok(Err(error)) => PublishedWorkflow {
+                steps: Vec::new(),
+                scenes: Vec::new(),
+                problem: Some(error.to_string()),
+            },
+            Err(_) => PublishedWorkflow {
+                steps: Vec::new(),
+                scenes: Vec::new(),
+                problem: Some("working out the steps panicked".to_owned()),
+            },
+        };
         *lock(&view.workflow) = Some(Arc::new(published));
     }
 
@@ -2089,12 +2147,23 @@ impl Worker {
                             (record, media)
                         })
                         .collect(),
+                    videos: shot
+                        .video_history()?
+                        .into_iter()
+                        .map(|record| {
+                            let media = record
+                                .media_path
+                                .as_ref()
+                                .map(|path| project.root().resolve(path));
+                            (record, media)
+                        })
+                        .collect(),
                 })
             })
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map(|mut published| {
-            published.video_in_flight = self.videos.in_flight.contains_key(&key);
+            published.video_in_flight = self.videos.follows(&key);
             published.video_unresolved = self.videos.unresolved.contains(&key);
             published.keyframes_unresolved = self.keyframes_unresolved.contains(&key);
             published
@@ -2496,6 +2565,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, AtomicU32};
 
         use crate::video::VideoProviderKind;
+        use kineto_project::ArtifactStatus;
 
         const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isommp41-video";
 
@@ -2510,6 +2580,9 @@ mod tests {
             refuse: AtomicU32,
             /// Submissions to time out after sending before accepting.
             time_out: AtomicU32,
+            /// From this submission on (counting from 1), every one times out
+            /// after sending; 0 for never.
+            time_out_from: AtomicU32,
         }
 
         fn answer(body: impl Into<Vec<u8>>) -> Result<HttpResponse, TransportFailure> {
@@ -2527,7 +2600,11 @@ mod tests {
                 body: &[u8],
             ) -> Result<HttpResponse, TransportFailure> {
                 if url.ends_with("/v1/video_generation") {
-                    self.submits.fetch_add(1, Ordering::SeqCst);
+                    let submit = self.submits.fetch_add(1, Ordering::SeqCst) + 1;
+                    let from = self.time_out_from.load(Ordering::SeqCst);
+                    if from != 0 && submit >= from {
+                        return Err(TransportFailure::Timeout);
+                    }
                     let take = |count: &AtomicU32| {
                         count
                             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -2921,6 +2998,260 @@ mod tests {
             .unwrap()
         }
 
+        /// Wait for `count` videos to finish, whatever else arrives.
+        fn videos_finished(events: &Receiver<Event>, count: usize) -> Vec<Result<(), String>> {
+            let mut results = Vec::new();
+            while results.len() < count {
+                if let Event::VideoFinished { result, .. } = events.recv_timeout(WAIT).unwrap() {
+                    results.push(result);
+                }
+            }
+            results
+        }
+
+        fn ask(count: u8, note: Option<&str>, branch: Option<&str>) -> ShotCommand {
+            ShotCommand::GenerateVideos(VideoAsk {
+                count,
+                note: note.map(str::to_owned),
+                branch_from: branch.map(str::to_owned),
+            })
+        }
+
+        #[test]
+        fn candidates_already_submitted_are_followed_and_one_left_unresolved_is_not_paid_again() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = locked_keyframe(&target, &fake);
+            // The third candidate's submission times out after sending.
+            fake.time_out_from.store(3, Ordering::SeqCst);
+            assert!(
+                command(&session, &events, 4, ask(3, None, None))
+                    .unwrap_err()
+                    .contains("UnresolvedSubmission")
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+            assert!(session.video_in_flight(0).unwrap());
+            assert!(session.video_unresolved(0).unwrap());
+            // Asking again while two are being made is refused.
+            assert_eq!(
+                command(&session, &events, 5, ask(3, None, None)),
+                Err("VideoInFlight".to_owned())
+            );
+            drop(session);
+
+            // The app closed before they finished. Reopened, the two submitted
+            // candidates are followed to the end; nothing is submitted.
+            fake.finish.store(true, Ordering::SeqCst);
+            fake.time_out_from.store(0, Ordering::SeqCst);
+            let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(videos_finished(&events, 2), [Ok(()), Ok(())]);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+            let history = session.video_history(0).unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|(take, _)| take.artifact_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["shot_001_v0001_candidate_a", "shot_001_v0001_candidate_b"]
+            );
+            // The generation has its videos; the lost candidate is no longer
+            // the shot's to resubmit.
+            assert!(!session.video_unresolved(0).unwrap());
+            assert_eq!(
+                command(&session, &events, 6, ShotCommand::LockVideo),
+                Err("Shot(NoSelection)".to_owned())
+            );
+            command(&session, &events, 7, ShotCommand::SelectVideo(1)).unwrap();
+            command(&session, &events, 8, ShotCommand::LockVideo).unwrap();
+            let history = session.video_history(0).unwrap();
+            assert_eq!(history[1].0.status, ArtifactStatus::Locked);
+            assert_eq!(history[0].0.status, ArtifactStatus::Candidate);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+        }
+
+        #[test]
+        fn takes_are_compared_refined_branched_chosen_and_complete_their_scene() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            let mut token = 0;
+            let mut run = |shot: u32, command: ShotCommand| {
+                token += 1;
+                session.submit(shot, command, token).unwrap();
+                completion(&events, token)
+            };
+            for shot in [0, 1] {
+                for command in [
+                    ShotCommand::Generate,
+                    ShotCommand::Select(0),
+                    ShotCommand::Lock,
+                ] {
+                    run(shot, command).unwrap();
+                }
+            }
+
+            // Two takes, then one refined by a note, then a branch from it.
+            run(0, ask(2, None, None)).unwrap();
+            assert_eq!(videos_finished(&events, 2), [Ok(()), Ok(())]);
+            run(0, ask(1, Some("Slower."), None)).unwrap();
+            videos_finished(&events, 1);
+            run(
+                0,
+                ask(
+                    1,
+                    Some("Hold on his eyes"),
+                    Some("shot_001_v0002_candidate_a"),
+                ),
+            )
+            .unwrap();
+            videos_finished(&events, 1);
+            assert!(
+                run(0, ask(1, None, Some("shot_001_v0009_candidate_a")))
+                    .unwrap_err()
+                    .contains("InvalidCandidate")
+            );
+            let history = session.video_history(0).unwrap();
+            let takes: Vec<_> = history
+                .iter()
+                .map(|(take, media)| {
+                    (
+                        take.artifact_id.as_str(),
+                        take.generation,
+                        take.candidate,
+                        take.status,
+                        take.notes.clone(),
+                        take.branched_from.clone(),
+                        media.as_ref().is_some_and(|media| media.is_file()),
+                    )
+                })
+                .collect();
+            let superseded = ArtifactStatus::Superseded;
+            assert_eq!(
+                takes,
+                [
+                    (
+                        "shot_001_v0001_candidate_a",
+                        1,
+                        Some(0),
+                        superseded,
+                        vec![],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0001_candidate_b",
+                        1,
+                        Some(1),
+                        superseded,
+                        vec![],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0002_candidate_a",
+                        2,
+                        Some(0),
+                        superseded,
+                        vec!["Slower.".to_owned()],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0003_candidate_a",
+                        3,
+                        Some(0),
+                        ArtifactStatus::Candidate,
+                        vec!["Slower.".to_owned(), "Hold on his eyes".to_owned()],
+                        Some("shot_001_v0002_candidate_a".to_owned()),
+                        true
+                    ),
+                ]
+            );
+            let artifacts: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+            )
+            .unwrap();
+            let branch = artifacts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["artifact_id"] == "shot_001_v0003_candidate_a")
+                .unwrap();
+            assert!(
+                branch["compiled_prompt"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Director's note: Slower; Hold on his eyes.")
+            );
+
+            // The sole take of the latest generation is locked; the scene
+            // still needs the second shot's video.
+            run(0, ShotCommand::LockVideo).unwrap();
+            let scene = |session: &ProjectSession| session.workflow().unwrap().scenes[0].clone();
+            let progress = scene(&session);
+            assert_eq!(progress.scene_id, "scene_001");
+            assert!(!progress.complete());
+            assert_eq!(
+                progress
+                    .shots
+                    .iter()
+                    .map(|shot| (shot.shot_id.as_str(), shot.keyframe, shot.video))
+                    .collect::<Vec<_>>(),
+                [
+                    ("shot_001", workflow::Stage::Locked, workflow::Stage::Locked),
+                    (
+                        "shot_002",
+                        workflow::Stage::Locked,
+                        workflow::Stage::Missing
+                    ),
+                ]
+            );
+
+            // Of two takes the director chooses the second.
+            run(1, ask(2, None, None)).unwrap();
+            videos_finished(&events, 2);
+            assert!(
+                run(1, ShotCommand::LockVideo)
+                    .unwrap_err()
+                    .contains("NoSelection")
+            );
+            run(1, ShotCommand::SelectVideo(1)).unwrap();
+            run(1, ShotCommand::LockVideo).unwrap();
+            assert!(scene(&session).complete());
+            let video_step = |session: &ProjectSession| {
+                session
+                    .workflow()
+                    .unwrap()
+                    .steps
+                    .iter()
+                    .find(|step| step.id == "video")
+                    .unwrap()
+                    .state
+            };
+            assert_eq!(video_step(&session), workflow::StepState::Done);
+            drop(session);
+
+            // Every take and choice is in the project's files.
+            fs::remove_dir_all(target.join(".kineto")).unwrap();
+            let (sink, events) = sink();
+            let reopened = ProjectSession::spawn(
+                OpenRequest::Open { path: target },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(reopened.video_history(0).unwrap().len(), 4);
+            assert_eq!(
+                reopened.video_history(1).unwrap()[1].0.status,
+                ArtifactStatus::Locked
+            );
+            assert!(scene(&reopened).complete());
+            assert_eq!(video_step(&reopened), workflow::StepState::Done);
+        }
+
         #[test]
         fn the_demo_makes_a_free_video_from_its_own_keyframe_and_minimax_refuses_it() {
             let temp = TempDir::new();
@@ -2962,7 +3293,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|artifact| artifact["artifact_id"] == "shot_001_v0001")
+                .find(|artifact| artifact["artifact_id"] == "shot_001_v0001_candidate_a")
                 .unwrap();
             assert_eq!(video["provider"], "local-demo-video");
             assert_eq!(video["model"], "demo-clip");
