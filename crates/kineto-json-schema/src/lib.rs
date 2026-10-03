@@ -130,7 +130,7 @@ pub fn ensure_supported_schema(schema: &Value, path: &str) -> Result<(), String>
 
 fn ensure_supported_type(expected: &Value, path: &str) -> Result<(), String> {
     let check = |kind: &str| match kind {
-        "array" | "integer" | "null" | "number" | "object" | "string" => Ok(()),
+        "array" | "boolean" | "integer" | "null" | "number" | "object" | "string" => Ok(()),
         _ => Err(format!("{path}: unsupported JSON Schema type {kind:?}")),
     };
 
@@ -326,6 +326,7 @@ fn matches_type(expected: &Value, instance: &Value) -> Result<bool, String> {
 fn type_matches(kind: &str, instance: &Value) -> Result<bool, String> {
     Ok(match kind {
         "array" => instance.is_array(),
+        "boolean" => instance.is_boolean(),
         "integer" => instance.as_i64().is_some() || instance.as_u64().is_some(),
         "null" => instance.is_null(),
         "number" => instance.is_number(),
@@ -533,6 +534,19 @@ mod tests {
             assert!(
                 error.starts_with(expected),
                 "{error:?} does not start with {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boolean_is_only_a_boolean() {
+        let schema = json!({"type": "object", "properties": {"approval": {"type": "boolean"}}});
+        ensure_supported_schema(&schema, "$").unwrap();
+        validate(&schema, &json!({"approval": false})).unwrap();
+        for wrong in [json!(0), json!("true"), json!(null)] {
+            assert!(
+                validate(&schema, &json!({"approval": wrong})).is_err(),
+                "{wrong}"
             );
         }
     }

@@ -183,6 +183,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "character.schema.json",
             "job.schema.json",
             "project.schema.json",
+            "recipe.schema.json",
             "revisions.schema.json",
             "scene.schema.json",
             "screenplay-scene.schema.json",
@@ -199,6 +200,21 @@ fn committed_schema_inventory_is_explicit_and_supported() {
     for file in files {
         let _ = schema(&file);
     }
+}
+
+#[test]
+fn every_shipped_recipe_matches_the_committed_schema() {
+    let recipe_schema = schema("recipe.schema.json");
+    let root = repo_root().join("recipes");
+    let mut files = Vec::new();
+    collect_files(&root, &root, &mut files);
+    assert_eq!(files, ["default-film-1.json"]);
+    for file in files {
+        validate(&recipe_schema, &json_file(&root.join(&file)), &file);
+    }
+    let mut drifted = json_file(&root.join("default-film-1.json"));
+    drifted["steps"][0]["produces"] = "music".into();
+    assert!(validate_value(&recipe_schema, &drifted, "$").is_err());
 }
 
 #[test]

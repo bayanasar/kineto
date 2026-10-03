@@ -2,6 +2,7 @@ pub mod bible;
 pub mod cast;
 pub mod fs;
 pub mod manifest;
+pub mod recipe;
 pub mod revisions;
 pub mod screenplay;
 pub mod shot;

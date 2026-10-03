@@ -8,6 +8,10 @@ The stages below define Kineto's **default filmmaking recipe**, not a hardcoded 
 
 A recipe records an ID/version in the project so provenance includes the workflow definition used.
 
+Recipes follow `schemas/recipe.schema.json`. Each step names what it produces (one of the artifact kinds the engine knows how to read back from the project: source, story analysis, screenplay, bible, style, cast, shot plan, keyframe, video), the steps it follows, and whether the director approves what it made. Every step comes after the steps it follows, so a recipe has no cycle. The build ships `recipes/default-film-1.json`, the stages below without voice and preference learning. `project.toml` names the recipe by `recipe_id` and `recipe_version`, and a recipe the build does not ship is refused rather than replaced by the default.
+
+Where a project stands is computed from its canonical files on every read (`kineto_core::workflow::status`), so deleting `.kineto/` changes no step. A step is *waiting* while a step it follows is not done and nothing is made, *ready* once they are, *awaiting approval* once made, and *done* once approved, or once made where no approval is asked. Each step also names what changed since its work was made: the source under an analysis, the analysis under the locked screenplay, the screenplay scenes under the locked bible, the bible entry or style under a cast, and the locks under a locked keyframe.
+
 ## Stage 1 — Ingest
 
 Inputs:

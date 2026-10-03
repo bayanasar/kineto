@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/recipe.schema.json",
+  "title": "Kineto Workflow Recipe",
+  "description": "A filmmaking workflow as data: the steps a project goes through, what each produces, which steps it follows and whether the director approves it. A project names its recipe by ID and version in project.toml; the engine runs the recipe it ships with that ID and version and refuses any other.",
+  "type": "object",
+  "required": ["schema_version", "recipe_id", "recipe_version", "name", "steps"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "recipe_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "recipe_version": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "produces", "after", "approval", "description"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+          "produces": {
+            "enum": ["source", "story_analysis", "screenplay", "bible", "style", "cast", "shot_plan", "keyframe", "video"]
+          },
+          "after": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}
+          },
+          "approval": {"type": "boolean"},
+          "description": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
