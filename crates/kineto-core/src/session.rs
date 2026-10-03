@@ -35,6 +35,7 @@ use kineto_project::{
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{CandidateOrigin, ShotApprovalSnapshot, ShotDirection, ShotWorkflow, ShotWorkflowError},
+    shot_plan::{self as shot_plan_document, ScenePlan, ShotPlan},
     source::{self, SourceError, SourceFormat},
     story::StoryAnalysis,
     style::{self as style_document, StyleError, StyleLock, StyleSample},
@@ -49,7 +50,7 @@ use crate::{
     },
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
-    screenplay, story,
+    screenplay, shot_plan, story,
     style::{self, SampleRequest},
     video::{self, VideoClient, VideoDone, VideoJob},
 };
@@ -98,9 +99,10 @@ pub enum ShotCommand {
     LockVideo,
 }
 
-/// A change to the project's documents: its source, story analysis and
-/// screenplay. Every command runs on the session worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A change to the project's documents: its source, story analysis,
+/// screenplay, bible and shot plan. Every command runs on the session
+/// worker.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DocumentCommand {
     /// Import new source text as the next source revision.
     ImportSource {
@@ -133,6 +135,22 @@ pub enum DocumentCommand {
         edit: EntryEdit,
     },
     LockBible {
+        revision: u32,
+    },
+    /// Plan the shots of the locked screenplay from it and the locked bible.
+    PlanShots,
+    /// Plan one scene of the latest shot plan again.
+    ReplanScene {
+        scene_id: String,
+        direction: Option<String>,
+    },
+    /// Save the director's edit of one scene's shots of plan revision
+    /// `based_on`, which must be the latest.
+    SaveScenePlan {
+        based_on: u32,
+        scene: ScenePlan,
+    },
+    LockShotPlan {
         revision: u32,
     },
 }
@@ -382,6 +400,17 @@ pub struct PublishedDocuments {
     pub bible_stale: Vec<StaleCause>,
     /// Estimated cost of the next bible, likewise.
     pub bible_cost: Option<u64>,
+    /// Every shot plan revision, oldest first.
+    pub shot_plan_revisions: Vec<RevisionRecord>,
+    /// The latest shot plan revision still in play, and what it says.
+    pub shot_plan: Option<(u32, ShotPlan)>,
+    /// The locked shot plan revision, which shots follow.
+    pub shot_plan_locked: Option<u32>,
+    /// Why the plan in play may no longer follow the locked screenplay and
+    /// bible.
+    pub shot_plan_stale: Vec<shot_plan_document::StaleCause>,
+    /// Estimated cost of the next shot plan, likewise.
+    pub shot_plan_cost: Option<u64>,
     /// The documents could not be read; why.
     pub damaged: Option<String>,
 }
@@ -1426,6 +1455,23 @@ impl Worker {
             DocumentCommand::LockBible { revision } => {
                 bible_document::lock(project, revision).map_err(revision_error)
             }
+            DocumentCommand::PlanShots => {
+                ask(DocumentKind::ShotPlan, &|| shot_plan::write(project, model))
+            }
+            DocumentCommand::ReplanScene {
+                scene_id,
+                direction,
+            } => ask(DocumentKind::ShotPlan, &|| {
+                shot_plan::replan_scene(project, model, &scene_id, direction.as_deref())
+            }),
+            DocumentCommand::SaveScenePlan { based_on, scene } => {
+                shot_plan_document::edit_scene(project, based_on, scene)
+                    .map(|_| ())
+                    .map_err(revision_error)
+            }
+            DocumentCommand::LockShotPlan { revision } => {
+                shot_plan_document::lock(project, revision).map_err(revision_error)
+            }
         }))
         .unwrap_or(Err(SessionError::Panicked))
     }
@@ -1590,10 +1636,14 @@ impl Worker {
                 Ok((completed, needs_attention)) => {
                     attention += needs_attention;
                     for record in completed {
-                        let kind = [DocumentKind::Screenplay, DocumentKind::Bible]
-                            .into_iter()
-                            .find(|kind| record.artifact_id.starts_with(kind.id_prefix()))
-                            .unwrap_or(DocumentKind::StoryAnalysis);
+                        let kind = [
+                            DocumentKind::Screenplay,
+                            DocumentKind::Bible,
+                            DocumentKind::ShotPlan,
+                        ]
+                        .into_iter()
+                        .find(|kind| record.artifact_id.starts_with(kind.id_prefix()))
+                        .unwrap_or(DocumentKind::StoryAnalysis);
                         recoveries.push(Recovery::Document {
                             kind,
                             revision: record.revision,
@@ -1684,10 +1734,40 @@ impl Worker {
             .iter()
             .find(|record| record.status == revisions::RevisionStatus::Locked)
             .map(|record| record.revision);
+        let shot_plan_revisions =
+            revisions::revisions(project, DocumentKind::ShotPlan).map_err(revision_error)?;
+        let shot_plan_latest =
+            revisions::latest(project, DocumentKind::ShotPlan).map_err(revision_error)?;
+        let shot_plan_stale = match &shot_plan_latest {
+            None => Vec::new(),
+            Some(record) => {
+                shot_plan_document::staleness(project, record).map_err(revision_error)?
+            }
+        };
+        let shot_plan = match &shot_plan_latest {
+            None => None,
+            Some(record) => Some((
+                record.revision,
+                revisions::read::<ShotPlan>(project, record).map_err(revision_error)?,
+            )),
+        };
+        let shot_plan_locked = shot_plan_revisions
+            .iter()
+            .find(|record| record.status == revisions::RevisionStatus::Locked)
+            .map(|record| record.revision);
         let info = self.model.info();
         let ready = self.model.describe().ready;
         Ok(PublishedDocuments {
             source_revision: Some(source.revision),
+            shot_plan_cost: if ready && bible_locked.is_some() && locked.is_some() {
+                shot_plan::plan_cost(project, &info).ok().flatten()
+            } else {
+                None
+            },
+            shot_plan_revisions,
+            shot_plan,
+            shot_plan_locked,
+            shot_plan_stale,
             bible_cost: if ready && locked.is_some() {
                 bible::bible_cost(project, &info).ok().flatten()
             } else {
@@ -3514,6 +3594,77 @@ mod tests {
                 Event::Completed { result: Ok(()), .. }
             ));
             assert_eq!(fake.calls.load(Ordering::SeqCst), 14);
+        }
+
+        #[test]
+        fn the_director_plans_edits_and_locks_the_shots() {
+            use kineto_project::shot_plan::SAMPLE_SHOT_PLAN_JSON;
+            let temp = TempDir::new();
+            let fake = Arc::new(FakeImages::default());
+            let model = DocumentModel::Fake(FakeLlm::answering([
+                SAMPLE_ANALYSIS_JSON,
+                SAMPLE_SCREENPLAY_JSON,
+                SAMPLE_BIBLE_JSON,
+                SAMPLE_SHOT_PLAN_JSON,
+            ]));
+            let (session, events) = spawn(
+                OpenRequest::CreateText {
+                    path: temp.0.join("film"),
+                    manifest: Box::new(manifest()),
+                    source: b"A filmmaker hears the last line and leaves.\n".to_vec(),
+                },
+                &fake,
+                model,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            for command in [
+                DocumentCommand::AnalyzeStory,
+                DocumentCommand::WriteScreenplay,
+                DocumentCommand::LockScreenplay { revision: 1 },
+                DocumentCommand::WriteBible,
+            ] {
+                document(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                document(&session, &events, DocumentCommand::PlanShots),
+                Err("Generation(Prerequisite(LockedBible))".to_owned())
+            );
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockBible { revision: 1 },
+            )
+            .unwrap();
+            document(&session, &events, DocumentCommand::PlanShots).unwrap();
+            let documents = session.documents().unwrap();
+            let (revision, plan) = documents.shot_plan.as_ref().unwrap();
+            assert_eq!(*revision, 1);
+            assert_eq!(plan.scenes[0].shots.len(), 2);
+            assert!(documents.shot_plan_stale.is_empty());
+
+            let mut scene = plan.scenes[0].clone();
+            scene.shots.truncate(1);
+            document(
+                &session,
+                &events,
+                DocumentCommand::SaveScenePlan { based_on: 1, scene },
+            )
+            .unwrap();
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockShotPlan { revision: 2 },
+            )
+            .unwrap();
+            let documents = session.documents().unwrap();
+            assert_eq!(documents.shot_plan_locked, Some(2));
+            assert_eq!(documents.shot_plan_revisions.len(), 2);
+            assert_eq!(
+                documents.shot_plan.as_ref().unwrap().1.scenes[0]
+                    .shots
+                    .len(),
+                1
+            );
         }
 
         #[test]

@@ -659,7 +659,8 @@ pub unsafe extern "C" fn kineto_project_llm_model_copy(
 /// `cost_unknown` when the model's billing gives no price (an agent on a
 /// subscription), `model_not_configured` without a usable model,
 /// `needs_analysis` for a screenplay with nothing to write from, and
-/// `needs_locked_screenplay` for a bible.
+/// `needs_locked_screenplay` for a bible, and `needs_locked_bible` for a
+/// shot plan as well.
 ///
 /// # Safety
 /// `session` must be a live project-session handle and `out_micros` writable
@@ -694,6 +695,13 @@ pub unsafe extern "C" fn kineto_project_document_cost(
                 return PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY;
             }
             Some("bible") => documents.bible_cost,
+            Some("shot_plan") if documents.locked.is_none() => {
+                return PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY;
+            }
+            Some("shot_plan") if documents.bible_locked.is_none() => {
+                return PROJECT_ERR_NEEDS_LOCKED_BIBLE;
+            }
+            Some("shot_plan") => documents.shot_plan_cost,
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         if !model.ready {

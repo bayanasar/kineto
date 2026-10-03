@@ -34,6 +34,10 @@ const MAX_SCENE_ID: usize = 64;
 /// `bible_character.mira`.
 pub const CHARACTER_ARTIFACT_PREFIX: &str = "bible_character.";
 
+/// The artifact ID prefix a location's entry is depended on by, as in
+/// `bible_location.small_office`.
+pub const LOCATION_ARTIFACT_PREFIX: &str = "bible_location.";
+
 /// The artifact ID the world's entry is depended on by.
 pub const WORLD_ARTIFACT_ID: &str = "bible_world";
 
@@ -353,6 +357,17 @@ impl Bible {
             entry_dependency(
                 &format!("{CHARACTER_ARTIFACT_PREFIX}{}", character.id),
                 character,
+            )
+        })
+    }
+
+    /// The dependency work set in location `id` records on its entry.
+    #[must_use]
+    pub fn location_dependency(&self, id: &str) -> Option<ArtifactDependency> {
+        self.location(id).map(|location| {
+            entry_dependency(
+                &format!("{LOCATION_ARTIFACT_PREFIX}{}", location.id),
+                location,
             )
         })
     }

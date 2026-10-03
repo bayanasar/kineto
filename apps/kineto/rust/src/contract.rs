@@ -67,10 +67,12 @@ pub(crate) const PROJECT_ERR_NEEDS_SELECTED_PORTRAIT: i32 = 150;
 pub(crate) const PROJECT_ERR_NO_IDENTITY_REFERENCE: i32 = 151;
 pub(crate) const PROJECT_ERR_REJECTED: i32 = 152;
 pub(crate) const PROJECT_ERR_PACK_INCOMPLETE: i32 = 153;
+pub(crate) const PROJECT_ERR_NEEDS_LOCKED_BIBLE: i32 = 154;
+pub(crate) const PROJECT_ERR_NEEDS_SHOT_PLAN: i32 = 155;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 56] = [
+const STATUSES: [(&str, i32); 58] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -138,6 +140,8 @@ const STATUSES: [(&str, i32); 56] = [
     ("no_identity_reference", PROJECT_ERR_NO_IDENTITY_REFERENCE),
     ("rejected", PROJECT_ERR_REJECTED),
     ("pack_incomplete", PROJECT_ERR_PACK_INCOMPLETE),
+    ("needs_locked_bible", PROJECT_ERR_NEEDS_LOCKED_BIBLE),
+    ("needs_shot_plan", PROJECT_ERR_NEEDS_SHOT_PLAN),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -175,8 +179,12 @@ pub(crate) const LLM_PROVIDERS: [(&str, u32); 4] =
 pub(crate) const SOURCE_FORMATS: [(&str, u32); 2] = [("text", 1), ("markdown", 2)];
 
 /// Documents whose cost `kineto_project_document_cost` estimates.
-pub(crate) const DOCUMENT_COSTS: [(&str, u32); 3] =
-    [("analysis", 1), ("screenplay", 2), ("bible", 3)];
+pub(crate) const DOCUMENT_COSTS: [(&str, u32); 4] = [
+    ("analysis", 1),
+    ("screenplay", 2),
+    ("bible", 3),
+    ("shot_plan", 4),
+];
 
 /// What `kineto_project_screenplay_count` counts.
 pub(crate) const SCREENPLAY_COUNTS: [(&str, u32); 6] = [

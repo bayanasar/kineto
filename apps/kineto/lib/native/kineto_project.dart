@@ -480,6 +480,12 @@ final class KinetoProjectException implements Exception {
   /// The selected portrait's reference pack is not complete.
   static const int packIncomplete = 153;
 
+  /// Shots are planned from the locked bible as well as the screenplay.
+  static const int needsLockedBible = 154;
+
+  /// A scene is planned again within a shot plan, which does not exist yet.
+  static const int needsShotPlan = 155;
+
   final int code;
   final String message;
 
@@ -997,6 +1003,7 @@ final class _SessionPort {
               -2 => KinetoDocumentKind.storyAnalysis,
               -3 => KinetoDocumentKind.screenplay,
               -4 => KinetoDocumentKind.bible,
+              -7 => KinetoDocumentKind.shotPlan,
               _ => null,
             },
             images: switch (values[3]) {
@@ -1217,6 +1224,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'no_identity_reference': 151,
   'rejected': 152,
   'pack_incomplete': 153,
+  'needs_locked_bible': 154,
+  'needs_shot_plan': 155,
   'panic': 199,
 };
 
@@ -1279,6 +1288,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   151: 'The image provider cannot take this portrait as an identity reference',
   152: 'A rejected sample or portrait cannot be chosen',
   153: "The selected portrait's reference pack is not complete; make the pack first",
+  154: 'Lock the bible before planning shots',
+  155: 'Plan the shots before planning a scene again',
   199: 'Native project call failed unexpectedly',
 };
 

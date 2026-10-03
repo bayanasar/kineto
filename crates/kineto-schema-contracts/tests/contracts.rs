@@ -189,6 +189,8 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "screenplay-scene.schema.json",
             "screenplay.schema.json",
             "selection.schema.json",
+            "shot-plan-scene.schema.json",
+            "shot-plan.schema.json",
             "shot.schema.json",
             "source.schema.json",
             "story-analysis.schema.json",
@@ -606,6 +608,64 @@ fn generated_and_edited_bibles_and_their_revision_log_match_committed_schemas() 
         &json_file(&temp.0.join("bible/revisions.json")),
         "bible revisions",
     );
+}
+
+#[test]
+fn generated_and_edited_shot_plans_and_their_revision_log_match_committed_schemas() {
+    use kineto_llm::fake::FakeLlm;
+    use kineto_project::shot_plan::{SAMPLE_SHOT_PLAN_JSON, ShotPlan};
+    let plan_schema = schema("shot-plan.schema.json");
+    let scene_schema = schema("shot-plan-scene.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    kineto_core::bible::write(
+        &project,
+        &FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    kineto_project::bible::lock(&project, 1).expect("the bible should lock");
+    let sample: Value = serde_json::from_str(SAMPLE_SHOT_PLAN_JSON).expect("the sample is JSON");
+    validate(&plan_schema, &sample, "sample shot plan");
+    validate(&scene_schema, &sample["scenes"][0], "sample scene plan");
+    let written =
+        kineto_core::shot_plan::write(&project, &FakeLlm::answering([SAMPLE_SHOT_PLAN_JSON]))
+            .expect("the plan should be written");
+    let plan: ShotPlan =
+        kineto_project::revisions::read(&project, &written).expect("the plan is readable");
+    let mut scene = plan.scenes[0].clone();
+    scene.shots[0].continuity_from = None;
+    scene.shots[1].dialogue = String::new();
+    let edited =
+        kineto_project::shot_plan::edit_scene(&project, 1, scene).expect("the edit is saved");
+    kineto_project::shot_plan::lock(&project, 2).expect("the plan should lock");
+    for record in [&written, &edited] {
+        validate(
+            &plan_schema,
+            &json_file(&temp.0.join(&record.path)),
+            &record.path,
+        );
+    }
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("shot_plan/revisions.json")),
+        "shot plan revisions",
+    );
+    let mut drifted = sample;
+    drifted["scenes"][0]["shots"][0]["camera_motion"] = "whip_pan".into();
+    assert!(validate_value(&plan_schema, &drifted, "$").is_err());
 }
 
 #[test]

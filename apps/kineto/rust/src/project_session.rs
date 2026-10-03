@@ -50,11 +50,12 @@ const MESSAGE_VIDEO: i64 = 4;
 /// The `shot` of a `RECOVERED` message for unplaced job records, and of a
 /// `COMPLETED` message for a document command.
 const NO_SHOT: i64 = -1;
-/// The `shot` of a `RECOVERED` message for a story analysis, screenplay or
-/// bible revision kept from an interrupted session.
+/// The `shot` of a `RECOVERED` message for a story analysis, screenplay,
+/// bible or shot plan revision kept from an interrupted session.
 const RECOVERED_ANALYSIS: i64 = -2;
 const RECOVERED_SCREENPLAY: i64 = -3;
 const RECOVERED_BIBLE: i64 = -4;
+const RECOVERED_SHOT_PLAN: i64 = -7;
 /// The `shot` of a `RECOVERED` message for style samples or casting images
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
@@ -149,6 +150,7 @@ impl SessionSink for DartPort {
                     DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
                     DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
                     DocumentKind::Bible => RECOVERED_BIBLE,
+                    DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
                 },
             ],
             Recovery::Images { kind, count } => [
@@ -1137,6 +1139,8 @@ fn generation_error_code(error: &GenerationError) -> i32 {
             PROJECT_ERR_NO_IDENTITY_REFERENCE
         }
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
+        GenerationError::Prerequisite(Prerequisite::LockedBible) => PROJECT_ERR_NEEDS_LOCKED_BIBLE,
+        GenerationError::Prerequisite(Prerequisite::ShotPlan) => PROJECT_ERR_NEEDS_SHOT_PLAN,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall

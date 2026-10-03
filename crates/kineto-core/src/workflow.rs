@@ -13,7 +13,7 @@ use kineto_project::{
     recipe::{self, ArtifactKind, RecipeError},
     revisions::{self, DocumentKind, RevisionStatus},
     shot::{ShotWorkflow, VideoState},
-    source, style as style_document,
+    shot_plan as shot_plan_document, source, style as style_document,
 };
 
 use crate::{cast, generation, session::SHOT_COUNT};
@@ -140,8 +140,7 @@ fn progress(project: &CanonicalProject, kind: ArtifactKind) -> Result<Progress, 
         ArtifactKind::Bible => bible(project),
         ArtifactKind::Style => style(project),
         ArtifactKind::Cast => casting(project),
-        // Shot plans are not made yet; the shot planner records them.
-        ArtifactKind::ShotPlan => Ok(Progress::default()),
+        ArtifactKind::ShotPlan => shot_plan(project),
         ArtifactKind::Keyframe | ArtifactKind::Video => shots(project, kind),
     }
 }
@@ -216,6 +215,35 @@ fn bible(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
             | bible_document::StaleCause::SceneChanged(id)
             | bible_document::StaleCause::SceneRemoved(id)
             | bible_document::StaleCause::SceneAdded(id) => id,
+        })
+        .collect();
+    Ok(Progress {
+        made: true,
+        approved: true,
+        stale,
+    })
+}
+
+fn shot_plan(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
+    let all = revisions::revisions(project, DocumentKind::ShotPlan).map_err(unreadable)?;
+    let Some(locked) = all
+        .iter()
+        .find(|record| record.status == RevisionStatus::Locked)
+    else {
+        return Ok(Progress {
+            made: !all.is_empty(),
+            ..Progress::default()
+        });
+    };
+    let stale = shot_plan_document::staleness(project, locked)
+        .map_err(unreadable)?
+        .into_iter()
+        .map(|cause| match cause {
+            shot_plan_document::StaleCause::NotLocked => "screenplay or bible".to_owned(),
+            shot_plan_document::StaleCause::SceneChanged(id)
+            | shot_plan_document::StaleCause::SceneRemoved(id)
+            | shot_plan_document::StaleCause::SceneAdded(id)
+            | shot_plan_document::StaleCause::Entry(id) => id,
         })
         .collect();
     Ok(Progress {

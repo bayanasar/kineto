@@ -668,6 +668,10 @@ pub enum Prerequisite {
     SelectedPortrait,
     /// The image provider takes no identity reference, or not this portrait.
     IdentityReference,
+    /// Shots are planned from the locked bible as well as the screenplay.
+    LockedBible,
+    /// A scene is planned again within a shot plan.
+    ShotPlan,
 }
 
 impl fmt::Display for Prerequisite {
@@ -690,6 +694,8 @@ impl fmt::Display for Prerequisite {
             Self::IdentityReference => {
                 "the image provider takes no identity reference, or not this portrait"
             }
+            Self::LockedBible => "lock the bible first",
+            Self::ShotPlan => "plan the shots before planning a scene again",
         })
     }
 }

@@ -28,6 +28,7 @@ pub enum DocumentKind {
     StoryAnalysis,
     Screenplay,
     Bible,
+    ShotPlan,
 }
 
 impl DocumentKind {
@@ -36,6 +37,7 @@ impl DocumentKind {
             Self::StoryAnalysis => "story/analysis",
             Self::Screenplay => "screenplay",
             Self::Bible => "bible",
+            Self::ShotPlan => "shot_plan",
         }
     }
 
@@ -46,6 +48,7 @@ impl DocumentKind {
             Self::StoryAnalysis => "story_analysis",
             Self::Screenplay => "screenplay",
             Self::Bible => "bible",
+            Self::ShotPlan => "shot_plan",
         }
     }
 

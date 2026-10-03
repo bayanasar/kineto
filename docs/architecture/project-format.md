@@ -21,6 +21,9 @@ my-film/
 │   ├── revisions.json
 │   ├── bible_r0001.json
 │   └── style.json
+├── shot_plan/
+│   ├── revisions.json
+│   └── shot_plan_r0001.json
 ├── style/
 │   ├── samples.json
 │   └── samples/
@@ -331,6 +334,12 @@ Representative shape:
   "shots": ["S003_SH01", "S003_SH02"]
 }
 ```
+
+## Shot plan
+
+The shot plan (`shot_plan/`) is a document artifact kept as revisions like the screenplay and the bible, and follows `shot-plan.schema.json`. It has the shots of every scene of the locked screenplay, in screenplay order. Each shot has an ID unique in the plan, its purpose, a direction (`reaction`, `spatial_clarity`, `intimacy`, `tension`), a framing and a camera motion from fixed vocabularies, a lens, the action seen, the dialogue spoken (verbatim, or empty), the emotion, a target duration of 1–30 seconds, the cast IDs of those seen (only the scene's cast, each with a bible entry), continuity notes and, optionally, the earlier shot it continues from. A shot's location is its scene's. The plan is made by a model from the locked screenplay and the locked bible (`shot-plan/1`); one scene can be planned again on its own (`shot-plan-scene.schema.json`, `shot-plan-scene/1`) as a new revision `based_on` the one it reworked. An answer that misses or reorders a scene, shows anyone a scene's cast lacks, or breaks the plan's own rules is asked for once more. The director's edit of one scene's shots is a new revision made only from the latest one, held to the same checks, and locking a revision makes it the plan the shots follow.
+
+A plan depends on each screenplay scene (`screenplay_scene.<id>`), on the bible entry of each cast member who appears (`bible_character.<id>`) and of each scene's location (`bible_location.<id>`), each by its content hash, and cosmetically on the screenplay and bible revisions it read. It is stale when a scene changed, went or came, when an entry it read changed, or when the screenplay or bible is no longer locked; staleness names each.
 
 ## Shot schema
 

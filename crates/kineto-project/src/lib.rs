@@ -6,6 +6,7 @@ pub mod recipe;
 pub mod revisions;
 pub mod screenplay;
 pub mod shot;
+pub mod shot_plan;
 pub mod source;
 pub mod story;
 pub mod style;

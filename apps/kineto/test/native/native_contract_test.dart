@@ -110,6 +110,8 @@ void main() {
       KinetoProjectException.noIdentityReference: 'no_identity_reference',
       KinetoProjectException.rejected: 'rejected',
       KinetoProjectException.packIncomplete: 'pack_incomplete',
+      KinetoProjectException.needsLockedBible: 'needs_locked_bible',
+      KinetoProjectException.needsShotPlan: 'needs_shot_plan',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);
