@@ -35,10 +35,11 @@ use kineto_jobs::{
 };
 use kineto_project::{
     ArtifactId, ContentHash, InputHash,
+    bible::Bible,
     cast::{self, CastError, CastImageKind, CharacterLock, LockedImage},
     fs::ProjectRelativePath,
     manifest::CanonicalProject,
-    revisions::DependencyRecord,
+    revisions::{self, DependencyRecord, DocumentKind, RevisionStatus},
     shot::{
         self, AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
         GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotIntent, ShotKey,
@@ -978,6 +979,7 @@ fn compile_prompt<G: CandidateGenerator>(
     let scene = load_scene_intent(project, shot.key().scene())?;
     let intent = shot.intent()?;
     let (style, characters) = locks_of(project, intent.as_ref())?;
+    let bible = locked_bible(project)?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
         intent.as_ref(),
@@ -985,9 +987,25 @@ fn compile_prompt<G: CandidateGenerator>(
         Locks {
             style: style.as_ref(),
             characters: &characters,
+            bible: bible.as_ref(),
         },
         &generator.capabilities(),
     )?)))
+}
+
+/// The locked bible, which keyframes read continuity from; `None` when no
+/// bible is locked.
+fn locked_bible(project: &CanonicalProject) -> Result<Option<Bible>, GenerationError> {
+    let Some(record) = revisions::revisions(project, DocumentKind::Bible)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|record| record.status == RevisionStatus::Locked)
+    else {
+        return Ok(None);
+    };
+    revisions::read(project, &record)
+        .map(Some)
+        .map_err(document_error)
 }
 
 /// The locked style and the locked casts of the shot's characters.
@@ -1044,6 +1062,12 @@ pub fn keyframe_staleness(
         .into_iter()
         .collect();
     current.extend(characters.iter().filter_map(cast::lock_dependency));
+    let scene = load_scene_intent(project, shot.key().scene())?;
+    current.extend(keyframe_prompt::continuity_dependencies(
+        scene.as_ref(),
+        intent.as_ref(),
+        locked_bible(project)?.as_ref(),
+    ));
     Ok(shot
         .candidate_dependencies()?
         .iter()
@@ -1940,7 +1964,7 @@ mod tests {
                 assert_eq!(artifact["provider"], "minimax");
                 assert_eq!(artifact["model"], "image-01");
                 assert_eq!(artifact["media_state"], "present");
-                assert_eq!(artifact["compiler_version"], "keyframe-prompt/2");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/3");
                 assert_eq!(artifact["degradation"], "identity_affecting");
                 assert!(artifact["media_path"].as_str().unwrap().starts_with(
                     "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"

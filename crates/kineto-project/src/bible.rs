@@ -38,6 +38,10 @@ pub const CHARACTER_ARTIFACT_PREFIX: &str = "bible_character.";
 /// `bible_location.small_office`.
 pub const LOCATION_ARTIFACT_PREFIX: &str = "bible_location.";
 
+/// The artifact ID prefix a prop's entry is depended on by, as in
+/// `bible_prop.notebook`.
+pub const PROP_ARTIFACT_PREFIX: &str = "bible_prop.";
+
 /// The artifact ID the world's entry is depended on by.
 pub const WORLD_ARTIFACT_ID: &str = "bible_world";
 
@@ -80,6 +84,18 @@ pub struct Character {
     pub wardrobe_changes: Vec<WardrobeChange>,
     pub forbidden_changes: Vec<String>,
     pub continuity_notes: Vec<String>,
+}
+
+impl Character {
+    /// What the character wears in scene `scene_id`: its wardrobe change
+    /// there, or its usual wardrobe.
+    #[must_use]
+    pub fn wardrobe_in(&self, scene_id: &str) -> &str {
+        self.wardrobe_changes
+            .iter()
+            .find(|change| change.scenes.iter().any(|scene| scene == scene_id))
+            .map_or(&self.wardrobe, |change| &change.wardrobe)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +386,15 @@ impl Bible {
                 location,
             )
         })
+    }
+
+    /// The dependency work showing prop `id` records on its entry.
+    #[must_use]
+    pub fn prop_dependency(&self, id: &str) -> Option<ArtifactDependency> {
+        self.props
+            .iter()
+            .find(|prop| prop.id == id)
+            .map(|prop| entry_dependency(&format!("{PROP_ARTIFACT_PREFIX}{}", prop.id), prop))
     }
 
     /// The dependency work that follows the world's rules records on them.

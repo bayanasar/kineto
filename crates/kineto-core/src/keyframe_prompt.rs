@@ -12,12 +12,19 @@
 //! identity-affecting drop: two takes of the same shot can show different
 //! faces. A cast character's forbidden changes are
 //! said as long as the prompt has room, and dropping them is
-//! identity-affecting too. Nothing is truncated.
+//! identity-affecting too.
+//!
+//! Continuity comes from the locked bible and the shot's plan: what each
+//! character wears in this scene, how the location looks and what never
+//! changes there, the props the scene holds, the shot's own continuity
+//! notes, and the shot it continues from. Each is said as long as the prompt
+//! has room; a cut one is reported. Nothing is truncated.
 
 use std::{error::Error, fmt};
 
 use kineto_project::{
     ArtifactDependency,
+    bible::Bible,
     cast::{self, CharacterLock, LockedImage},
     shot::{SceneIntent, ShotDirection, ShotIntent},
     style::{self, StyleLock},
@@ -33,9 +40,9 @@ use crate::style_prompt::{Part, fit, sentence};
 
 /// Version recorded with every keyframe compiled by this module. Change it
 /// whenever the same intent would compile to a different prompt.
-pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/2";
+pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/3";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.keyframe-intent.v2";
+const INTENT_DOMAIN: &[u8] = b"kineto.keyframe-intent.v3";
 
 /// What production has locked that a keyframe follows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,6 +50,46 @@ pub struct Locks<'a> {
     pub style: Option<&'a StyleLock>,
     /// The locked casts of characters, in any order.
     pub characters: &'a [CharacterLock],
+    /// The locked bible, whose entries say what carries over.
+    pub bible: Option<&'a Bible>,
+}
+
+/// The bible entries a shot's keyframe reads for continuity: the entry of
+/// each character it shows, of its scene's location, and of each prop the
+/// scene holds. A keyframe depends on each.
+#[must_use]
+pub fn continuity_dependencies(
+    scene: Option<&SceneIntent>,
+    shot: Option<&ShotIntent>,
+    bible: Option<&Bible>,
+) -> Vec<ArtifactDependency> {
+    let Some(bible) = bible else {
+        return Vec::new();
+    };
+    let mut dependencies: Vec<ArtifactDependency> = shot
+        .map_or(&[][..], |shot| shot.characters.as_slice())
+        .iter()
+        .filter_map(|character| bible.character_dependency(character))
+        .collect();
+    if let Some(location) = scene.and_then(|scene| scene.location.as_deref()) {
+        dependencies.extend(bible.location_dependency(location));
+    }
+    for prop in props_in(bible, scene) {
+        dependencies.extend(bible.prop_dependency(&prop.id));
+    }
+    dependencies
+}
+
+/// The props the bible places in `scene`.
+fn props_in<'a>(
+    bible: &'a Bible,
+    scene: Option<&'a SceneIntent>,
+) -> impl Iterator<Item = &'a kineto_project::bible::Prop> {
+    let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
+    bible
+        .props
+        .iter()
+        .filter(move |prop| !scene_id.is_empty() && prop.scenes.iter().any(|id| id == scene_id))
 }
 
 /// A compiled keyframe prompt with the hash that ties it to its intent.
@@ -244,6 +291,101 @@ pub fn compile(
             });
         }
     }
+    if let Some(from) = &shot.continuity_from {
+        needed(
+            &mut required,
+            "continuity.from",
+            format!(
+                "It continues directly from shot {}: keep its light, framing and wardrobe",
+                words(from)
+            ),
+        )?;
+        dropped.push(drop(
+            "continuity.previous_frame",
+            "the previous shot's keyframe is not sent as a reference; the shot follows it in \
+             words only",
+            DegradationLevel::Cosmetic,
+        )?);
+    }
+    if let Some(bible) = locks.bible {
+        let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
+        for character in &shot.characters {
+            let Some(entry) = bible.character(character) else {
+                continue;
+            };
+            let wardrobe = if scene_id.is_empty() {
+                entry.wardrobe.as_str()
+            } else {
+                entry.wardrobe_in(scene_id)
+            };
+            optional.push(Part {
+                constraint: format!("wardrobe.{character}"),
+                text: sentence(&format!("{} wears {}", entry.name, clause(wardrobe))),
+                rank: 2,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+        if let Some(location) = scene
+            .and_then(|scene| scene.location.as_deref())
+            .and_then(|id| bible.location(id))
+        {
+            optional.push(Part {
+                constraint: format!("location.{}", location.id),
+                text: sentence(&format!(
+                    "{}: {}",
+                    location.name,
+                    clause(&location.appearance)
+                )),
+                rank: 1,
+                degradation: DegradationLevel::Cosmetic,
+            });
+            if !location.forbidden_changes.is_empty() {
+                optional.push(Part {
+                    constraint: format!("location_forbidden.{}", location.id),
+                    text: sentence(&format!(
+                        "{}, always: {}",
+                        location.name,
+                        location
+                            .forbidden_changes
+                            .iter()
+                            .map(|change| clause(change))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )),
+                    rank: 1,
+                    degradation: DegradationLevel::Cosmetic,
+                });
+            }
+        }
+        for prop in props_in(bible, scene) {
+            optional.push(Part {
+                constraint: format!("prop.{}", prop.id),
+                text: sentence(&format!("{}: {}", prop.name, clause(&prop.appearance))),
+                rank: 0,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+        dependencies.extend(continuity_dependencies(scene, Some(shot), Some(bible)));
+    }
+    if !shot.continuity.is_empty() {
+        optional.push(Part {
+            constraint: "shot.continuity".to_owned(),
+            text: sentence(&format!(
+                "Keep: {}",
+                shot.continuity
+                    .iter()
+                    .map(|note| clause(note))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+            rank: 2,
+            degradation: DegradationLevel::Cosmetic,
+        });
+    }
+    for part in &optional {
+        ConstraintId::new(part.constraint.as_str())?;
+    }
+
     // A locked style says how the image looks; only the default names a
     // photograph.
     let look = if locks.style.is_some() {
@@ -316,6 +458,11 @@ fn drop(
     })
 }
 
+/// A phrase to embed in a sentence: without its closing stop.
+fn clause(value: &str) -> &str {
+    value.trim().trim_end_matches(['.', ' '])
+}
+
 /// `medium_close_up` reads as `medium close up`.
 fn words(value: &str) -> String {
     value.replace('_', " ")
@@ -367,6 +514,17 @@ fn canonical_intent(
             .map_or_else(Vec::new, |seconds| seconds.to_bits().to_be_bytes().to_vec()),
     );
     field(&[direction.code()]);
+    field(scene.map_or(&b""[..], |scene| scene.id.as_bytes()));
+    field(&(shot.continuity.len() as u64).to_be_bytes());
+    for note in &shot.continuity {
+        field(note.as_bytes());
+    }
+    field(&optional(&shot.continuity_from));
+    // The entries continuity reads, as they say it now.
+    for dependency in continuity_dependencies(scene, Some(shot), locks.bible) {
+        field(dependency.artifact_id.as_str().as_bytes());
+        field(dependency.content_hash.as_str().as_bytes());
+    }
     field(
         &locks
             .style
@@ -401,11 +559,14 @@ mod tests {
             dialogue: None,
             characters: vec!["filmmaker".to_owned()],
             duration_target: Some(4.0),
+            continuity: Vec::new(),
+            continuity_from: None,
         }
     }
 
     fn scene() -> SceneIntent {
         SceneIntent {
+            id: "scene_001".to_owned(),
             location: Some("small_office".to_owned()),
             time: Some("night".to_owned()),
             dramatic_goal: None,
@@ -415,6 +576,187 @@ mod tests {
 
     fn minimax() -> ImageCapabilities {
         kineto_provider_minimax::image_capabilities()
+    }
+
+    fn bible() -> Bible {
+        serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON).unwrap()
+    }
+
+    /// The sample bible, the filmmaker in a wardrobe change for this scene.
+    fn dressed_bible() -> Bible {
+        let mut bible = bible();
+        bible.characters[0].wardrobe_changes = vec![kineto_project::bible::WardrobeChange {
+            scenes: vec!["office_night".to_owned()],
+            wardrobe: "Shirtsleeves, the coat over the chair.".to_owned(),
+        }];
+        bible
+    }
+
+    fn night() -> SceneIntent {
+        SceneIntent {
+            id: "office_night".to_owned(),
+            ..scene()
+        }
+    }
+
+    fn continuing() -> ShotIntent {
+        ShotIntent {
+            continuity: vec!["The lamp is still on.".to_owned()],
+            continuity_from: Some("office_night_01".to_owned()),
+            ..shot()
+        }
+    }
+
+    #[test]
+    fn continuity_from_the_bible_and_the_plan_reaches_the_prompt() {
+        let bible = dressed_bible();
+        let prompt = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        let text = prompt.compiled.prompt();
+        for said in [
+            "It continues directly from shot office night 01: keep its light, framing and wardrobe.",
+            "The Filmmaker wears Shirtsleeves, the coat over the chair.",
+            "A small office: One table, two chairs, a rain-streaked window, a single desk lamp.",
+            "A small office, always: The window is behind the interviewer.",
+            "The notebook: A small black notebook with a red elastic band.",
+            "Keep: The lamp is still on.",
+        ] {
+            assert!(text.contains(said), "{said:?} in {text:?}");
+        }
+        let applied: Vec<_> = prompt
+            .compiled
+            .applied_constraints()
+            .iter()
+            .map(ConstraintId::as_str)
+            .collect();
+        for constraint in [
+            "continuity.from",
+            "wardrobe.filmmaker",
+            "location.small_office",
+            "location_forbidden.small_office",
+            "prop.notebook",
+            "shot.continuity",
+        ] {
+            assert!(applied.contains(&constraint), "{constraint}");
+        }
+        assert!(prompt.compiled.dropped_constraints().iter().any(|dropped| {
+            dropped.constraint.as_str() == "continuity.previous_frame"
+                && dropped.degradation == DegradationLevel::Cosmetic
+        }));
+        let depends_on: Vec<_> = prompt
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            depends_on,
+            [
+                "bible_character.filmmaker",
+                "bible_location.small_office",
+                "bible_prop.notebook"
+            ]
+        );
+        assert_eq!(
+            prompt.dependencies,
+            continuity_dependencies(Some(&night()), Some(&continuing()), Some(&bible)),
+            "staleness reads what compilation read"
+        );
+
+        // A change to an entry the shot reads changes the prompt's hash.
+        let mut changed = bible.clone();
+        changed.locations[0].appearance = "A bare office.".to_owned();
+        let again = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&changed),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert_ne!(again.prompt_hash, prompt.prompt_hash);
+        // Another scene's wardrobe change does not apply here.
+        let usual = compile(
+            Some(&SceneIntent {
+                id: "office_dawn".to_owned(),
+                ..scene()
+            }),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert!(
+            usual
+                .compiled
+                .prompt()
+                .contains("The Filmmaker wears A dark wool coat over a black sweater.")
+        );
+        assert!(
+            !usual.compiled.prompt().contains("notebook"),
+            "the notebook is in another scene"
+        );
+    }
+
+    #[test]
+    fn continuity_is_cut_props_first_when_the_prompt_has_no_room() {
+        let bible = dressed_bible();
+        let full = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        let length = full.compiled.prompt().chars().count();
+        let tight = ImageCapabilities {
+            max_prompt_chars: Some(length - 10),
+            ..minimax()
+        };
+        let cut = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &tight,
+        )
+        .unwrap();
+        let dropped: Vec<_> = cut
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .map(|dropped| dropped.constraint.as_str())
+            .collect();
+        assert!(dropped.contains(&"prop.notebook"), "{dropped:?}");
+        assert!(!dropped.contains(&"wardrobe.filmmaker"), "{dropped:?}");
+        // What was cut was still read: the keyframe depends on it.
+        assert!(
+            cut.dependencies
+                .iter()
+                .any(|dependency| dependency.artifact_id.as_str() == "bible_prop.notebook")
+        );
     }
 
     #[test]
@@ -689,6 +1031,7 @@ mod tests {
             Locks {
                 style: Some(&style),
                 characters: &[],
+                bible: None,
             },
             &minimax(),
         )
@@ -720,6 +1063,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
             },
             &minimax(),
         )
@@ -756,6 +1100,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &recast,
+                bible: None,
             },
             &minimax(),
         )
@@ -777,6 +1122,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
             },
             &minimax(),
         )
@@ -821,6 +1167,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
             },
             &text_only,
         )
@@ -856,6 +1203,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
             },
             &two,
         )
@@ -896,6 +1244,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks[1..],
+                bible: None,
             },
             &three,
         )
@@ -925,6 +1274,7 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
             },
             &minimax(),
         )

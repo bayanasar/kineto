@@ -310,11 +310,17 @@ pub struct ShotIntent {
     pub dialogue: Option<String>,
     pub characters: Vec<String>,
     pub duration_target: Option<f64>,
+    /// What must stay as it was, in words.
+    pub continuity: Vec<String>,
+    /// The earlier shot this one continues from.
+    pub continuity_from: Option<String>,
 }
 
 /// The scene a shot belongs to, as written in its `scene.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneIntent {
+    /// The scene's ID, as its directory is named.
+    pub id: String,
     pub location: Option<String>,
     pub time: Option<String>,
     pub dramatic_goal: Option<String>,
@@ -339,6 +345,10 @@ struct StoredShotIntent {
     characters: Vec<String>,
     #[serde(default)]
     duration_target: Option<f64>,
+    #[serde(default)]
+    continuity: Vec<String>,
+    #[serde(default)]
+    continuity_from: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -369,6 +379,7 @@ pub fn load_scene_intent(
         return Ok(None);
     };
     Ok(Some(SceneIntent {
+        id: scene_id.to_owned(),
         location: non_blank(stored.location),
         time: non_blank(stored.time),
         dramatic_goal: non_blank(stored.dramatic_goal),
@@ -843,6 +854,12 @@ impl ShotWorkflow {
             dialogue: non_blank(stored.dialogue),
             characters: stored.characters,
             duration_target: stored.duration_target,
+            continuity: stored
+                .continuity
+                .into_iter()
+                .filter_map(|note| non_blank(Some(note)))
+                .collect(),
+            continuity_from: non_blank(stored.continuity_from),
         }))
     }
 
@@ -2520,11 +2537,14 @@ mod tests {
             dialogue: None,
             characters: vec!["alice".to_owned()],
             duration_target: Some(4.0),
+            continuity: Vec::new(),
+            continuity_from: None,
         };
         assert_eq!(shot.intent().unwrap(), Some(expected.clone()));
         assert_eq!(
             load_scene_intent(&project, BOOTSTRAP_SCENE).unwrap(),
             Some(SceneIntent {
+                id: "scene_001".to_owned(),
                 location: Some("empty_room".to_owned()),
                 time: Some("day".to_owned()),
                 dramatic_goal: Some("Alice discovers the letter".to_owned()),
