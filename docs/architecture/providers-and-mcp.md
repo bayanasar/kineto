@@ -125,6 +125,48 @@ Support:
 
 Voice metadata belongs to character production memory.
 
+`SpeechCapabilities` (`kineto-providers`) is what workflow code reads. It declares:
+
+- where voices come from: a listed catalogue, cloning from reference audio, or design from a description;
+- the languages spoken, as ISO 639-1 codes;
+- the deliveries (emotions) a line can be asked for;
+- the range of speaking rates (in thousandths of the normal rate) and pitch shifts (in semitones);
+- how finely it times what it spoke: sentences, words, or only the whole;
+- whether speech arrives in the answer or as a remote job;
+- its output formats;
+- the longest text it takes;
+- its price per character.
+
+`evaluate_speech` holds a chosen voice to what was chosen. A provider that would change its language, delivery, rate or pitch, or would answer with a remote job where the workflow keeps the answer, is incompatible. Less timing than wanted is only a warning, because a line's length is known from its audio either way.
+
+Speech providers implement `kineto_core::speech::SpeechGenerator`, statically dispatched:
+
+- what they declare;
+- their voices, which are free to list;
+- synthesis, the paid call;
+- error classification, and whether an error proves the call was not accepted.
+
+Before anything is written, `check_speech` refuses a provider that cannot keep the voice or take the text (`GenerationError::Incapable`, naming each capability). It also picks the format to ask for, compressed when the provider offers it.
+
+Synthesis runs as a write-ahead job, like a paid image, in its own partition per provider and kind of work (`<provider>-<kind>`, such as `local-demo-speech-line`). The order is:
+
+1. The intent is prepared.
+2. A receipt holds the record's plan.
+3. The provider answers.
+4. The audio is written beside its record, and the receipt names its hash.
+5. Only then is the intent marked invoked.
+
+A restart records speech from a receipt whose audio matches, and never calls again. An attempt that left no audio is asked again only if its receipt proves the provider certainly did not accept that attempt (`refused_attempt`). Otherwise speech in its numbering is refused until the director chooses to risk paying twice. That choice retires only that numbering's calls.
+
+The local demo (`local-demo-speech`, model `demo-tone`) is free, offline and the same for the same line:
+
+- It declares a catalogue of three voices, every delivery, rates of 0.5–2×, pitch of ±12 semitones, sentence timing, WAV output and no cost.
+- It speaks each sentence as a triangle tone, made in integer arithmetic so the bytes are the same on every platform.
+- Each sentence lasts about as long as a person would take to say it (`estimate_duration_ms`): about 2.6 words a second, or 4 Chinese or Japanese characters a second, with a 250 ms breath between sentences, scaled by the voice's rate.
+- Delivery sets its loudness and pitch sets its frequency.
+
+A session's speech provider is `SessionOptions::speech_provider`, the local demo by default. `SpeechProvider::select` names one by `local-demo`.
+
 ## Model router and fallback policy
 
 Provider selection supports:

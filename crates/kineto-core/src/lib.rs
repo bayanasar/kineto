@@ -11,6 +11,7 @@ pub mod paid_image;
 pub mod screenplay;
 pub mod session;
 pub mod shot_plan;
+pub mod speech;
 pub mod story;
 pub mod style;
 pub mod style_prompt;

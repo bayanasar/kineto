@@ -55,7 +55,9 @@ use crate::{
     },
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
-    screenplay, shot_plan, story,
+    screenplay, shot_plan,
+    speech::{SpeechProvider, SpeechProviderInfo},
+    story,
     style::{self, SampleRequest},
     video::{
         self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
@@ -675,6 +677,7 @@ pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
     video_provider: VideoProviderInfo,
+    speech_provider: SpeechProviderInfo,
     image_prices: ImagePrices,
     document_model: DocumentModelInfo,
     view: Arc<View>,
@@ -717,6 +720,10 @@ impl ProjectSession {
             .video_provider
             .get_or_insert_with(|| video_provider_for(&provider));
         let video_provider = videos.info();
+        let speech_provider = options
+            .speech_provider
+            .get_or_insert_with(SpeechProvider::default)
+            .info();
         let image_prices = ImagePrices {
             sample: style::sample_cost(&provider),
             portrait: cast::audition_cost(&provider, 1),
@@ -742,6 +749,7 @@ impl ProjectSession {
             commands: Some(commands),
             image_provider,
             video_provider,
+            speech_provider,
             image_prices,
             document_model,
             view,
@@ -1044,6 +1052,12 @@ impl ProjectSession {
         self.video_provider
     }
 
+    /// The provider this session speaks lines with.
+    #[must_use]
+    pub const fn speech_provider(&self) -> SpeechProviderInfo {
+        self.speech_provider
+    }
+
     /// Project metadata, available once the open has succeeded.
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
@@ -1289,6 +1303,8 @@ pub struct SessionOptions {
     /// The provider videos are made with. `None` follows the image
     /// provider: MiniMax with its key, otherwise the local demo.
     pub video_provider: Option<VideoProvider>,
+    /// The provider lines are spoken with. `None` is the local demo.
+    pub speech_provider: Option<SpeechProvider>,
 }
 
 impl Default for SessionOptions {
@@ -1296,6 +1312,7 @@ impl Default for SessionOptions {
         Self {
             video_poll_interval: video::POLL_INTERVAL,
             video_provider: None,
+            speech_provider: None,
         }
     }
 }
@@ -3730,6 +3747,14 @@ mod tests {
             let (session, events) = create(&target);
             assert_eq!(session.video_provider().kind, VideoProviderKind::LocalDemo);
             assert_eq!(session.video_provider().clip_cost_micros, 0);
+            assert_eq!(
+                session.speech_provider(),
+                crate::speech::SpeechProviderInfo {
+                    kind: crate::speech::SpeechProviderKind::LocalDemo,
+                    ready: true,
+                    character_cost_micros: Some(0),
+                }
+            );
             assert!(
                 command(&session, &events, 1, ShotCommand::GenerateVideo)
                     .unwrap_err()
