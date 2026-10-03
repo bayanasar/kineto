@@ -1262,23 +1262,27 @@ impl Worker {
             ShotCommand::Refine { note, consent } => self.refine(key, consent, &note),
             ShotCommand::GenerateVideo => self.start_video(key, false),
             ShotCommand::ResubmitVideo => self.start_video(key, true),
+            // A keyframe of a style or cast since moved on from is not locked.
+            ShotCommand::Lock => self
+                .with_shot(key, |project, _, shot| generation::lock(project, shot))
+                .map_err(generation_error),
             command => self
                 .with_shot(key, |project, _, shot| match command {
                     ShotCommand::SetDirection(direction) => shot.set_direction(project, direction),
                     ShotCommand::Select(candidate) => shot.select(project, candidate),
-                    ShotCommand::Lock => shot.lock(project),
                     ShotCommand::Reset => shot.reset(project),
                     ShotCommand::MigrateLegacyHashes => {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
                     ShotCommand::LockVideo => shot.lock_video(project),
                     ShotCommand::Generate
+                    | ShotCommand::Lock
                     | ShotCommand::ResubmitKeyframes
                     | ShotCommand::GenerateConsenting(_)
                     | ShotCommand::Refine { .. }
                     | ShotCommand::GenerateVideo
                     | ShotCommand::ResubmitVideo => {
-                        unreachable!("generation is handled above")
+                        unreachable!("handled above")
                     }
                 })
                 .map_err(SessionError::Shot),
@@ -3739,19 +3743,64 @@ mod tests {
             );
 
             // Keyframes with what the director accepted.
-            let token = token();
-            session
-                .submit(
-                    0,
-                    ShotCommand::GenerateConsenting(Consent::default()),
-                    token,
-                )
-                .unwrap();
-            assert!(matches!(
-                events.recv_timeout(WAIT).unwrap(),
-                Event::Completed { result: Ok(()), .. }
-            ));
+            on_shot(
+                &session,
+                &events,
+                ShotCommand::GenerateConsenting(Consent::default()),
+            )
+            .unwrap();
             assert_eq!(fake.calls.load(Ordering::SeqCst), 14);
+            on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
+
+            // Another style is locked before the keyframe is: it was made in
+            // the style the director moved on from, so it is not locked.
+            for command in [
+                ProductionCommand::SampleStyle {
+                    preset: "film_realism".to_owned(),
+                    note: None,
+                },
+                ProductionCommand::SelectStyle("style_s0003".to_owned()),
+                ProductionCommand::LockStyle("style_s0003".to_owned()),
+            ] {
+                produce(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                on_shot(&session, &events, ShotCommand::Lock),
+                Err("Shot(StaleSelection)".to_owned())
+            );
+            assert!(!session.snapshot(0).unwrap().locked);
+
+            // Made again in the new style, it is.
+            on_shot(
+                &session,
+                &events,
+                ShotCommand::GenerateConsenting(Consent::default()),
+            )
+            .unwrap();
+            on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
+            on_shot(&session, &events, ShotCommand::Lock).unwrap();
+            assert!(session.snapshot(0).unwrap().locked);
+        }
+
+        /// Submit `command` to the first shot and wait for its result.
+        fn on_shot(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            command: ShotCommand,
+        ) -> Result<(), String> {
+            let token = token();
+            session.submit(0, command, token).unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Completed {
+                    token: actual,
+                    result,
+                    ..
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a shot completion, got {other:?}"),
+            }
         }
 
         #[test]

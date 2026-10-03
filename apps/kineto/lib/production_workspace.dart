@@ -894,13 +894,35 @@ class _CastingCardState extends State<CastingCard> {
               key: ValueKey<String>('remake-${widget.character.id}-${reference.kind.wireName}'),
               kind: WabMaterialKind.paper,
               onPressed: widget.enabled && widget.prices.portrait != null
-                  ? () => widget.onMakePack(<KinetoCastImageKind>[reference.kind])
+                  ? () => _confirmRemake(reference.kind)
                   : null,
-              child: const Text('Remake'),
+              child: const Text('Remake…'),
             ),
           ],
         ),
       );
+
+  /// A remade reference is a paid image: its price is shown before it is
+  /// asked for.
+  Future<void> _confirmRemake(KinetoCastImageKind kind) async {
+    final cost = imageCostLabel(timesImages(widget.prices.portrait, 1));
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Remake the ${kind.label.toLowerCase()} reference of ${widget.character.name}?'),
+        content: Text('The image is made again from the chosen portrait: $cost.'),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            key: const ValueKey<String>('remake-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Remake · $cost'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed ?? false) widget.onMakePack(<KinetoCastImageKind>[kind]);
+  }
 }
 
 /// Edits one bible entry: what it looks like and what must never change.

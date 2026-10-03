@@ -1128,6 +1128,22 @@ pub fn keyframe_staleness(
         .collect())
 }
 
+/// Lock the shot's selected keyframe as production truth, unless a lock its
+/// prompt followed has changed or gone since, or a lock it did not follow
+/// has been made: the shot alone checks only its own intent.
+pub fn lock(project: &CanonicalProject, shot: &mut ShotWorkflow) -> Result<(), GenerationError> {
+    let snapshot = shot.snapshot()?;
+    if !snapshot.locked
+        && let Some(selected) = snapshot.selected_index
+        && keyframe_staleness(project, shot)?
+            .get(usize::from(selected))
+            .is_some_and(|causes| !causes.is_empty())
+    {
+        return Err(ShotWorkflowError::StaleSelection.into());
+    }
+    Ok(shot.lock(project)?)
+}
+
 /// `requested` holds the compiled prompt of a generation the director asked
 /// for, and is `None` when an interrupted generation is being recovered.
 fn complete_inner<G: CandidateGenerator>(

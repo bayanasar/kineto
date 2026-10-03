@@ -265,7 +265,19 @@ void main() {
     await _tap(tester, find.byKey(_key('select-cast.filmmaker.0001')));
     await _tap(tester, find.byKey(_key('reject-cast.filmmaker.0001')));
     await _tap(tester, find.byKey(_key('pack-filmmaker')));
+    // A remade reference is paid: its price is shown first, and nothing is
+    // asked for until the director confirms it.
     await _tap(tester, find.byKey(_key('remake-filmmaker-full_body')));
+    await tester.pumpAndSettle();
+    expect(find.text('Remake the full body reference of Daniel?'), findsOneWidget);
+    expect(find.text('Remake · 1 image ≈ \$0.0035'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(calls.log.last, 'pack filmmaker ');
+    await _tap(tester, find.byKey(_key('remake-filmmaker-full_body')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(_key('remake-confirm')));
+    await tester.pumpAndSettle();
     expect(calls.log, <String>[
       'audition filmmaker 3',
       'select cast.filmmaker.0001',
