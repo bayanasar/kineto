@@ -304,7 +304,8 @@ fn ask<T: Transport + Sync>(
     });
 
     // A sample an interruption left is recorded first, so it keeps its ID.
-    let mut jobs = Jobs::<Samples, _>::open(project, adapter, submission)?;
+    // Every sample shares one numbering.
+    let mut jobs = Jobs::<Samples, _>::open(project, adapter, |_| true, submission)?;
     let artifact_id = document::next_artifact_id(project).map_err(document_error)?;
     let plan = SamplePlan {
         schema_version: PLAN_SCHEMA_VERSION,

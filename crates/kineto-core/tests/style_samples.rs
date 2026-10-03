@@ -470,7 +470,7 @@ fn killed_as_minimax_answered_a_sample_waits_for_the_director() {
 
     let project = CanonicalProject::open(&target).unwrap();
     let recovery = style::recover(&project).unwrap();
-    assert!(recovery.unresolved);
+    assert_eq!(recovery.unresolved, ["style_s0001"]);
     assert!(recovery.attached.is_empty());
 
     let minimax = Minimax::new([]);
@@ -486,7 +486,7 @@ fn killed_as_minimax_answered_a_sample_waits_for_the_director() {
         .unwrap();
     assert_eq!(sample.artifact_id, "style_s0001");
     assert_eq!(minimax.calls(), 1);
-    assert!(!style::recover(&project).unwrap().unresolved);
+    assert!(style::recover(&project).unwrap().unresolved.is_empty());
 }
 
 #[test]
@@ -506,7 +506,7 @@ fn a_sample_answered_before_a_crash_is_kept_without_paying_again() {
         let project = CanonicalProject::open(&target).unwrap();
         if opened {
             let recovery = style::recover(&project).unwrap();
-            assert!(!recovery.unresolved, "{point}");
+            assert!(recovery.unresolved.is_empty(), "{point}");
             assert_eq!(recovery.needs_attention, 0, "{point}");
             assert_eq!(document::samples(&project).unwrap().len(), 1, "{point}");
         }
@@ -542,7 +542,7 @@ fn a_sample_interrupted_before_its_call_costs_nothing_and_makes_way() {
     assert_eq!(intent(&target, "style_s0001").unwrap()["attempts"], 0);
 
     let project = CanonicalProject::open(&target).unwrap();
-    assert!(!style::recover(&project).unwrap().unresolved);
+    assert!(style::recover(&project).unwrap().unresolved.is_empty());
     // Another direction takes the same ID; the unsent one is retired.
     let minimax = Minimax::new([]);
     let sample = minimax

@@ -16,8 +16,10 @@
 //! ```
 //!
 //! An image whose call may have been accepted without its result being kept
-//! is never paid for again unasked: no new image of its kind is made until
-//! the director chooses to risk paying twice.
+//! is never paid for again unasked: no new image is made in its numbering
+//! (every style sample, or one character's casting images) until the
+//! director chooses to risk paying twice there. That choice retires only
+//! those images; another numbering's stay guarded.
 
 use std::marker::PhantomData;
 
@@ -67,8 +69,9 @@ pub(crate) trait Ledger {
 pub struct ImageRecovery {
     /// Images recorded from their receipts.
     pub attached: Vec<String>,
-    /// An image's call may have been accepted without its result being kept.
-    pub unresolved: bool,
+    /// Images whose call may have been accepted without their result being
+    /// kept, by ID.
+    pub unresolved: Vec<String>,
     /// Records this build cannot complete; they need a person.
     pub needs_attention: usize,
 }
@@ -184,7 +187,7 @@ fn finish<L: Ledger, T: Transport + Sync>(
                     && !adapter
                         .may_call_again(&keyed(artifact_id, record.intent().input_hash().clone()))
                 {
-                    recovery.unresolved = true;
+                    recovery.unresolved.push(job_id.as_str().to_owned());
                 }
                 waiting.push(job_id);
             }
@@ -208,21 +211,30 @@ pub(crate) fn recover<L: Ledger>(
 }
 
 impl<'p, 'a, L: Ledger, T: Transport + Sync> Jobs<'p, 'a, L, T> {
-    /// Open L's partition: record images an interruption left, retire
-    /// intents never called or certainly refused, and refuse while one may
-    /// have been charged without its result, unless the director risks
-    /// paying twice, which retires it too.
+    /// Open L's partition for new images numbered where `numbering` says
+    /// an image ID belongs: record images an interruption left, retire
+    /// intents never called or certainly refused, and refuse while an image
+    /// of `numbering` may have been charged without its result, unless the
+    /// director risks paying twice, which retires those images. An
+    /// unresolved image outside `numbering` is left as it is: the director
+    /// accepted no risk for it.
     pub(crate) fn open(
         project: &'p CanonicalProject,
         mut adapter: MinimaxKeyframes<'a, T>,
+        numbering: impl Fn(&str) -> bool,
         submission: Submission,
     ) -> Result<Self, GenerationError> {
         let runtime = JobRuntime::new(project, partition::<L>(), adapter.policy());
         let (recovery, waiting) = finish::<L, _>(project, &runtime, &mut adapter)?;
-        if recovery.unresolved && submission == Submission::Once {
+        if submission == Submission::Once && recovery.unresolved.iter().any(|id| numbering(id)) {
             return Err(GenerationError::UnresolvedSubmission);
         }
         for job_id in waiting {
+            if recovery.unresolved.iter().any(|id| id == job_id.as_str())
+                && !numbering(job_id.as_str())
+            {
+                continue;
+            }
             let Some(record) = runtime.load(&job_id)? else {
                 continue;
             };

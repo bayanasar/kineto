@@ -462,6 +462,12 @@ impl Ledger for Casting {
     }
 }
 
+/// Casting images are numbered per character, so the director's decision to
+/// risk paying twice for one character's images retires none of another's.
+fn numbered(character_id: &str) -> impl Fn(&str) -> bool + '_ {
+    move |artifact_id| document::character_of(artifact_id) == Some(character_id)
+}
+
 /// Record casting images an interrupted session left, as a project opens.
 /// Never calls MiniMax.
 pub fn recover(project: &CanonicalProject) -> Result<CastRecovery, GenerationError> {
@@ -646,7 +652,7 @@ pub fn audition_with<T: Transport + Sync>(
     // A prompt that cannot fit is refused before anything is written.
     let planned = plan_shot(&material, &shot, None, &capabilities)?;
     // Portraits an interruption left are recorded first, so they count.
-    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
+    let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
     let mut portraits: Vec<CastImage> = document::images(project, character_id)
         .map_err(document_error)?
         .into_iter()
@@ -780,7 +786,7 @@ pub fn remake_pack_with<T: Transport + Sync>(
         })
         .collect::<Result<Vec<_>, GenerationError>>()?;
     // References an interruption left are recorded first, so they count.
-    let mut jobs = Jobs::<Casting, _>::open(project, adapter, submission)?;
+    let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
     let recorded = document::images(project, character_id).map_err(document_error)?;
     let mut pack = Vec::with_capacity(shots.len());
     let mut made = 0;

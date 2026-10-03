@@ -697,7 +697,10 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
     crash(&temp, &target, "pack-answered-1");
 
     let project = CanonicalProject::open(&target).unwrap();
-    assert!(cast::recover(&project).unwrap().unresolved);
+    assert_eq!(
+        cast::recover(&project).unwrap().unresolved,
+        ["cast.filmmaker.0002"]
+    );
     assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 1);
     let minimax = Minimax::new();
     let make = |submission| {
@@ -731,4 +734,53 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
     assert_eq!(pack.len(), 7);
     assert_eq!(pack[0].artifact_id, "cast.filmmaker.0002");
     assert_eq!(minimax.calls(), 7);
+}
+
+#[test]
+fn risking_paying_twice_for_one_character_leaves_anothers_unresolved_image_guarded() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(selected(&target));
+    crash(&temp, &target, "pack-answered-1");
+
+    let project = CanonicalProject::open(&target).unwrap();
+    let minimax = Minimax::new();
+    let audition = |character, submission| {
+        cast::audition_with(
+            &project,
+            minimax.adapter(&project),
+            character,
+            1,
+            submission,
+            &mut NoHooks,
+        )
+    };
+    // The filmmaker's unresolved image is not the interviewer's to answer
+    // for: it neither stops the interviewer's casting nor is retired by it.
+    audition("interviewer", Submission::Once).unwrap();
+    let portraits = audition("interviewer", Submission::RiskPayingTwice).unwrap();
+    assert_eq!(portraits[0].artifact_id, "cast.interviewer.0001");
+    assert_eq!(minimax.calls(), 1);
+    assert_eq!(
+        cast::recover(&project).unwrap().unresolved,
+        ["cast.filmmaker.0002"]
+    );
+    assert!(matches!(
+        audition("filmmaker", Submission::Once),
+        Err(GenerationError::UnresolvedSubmission)
+    ));
+    assert_eq!(minimax.calls(), 1, "never paid twice unasked");
+
+    // Only the director's decision for the filmmaker retires it.
+    let pack = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::RiskPayingTwice,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(pack[0].artifact_id, "cast.filmmaker.0002");
+    assert_eq!(minimax.calls(), 8);
+    assert!(cast::recover(&project).unwrap().unresolved.is_empty());
 }
