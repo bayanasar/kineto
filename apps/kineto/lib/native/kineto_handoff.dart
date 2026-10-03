@@ -15,6 +15,17 @@ external int _kinetoProjectShotGenerateVideos(
   int token,
 );
 
+@Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint32>, Pointer<Uint64>)>(
+  symbol: 'kineto_project_video_estimate',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoEstimate(
+  Pointer<Void> session,
+  int shotIndex,
+  Pointer<Uint32> seconds,
+  Pointer<Uint64> micros,
+);
+
 @Native<Int32 Function(Pointer<Void>, Uint32, Uint32, Uint64)>(symbol: 'kineto_project_shot_select_video')
 external int _kinetoProjectShotSelectVideo(Pointer<Void> session, int shotIndex, int video, int token);
 
@@ -129,6 +140,25 @@ external int _kinetoProjectExportTextCopy(
 
 /// Most video candidates one generation may be asked for.
 const int kinetoMaxVideoCandidates = 4;
+
+/// What one take of a shot's next video costs, at the clip length its plan
+/// asks for.
+final class KinetoVideoEstimate {
+  const KinetoVideoEstimate({required this.clipSeconds, this.costMicros});
+
+  final int clipSeconds;
+
+  /// Null when the provider declares no price for that length.
+  final int? costMicros;
+
+  /// What [count] takes cost, for example `≈ $1.12`, `free`, or
+  /// `cost unknown`.
+  String costFor(int count) => switch (costMicros) {
+        null => 'cost unknown',
+        0 => 'free',
+        final micros => '≈ ${_dollars(micros * count)}',
+      };
+}
 
 /// One video a shot has had.
 final class KinetoVideoTake {
@@ -328,6 +358,25 @@ extension KinetoProjectHandoff on KinetoProjectSession {
   /// Choose video [video] of shot [shotIndex]'s latest generation to lock.
   Future<void> selectShotVideo(int shotIndex, int video) =>
       _submit(shotIndex, (token) => _kinetoProjectShotSelectVideo(_handle, shotIndex, video, token));
+
+  /// What one take of shot [shotIndex]'s next video costs; null when the
+  /// session's video provider declares no clip lengths.
+  KinetoVideoEstimate? videoEstimate(int shotIndex) {
+    _checkShotIndex(shotIndex);
+    final arena = Arena();
+    try {
+      final seconds = arena<Uint32>();
+      final micros = arena<Uint64>();
+      _checkProjectResult(_kinetoProjectVideoEstimate(_handle, shotIndex, seconds, micros));
+      if (seconds.value == 0) return null;
+      return KinetoVideoEstimate(
+        clipSeconds: seconds.value,
+        costMicros: micros.value == -1 ? null : micros.value,
+      );
+    } finally {
+      arena.releaseAll();
+    }
+  }
 
   /// Every video shot [shotIndex] has had, oldest generation first.
   List<KinetoVideoTake> videoTakes(int shotIndex) {

@@ -73,6 +73,8 @@ void main() {
     List<String?>? keyframes,
     List<KinetoVideoTake> videos = const <KinetoVideoTake>[],
     void Function(int, String?, String?)? onGenerateVideos,
+    KinetoVideoEstimate? estimate,
+    int activeShot = 0,
     VoidCallback? onResubmitVideo,
     ValueChanged<int>? onSelectVideo,
     VoidCallback? onLockVideo,
@@ -88,9 +90,10 @@ void main() {
           videoProvider: provider,
           candidateMedia: keyframes ?? media,
           videoTakes: videos,
+          videoEstimate: estimate,
           shotSnapshot: shot,
           shotSnapshots: <KinetoShotSnapshot>[shot, shot],
-          activeShotIndex: 0,
+          activeShotIndex: activeShot,
           onShotChanged: (_) {},
           onDirectionChanged: (_) {},
           onGenerate: () {},
@@ -148,6 +151,32 @@ void main() {
     await tap(tester, find.text(r'Generate · 3 takes · 6 s · ≈ $0.84'));
     expect(asked, <(int, String?, String?)>[(3, null, null)]);
     expect(find.byKey(const ValueKey<String>('refine-video')), findsNothing, reason: 'nothing to refine yet');
+  });
+
+  testWidgets('a shot is priced at the clip length its plan asks for', (tester) async {
+    final asked = <int>[];
+    await pump(
+      tester,
+      state: KinetoVideoState.none,
+      estimate: const KinetoVideoEstimate(clipSeconds: 10, costMicros: 560000),
+      onGenerateVideos: (count, _, _) => asked.add(count),
+    );
+    expect(find.text(r'Generate · 1 take · 10 s · ≈ $0.56'), findsOneWidget);
+    await tap(tester, find.byKey(const ValueKey<String>('video-count')));
+    await tester.tap(find.text('2 takes').last);
+    await tester.pumpAndSettle();
+    await tap(tester, find.text(r'Generate · 2 takes · 10 s · ≈ $1.12'));
+    expect(asked, <int>[2]);
+  });
+
+  testWidgets('another shot starts from one take again', (tester) async {
+    await pump(tester, state: KinetoVideoState.none);
+    await tap(tester, find.byKey(const ValueKey<String>('video-count')));
+    await tester.tap(find.text('3 takes').last);
+    await tester.pumpAndSettle();
+    expect(find.text(r'Generate · 3 takes · 6 s · ≈ $0.84'), findsOneWidget);
+    await pump(tester, state: KinetoVideoState.none, activeShot: 1);
+    expect(find.text(r'Generate · 1 take · 6 s · ≈ $0.28'), findsOneWidget);
   });
 
   testWidgets('a video being generated can not be asked for again', (tester) async {

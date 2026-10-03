@@ -339,6 +339,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       ),
       videoMedia: widget.project.videoMediaPath(_activeShotIndex),
       videoTakes: widget.project.videoTakes(_activeShotIndex),
+      videoEstimate: widget.project.videoEstimate(_activeShotIndex),
       onGenerateVideos: (count, note, branch) => _run(
         () => widget.project.generateShotVideos(
           _activeShotIndex,
@@ -399,6 +400,7 @@ class DemoWorkspaceView extends StatelessWidget {
     this.candidateMedia = const <String?>[],
     this.videoMedia,
     this.videoTakes = const <KinetoVideoTake>[],
+    this.videoEstimate,
     this.onGenerateVideos,
     this.onSelectVideo,
     this.onGenerateVideo,
@@ -471,6 +473,10 @@ class DemoWorkspaceView extends StatelessWidget {
 
   /// Every video the active shot has had, oldest generation first.
   final List<KinetoVideoTake> videoTakes;
+
+  /// What one take of the active shot's next video costs, at the clip
+  /// length its plan asks for; null to price the provider's shortest clip.
+  final KinetoVideoEstimate? videoEstimate;
 
   /// Ask for a video generation: how many takes, a note, a take to branch
   /// from.
@@ -855,8 +861,12 @@ class DemoWorkspaceView extends StatelessWidget {
                 if (shotSnapshot.locked) ...<Widget>[
                   const SizedBox(height: 20),
                   _VideoPanel(
+                    // A shot's choices are its own: the take count starts
+                    // over on every shot.
+                    key: ValueKey<String>('video-panel-${shots[activeShotIndex].label}'),
                     snapshot: shotSnapshot,
                     provider: videoProvider,
+                    estimate: videoEstimate,
                     poster: selectedIndex != null && selectedIndex < candidateMedia.length
                         ? candidateMedia[selectedIndex]
                         : null,
@@ -1030,6 +1040,8 @@ Future<void> openInSystemPlayer(String path) async {
 class _VideoPanel extends StatefulWidget {
   const _VideoPanel({
     required this.snapshot,
+    this.estimate,
+    super.key,
     required this.provider,
     required this.poster,
     required this.takes,
@@ -1043,6 +1055,7 @@ class _VideoPanel extends StatefulWidget {
 
   final KinetoShotSnapshot snapshot;
   final KinetoVideoProvider provider;
+  final KinetoVideoEstimate? estimate;
   final String? poster;
   final List<KinetoVideoTake> takes;
   final bool blocked;
@@ -1060,6 +1073,12 @@ class _VideoPanelState extends State<_VideoPanel> {
   int _count = 1;
 
   KinetoVideoProvider get _provider => widget.provider;
+
+  /// The clip length this shot's takes are made at.
+  int get _clipSeconds => widget.estimate?.clipSeconds ?? _provider.clipSeconds;
+
+  /// What [count] takes of this shot cost.
+  String _costFor(int count) => widget.estimate?.costFor(count) ?? _provider.costFor(count);
 
   @override
   Widget build(BuildContext context) {
@@ -1125,7 +1144,7 @@ class _VideoPanelState extends State<_VideoPanel> {
                 WabButton(
                   kind: WabMaterialKind.zhuwen,
                   onPressed: widget.blocked || !hasFirstFrame ? null : widget.onResubmit,
-                  child: Text('Submit again · may pay twice · ${_provider.costLabel}'),
+                  child: Text('Submit again · may pay twice · ${_costFor(1)}'),
                 ),
               if (_provider.ready && !locked && state != KinetoVideoState.unresolved) ...<Widget>[
                 SizedBox(
@@ -1146,7 +1165,7 @@ class _VideoPanelState extends State<_VideoPanel> {
                   onPressed: canGenerate ? () => widget.onGenerate?.call(_count, null, null) : null,
                   child: Text(
                     '${current.isEmpty ? 'Generate' : 'Generate again'} · $takes · '
-                    '${_provider.clipSeconds} s · ${_provider.costFor(_count)}',
+                    '$_clipSeconds s · ${_costFor(_count)}',
                   ),
                 ),
                 if (current.isNotEmpty)
@@ -1257,7 +1276,7 @@ class _VideoPanelState extends State<_VideoPanel> {
             ? 'What should change, such as "slower, hold on his eyes"'
             : 'What should change from this take; its own notes are kept',
         confirmKey: 'video-note-confirm',
-        confirmLabel: 'Generate · $takes · ${_provider.costFor(_count)}',
+        confirmLabel: 'Generate · $takes · ${_costFor(_count)}',
       ),
     );
     if (note == null) return;
@@ -1288,9 +1307,9 @@ class _VideoPanelState extends State<_VideoPanel> {
     }
     return switch (state) {
       KinetoVideoState.none => _provider.isPaid
-          ? 'The locked keyframe becomes the first frame of ${_provider.clipSeconds}-second clips, '
+          ? 'The locked keyframe becomes the first frame of $_clipSeconds-second clips, '
               'generated in the background. Ask for several takes to compare.'
-          : 'The local demo makes ${_provider.clipSeconds}-second placeholder clips from the locked '
+          : 'The local demo makes $_clipSeconds-second placeholder clips from the locked '
               'keyframe, free and at once.',
       KinetoVideoState.generating =>
         '${_provider.kind.label} is generating the video. It can take a few minutes; you can keep '

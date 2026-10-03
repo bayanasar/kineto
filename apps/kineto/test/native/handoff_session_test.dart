@@ -45,6 +45,11 @@ void main() {
         ],
       );
 
+      // The demo makes 2-second clips, free, whatever the plan asks.
+      final estimate = session.videoEstimate(0)!;
+      expect((estimate.clipSeconds, estimate.costMicros), (2, 0));
+      expect(estimate.costFor(3), 'free');
+
       // Two takes, then one refined by a note, then a branch from it.
       await _videos(session, 0, count: 2);
       await _videos(session, 0, note: 'Slower.');

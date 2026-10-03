@@ -141,6 +141,46 @@ pub unsafe extern "C" fn kineto_project_video_take_count(
     })
 }
 
+/// What one take of shot `shot_index`'s next video costs: the clip length
+/// its plan asks for, as the session's video provider renders it, in
+/// `out_seconds` (0 when the provider declares none), and that clip's price
+/// in USD micros in `out_micros` (`u64::MAX` when unknown). Never does I/O.
+///
+/// # Safety
+/// `session` must be a live project-session handle; `out_seconds` and
+/// `out_micros` writable storage for one `u32` and one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_estimate(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    out_seconds: *mut u32,
+    out_micros: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        if out_seconds.is_null() || out_micros.is_null() {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        }
+        // SAFETY: forwarded caller contract.
+        let Some(session) = (unsafe { session_ref(session) }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let estimate = match session.video_estimate(shot_index) {
+            Ok(estimate) => estimate,
+            Err(error) => return crate::project_session::snapshot_error_code(&error),
+        };
+        // SAFETY: checked non-null; the caller guarantees both are writable.
+        unsafe {
+            out_seconds.write(estimate.map_or(0, |estimate| u32::from(estimate.clip_seconds)));
+            out_micros.write(
+                estimate
+                    .and_then(|estimate| estimate.cost_micros)
+                    .unwrap_or(u64::MAX),
+            );
+        }
+        PROJECT_OK
+    })
+}
+
 /// Number field `field` (a contract `video_take_value` code) of take
 /// `take` of shot `shot_index`'s videos. Never does I/O.
 ///

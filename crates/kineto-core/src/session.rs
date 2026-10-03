@@ -58,8 +58,8 @@ use crate::{
     screenplay, shot_plan, story,
     style::{self, SampleRequest},
     video::{
-        self, LocalDemoVideos, VideoAsk, VideoDone, VideoGenerator, VideoJob, VideoProvider,
-        VideoProviderInfo,
+        self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
+        VideoProvider, VideoProviderInfo,
     },
     workflow,
 };
@@ -552,6 +552,9 @@ struct PublishedShot {
     /// Every video the shot has had, oldest generation first, with its
     /// media's absolute path.
     videos: Vec<(VideoRecord, Option<PathBuf>)>,
+    /// What one take of the shot's next video costs with the session's
+    /// video provider.
+    video_estimate: Option<VideoEstimate>,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -937,6 +940,12 @@ impl ProjectSession {
         shot_index: u32,
     ) -> Result<Vec<(CandidateRecord, Option<PathBuf>)>, SnapshotError> {
         self.published(shot_index, |published| published.history.clone())
+    }
+
+    /// What one take of the shot's next video costs, at the clip length its
+    /// plan asks for. Never does I/O.
+    pub fn video_estimate(&self, shot_index: u32) -> Result<Option<VideoEstimate>, SnapshotError> {
+        self.published(shot_index, |published| published.video_estimate)
     }
 
     /// Every video the shot has had, current or superseded, oldest
@@ -2359,6 +2368,7 @@ impl Worker {
         let Some(key) = self.keys.get(shot_index).cloned() else {
             return;
         };
+        let video_provider = self.videos.provider.clone();
         let published = panic::catch_unwind(AssertUnwindSafe(|| {
             self.with_shot(&key, |project, _, shot| {
                 Ok(PublishedShot {
@@ -2399,6 +2409,8 @@ impl Worker {
                             (record, media)
                         })
                         .collect(),
+                    video_estimate: video_provider
+                        .estimate(shot.intent()?.and_then(|intent| intent.duration_target)),
                 })
             })
         }))

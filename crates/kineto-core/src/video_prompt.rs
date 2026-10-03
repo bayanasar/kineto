@@ -178,26 +178,18 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             "the video model generates no speech",
         )?);
     }
-    let shortest = capabilities
-        .nearest_clip_seconds(0.0)
+    let duration_seconds = clip_seconds(capabilities, shot.duration_target)
         .ok_or(KeyframePromptError::MissingIntent)?;
-    let duration_seconds = match shot.duration_target {
-        Some(target) => {
-            let seconds = capabilities
-                .nearest_clip_seconds(target)
-                .unwrap_or(shortest);
-            if (f64::from(seconds) - target).abs() > f64::EPSILON {
-                dropped.push(drop(
-                    "shot.duration_target",
-                    &format!("{target} s was asked for; the provider renders {seconds} s"),
-                )?);
-            } else {
-                needed(&mut required, "shot.duration_target", "")?;
-            }
-            seconds
+    if let Some(target) = shot.duration_target {
+        if (f64::from(duration_seconds) - target).abs() > f64::EPSILON {
+            dropped.push(drop(
+                "shot.duration_target",
+                &format!("{target} s was asked for; the provider renders {duration_seconds} s"),
+            )?);
+        } else {
+            needed(&mut required, "shot.duration_target", "")?;
         }
-        None => shortest,
-    };
+    }
     if let Some(successor) = input.successor {
         let reason = if !capabilities.end_frame {
             format!(
@@ -232,6 +224,19 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         prompt_hash: prompt.prompt_hash,
         duration_seconds,
     })
+}
+
+/// The clip length a shot of `target` seconds is made at: the declared
+/// length nearest it, or the shortest without a target. `None` when the
+/// provider declares no lengths.
+#[must_use]
+pub fn clip_seconds(capabilities: &VideoCapabilities, target: Option<f64>) -> Option<u8> {
+    let shortest = capabilities.nearest_clip_seconds(0.0)?;
+    Some(target.map_or(shortest, |target| {
+        capabilities
+            .nearest_clip_seconds(target)
+            .unwrap_or(shortest)
+    }))
 }
 
 /// A part the prompt cannot do without; an empty text is said by another

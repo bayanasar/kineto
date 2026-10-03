@@ -399,6 +399,31 @@ impl VideoProvider {
     }
 }
 
+/// What a shot's next video costs before it is asked for: the clip length
+/// its plan asks for, as the provider renders it, and that clip's price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoEstimate {
+    pub clip_seconds: u8,
+    /// `None` when the provider declares no price for that length.
+    pub cost_micros: Option<u64>,
+}
+
+impl VideoProvider {
+    /// What one take of a shot whose plan asks for `target` seconds costs.
+    #[must_use]
+    pub fn estimate(&self, target: Option<f64>) -> Option<VideoEstimate> {
+        let capabilities = self.capabilities();
+        let clip_seconds = video_prompt::clip_seconds(&capabilities, target)?;
+        Some(VideoEstimate {
+            clip_seconds,
+            cost_micros: capabilities
+                .clip_prices
+                .get(&clip_seconds)
+                .map(|price| price.amount_micros),
+        })
+    }
+}
+
 /// A provider's failure, kept with how it is classified once the
 /// provider's own error type is no longer at hand.
 #[derive(Debug)]
@@ -1581,6 +1606,30 @@ mod tests {
             Some(VideoProvider::Minimax(None))
         ));
         assert!(VideoProvider::select(Some("sora"), &with_key).is_err());
+    }
+
+    #[test]
+    fn a_take_is_priced_at_the_length_the_plan_asks_for() {
+        let minimax = VideoProvider::Minimax(None);
+        let estimate = |target| minimax.estimate(target).unwrap();
+        assert_eq!(
+            estimate(Some(10.0)),
+            VideoEstimate {
+                clip_seconds: 10,
+                cost_micros: Some(560_000)
+            }
+        );
+        // A tie goes to the shorter, cheaper clip, as the compiler does.
+        assert_eq!(estimate(Some(8.0)).clip_seconds, 6);
+        assert_eq!(estimate(Some(7.0)).cost_micros, Some(280_000));
+        assert_eq!(estimate(None).clip_seconds, 6);
+        assert_eq!(
+            VideoProvider::LocalDemo.estimate(Some(10.0)),
+            Some(VideoEstimate {
+                clip_seconds: 2,
+                cost_micros: Some(0)
+            })
+        );
     }
 
     #[test]
