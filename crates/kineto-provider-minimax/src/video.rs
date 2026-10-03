@@ -507,9 +507,18 @@ mod tests {
     #[test]
     fn only_a_reported_failure_ends_a_task() {
         let client = client([
-            json(200, r#"{"status":"Rendering","file_id":"","base_resp":{"status_code":0}}"#),
-            json(200, r#"{"status":"Success","file_id":"","base_resp":{"status_code":0}}"#),
-            json(200, r#"{"status":"Fail","file_id":"","base_resp":{"status_code":0}}"#),
+            json(
+                200,
+                r#"{"status":"Rendering","file_id":"","base_resp":{"status_code":0}}"#,
+            ),
+            json(
+                200,
+                r#"{"status":"Success","file_id":"","base_resp":{"status_code":0}}"#,
+            ),
+            json(
+                200,
+                r#"{"status":"Fail","file_id":"","base_resp":{"status_code":0}}"#,
+            ),
         ]);
         let task = VideoTask::new("447576615924185").unwrap();
         assert_eq!(client.query_video(&task).unwrap(), VideoTaskState::Pending);
