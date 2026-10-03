@@ -451,6 +451,9 @@ pub const MAX_VIDEO_CANDIDATES: u8 = 4;
 /// the take it was branched from.
 const NOTES_RECORD: &str = "notes";
 const BRANCH_RECORD: &str = "branched_from";
+/// Artifact fields holding a video's clip length and provider parameters.
+const CLIP_SECONDS_RECORD: &str = "clip_seconds";
+const PARAMETERS_RECORD: &str = "parameters";
 
 /// Where a video candidate's bytes live: beside the shot's canonical files,
 /// named by its stable artifact ID.
@@ -556,6 +559,30 @@ pub struct VideoOutput {
     pub notes: Vec<String>,
     /// The take it was branched from.
     pub branched_from: Option<String>,
+    /// The clip's length, in seconds, as it was asked for.
+    pub clip_seconds: Option<u8>,
+    /// The provider parameters it was asked with, such as
+    /// `duration=6;resolution=768P`.
+    pub parameters: Option<String>,
+}
+
+/// A shot's locked video, with what made it: everything a handoff says
+/// about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedVideo {
+    pub artifact_id: String,
+    pub content_hash: ContentHash,
+    pub media_path: ProjectRelativePath,
+    pub provider: String,
+    pub model: String,
+    pub provenance: Option<PromptProvenance>,
+    /// The keyframe it starts from, and that keyframe's image if it has one.
+    pub first_frame: ArtifactDependency,
+    pub first_frame_media: Option<ProjectRelativePath>,
+    pub notes: Vec<String>,
+    pub branched_from: Option<String>,
+    pub clip_seconds: Option<u8>,
+    pub parameters: Option<String>,
 }
 
 /// Output of the deterministic local demo generator for one candidate.
@@ -1670,6 +1697,15 @@ impl ShotWorkflow {
         if let Some(branch) = &output.branched_from {
             extra.insert(BRANCH_RECORD.to_owned(), Value::String(branch.clone()));
         }
+        if let Some(seconds) = output.clip_seconds {
+            extra.insert(CLIP_SECONDS_RECORD.to_owned(), Value::from(seconds));
+        }
+        if let Some(parameters) = &output.parameters {
+            extra.insert(
+                PARAMETERS_RECORD.to_owned(),
+                Value::String(parameters.clone()),
+            );
+        }
         let provenance = output.provenance.as_ref();
         next_artifacts.push(StoredArtifactRecord {
             artifact_id: plan.artifact_id.as_str().to_owned(),
@@ -1841,6 +1877,76 @@ impl ShotWorkflow {
         )?;
         self.artifacts = next_artifacts;
         Ok(())
+    }
+
+    /// The shot's locked video, if it has one that still follows the shot,
+    /// with what made it.
+    pub fn locked_video(&self) -> Result<Option<LockedVideo>, ShotWorkflowError> {
+        if self.video_state()? != VideoState::Locked {
+            return Ok(None);
+        }
+        let Some(video) = self.current_video() else {
+            return Ok(None);
+        };
+        let Some(media) = video.kept_media() else {
+            return Ok(None);
+        };
+        let dependency = video
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.field.as_deref() == Some("first_frame"))
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        let first_frame = ArtifactDependency {
+            artifact_id: ArtifactId::new(dependency.artifact_id.clone())?,
+            content_hash: ContentHash::new(dependency.content_hash.clone())
+                .map_err(ShotWorkflowError::Hash)?,
+            impact: DependencyImpact::Semantic,
+            field: dependency.field.clone(),
+        };
+        let first_frame_media = self
+            .artifact(&first_frame.artifact_id)
+            .and_then(StoredArtifactRecord::kept_media)
+            .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
+            .transpose()?;
+        let provenance = match (
+            &video.compiler_version,
+            &video.compiled_prompt,
+            &video.prompt_hash,
+        ) {
+            (Some(compiler_version), Some(compiled_prompt), Some(prompt_hash)) => {
+                Some(PromptProvenance {
+                    compiler_version: compiler_version.clone(),
+                    compiled_prompt: compiled_prompt.clone(),
+                    prompt_hash: prompt_hash.clone(),
+                    applied_constraints: video.applied_constraints.clone().unwrap_or_default(),
+                    dropped_constraints: video.dropped_constraints.clone().unwrap_or_default(),
+                })
+            }
+            _ => None,
+        };
+        Ok(Some(LockedVideo {
+            artifact_id: video.artifact_id.clone(),
+            content_hash: ContentHash::new(video.content_hash.clone())
+                .map_err(ShotWorkflowError::Hash)?,
+            media_path: ProjectRelativePath::new(media).map_err(ShotWorkflowError::Path)?,
+            provider: video.provider.clone().unwrap_or_default(),
+            model: video.model.clone().unwrap_or_default(),
+            provenance,
+            first_frame,
+            first_frame_media,
+            notes: stored_notes(video),
+            branched_from: stored_branch(video),
+            clip_seconds: video
+                .extra
+                .get(CLIP_SECONDS_RECORD)
+                .and_then(Value::as_u64)
+                .and_then(|seconds| u8::try_from(seconds).ok()),
+            parameters: video
+                .extra
+                .get(PARAMETERS_RECORD)
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }))
     }
 
     /// Every video the shot has had, current or superseded, oldest
@@ -3069,6 +3175,8 @@ mod tests {
             intent: None,
             notes: Vec::new(),
             branched_from: None,
+            clip_seconds: None,
+            parameters: None,
         }
     }
 

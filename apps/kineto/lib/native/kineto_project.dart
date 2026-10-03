@@ -572,6 +572,18 @@ final class KinetoProjectException implements Exception {
   /// Collecting was asked for before a dry run showed what it lets go.
   static const int noCollectionPlan = 158;
 
+  /// Shots are not ready to export and a partial package was not asked for.
+  static const int exportIncomplete = 159;
+
+  /// A package of that name exists and replacing it was not asked for.
+  static const int exportExists = 160;
+
+  /// No shot has a locked video to export.
+  static const int nothingToExport = 161;
+
+  /// A file's bytes are not what its record says.
+  static const int mediaChanged = 162;
+
   final int code;
   final String message;
 
@@ -1353,6 +1365,10 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'provider_incapable': 156,
   'media_unreadable': 157,
   'no_collection_plan': 158,
+  'export_incomplete': 159,
+  'export_exists': 160,
+  'nothing_to_export': 161,
+  'media_changed': 162,
   'panic': 199,
 };
 
@@ -1420,6 +1436,10 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   156: 'The provider cannot do what this needs, such as start a video from the locked keyframe',
   157: 'The project\'s media records could not be read',
   158: 'Work out what collecting would let go before collecting it',
+  159: 'Some shots are not ready to export; export the ready ones only if you mean to',
+  160: 'A package of that name exists already',
+  161: 'No shot has a locked video to export yet',
+  162: 'A file is not what its record says; check the project\'s media',
   199: 'Native project call failed unexpectedly',
 };
 

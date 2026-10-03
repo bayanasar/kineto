@@ -49,6 +49,7 @@ use kineto_providers::Price;
 use crate::{
     bible, cast,
     documents::{self, DOCUMENT_PROVIDERS},
+    export,
     generation::{
         self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
     },
@@ -286,6 +287,8 @@ pub enum SessionError {
     Production(ProductionError),
     /// The project's media could not be listed or collected.
     Media(media::MediaError),
+    /// The production package could not be written.
+    Export(export::ExportError),
     /// Collecting was asked for before a dry run showed what it would let
     /// go.
     NoCollectionPlan,
@@ -307,6 +310,7 @@ impl fmt::Display for SessionError {
             Self::Document(error) => error.fmt(formatter),
             Self::Production(error) => error.fmt(formatter),
             Self::Media(error) => error.fmt(formatter),
+            Self::Export(error) => error.fmt(formatter),
             Self::NoCollectionPlan => {
                 formatter.write_str("work out what collecting would let go before collecting it")
             }
@@ -328,6 +332,7 @@ impl Error for SessionError {
             Self::Document(error) => Some(error),
             Self::Production(error) => Some(error),
             Self::Media(error) => Some(error),
+            Self::Export(error) => Some(error),
             Self::NoCollectionPlan | Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
@@ -590,6 +595,10 @@ pub struct PublishedWorkflow {
     pub steps: Vec<workflow::StepStatus>,
     /// Every scene with shots in play, and where each shot stands.
     pub scenes: Vec<workflow::SceneProgress>,
+    /// Which shots can be exported, and why the others cannot.
+    pub export: export::Readiness,
+    /// The package the session last wrote.
+    pub last_export: Option<export::Exported>,
     /// Why the steps could not be worked out, such as a recipe this build
     /// does not ship.
     pub problem: Option<String>,
@@ -635,6 +644,7 @@ enum Work {
         submission: Submission,
     },
     Storage(StorageCommand),
+    Export(export::ExportRequest),
 }
 
 /// Work on the project's stored media.
@@ -803,6 +813,20 @@ impl ProjectSession {
                 command,
                 submission: Submission::Once,
             },
+        })
+    }
+
+    /// Queue writing a production package. Its result arrives through
+    /// [`SessionSink::document_completed`]; what was written is published in
+    /// [`PublishedWorkflow::last_export`].
+    pub fn submit_export(
+        &self,
+        request: export::ExportRequest,
+        token: u64,
+    ) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Export(request),
         })
     }
 
@@ -1193,6 +1217,20 @@ fn run(
             }
             Some(Envelope {
                 token,
+                work: Work::Export(request),
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.export(&request);
+                        worker.publish_workflow(view);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Some(Envelope {
+                token,
                 work: Work::Storage(command),
             }) => {
                 let result = match worker.as_mut() {
@@ -1349,6 +1387,8 @@ struct Worker {
     collection: Option<media::Collection>,
     /// What the last verification found.
     mismatched: Vec<MediaRecord>,
+    /// The package this session last wrote.
+    last_export: Option<export::Exported>,
     /// The shots in play, in order; a shot index names one of them.
     keys: Vec<ShotKey>,
     // Canonical JSON is loaded once per shot per session; reads then stay
@@ -1396,6 +1436,7 @@ impl Worker {
             cast_unresolved: BTreeSet::new(),
             collection: None,
             mismatched: Vec::new(),
+            last_export: None,
         }
     }
 
@@ -2151,6 +2192,16 @@ impl Worker {
         }));
     }
 
+    fn export(&mut self, request: &export::ExportRequest) -> Result<(), SessionError> {
+        let written = panic::catch_unwind(AssertUnwindSafe(|| {
+            export::export(&self.project, request, std::time::SystemTime::now())
+        }))
+        .map_err(|_| SessionError::Panicked)?
+        .map_err(SessionError::Export)?;
+        self.last_export = Some(written);
+        Ok(())
+    }
+
     fn apply_storage(&mut self, command: StorageCommand) -> Result<(), SessionError> {
         let recent = media::recent_window(&self.project);
         let applied = panic::catch_unwind(AssertUnwindSafe(|| match command {
@@ -2180,28 +2231,30 @@ impl Worker {
     }
 
     fn publish_workflow(&self, view: &View) {
-        let read = || -> Result<_, workflow::WorkflowError> {
+        let read = || -> Result<_, String> {
             Ok((
-                workflow::status(&self.project)?,
-                workflow::scenes(&self.project)?,
+                workflow::status(&self.project).map_err(|error| error.to_string())?,
+                workflow::scenes(&self.project).map_err(|error| error.to_string())?,
+                export::readiness(&self.project).map_err(|error| error.to_string())?,
             ))
         };
+        let failed = |problem: String| PublishedWorkflow {
+            steps: Vec::new(),
+            scenes: Vec::new(),
+            export: export::Readiness::default(),
+            last_export: self.last_export.clone(),
+            problem: Some(problem),
+        };
         let published = match panic::catch_unwind(AssertUnwindSafe(read)) {
-            Ok(Ok((steps, scenes))) => PublishedWorkflow {
+            Ok(Ok((steps, scenes, export))) => PublishedWorkflow {
                 steps,
                 scenes,
+                export,
+                last_export: self.last_export.clone(),
                 problem: None,
             },
-            Ok(Err(error)) => PublishedWorkflow {
-                steps: Vec::new(),
-                scenes: Vec::new(),
-                problem: Some(error.to_string()),
-            },
-            Err(_) => PublishedWorkflow {
-                steps: Vec::new(),
-                scenes: Vec::new(),
-                problem: Some("working out the steps panicked".to_owned()),
-            },
+            Ok(Err(problem)) => failed(problem),
+            Err(_) => failed("working out the steps panicked".to_owned()),
         };
         *lock(&view.workflow) = Some(Arc::new(published));
     }
@@ -3585,6 +3638,67 @@ mod tests {
             let mismatched = &session.media().unwrap().mismatched;
             assert_eq!(mismatched.len(), 1);
             assert_eq!(mismatched[0].artifact_id, "shot_001_v0003_candidate_a");
+        }
+
+        #[test]
+        fn a_finished_scene_is_handed_off_as_a_package() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let out = temp.0.join("out");
+            fs::create_dir_all(&out).unwrap();
+            let (session, events) = create(&target);
+            let mut token = 0;
+            let mut run = |shot: u32, command: ShotCommand| {
+                token += 1;
+                session.submit(shot, command, token).unwrap();
+                completion(&events, token)
+            };
+            for shot in [0, 1] {
+                for command in [
+                    ShotCommand::Generate,
+                    ShotCommand::Select(0),
+                    ShotCommand::Lock,
+                    ShotCommand::GenerateVideo,
+                ] {
+                    run(shot, command).unwrap();
+                }
+                videos_finished(&events, 1);
+            }
+            run(0, ShotCommand::LockVideo).unwrap();
+            let workflow = session.workflow().unwrap();
+            assert_eq!(workflow.export.ready, [(ShotKey::bootstrap(1), 1)]);
+            assert_eq!(workflow.export.missing[0].reason, "its video is not locked");
+            let request = |partial| export::ExportRequest {
+                destination: out.clone(),
+                name: "dailies".to_owned(),
+                partial,
+                replace: false,
+            };
+            let export = |request: export::ExportRequest, token: u64| {
+                session.submit_export(request, token).unwrap();
+                match events.recv_timeout(WAIT).unwrap() {
+                    Event::DocumentCompleted { result, .. } => result,
+                    other => panic!("expected the export's result, got {other:?}"),
+                }
+            };
+            assert!(
+                export(request(false), 100)
+                    .unwrap_err()
+                    .starts_with("Export(Incomplete(")
+            );
+            assert!(session.workflow().unwrap().last_export.is_none());
+
+            run(1, ShotCommand::LockVideo).unwrap();
+            assert!(session.workflow().unwrap().export.complete());
+            export(request(false), 101).unwrap();
+            let exported = session.workflow().unwrap().last_export.clone().unwrap();
+            assert_eq!(exported.path, out.join("dailies"));
+            assert!(exported.complete && exported.shots == 2);
+            assert!(out.join("dailies/manifest.json").is_file());
+            assert_eq!(
+                fs::read(out.join("dailies/scene_001_shot_002.mp4")).unwrap(),
+                video::DEMO_CLIP
+            );
         }
 
         fn command_ok(

@@ -508,6 +508,11 @@ struct Receipt {
     /// The take it branches from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branched_from: Option<String>,
+    /// The clip's length and the provider parameters it is asked with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clip_seconds: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters: Option<String>,
 }
 
 fn receipt_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, VideoError> {
@@ -1126,6 +1131,8 @@ pub fn start_videos<G: VideoGenerator>(
         intent: Some(shot.intent_record()?),
         notes,
         branched_from: ask.branch_from.clone(),
+        clip_seconds: Some(prompt.duration_seconds),
+        parameters: Some(params.clone()),
     };
     let request = VideoSubmission {
         prompt: prompt.compiled.prompt().to_owned(),
@@ -1428,6 +1435,8 @@ pub fn finish(
             intent: receipt.intent,
             notes: receipt.notes,
             branched_from: receipt.branched_from,
+            clip_seconds: receipt.clip_seconds,
+            parameters: receipt.parameters,
         },
     )?;
     let _ = runtime.acknowledge_result(&job_id)?;

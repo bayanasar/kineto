@@ -15,6 +15,7 @@ use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
 use kineto_core::{
+    export::ExportError,
     generation::{Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
     keyframe_prompt::KeyframePromptError,
     llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
@@ -1214,9 +1215,23 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
         SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
         SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
+        SessionError::Export(error) => export_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+    }
+}
+
+fn export_error_code(error: &ExportError) -> i32 {
+    match error {
+        ExportError::Shot(error) => shot_error_code(error),
+        ExportError::Plan(error) => revision_error_code(error),
+        ExportError::Incomplete(_) => PROJECT_ERR_EXPORT_INCOMPLETE,
+        ExportError::NothingToExport => PROJECT_ERR_NOTHING_TO_EXPORT,
+        ExportError::InvalidName(_) => PROJECT_ERR_INVALID_ARGUMENT,
+        ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
+        ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
+        ExportError::Io(_) => PROJECT_ERR_IO,
     }
 }
 

@@ -134,6 +134,10 @@ void main() {
       KinetoProjectException.providerIncapable: 'provider_incapable',
       KinetoProjectException.mediaUnreadable: 'media_unreadable',
       KinetoProjectException.noCollectionPlan: 'no_collection_plan',
+      KinetoProjectException.exportIncomplete: 'export_incomplete',
+      KinetoProjectException.exportExists: 'export_exists',
+      KinetoProjectException.nothingToExport: 'nothing_to_export',
+      KinetoProjectException.mediaChanged: 'media_changed',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);

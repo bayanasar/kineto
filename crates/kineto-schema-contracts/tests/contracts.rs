@@ -181,6 +181,8 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "bible.schema.json",
             "casting.schema.json",
             "character.schema.json",
+            "export-manifest.schema.json",
+            "export-shot.schema.json",
             "job.schema.json",
             "project.schema.json",
             "recipe.schema.json",
@@ -405,6 +407,8 @@ fn shot_video_records_match_committed_schemas() {
             intent: Some(shot.intent_record().expect("the shot has an intent")),
             notes: vec!["Slower.".to_owned()],
             branched_from: Some("shot_001_v0001_candidate_b".to_owned()),
+            clip_seconds: Some(6),
+            parameters: Some("duration=6".to_owned()),
         },
     )
     .expect("the video should attach");

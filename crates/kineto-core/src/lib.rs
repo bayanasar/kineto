@@ -2,6 +2,7 @@ pub mod bible;
 pub mod bootstrap;
 pub mod cast;
 pub mod documents;
+pub mod export;
 pub mod generation;
 pub mod keyframe_prompt;
 pub mod llm;

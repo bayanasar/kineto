@@ -72,10 +72,14 @@ pub(crate) const PROJECT_ERR_NEEDS_SHOT_PLAN: i32 = 155;
 pub(crate) const PROJECT_ERR_PROVIDER_INCAPABLE: i32 = 156;
 pub(crate) const PROJECT_ERR_MEDIA_UNREADABLE: i32 = 157;
 pub(crate) const PROJECT_ERR_NO_COLLECTION_PLAN: i32 = 158;
+pub(crate) const PROJECT_ERR_EXPORT_INCOMPLETE: i32 = 159;
+pub(crate) const PROJECT_ERR_EXPORT_EXISTS: i32 = 160;
+pub(crate) const PROJECT_ERR_NOTHING_TO_EXPORT: i32 = 161;
+pub(crate) const PROJECT_ERR_MEDIA_CHANGED: i32 = 162;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 61] = [
+const STATUSES: [(&str, i32); 65] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -148,6 +152,10 @@ const STATUSES: [(&str, i32); 61] = [
     ("provider_incapable", PROJECT_ERR_PROVIDER_INCAPABLE),
     ("media_unreadable", PROJECT_ERR_MEDIA_UNREADABLE),
     ("no_collection_plan", PROJECT_ERR_NO_COLLECTION_PLAN),
+    ("export_incomplete", PROJECT_ERR_EXPORT_INCOMPLETE),
+    ("export_exists", PROJECT_ERR_EXPORT_EXISTS),
+    ("nothing_to_export", PROJECT_ERR_NOTHING_TO_EXPORT),
+    ("media_changed", PROJECT_ERR_MEDIA_CHANGED),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
