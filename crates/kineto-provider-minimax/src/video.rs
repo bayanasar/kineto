@@ -362,7 +362,7 @@ impl<T: Transport> MinimaxClient<T> {
             .download(&url, MAX_VIDEO_BYTES)
             .map_err(MinimaxError::Transport)?;
         if !(200..300).contains(&download.status) {
-            return Err(MinimaxError::Http {
+            return Err(MinimaxError::Download {
                 status: download.status,
             });
         }
@@ -500,6 +500,40 @@ mod tests {
             );
         }
         assert_eq!(capabilities.clip_seconds.len(), 2);
+    }
+
+    #[test]
+    fn an_expired_download_link_is_retrieved_again_without_paying() {
+        let retrieved = || {
+            json(
+                200,
+                r#"{"file":{"file_id":1,"download_url":"https://cdn.example.test/v.mp4"},"base_resp":{"status_code":0}}"#,
+            )
+        };
+        let client = client([
+            retrieved(),
+            Ok(HttpResponse {
+                status: 403,
+                body: b"expired".to_vec(),
+            }),
+            retrieved(),
+            Ok(HttpResponse {
+                status: 200,
+                body: MP4.to_vec(),
+            }),
+        ]);
+        let expired = client.fetch_video("1").unwrap_err();
+        assert_eq!(expired, MinimaxError::Download { status: 403 });
+        assert_eq!(expired.class(), ErrorClass::Retryable);
+        assert_eq!(client.fetch_video("1").unwrap(), MP4);
+        assert_eq!(
+            MinimaxError::Download { status: 400 }.class(),
+            ErrorClass::Terminal
+        );
+        assert_eq!(
+            MinimaxError::Download { status: 503 }.class(),
+            ErrorClass::Retryable
+        );
     }
 
     #[test]

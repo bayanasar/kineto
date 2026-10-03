@@ -101,6 +101,10 @@ pub struct CastImage {
     pub media_path: String,
     pub provenance: PromptProvenance,
     pub dependencies: Vec<DependencyRecord>,
+    /// Whether its bytes are kept; `None` for a record made before eviction,
+    /// which keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_state: Option<crate::media::MediaState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -713,6 +717,7 @@ mod tests {
                 dropped_constraints: Vec::new(),
             },
             dependencies: vec![parent("bible_character.filmmaker", "entry")],
+            media_state: None,
         };
         assert_eq!(
             attach(project, "filmmaker", image.clone()).unwrap(),

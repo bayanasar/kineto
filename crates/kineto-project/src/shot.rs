@@ -14,6 +14,7 @@ use crate::{
     SelectionManifest,
     fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
     manifest::{CanonicalProject, ProjectManifestError, ProjectStoreError},
+    media::{MediaKind, MediaOwner, MediaRecord, MediaState},
 };
 
 const SHOT_SCHEMA_VERSION: u32 = 1;
@@ -675,13 +676,6 @@ struct StoredArtifactRecord {
     dependencies: Vec<StoredArtifactDependency>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MediaState {
-    Present,
-    Evicted,
 }
 
 impl StoredArtifactRecord {
@@ -1883,6 +1877,34 @@ impl ShotWorkflow {
             (left.generation, left.candidate).cmp(&(right.generation, right.candidate))
         });
         Ok(history)
+    }
+
+    /// Every media file the shot's records name: its keyframes and videos,
+    /// current or superseded.
+    pub fn media(&self) -> Result<Vec<MediaRecord>, ShotWorkflowError> {
+        self.artifacts
+            .iter()
+            .filter_map(|artifact| {
+                let path = artifact.media_path.as_ref()?;
+                Some((artifact, path))
+            })
+            .map(|(artifact, path)| {
+                Ok(MediaRecord {
+                    owner: MediaOwner::Shot(self.key.clone()),
+                    artifact_id: artifact.artifact_id.clone(),
+                    kind: if artifact.artifact_type == VIDEO_ARTIFACT_TYPE {
+                        MediaKind::Video
+                    } else {
+                        MediaKind::Keyframe
+                    },
+                    path: ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path)?,
+                    content_hash: ContentHash::new(artifact.content_hash.clone())
+                        .map_err(ShotWorkflowError::Hash)?,
+                    state: artifact.media_state.unwrap_or_default(),
+                    standing: ArtifactStatus::from(artifact.status).into(),
+                })
+            })
+            .collect()
     }
 
     /// Absolute-path-free location of the current video's media, if any.

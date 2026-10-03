@@ -321,6 +321,10 @@ pub enum MinimaxError {
     InvalidRequest(&'static str),
     /// A remote task ended in failure.
     TaskFailed,
+    /// The content host answered a finished video's download with an HTTP
+    /// error status. The task stays finished: a link that expired or was
+    /// refused is retrieved afresh, without paying again.
+    Download { status: u16 },
 }
 
 impl MinimaxError {
@@ -333,6 +337,12 @@ impl MinimaxError {
         match self {
             Self::Transport(_) => ErrorClass::Retryable,
             Self::Http { status } if *status == 429 || *status >= 500 => ErrorClass::Retryable,
+            // An expired or revoked link, a busy host: retrieving the file
+            // again gives a new link. A malformed request never succeeds.
+            Self::Download { status } => match status {
+                400 | 405..=428 | 431..=499 => ErrorClass::Terminal,
+                _ => ErrorClass::Retryable,
+            },
             Self::Api { code, .. } => match code {
                 // unknown error, timeout, rate limit, internal error,
                 // connection limit, rate-growth limit
@@ -359,7 +369,12 @@ impl MinimaxError {
             | Self::Api { .. }
             | Self::Transport(TransportFailure::Connect) => true,
             Self::Http { status } => (400..500).contains(status),
-            Self::Transport(_) | Self::NoImage | Self::Malformed(_) | Self::TaskFailed => false,
+            // A download follows a task that was accepted long before.
+            Self::Transport(_)
+            | Self::NoImage
+            | Self::Malformed(_)
+            | Self::TaskFailed
+            | Self::Download { .. } => false,
         }
     }
 }
@@ -381,6 +396,12 @@ impl fmt::Display for MinimaxError {
             }
             Self::InvalidRequest(what) => write!(formatter, "MiniMax request is invalid: {what}"),
             Self::TaskFailed => formatter.write_str("MiniMax reported the task as failed"),
+            Self::Download { status } => {
+                write!(
+                    formatter,
+                    "the video's download link answered HTTP {status}"
+                )
+            }
         }
     }
 }

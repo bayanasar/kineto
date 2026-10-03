@@ -32,6 +32,7 @@ use kineto_project::{
     cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
+    media::{self, MediaRecord},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
@@ -549,6 +550,17 @@ struct View {
     documents: Mutex<Option<Arc<PublishedDocuments>>>,
     production: Mutex<Option<Arc<PublishedProduction>>>,
     workflow: Mutex<Option<Arc<PublishedWorkflow>>>,
+    media: Mutex<Option<Arc<PublishedMedia>>>,
+}
+
+/// The project's media as last checked. Reads never do I/O.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedMedia {
+    /// Records that say their bytes are kept, whose file is gone. Found at
+    /// open and after the session made media; reported, never rewritten.
+    pub missing: Vec<MediaRecord>,
+    /// Why the media could not be listed, such as a damaged record.
+    pub problem: Option<String>,
 }
 
 /// Where the project stands in its recipe, as last published. Reads never
@@ -794,6 +806,11 @@ impl ProjectSession {
             .ok_or(SnapshotError::NotOpen)
     }
 
+    /// The project's media as last checked. Never does I/O.
+    pub fn media(&self) -> Result<Arc<PublishedMedia>, SnapshotError> {
+        lock(&self.view.media).clone().ok_or(SnapshotError::NotOpen)
+    }
+
     /// Where the project stands in its recipe, as last published. Never does
     /// I/O.
     pub fn workflow(&self) -> Result<Arc<PublishedWorkflow>, SnapshotError> {
@@ -1023,6 +1040,7 @@ fn run(
             worker.publish_documents(view);
             worker.publish_production(view);
             worker.publish_workflow(view);
+            worker.tend_media(view, false);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
             }
@@ -1060,9 +1078,19 @@ fn run(
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
                         let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
+                        let makes_media = matches!(
+                            command,
+                            ShotCommand::Generate
+                                | ShotCommand::ResubmitKeyframes
+                                | ShotCommand::GenerateConsenting(_)
+                                | ShotCommand::Refine { .. }
+                        );
                         let result = worker.apply(index, command);
                         worker.publish(view, index);
                         worker.publish_workflow(view);
+                        if makes_media {
+                            worker.tend_media(view, true);
+                        }
                         result
                     }
                 };
@@ -1103,9 +1131,19 @@ fn run(
                 let result = match worker.as_mut() {
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
+                        let makes_media = matches!(
+                            command,
+                            ProductionCommand::SampleStyle { .. }
+                                | ProductionCommand::RefineStyle { .. }
+                                | ProductionCommand::Audition { .. }
+                                | ProductionCommand::MakePack { .. }
+                        );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
                         worker.publish_workflow(view);
+                        if makes_media {
+                            worker.tend_media(view, true);
+                        }
                         result
                     }
                 };
@@ -1120,6 +1158,9 @@ fn run(
                 };
                 worker.publish(view, index);
                 worker.publish_workflow(view);
+                if result.is_ok() {
+                    worker.tend_media(view, true);
+                }
                 let shot_index = u32::try_from(index).expect("shot index fits in u32");
                 gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
             }
@@ -1989,6 +2030,34 @@ impl Worker {
             screenplay_stale,
             damaged: None,
         })
+    }
+
+    /// List the project's media, link files whose bytes are the same when
+    /// `dedupe`, and publish which present files are gone. Storage upkeep:
+    /// it never fails a command.
+    fn tend_media(&self, view: &View, dedupe: bool) {
+        let tended = panic::catch_unwind(AssertUnwindSafe(|| {
+            let records = media::catalog(&self.project)?;
+            if dedupe && !self.project.is_read_only() {
+                media::dedupe(&self.project, &records)?;
+            }
+            media::check(&self.project, &records, false)
+        }));
+        let published = match tended {
+            Ok(Ok(report)) => PublishedMedia {
+                missing: report.missing,
+                problem: None,
+            },
+            Ok(Err(error)) => PublishedMedia {
+                missing: Vec::new(),
+                problem: Some(error.to_string()),
+            },
+            Err(_) => PublishedMedia {
+                missing: Vec::new(),
+                problem: Some("checking the media panicked".to_owned()),
+            },
+        };
+        *lock(&view.media) = Some(Arc::new(published));
     }
 
     fn publish_workflow(&self, view: &View) {
@@ -3250,6 +3319,66 @@ mod tests {
             );
             assert!(scene(&reopened).complete());
             assert_eq!(video_step(&reopened), workflow::StepState::Done);
+        }
+
+        #[test]
+        fn identical_takes_share_their_bytes_and_a_lost_file_is_reported_at_open() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            for (token, command) in [
+                (1, ShotCommand::Generate),
+                (2, ShotCommand::Select(0)),
+                (3, ShotCommand::Lock),
+                (4, ask(2, None, None)),
+            ] {
+                command_ok(&session, &events, token, command);
+            }
+            videos_finished(&events, 2);
+            let takes = session.video_history(0).unwrap();
+            let paths: Vec<PathBuf> = takes
+                .iter()
+                .map(|(_, media)| media.clone().unwrap())
+                .collect();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let inode = |path: &PathBuf| fs::metadata(path).unwrap().ino();
+                assert_eq!(
+                    inode(&paths[0]),
+                    inode(&paths[1]),
+                    "the demo clip is stored once"
+                );
+            }
+            let media = session.media().unwrap();
+            assert!(media.missing.is_empty() && media.problem.is_none());
+            drop(session);
+
+            fs::remove_file(&paths[1]).unwrap();
+            assert_eq!(fs::read(&paths[0]).unwrap(), video::DEMO_CLIP);
+            let (sink, events) = sink();
+            let reopened = ProjectSession::spawn(
+                OpenRequest::Open { path: target },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            let missing = &reopened.media().unwrap().missing;
+            assert_eq!(missing.len(), 1);
+            assert_eq!(missing[0].artifact_id, "shot_001_v0001_candidate_b");
+            // Reported, not rewritten: the take still says its bytes are kept.
+            assert_eq!(reopened.video_history(0).unwrap().len(), 2);
+        }
+
+        fn command_ok(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            token: u64,
+            command: ShotCommand,
+        ) {
+            session.submit(0, command, token).unwrap();
+            assert_eq!(completion(events, token), Ok(()));
         }
 
         #[test]

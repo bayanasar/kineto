@@ -315,7 +315,11 @@ Retention classes:
 - `archived` — canonical metadata retained while regenerable media bytes may be evicted
 - `collectable` — unreferenced/superseded and outside the retention window
 
-`media_state` must represent at least `present` and `evicted`.
+`media_state` must represent at least `present` and `evicted`. Shot artifacts, casting images and style samples all carry it; a record without one predates eviction and keeps its bytes.
+
+The records are the authority for media (`kineto_project::media`). The catalog lists every file a record names, with its owner (a shot, a character or the style), its kind and the director's standing on it (locked, chosen, candidate, or passed: superseded or rejected). A session checks at open, and after it makes media, that every file a record calls present exists, and publishes what is gone; whether the bytes still hash as recorded is checked only when asked, since that reads every file. Both are reported, never rewritten.
+
+Generated media is deduplicated by content: after the session makes media, files whose bytes are the same, verified by hashing both, become hard links to one another. Each record keeps its own path beside its owner; a file system without hard links keeps the copies. A finished video's download link that has expired or is refused is retrieved again on the next look at the task, without paying again.
 
 Future GC must be dependency-aware, provide dry-run reporting, and never collect an ancestor required by a pinned artifact. Generated media should use content-addressed deduplication where practical.
 
