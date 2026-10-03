@@ -257,7 +257,7 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
-The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
+The keyframe compiler is `keyframe-prompt/4` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
 
 - The locked style's directives and note lead the prompt; without a locked style it asks for a photorealistic film still.
 - A character whose cast is locked is shown from their canonical portrait, sent as an identity reference, up to as many references as the provider declares it takes in one image, in the shot's order.
@@ -269,7 +269,7 @@ The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.r
 
 The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 
-The video compiler is `video-prompt/4` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
+The video compiler is `video-prompt/5` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
 
 - The locked style leads, to be kept throughout the clip, and the clip is asked for as one continuous shot without cuts. The first frame alone does not hold a model to its look: in the P4 live run, Hailuo started from black-and-white noir keyframes and cut within a second to colour scenes that followed the action's words.
 - The first frame carries framing, lens, setting, the characters' look and the shot it continues from; those are applied through it, not restated.

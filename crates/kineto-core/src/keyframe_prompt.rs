@@ -38,11 +38,14 @@ use kineto_prompts::{
 use kineto_providers::{ImageCapabilities, ReferenceRole};
 use sha2::{Digest, Sha256};
 
-use crate::style_prompt::{Part, fit, sentence};
+use crate::{
+    preferences::{InForce, KEYFRAME_DIMENSIONS},
+    style_prompt::{Part, fit, sentence},
+};
 
 /// Version recorded with every keyframe compiled by this module. Change it
 /// whenever the same intent would compile to a different prompt.
-pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/3";
+pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/4";
 
 const INTENT_DOMAIN: &[u8] = b"kineto.keyframe-intent.v3";
 
@@ -57,6 +60,8 @@ pub struct Locks<'a> {
     /// The director's note for this generation only, such as "warmer light,
     /// tighter on his hands".
     pub note: Option<&'a str>,
+    /// The director's preferences in force, read for what a still can show.
+    pub preferences: Option<&'a InForce>,
 }
 
 /// The bible entries a shot's keyframe reads for continuity: the entry of
@@ -395,6 +400,18 @@ pub fn compile(
             degradation: DegradationLevel::Cosmetic,
         });
     }
+    // The director's preferences give way first, and to the locked style.
+    if let Some(in_force) = locks.preferences
+        && let Some(text) = in_force.sentence(&KEYFRAME_DIMENSIONS)
+    {
+        optional.push(Part {
+            constraint: "director.preferences".to_owned(),
+            text: sentence(&text),
+            rank: 0,
+            degradation: DegradationLevel::Cosmetic,
+        });
+        dependencies.extend(kineto_project::preferences::dependency(&in_force.record));
+    }
     for part in &optional {
         ConstraintId::new(part.constraint.as_str())?;
     }
@@ -534,6 +551,11 @@ fn canonical_intent(
     }
     field(&optional(&shot.continuity_from));
     field(&optional(&locks.note.map(str::to_owned)));
+    field(&optional(
+        &locks
+            .preferences
+            .and_then(|in_force| in_force.sentence(&KEYFRAME_DIMENSIONS)),
+    ));
     // The entries continuity reads, as they say it now.
     for dependency in continuity_dependencies(scene, Some(shot), locks.bible) {
         field(dependency.artifact_id.as_str().as_bytes());
@@ -1148,6 +1170,7 @@ mod tests {
                 characters: &[],
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &minimax(),
         )
@@ -1181,6 +1204,7 @@ mod tests {
                 characters: &locks,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &minimax(),
         )
@@ -1219,6 +1243,7 @@ mod tests {
                 characters: &recast,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &minimax(),
         )
@@ -1242,6 +1267,7 @@ mod tests {
                 characters: &locks,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &minimax(),
         )
@@ -1288,6 +1314,7 @@ mod tests {
                 characters: &locks,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &text_only,
         )
@@ -1325,6 +1352,7 @@ mod tests {
                 characters: &locks,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &two,
         )
@@ -1367,6 +1395,7 @@ mod tests {
                 characters: &locks[1..],
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &three,
         )
@@ -1398,6 +1427,7 @@ mod tests {
                 characters: &locks,
                 bible: None,
                 note: None,
+                preferences: None,
             },
             &minimax(),
         )

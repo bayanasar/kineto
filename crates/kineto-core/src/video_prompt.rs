@@ -38,9 +38,9 @@ use crate::{
 };
 
 /// Version recorded with every video prompt compiled by this module.
-pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/4";
+pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/5";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v4";
+const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v5";
 
 /// Mood is cut last of what is optional, the shot's direction before it,
 /// its continuity notes first: the first frame already holds what carries
@@ -84,6 +84,8 @@ pub struct VideoPromptInput<'a> {
     /// How long the shot's dialogue takes to say, which the clip should
     /// hold.
     pub dialogue_ms: Option<u32>,
+    /// The director's preferences in force, worded for a clip.
+    pub preferences: Option<&'a str>,
 }
 
 /// Compile the video prompt for `input`.
@@ -192,6 +194,14 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             ),
             RANK_CONTINUITY,
         )?);
+    }
+    // The director's preferences give way first, and to the locked style.
+    if let Some(preferences) = input
+        .preferences
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        optional.push(part("director.preferences", preferences, RANK_CONTINUITY)?);
     }
 
     if shot.dialogue.is_some() {
@@ -404,6 +414,7 @@ fn canonical_intent(input: &VideoPromptInput<'_>, shot: &ShotIntent, duration: u
         field(note.as_bytes());
     }
     field(&optional(input.style));
+    field(&optional(input.preferences));
     field(&[
         input.direction.code(),
         duration,
@@ -467,6 +478,7 @@ mod tests {
             notes: &[],
             style: None,
             dialogue_ms: None,
+            preferences: None,
         }
     }
 
@@ -642,6 +654,39 @@ mod tests {
         let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
         assert!(!applied(&plain).contains(&"style.locked"));
         assert_ne!(styled.prompt_hash, plain.prompt_hash);
+    }
+
+    #[test]
+    fn the_directors_preferences_join_the_clip_and_give_way_first() {
+        let shot = shot();
+        let parametric = capabilities(CameraControl::Parametric);
+        let wanted = "The director's preferences, where the locked style allows: prefer slow \
+                      dolly camera motion";
+        let preferred = compile(VideoPromptInput {
+            preferences: Some(wanted),
+            ..input(&shot, &parametric, Some("Push in"))
+        })
+        .unwrap();
+        assert!(
+            preferred
+                .compiled
+                .prompt()
+                .contains("prefer slow dolly camera motion")
+        );
+        assert!(applied(&preferred).contains(&"director.preferences"));
+        let plain = compile(input(&shot, &parametric, Some("Push in"))).unwrap();
+        assert_ne!(preferred.prompt_hash, plain.prompt_hash);
+
+        // Short of room, the preferences go before anything else.
+        let mut short = parametric.clone();
+        short.max_prompt_chars = Some(preferred.compiled.prompt().chars().count() - 5);
+        let cut = compile(VideoPromptInput {
+            preferences: Some(wanted),
+            ..input(&shot, &short, Some("Push in"))
+        })
+        .unwrap();
+        assert_eq!(dropped(&cut).last().unwrap().0, "director.preferences");
+        assert!(cut.compiled.prompt().contains("Mood:"));
     }
 
     #[test]

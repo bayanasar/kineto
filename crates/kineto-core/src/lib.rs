@@ -10,6 +10,7 @@ pub mod keyframe_prompt;
 pub mod llm;
 pub mod minimax;
 pub mod paid_image;
+pub mod preferences;
 pub mod screenplay;
 pub mod session;
 pub mod shot_plan;

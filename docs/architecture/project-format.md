@@ -145,6 +145,14 @@ Rules for asking:
 
 Work spoken in a character's voice records the lock as a dependency: the audition's ID and the hash of `voice.json`, `field: voice.<id>`.
 
+## Director preferences
+
+`preferences/` holds the director's preference profile as document revisions (`preferences_rNNNN.json`, `preferences.schema.json`, kind `preferences` in `revisions.json`).
+
+- Every change is a revision, and the latest is in force; nothing is locked.
+- An entry names a dimension, `prefer` or `avoid`, a value in the director's words, an optional strength in thousandths, and its source: the director, or a suggestion with its reason and the candidates that showed it.
+- Work made with the profile records its revision as a cosmetic dependency (`field: preferences`). It is excluded from input hashes and from staleness. It shows only that the profile has changed since.
+
 ## Dubbing
 
 `scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every take of the scene's lines in the order made, as `line.<scene>.<NN>.<TTTT>`: line `NN` of the scene (its place among the scene's dialogue blocks), take `TTTT` of that line. The audio sits beside it.
@@ -326,7 +334,7 @@ Representative record:
   "input_hash": "sha256:...",
   "provider": "example-video",
   "model": "model-x",
-  "compiler_version": "video-prompt/4",
+  "compiler_version": "video-prompt/5",
   "compiled_prompt": "verbatim provider input used for this generation",
   "prompt_hash": "sha256:...",
   "dropped_constraints": [],

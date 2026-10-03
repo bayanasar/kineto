@@ -1122,6 +1122,8 @@ pub fn start_videos<G: VideoGenerator>(
             Some(note) => format!("{}. {note}", lock.directives.trim_end_matches(['.', ' '])),
             None => lock.directives,
         });
+    let preferences = crate::preferences::in_force(project)?
+        .and_then(|in_force| in_force.sentence(&crate::preferences::VIDEO_DIMENSIONS));
     let prompt = video_prompt::compile(VideoPromptInput {
         shot: intent.as_ref(),
         direction: shot.direction(),
@@ -1146,6 +1148,7 @@ pub fn start_videos<G: VideoGenerator>(
                 .as_ref()
                 .and_then(|intent| intent.dialogue.as_deref()),
         )?,
+        preferences: preferences.as_deref(),
     })?;
     let params = generator.canonical_params(prompt.duration_seconds);
     let plans = shot.plan_videos(

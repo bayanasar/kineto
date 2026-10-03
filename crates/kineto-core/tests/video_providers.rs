@@ -258,7 +258,7 @@ fn a_video_says_what_its_provider_could_not_do_and_goes_stale_when_the_plan_move
         .iter()
         .find(|artifact| artifact["type"] == "shot_video")
         .unwrap();
-    assert_eq!(record["compiler_version"], "video-prompt/4");
+    assert_eq!(record["compiler_version"], "video-prompt/5");
     let dropped: Vec<(&str, &str)> = record["dropped_constraints"]
         .as_array()
         .unwrap()

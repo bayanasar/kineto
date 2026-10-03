@@ -34,7 +34,7 @@ use kineto_jobs::{
     IntentState, JobId, JobValueError, PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
 use kineto_project::{
-    ArtifactId, ContentHash, InputHash,
+    ArtifactId, ContentHash, DependencyImpact, InputHash,
     bible::Bible,
     cast::{self, CastError, CastImageKind, CharacterLock, LockedImage},
     fs::ProjectRelativePath,
@@ -1033,6 +1033,7 @@ fn compile_prompt<G: CandidateGenerator>(
     let intent = shot.intent()?;
     let (style, characters) = locks_of(project, intent.as_ref())?;
     let bible = locked_bible(project)?;
+    let preferences = crate::preferences::in_force(project)?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
         intent.as_ref(),
@@ -1042,6 +1043,7 @@ fn compile_prompt<G: CandidateGenerator>(
             characters: &characters,
             bible: bible.as_ref(),
             note,
+            preferences: preferences.as_ref(),
         },
         &generator.capabilities(),
     )?)))
@@ -1132,11 +1134,38 @@ pub fn keyframe_staleness(
         .map(|((recorded, origin), mut stale)| {
             // A demo candidate follows no lock, but it was made for an intent.
             if origin.provider != DEMO_PROVIDER {
-                let recorded: Vec<DependencyRecord> =
-                    recorded.iter().map(DependencyRecord::from).collect();
+                // Only what the keyframe was made from can make it stale;
+                // the preferences it was made with cannot.
+                let recorded: Vec<DependencyRecord> = recorded
+                    .iter()
+                    .filter(|dependency| dependency.impact == DependencyImpact::Semantic)
+                    .map(DependencyRecord::from)
+                    .collect();
                 stale.extend(cast::stale_parents(&recorded, &current));
             }
             stale
+        })
+        .collect())
+}
+
+/// For each current keyframe candidate of `shot`, whether it was made with
+/// preferences other than those in force. Never a reason for staleness;
+/// it says what a candidate not yet chosen was asked for.
+pub fn preferences_changed(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+) -> Result<Vec<bool>, GenerationError> {
+    let in_force = crate::preferences::in_force(project)?;
+    Ok(shot
+        .candidate_dependencies()?
+        .iter()
+        .zip(shot.candidate_origins()?)
+        .map(|(recorded, origin)| {
+            origin.provider != DEMO_PROVIDER
+                && kineto_project::preferences::changed_since(
+                    recorded,
+                    in_force.as_ref().map(|in_force| &in_force.record),
+                )
         })
         .collect())
 }
@@ -2038,7 +2067,7 @@ mod tests {
                 assert_eq!(artifact["provider"], "minimax");
                 assert_eq!(artifact["model"], "image-01");
                 assert_eq!(artifact["media_state"], "present");
-                assert_eq!(artifact["compiler_version"], "keyframe-prompt/3");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/4");
                 assert_eq!(artifact["degradation"], "identity_affecting");
                 assert!(artifact["media_path"].as_str().unwrap().starts_with(
                     "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"

@@ -62,6 +62,10 @@ const RECOVERED_ANALYSIS: i64 = -2;
 const RECOVERED_SCREENPLAY: i64 = -3;
 const RECOVERED_BIBLE: i64 = -4;
 const RECOVERED_SHOT_PLAN: i64 = -7;
+/// The `shot` a `RECOVERED` message for a preferences revision would have.
+/// The director writes preferences and no model does, so a session never
+/// posts one; the code keeps the document kinds answerable.
+const RECOVERED_PREFERENCES: i64 = -10;
 /// The `shot` of a `RECOVERED` message for style samples or casting images
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
@@ -222,6 +226,7 @@ impl SessionSink for DartPort {
                         DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
                         DocumentKind::Bible => RECOVERED_BIBLE,
                         DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
+                        DocumentKind::Preferences => RECOVERED_PREFERENCES,
                     },
                 ],
                 None,

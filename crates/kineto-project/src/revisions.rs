@@ -1,5 +1,5 @@
 //! Revisions of a document artifact: the story analysis, the screenplay, the
-//! world and character bible.
+//! world and character bible, the shot plan and the director's preferences.
 //!
 //! Each revision is a JSON file named by its stable artifact ID, beside a
 //! `revisions.json` log that records every revision's status, provenance and
@@ -29,6 +29,7 @@ pub enum DocumentKind {
     Screenplay,
     Bible,
     ShotPlan,
+    Preferences,
 }
 
 impl DocumentKind {
@@ -38,6 +39,7 @@ impl DocumentKind {
             Self::Screenplay => "screenplay",
             Self::Bible => "bible",
             Self::ShotPlan => "shot_plan",
+            Self::Preferences => "preferences",
         }
     }
 
@@ -49,6 +51,7 @@ impl DocumentKind {
             Self::Screenplay => "screenplay",
             Self::Bible => "bible",
             Self::ShotPlan => "shot_plan",
+            Self::Preferences => "preferences",
         }
     }
 

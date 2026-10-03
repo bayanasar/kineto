@@ -34,6 +34,7 @@ use kineto_project::{
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     media::{self, MediaRecord},
+    preferences::{self as preferences_document, Preferences},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
@@ -180,6 +181,12 @@ pub enum DocumentCommand {
     },
     LockShotPlan {
         revision: u32,
+    },
+    /// Save the director's preference profile as the next revision,
+    /// starting from `based_on`, the latest (`None` for the first).
+    SavePreferences {
+        based_on: Option<u32>,
+        preferences: Preferences,
     },
 }
 
@@ -501,6 +508,13 @@ pub struct PublishedDocuments {
     pub shot_plan_stale: Vec<shot_plan_document::StaleCause>,
     /// Estimated cost of the next shot plan, likewise.
     pub shot_plan_cost: Option<u64>,
+    /// The director's preference profile in force, and its revision.
+    pub preferences: Option<(RevisionRecord, Preferences)>,
+    /// Every preference revision, oldest first.
+    pub preferences_revisions: Vec<RevisionRecord>,
+    /// The plan in play was made with other preferences than those in
+    /// force. Never a reason for staleness.
+    pub shot_plan_preferences_changed: bool,
     /// Every line of the screenplay work builds on, with how long it takes
     /// to say.
     pub line_durations: Vec<dialogue::LineDuration>,
@@ -641,6 +655,9 @@ struct PublishedShot {
     /// Why each current candidate is stale, in candidate order; see
     /// [`generation::keyframe_staleness`].
     staleness: Vec<Vec<String>>,
+    /// Whether each current candidate was made with other preferences than
+    /// those in force, in candidate order.
+    preferences_changed: Vec<bool>,
     /// Every candidate the shot has had, oldest first, with its media's
     /// absolute path.
     history: Vec<(CandidateRecord, Option<PathBuf>)>,
@@ -1032,6 +1049,17 @@ impl ProjectSession {
     /// I/O.
     pub fn candidate_staleness(&self, shot_index: u32) -> Result<Vec<Vec<String>>, SnapshotError> {
         self.published(shot_index, |published| published.staleness.clone())
+    }
+
+    /// Whether each current keyframe candidate was made with other
+    /// preferences than those in force, in candidate order. Never does I/O.
+    pub fn candidate_preferences_changed(
+        &self,
+        shot_index: u32,
+    ) -> Result<Vec<bool>, SnapshotError> {
+        self.published(shot_index, |published| {
+            published.preferences_changed.clone()
+        })
     }
 
     /// Every keyframe candidate the shot has had, current or superseded,
@@ -1956,6 +1984,12 @@ impl Worker {
             DocumentCommand::LockShotPlan { revision } => {
                 shot_plan_document::lock(project, revision).map_err(revision_error)
             }
+            DocumentCommand::SavePreferences {
+                based_on,
+                preferences,
+            } => preferences_document::save(project, based_on, &preferences)
+                .map(|_| ())
+                .map_err(revision_error),
         }))
         .unwrap_or(Err(SessionError::Panicked))
     }
@@ -2375,6 +2409,15 @@ impl Worker {
             .iter()
             .find(|record| record.status == revisions::RevisionStatus::Locked)
             .map(|record| record.revision);
+        let preferences = preferences_document::current(project).map_err(revision_error)?;
+        let preferences_revisions =
+            revisions::revisions(project, DocumentKind::Preferences).map_err(revision_error)?;
+        let shot_plan_preferences_changed = shot_plan_latest.as_ref().is_some_and(|record| {
+            preferences_document::revision_changed_since(
+                &record.dependencies,
+                preferences.as_ref().map(|(record, _)| record),
+            )
+        });
         let line_durations =
             match revisions::current(project, DocumentKind::Screenplay).map_err(revision_error)? {
                 Some(record) => dialogue::line_durations(
@@ -2394,6 +2437,9 @@ impl Worker {
             source_revision: Some(source.revision),
             line_durations,
             short_shots,
+            preferences,
+            preferences_revisions,
+            shot_plan_preferences_changed,
             shot_plan_cost: if ready && bible_locked.is_some() && locked.is_some() {
                 shot_plan::plan_cost(project, &info).ok().flatten()
             } else {
@@ -2718,6 +2764,8 @@ impl Worker {
                     origins: shot.candidate_origins()?,
                     keyframes_unresolved: false,
                     staleness: generation::keyframe_staleness(project, shot)
+                        .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?,
+                    preferences_changed: generation::preferences_changed(project, shot)
                         .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?,
                     history: shot
                         .candidate_history()?

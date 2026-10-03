@@ -185,6 +185,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "export-shot.schema.json",
             "job.schema.json",
             "lines.schema.json",
+            "preferences.schema.json",
             "project.schema.json",
             "recipe.schema.json",
             "revisions.schema.json",
@@ -895,6 +896,61 @@ fn casting_records_and_a_locked_character_match_committed_schemas() {
     let mut drifted = voice.clone();
     drifted["artifact_id"] = "voice filmmaker".into();
     assert!(validate_value(&voice_schema, &drifted, "$").is_err());
+}
+
+#[test]
+fn preference_revisions_match_committed_schemas() {
+    use kineto_project::preferences::{self, Dimension, Preference, Preferences, Source, Stance};
+    let preferences_schema = schema("preferences.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    let first = preferences::save(
+        &project,
+        None,
+        &Preferences {
+            entries: vec![Preference {
+                dimension: Dimension::CameraMotion,
+                stance: Stance::Prefer,
+                value: "slow dolly".to_owned(),
+                strength_permille: Some(700),
+                source: Source::Director,
+            }],
+        },
+    )
+    .expect("the first profile is saved");
+    preferences::save(
+        &project,
+        Some(first.revision),
+        &Preferences {
+            entries: vec![Preference {
+                dimension: Dimension::Lighting,
+                stance: Stance::Avoid,
+                value: "flat".to_owned(),
+                strength_permille: None,
+                source: Source::Suggestion {
+                    reason: "Every chosen take is lit from one side.".to_owned(),
+                    evidence: vec!["office_night_02_g0001_candidate_b".to_owned()],
+                },
+            }],
+        },
+    )
+    .expect("the edit is saved");
+    for revision in ["preferences_r0001", "preferences_r0002"] {
+        let document = json_file(&temp.0.join(format!("preferences/{revision}.json")));
+        validate(&preferences_schema, &document, revision);
+    }
+    let log = json_file(&temp.0.join("preferences/revisions.json"));
+    validate(&revisions_schema, &log, "preference revisions");
+    assert_eq!(log["kind"], "preferences");
+
+    let mut drifted = json_file(&temp.0.join("preferences/preferences_r0002.json"));
+    drifted["entries"][0]["source"]["evidence"] = serde_json::json!([]);
+    assert!(validate_value(&preferences_schema, &drifted, "$").is_err());
+    let mut drifted = json_file(&temp.0.join("preferences/preferences_r0001.json"));
+    drifted["entries"][0]["stance"] = "tolerate".into();
+    assert!(validate_value(&preferences_schema, &drifted, "$").is_err());
 }
 
 #[test]
