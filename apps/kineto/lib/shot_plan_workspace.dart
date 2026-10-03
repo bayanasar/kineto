@@ -26,6 +26,8 @@ class RecipeStrip extends StatelessWidget {
               step.description,
               if (step.waitingOn.isNotEmpty) 'Waiting on ${step.waitingOn.join(', ')}',
               if (step.stale.isNotEmpty) 'Changed since: ${step.stale.join(', ')}',
+              if (step.skippedWhen.isNotEmpty)
+                'Skipped: ${step.skippedWhen.map((condition) => condition.replaceAll('_', ' ')).join(', ')}',
             ].join('\n'),
             child: WabStatusBadge(
               '${step.id.replaceAll('_', ' ')} · ${step.state.label}${step.stale.isEmpty ? '' : ' · stale'}',
@@ -36,7 +38,7 @@ class RecipeStrip extends StatelessWidget {
                       KinetoStepState.done => WabBadgeKind.done,
                       KinetoStepState.awaitingApproval => WabBadgeKind.progress,
                       KinetoStepState.ready => WabBadgeKind.primary,
-                      KinetoStepState.waiting => WabBadgeKind.neutral,
+                      KinetoStepState.waiting || KinetoStepState.skipped => WabBadgeKind.neutral,
                     },
             ),
           ),

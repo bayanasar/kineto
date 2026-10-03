@@ -36,6 +36,13 @@ const KinetoPlannedShot _close = KinetoPlannedShot(
 const List<KinetoWorkflowStep> _steps = <KinetoWorkflowStep>[
   KinetoWorkflowStep(id: 'screenplay', description: 'Lock the screenplay.', state: KinetoStepState.done, approval: true),
   KinetoWorkflowStep(
+    id: 'casting',
+    description: 'Cast every main character.',
+    state: KinetoStepState.skipped,
+    approval: true,
+    skippedWhen: <String>['no_main_characters'],
+  ),
+  KinetoWorkflowStep(
     id: 'shot_plan',
     description: 'Plan and lock the shots.',
     state: KinetoStepState.awaitingApproval,
@@ -126,6 +133,11 @@ void main() {
     expect(find.text('Keep: Rain on the window.'), findsOneWidget);
     expect(find.text('shot plan · Awaiting approval'), findsOneWidget);
     expect(find.text('keyframes · Waiting'), findsOneWidget);
+    expect(find.text('casting · Skipped'), findsOneWidget);
+    expect(
+      tester.widget<Tooltip>(find.ancestor(of: find.byKey(_key('step-casting')), matching: find.byType(Tooltip))).message,
+      'Cast every main character.\nSkipped: no main characters',
+    );
     expect(find.text('Kimi Code · cost unknown: billed by the Kimi Code subscription'), findsOneWidget);
 
     await _tap(tester, find.byKey(_key('lock-plan')));

@@ -380,6 +380,7 @@ fn count(published: &Published, what: &str, group: u32, item: u32) -> Option<usi
         "workflow_steps" => steps.len(),
         "step_waiting" => at(steps, group)?.waiting_on.len(),
         "step_stale" => at(steps, group)?.stale.len(),
+        "step_skipped" => at(steps, group)?.skipped_when.len(),
         _ => return None,
     })
 }
@@ -436,6 +437,7 @@ fn step_state(state: StepState) -> &'static str {
         StepState::Ready => "ready",
         StepState::AwaitingApproval => "awaiting_approval",
         StepState::Done => "done",
+        StepState::Skipped => "skipped",
     }
 }
 
@@ -535,6 +537,7 @@ fn text(published: &Published, field: &str, group: u32, item: u32, sub: u32) -> 
         "step_description" => owned(&step()?.description),
         "step_waiting" => owned(at(&step()?.waiting_on, item)?),
         "step_stale" => owned(at(&step()?.stale, item)?),
+        "step_skipped" => Some(at(&step()?.skipped_when, item)?.as_str().to_owned()),
         "workflow_problem" => owned(published.workflow.problem.as_deref().unwrap_or_default()),
         _ => None,
     }

@@ -332,7 +332,10 @@ enum KinetoStepState {
   waiting('waiting', 'Waiting'),
   ready('ready', 'Ready'),
   awaitingApproval('awaiting_approval', 'Awaiting approval'),
-  done('done', 'Done');
+  done('done', 'Done'),
+
+  /// It does not apply to this project, and counts as done.
+  skipped('skipped', 'Skipped');
 
   const KinetoStepState(this.wireName, this.label);
 
@@ -349,6 +352,7 @@ final class KinetoWorkflowStep {
     this.approval = false,
     this.waitingOn = const <String>[],
     this.stale = const <String>[],
+    this.skippedWhen = const <String>[],
   });
 
   final String id;
@@ -363,6 +367,10 @@ final class KinetoWorkflowStep {
 
   /// What changed since its work was made.
   final List<String> stale;
+
+  /// The recipe's conditions that hold when it is skipped, such as
+  /// `no_main_characters`.
+  final List<String> skippedWhen;
 }
 
 /// The shot plan and where the project stands in its recipe, as the engine
@@ -763,6 +771,10 @@ final class _PlanningReader {
         stale: <String>[
           for (var item = 0; item < count('step_stale', group: group); item++)
             text('step_stale', group: group, item: item),
+        ],
+        skippedWhen: <String>[
+          for (var item = 0; item < count('step_skipped', group: group); item++)
+            text('step_skipped', group: group, item: item),
         ],
       );
 
