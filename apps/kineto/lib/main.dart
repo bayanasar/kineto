@@ -6,6 +6,7 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'demo_workspace.dart';
 import 'native/kineto_engine.dart';
+import 'production_workspace.dart';
 import 'project_busy.dart';
 import 'screenplay_workspace.dart';
 
@@ -106,7 +107,7 @@ class KinetoApp extends StatefulWidget {
 }
 
 /// The workspaces the director moves between.
-enum KinetoWorkspace { screenplay, shots }
+enum KinetoWorkspace { screenplay, production, shots }
 
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
@@ -146,9 +147,11 @@ class _KinetoAppState extends State<KinetoApp> {
         children: <Widget>[
           for (final (workspace, label) in <(KinetoWorkspace, String)>[
             (KinetoWorkspace.screenplay, 'Story & screenplay'),
+            (KinetoWorkspace.production, 'Bible, style & cast'),
             (KinetoWorkspace.shots, 'Shots'),
           ])
             WabButton(
+              key: ValueKey<String>('workspace-${workspace.name}'),
               kind: workspace == _workspace ? WabMaterialKind.seal : WabMaterialKind.zhuwen,
               onPressed: () => setState(() => _workspace = workspace),
               child: Text(label),
@@ -163,6 +166,12 @@ class _KinetoAppState extends State<KinetoApp> {
       theme: WabTheme.materialTheme(lightTheme: !_darkMode),
       home: switch (_workspace) {
         KinetoWorkspace.screenplay => ScreenplayWorkspaceScreen(
+            project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+        KinetoWorkspace.production => ProductionWorkspaceScreen(
             project: widget.project,
             navigation: _navigation(),
             isDarkMode: _darkMode,

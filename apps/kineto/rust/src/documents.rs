@@ -44,14 +44,16 @@ pub struct KinetoScreenplayBlock {
 
 /// # Safety
 /// `session` must be null or a live project-session handle.
-unsafe fn session_ref<'a>(session: *const KinetoProjectSession) -> Option<&'a ProjectSession> {
+pub(crate) unsafe fn session_ref<'a>(
+    session: *const KinetoProjectSession,
+) -> Option<&'a ProjectSession> {
     // SAFETY: forwarded caller contract.
     unsafe { session.as_ref() }.map(|session| &session.session)
 }
 
 /// # Safety
 /// `session` must be null or a live project-session handle.
-unsafe fn submit(
+pub(crate) unsafe fn submit(
     session: *const KinetoProjectSession,
     command: DocumentCommand,
     resubmit: bool,
@@ -76,7 +78,7 @@ unsafe fn submit(
 ///
 /// # Safety
 /// When `len` is non-zero, `ptr` must be readable for `len` bytes.
-unsafe fn optional_text(ptr: *const u8, len: u64) -> Result<Option<String>, i32> {
+pub(crate) unsafe fn optional_text(ptr: *const u8, len: u64) -> Result<Option<String>, i32> {
     // SAFETY: forwarded caller contract.
     unsafe { utf8_owned(ptr, len) }.map(|text| Some(text).filter(|text| !text.is_empty()))
 }
@@ -313,7 +315,7 @@ pub unsafe extern "C" fn kineto_project_lock_screenplay(
 
 /// # Safety
 /// `session` must be null or a live project-session handle.
-unsafe fn published(
+pub(crate) unsafe fn published(
     session: *const KinetoProjectSession,
 ) -> Result<std::sync::Arc<PublishedDocuments>, i32> {
     // SAFETY: forwarded caller contract.
@@ -321,7 +323,7 @@ unsafe fn published(
     session.documents().map_err(|_| PROJECT_ERR_NOT_OPEN)
 }
 
-fn revision_bits(revision: Option<u32>) -> u64 {
+pub(crate) fn revision_bits(revision: Option<u32>) -> u64 {
     let mask = (1_u64 << SOURCE_REVISION.width) - 1;
     revision.map_or(0, |revision| u64::from(revision).min(mask))
 }
@@ -383,7 +385,7 @@ fn screenplay(documents: &PublishedDocuments) -> Option<&Screenplay> {
         .map(|(_, screenplay)| screenplay)
 }
 
-fn at<T>(items: &[T], index: u32) -> Option<&T> {
+pub(crate) fn at<T>(items: &[T], index: u32) -> Option<&T> {
     items.get(usize::try_from(index).ok()?)
 }
 
@@ -655,8 +657,9 @@ pub unsafe extern "C" fn kineto_project_llm_model_copy(
 /// Estimated cost of asking for `document` (a contract `document_cost` code)
 /// in USD micros, counting the model's full output allowance. Returns
 /// `cost_unknown` when the model's billing gives no price (an agent on a
-/// subscription), `model_not_configured` without a usable model, and
-/// `needs_analysis` for a screenplay with nothing to write from.
+/// subscription), `model_not_configured` without a usable model,
+/// `needs_analysis` for a screenplay with nothing to write from, and
+/// `needs_locked_screenplay` for a bible.
 ///
 /// # Safety
 /// `session` must be a live project-session handle and `out_micros` writable
@@ -687,6 +690,10 @@ pub unsafe extern "C" fn kineto_project_document_cost(
                 return PROJECT_ERR_NEEDS_ANALYSIS;
             }
             Some("screenplay") => documents.screenplay_cost,
+            Some("bible") if documents.locked.is_none() => {
+                return PROJECT_ERR_NEEDS_LOCKED_SCREENPLAY;
+            }
+            Some("bible") => documents.bible_cost,
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         if !model.ready {

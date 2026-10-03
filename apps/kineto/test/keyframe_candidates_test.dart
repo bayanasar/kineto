@@ -41,6 +41,8 @@ Widget _workspace({
   VoidCallback? onGenerate,
   bool unresolved = false,
   VoidCallback? onResubmit,
+  String? error,
+  VoidCallback? onConsent,
 }) =>
     MaterialApp(
       theme: WabTheme.materialTheme(lightTheme: false),
@@ -51,6 +53,8 @@ Widget _workspace({
         candidateOrigins: origins,
         keyframesUnresolved: unresolved,
         onResubmitKeyframes: onResubmit,
+        error: error,
+        onGenerateDespiteIdentityDrift: onConsent,
         shotSnapshot: shot,
         shotSnapshots: <KinetoShotSnapshot>[shot, _empty],
         activeShotIndex: 0,
@@ -238,5 +242,30 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(resubmit);
     expect((generated, resubmitted), (0, 1));
+  });
+
+  testWidgets('generating despite identity drift is offered only after the policy refused it', (tester) async {
+    tester.view.physicalSize = const Size(1280, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(_workspace(shot: _empty, provider: _minimax, error: 'The provider failed.'));
+    expect(find.byKey(const ValueKey<String>('generate-despite-drift')), findsNothing);
+
+    var consented = 0;
+    await tester.pumpWidget(
+      _workspace(
+        shot: _empty,
+        provider: _minimax,
+        error: 'A character in this shot has no locked cast.',
+        onConsent: () => consented++,
+      ),
+    );
+    expect(find.textContaining('a different-looking person is acceptable'), findsOneWidget);
+    final consent = find.byKey(const ValueKey<String>('generate-despite-drift'));
+    await tester.ensureVisible(consent);
+    await tester.tap(consent);
+    await tester.pump();
+    expect(consented, 1);
   });
 }

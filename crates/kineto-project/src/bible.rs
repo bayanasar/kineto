@@ -364,6 +364,70 @@ impl Bible {
     }
 }
 
+/// Which list of the bible an entry is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Character,
+    Location,
+    Prop,
+}
+
+/// The director's edit of one entry: what it looks like and what must
+/// never change. Its ID, name and the rest of the entry stay as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryEdit {
+    pub kind: EntryKind,
+    pub id: String,
+    pub description: String,
+    pub appearance: String,
+    /// A character's usual wardrobe; ignored for other entries.
+    pub wardrobe: String,
+    pub forbidden_changes: Vec<String>,
+}
+
+impl Bible {
+    /// This bible with `edit` applied to the entry it names.
+    pub fn with_entry_edit(&self, edit: EntryEdit) -> Result<Self, String> {
+        let mut bible = self.clone();
+        let missing = || format!("the bible has no entry {:?}", edit.id);
+        match edit.kind {
+            EntryKind::Character => {
+                let character = bible
+                    .characters
+                    .iter_mut()
+                    .find(|character| character.id == edit.id)
+                    .ok_or_else(missing)?;
+                character.description = edit.description;
+                character.appearance = edit.appearance;
+                character.wardrobe = edit.wardrobe;
+                character.forbidden_changes = edit.forbidden_changes;
+            }
+            EntryKind::Location => {
+                let location = bible
+                    .locations
+                    .iter_mut()
+                    .find(|location| location.id == edit.id)
+                    .ok_or_else(missing)?;
+                location.description = edit.description;
+                location.appearance = edit.appearance;
+                location.forbidden_changes = edit.forbidden_changes;
+            }
+            EntryKind::Prop => {
+                let prop = bible
+                    .props
+                    .iter_mut()
+                    .find(|prop| prop.id == edit.id)
+                    .ok_or_else(missing)?;
+                prop.description = edit.description;
+                prop.appearance = edit.appearance;
+                prop.forbidden_changes = edit.forbidden_changes;
+            }
+        }
+        bible.validate()?;
+        Ok(bible)
+    }
+}
+
 impl TryFrom<RawBible> for Bible {
     type Error = String;
 
@@ -742,6 +806,48 @@ mod tests {
 
     fn parse(value: &serde_json::Value) -> Result<Bible, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn an_entry_edit_changes_only_what_it_names() {
+        let bible = parse(&sample()).unwrap();
+        let edit = |kind, id: &str, wardrobe: &str| EntryEdit {
+            kind,
+            id: id.to_owned(),
+            description: "Edited.".to_owned(),
+            appearance: "Edited look.".to_owned(),
+            wardrobe: wardrobe.to_owned(),
+            forbidden_changes: vec!["Never edited again.".to_owned()],
+        };
+        let edited = bible
+            .with_entry_edit(edit(EntryKind::Character, "filmmaker", "A grey suit."))
+            .unwrap();
+        let character = &edited.characters[0];
+        assert_eq!(character.appearance, "Edited look.");
+        assert_eq!(character.wardrobe, "A grey suit.");
+        assert_eq!(character.forbidden_changes, ["Never edited again."]);
+        assert_eq!(character.name, bible.characters[0].name);
+        assert_eq!(edited.characters[1], bible.characters[1]);
+        assert_eq!(edited.locations, bible.locations);
+
+        let edited = bible
+            .with_entry_edit(edit(EntryKind::Location, "small_office", "ignored"))
+            .unwrap();
+        assert_eq!(edited.locations[0].description, "Edited.");
+        assert_eq!(edited.characters, bible.characters);
+        let edited = bible
+            .with_entry_edit(edit(EntryKind::Prop, "notebook", ""))
+            .unwrap();
+        assert_eq!(edited.props[0].appearance, "Edited look.");
+
+        assert!(
+            bible
+                .with_entry_edit(edit(EntryKind::Prop, "filmmaker", ""))
+                .is_err()
+        );
+        let mut empty = edit(EntryKind::Character, "filmmaker", "A grey suit.");
+        empty.appearance = "  ".to_owned();
+        assert!(bible.with_entry_edit(empty).is_err());
     }
 
     /// A project with the sample screenplay locked and a bible written from

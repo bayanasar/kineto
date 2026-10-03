@@ -1,0 +1,370 @@
+{
+  "schema_version": 1,
+  "character_id": "filmmaker",
+  "images": [
+    {
+      "artifact_id": "cast.filmmaker.0001",
+      "kind": "portrait",
+      "status": "candidate",
+      "content_hash": "sha256:19cbfa2739594b32242fcdf5ea207cd4a87b40fd019b3bc0018c1ca29403919d",
+      "input_hash": "sha256:58c8544167d504bbcbe920897cf3b0ee84e3ce9e369a1d8fa5872e757b4b953e",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/candidates/cast.filmmaker.0001.jpg",
+      "provenance": {
+        "compiler_version": "cast-portrait/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:1f373d30749d451963a37a519b53f80334e057b02c6bc52bde0795922fdc3dec",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.portrait",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0002",
+      "kind": "portrait",
+      "status": "selected",
+      "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+      "input_hash": "sha256:58c8544167d504bbcbe920897cf3b0ee84e3ce9e369a1d8fa5872e757b4b953e",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg",
+      "provenance": {
+        "compiler_version": "cast-portrait/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:1f373d30749d451963a37a519b53f80334e057b02c6bc52bde0795922fdc3dec",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.portrait",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0003",
+      "kind": "front",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:b6e08d3b1ed168d3c4516c068822509955935a802db936b8367662907971d43c",
+      "input_hash": "sha256:d6b4618769e3060de12f612350e0b47ca273aee8b3b3872baeb77bdf3f9b9fba",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0003.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Front view of The Filmmaker: the person in the reference image, head and shoulders, looking straight at the camera, neutral expression, plain background. Same face, build and colouring as the reference image. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:375ad20f47b300ce76e00585032460cddeb7d5baa72a6cc8f70e014ebad0164b",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.front",
+          "identity.filmmaker",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0004",
+      "kind": "profile_left",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:b6bbd1e5b128d437414395261f6d81ff4bd1715e1560fda15e8f3625bd7b3191",
+      "input_hash": "sha256:b37c2f30086da38572761aaec546a76208a15d2adf28f1054dfacb17387804bb",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0004.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Left profile of The Filmmaker: the person in the reference image, head and shoulders, face turned fully to the left, plain background. Same face, build and colouring as the reference image. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:a413b6c713b29a7660eaeb9179725c5b567a015a7451380911945fb1de8fd1ee",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.profile_left",
+          "identity.filmmaker",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0005",
+      "kind": "profile_right",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:e2a14bb8b53713bf880a6c11d15d57817c39b1a179adc65cb5efb15b598e2e77",
+      "input_hash": "sha256:1d1b88bb71241268c42c5793188d928040910e6ce0636312a657e47259d4ece3",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0005.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Right profile of The Filmmaker: the person in the reference image, head and shoulders, face turned fully to the right, plain background. Same face, build and colouring as the reference image. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:62c24e00c50a9e3b7f17014f9daf43a61bc2a2ce6d48bc582c3286622a22d0ca",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.profile_right",
+          "identity.filmmaker",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0006",
+      "kind": "full_body",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:4152121c322dfc1776f336011a48fa6630f32745d7d083477d055cf669188ed7",
+      "input_hash": "sha256:63438c7277a5d98554e950e2f03f47c59d876bc57de1b30b31d30050851ed9d7",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0006.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Full-length view of The Filmmaker: the person in the reference image, standing, head to toe in frame, facing the camera, plain background. Same face, build and colouring as the reference image. Wardrobe: A dark wool coat over a black sweater. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:8273f8b08f8e0c600f950d7aadfb175cf4aef913a1265dfd6d1c884733275156",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.full_body",
+          "identity.filmmaker",
+          "bible.wardrobe",
+          "bible.appearance",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0007",
+      "kind": "costume",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:37e304c786f521f0e8fe4f0f554d3d0e8c17646369c5bd6c74a9e975fd09da8c",
+      "input_hash": "sha256:7aee9461439f925e99dd7a69d7264722c4436170ee53d2f25a207d4f7fbb329a",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0007.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Costume reference of The Filmmaker: the person in the reference image, full length, three-quarter view, the whole costume clearly visible, plain background. Same face, build and colouring as the reference image. Wardrobe: A dark wool coat over a black sweater. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:bcd5ce36fb0b1788b2c06c8b0f52f09b23fcf98fc0efb1dea143106fa4423999",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.costume",
+          "identity.filmmaker",
+          "bible.wardrobe",
+          "bible.appearance",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0008",
+      "kind": "expression_smile",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:1ec2f1736c1ebbad74038b3a6eff98ed27e61bda091d981fd550668f5751ecf4",
+      "input_hash": "sha256:dc03af965f5425c4ef805fb06691d07fe9282a4b11e50ef9fb2b2c55b71f5f8c",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0008.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up of The Filmmaker: the person in the reference image, a warm, unguarded smile, plain background. Same face, build and colouring as the reference image. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:47e23a69fadd399ed3bcda31047fdb1d24713184fd4cc3dd27b57c071d276741",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.expression_smile",
+          "identity.filmmaker",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    },
+    {
+      "artifact_id": "cast.filmmaker.0009",
+      "kind": "expression_tense",
+      "identity_reference": "cast.filmmaker.0002",
+      "content_hash": "sha256:8d37fa4be8db332add22de3ddfcb40051a897c2a4c3de3d190cd5a2012bcf2b2",
+      "input_hash": "sha256:f0518a6f763d7e6b579e64a2e1d7687330b722923ac1af3abd1c3ab7825c704c",
+      "provider": "minimax",
+      "model": "image-01",
+      "media_path": "characters/filmmaker/refs/cast.filmmaker.0009.jpg",
+      "provenance": {
+        "compiler_version": "cast-reference/1",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up of The Filmmaker: the person in the reference image, tense and troubled, brows drawn, plain background. Same face, build and colouring as the reference image. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
+        "prompt_hash": "sha256:8d52cf52bd7662da2d94ce1a86854fa56f008dcb50d8171151d965f2d9af93d5",
+        "applied_constraints": [
+          "style.locked",
+          "cast.frame.expression_tense",
+          "identity.filmmaker",
+          "bible.appearance",
+          "bible.wardrobe",
+          "bible.forbidden_changes"
+        ],
+        "dropped_constraints": []
+      },
+      "dependencies": [
+        {
+          "artifact_id": "bible_character.filmmaker",
+          "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "style_s0001",
+          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "impact": "semantic"
+        },
+        {
+          "artifact_id": "cast.filmmaker.0002",
+          "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+          "impact": "semantic",
+          "field": "identity"
+        }
+      ]
+    }
+  ]
+}

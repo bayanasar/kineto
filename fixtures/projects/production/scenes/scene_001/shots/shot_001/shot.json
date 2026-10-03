@@ -1,0 +1,16 @@
+{
+  "action": "A filmmaker sits across a table and hears the final line of the conversation",
+  "camera_motion": "slow_dolly_in",
+  "characters": [
+    "filmmaker"
+  ],
+  "dialogue": "",
+  "direction": "reaction",
+  "duration_target": 4.0,
+  "emotion": "a quiet, withheld reaction that matters more than the words",
+  "framing": "medium_close_up",
+  "generation_revision": 0,
+  "lens": "50mm",
+  "schema_version": 1,
+  "shot_id": "shot_001"
+}
