@@ -169,6 +169,10 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late List<String> _recoveryNotes;
   StreamSubscription<KinetoVideoEvent>? _videoEvents;
 
+  /// Takes that ended without a video, by shot: kept until the director
+  /// asks for that shot's video again, whatever else they do meanwhile.
+  final Map<int, List<String>> _videoFailures = <int, List<String>>{};
+
   @override
   void initState() {
     super.initState();
@@ -183,7 +187,9 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       setState(() {
         _shotSnapshots = _readShotSnapshots();
         final error = event.error;
-        if (error != null) _error = error.toString();
+        if (error != null) {
+          (_videoFailures[event.shotIndex] ??= <String>[]).add(error.message);
+        }
       });
     });
   }
@@ -340,13 +346,17 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       videoMedia: widget.project.videoMediaPath(_activeShotIndex),
       videoTakes: widget.project.videoTakes(_activeShotIndex),
       videoEstimate: widget.project.videoEstimate(_activeShotIndex),
+      videoFailures: _videoFailures[_activeShotIndex] ?? const <String>[],
       onGenerateVideos: (count, note, branch) => _run(
-        () => widget.project.generateShotVideos(
+        () {
+          _videoFailures.remove(_activeShotIndex);
+          return widget.project.generateShotVideos(
           _activeShotIndex,
           count: count,
           note: note,
           branchFrom: branch,
-        ),
+          );
+        },
         label: 'Asking for the video',
       ),
       onSelectVideo: (video) => _run(() => widget.project.selectShotVideo(_activeShotIndex, video)),
@@ -401,6 +411,7 @@ class DemoWorkspaceView extends StatelessWidget {
     this.videoMedia,
     this.videoTakes = const <KinetoVideoTake>[],
     this.videoEstimate,
+    this.videoFailures = const <String>[],
     this.onGenerateVideos,
     this.onSelectVideo,
     this.onGenerateVideo,
@@ -477,6 +488,10 @@ class DemoWorkspaceView extends StatelessWidget {
   /// What one take of the active shot's next video costs, at the clip
   /// length its plan asks for; null to price the provider's shortest clip.
   final KinetoVideoEstimate? videoEstimate;
+
+  /// Why takes of the active shot ended without a video, since it last
+  /// asked for one.
+  final List<String> videoFailures;
 
   /// Ask for a video generation: how many takes, a note, a take to branch
   /// from.
@@ -867,6 +882,7 @@ class DemoWorkspaceView extends StatelessWidget {
                     snapshot: shotSnapshot,
                     provider: videoProvider,
                     estimate: videoEstimate,
+                    failures: videoFailures,
                     poster: selectedIndex != null && selectedIndex < candidateMedia.length
                         ? candidateMedia[selectedIndex]
                         : null,
@@ -1041,6 +1057,7 @@ class _VideoPanel extends StatefulWidget {
   const _VideoPanel({
     required this.snapshot,
     this.estimate,
+    this.failures = const <String>[],
     super.key,
     required this.provider,
     required this.poster,
@@ -1056,6 +1073,9 @@ class _VideoPanel extends StatefulWidget {
   final KinetoShotSnapshot snapshot;
   final KinetoVideoProvider provider;
   final KinetoVideoEstimate? estimate;
+
+  /// Why takes ended without a video.
+  final List<String> failures;
   final String? poster;
   final List<KinetoVideoTake> takes;
   final bool blocked;
@@ -1117,6 +1137,12 @@ class _VideoPanelState extends State<_VideoPanel> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Text(_explanation(state)),
+          for (final (index, failure) in widget.failures.indexed)
+            Padding(
+              key: ValueKey<String>('video-failure-$index'),
+              padding: const EdgeInsets.only(top: 8),
+              child: Text('A take did not arrive: $failure.'),
+            ),
           if (current.isNotEmpty) ...<Widget>[
             const SizedBox(height: 12),
             Wrap(

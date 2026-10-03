@@ -320,8 +320,11 @@ impl<T: Transport> MinimaxClient<T> {
         let query: WireQuery = answer(response.status, &response.body, |wire: &WireQuery| {
             &wire.base_resp
         })?;
+        // Only MiniMax's own word that the task failed ends it. A paid task
+        // in any other state, including one this client does not recognise
+        // or a success whose file is not named yet, is followed again: asking
+        // is free, and giving up could abandon a video already paid for.
         match query.status.as_str() {
-            "Preparing" | "Queueing" | "Processing" => Ok(VideoTaskState::Pending),
             "Success"
                 if !query.file_id.is_empty()
                     && query.file_id.bytes().all(|byte| byte.is_ascii_digit()) =>
@@ -330,9 +333,8 @@ impl<T: Transport> MinimaxClient<T> {
                     file_id: query.file_id,
                 })
             }
-            "Success" => Err(MinimaxError::Malformed("finished task has no file ID")),
             "Fail" => Err(MinimaxError::TaskFailed),
-            _ => Err(MinimaxError::Malformed("task status is not recognised")),
+            _ => Ok(VideoTaskState::Pending),
         }
     }
 
@@ -500,6 +502,19 @@ mod tests {
             );
         }
         assert_eq!(capabilities.clip_seconds.len(), 2);
+    }
+
+    #[test]
+    fn only_a_reported_failure_ends_a_task() {
+        let client = client([
+            json(200, r#"{"status":"Rendering","file_id":"","base_resp":{"status_code":0}}"#),
+            json(200, r#"{"status":"Success","file_id":"","base_resp":{"status_code":0}}"#),
+            json(200, r#"{"status":"Fail","file_id":"","base_resp":{"status_code":0}}"#),
+        ]);
+        let task = VideoTask::new("447576615924185").unwrap();
+        assert_eq!(client.query_video(&task).unwrap(), VideoTaskState::Pending);
+        assert_eq!(client.query_video(&task).unwrap(), VideoTaskState::Pending);
+        assert_eq!(client.query_video(&task), Err(MinimaxError::TaskFailed));
     }
 
     #[test]

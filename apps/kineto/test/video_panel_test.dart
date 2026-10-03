@@ -74,6 +74,7 @@ void main() {
     List<KinetoVideoTake> videos = const <KinetoVideoTake>[],
     void Function(int, String?, String?)? onGenerateVideos,
     KinetoVideoEstimate? estimate,
+    List<String> failures = const <String>[],
     int activeShot = 0,
     VoidCallback? onResubmitVideo,
     ValueChanged<int>? onSelectVideo,
@@ -91,6 +92,7 @@ void main() {
           candidateMedia: keyframes ?? media,
           videoTakes: videos,
           videoEstimate: estimate,
+          videoFailures: failures,
           shotSnapshot: shot,
           shotSnapshots: <KinetoShotSnapshot>[shot, shot],
           activeShotIndex: activeShot,
@@ -167,6 +169,17 @@ void main() {
     await tester.pumpAndSettle();
     await tap(tester, find.text(r'Generate · 2 takes · 10 s · ≈ $1.12'));
     expect(asked, <int>[2]);
+  });
+
+  testWidgets('a take that ended without a video is still said after other work', (tester) async {
+    await pump(
+      tester,
+      state: KinetoVideoState.ready,
+      videos: <KinetoVideoTake>[take(1, 0, KinetoTakeStatus.candidate)],
+      failures: const <String>['The provider refused or failed'],
+    );
+    expect(find.text('A take did not arrive: The provider refused or failed.'), findsOneWidget);
+    expect(find.text('Generation 1 · take a'), findsOneWidget);
   });
 
   testWidgets('another shot starts from one take again', (tester) async {
