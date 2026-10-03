@@ -165,7 +165,24 @@ The local demo (`local-demo-speech`, model `demo-tone`) is free, offline and the
 - Each sentence lasts about as long as a person would take to say it (`estimate_duration_ms`): about 2.6 words a second, or 4 Chinese or Japanese characters a second, with a 250 ms breath between sentences, scaled by the voice's rate.
 - Delivery sets its loudness and pitch sets its frequency.
 
-A session's speech provider is `SessionOptions::speech_provider`, the local demo by default. `SpeechProvider::select` names one by `local-demo`.
+The cloud provider is MiniMax `speech-2.8-hd` (`t2a_v2`), recorded under `minimax-speech`, apart from MiniMax images and videos.
+
+- **The call is synchronous.** The audio arrives hex encoded inside the authenticated answer (`output_format: hex`), and `extra_info.audio_length` is its measured length in milliseconds.
+- **Sentence timings come from a separate file.** The request turns on `subtitle_enable`, and MiniMax writes the timings to a file on its content host. That file is fetched over https only, without the key, and is at most 1 MB. The audio is already paid for, so if the file cannot be had, the speech is kept without timings.
+- **Declared capabilities**, as MiniMax documents them:
+  - its catalogue of system voices, listed free by `POST /v1/get_voice` (`voice_type: system`);
+  - 39 languages, sent as `language_boost` names for their ISO 639-1 codes;
+  - happy, sad, angry, fearful, disgusted, surprised and calm (MiniMax's `fluent` and `whisper` belong to its 2.6 models only);
+  - rates of 0.5–2× and pitch of ±12 semitones;
+  - MP3 (32 kHz, 128 kbps, mono), WAV or FLAC;
+  - fewer than 10,000 characters a call;
+  - $100 per million characters (100 USD micros a character).
+- **Refusals before sending.** The client refuses a request it cannot send before anything is sent, so a refused request was certainly not accepted. It also refuses an answer whose audio is not in the format asked for.
+- **Not supported.** MiniMax also clones voices ($1.5 a voice) and designs them ($3 a voice). This adapter does neither, so neither is declared.
+- **Error classes.** Rate limits (1002, 1039 tokens per minute) are retryable. Every refusal, including 2056 when the plan's quota is spent, is certainly not accepted, and its words reach the director.
+- **Manual smoke test.** `cargo run -p kineto-provider-minimax --example speech_smoke` lists the voices free. With an output file and a voice ID it speaks one paid line. No test suite calls it.
+
+A session's speech provider is `SessionOptions::speech_provider`. By default it follows the image provider: MiniMax with the same key, otherwise the local demo. `SpeechProvider::select` names one by `local-demo` or `minimax`, and a paid provider is used only when it is named.
 
 ## Model router and fallback policy
 

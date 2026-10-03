@@ -40,6 +40,10 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::DEMO_PROVIDER,
 };
+use kineto_provider_minimax::{
+    MinimaxClient, MinimaxError, PROVIDER as MINIMAX_PROVIDER, SPEECH_MODEL, SharedTransport,
+    Transport, speech_capabilities,
+};
 use kineto_providers::{
     AudioFormat, Emotion, GapSeverity, Price, SpeechCapabilities, SpeechRequirements, SpeechTiming,
     VoiceSource, evaluate_speech, secret::SecretSource,
@@ -59,6 +63,9 @@ pub const SPEECH_OPERATION: &str = "speech.synthesize";
 pub const DEMO_SPEECH_PROVIDER: &str = "local-demo-speech";
 /// The model the local demo names: a tone for every voice.
 pub const DEMO_SPEECH_MODEL: &str = "demo-tone";
+/// Provider key MiniMax speech is recorded under, apart from its images and
+/// videos.
+pub const MINIMAX_SPEECH_PROVIDER: &str = "minimax-speech";
 const DEMO_SAMPLE_RATE: u32 = 16_000;
 /// The demo's voices: an ID, a name, a description and the tone's pitch in
 /// hertz.
@@ -234,6 +241,72 @@ pub trait SpeechGenerator {
     /// Whether `error` proves the provider did not accept the call, so it
     /// cannot have been charged.
     fn certainly_not_accepted(&self, error: &Self::Error) -> bool;
+}
+
+impl<T: Transport> SpeechGenerator for MinimaxClient<T> {
+    type Error = MinimaxError;
+
+    fn provider(&self) -> &'static str {
+        MINIMAX_SPEECH_PROVIDER
+    }
+
+    fn model(&self) -> &'static str {
+        SPEECH_MODEL
+    }
+
+    fn capabilities(&self) -> SpeechCapabilities {
+        speech_capabilities()
+    }
+
+    fn voices(&self) -> Result<Vec<Voice>, MinimaxError> {
+        Ok(self
+            .speech_voices()?
+            .into_iter()
+            .map(|voice| Voice {
+                id: voice.id,
+                name: voice.name,
+                description: voice.description,
+            })
+            .collect())
+    }
+
+    fn synthesize(&self, request: &SpeechRequest) -> Result<Spoken, MinimaxError> {
+        let voice = &request.voice;
+        let speech = Self::synthesize(
+            self,
+            &kineto_provider_minimax::SpeechRequest {
+                text: request.text.clone(),
+                voice_id: voice.voice_id.clone(),
+                language: voice.language.clone(),
+                emotion: voice.emotion,
+                speed_permille: voice.speed_permille,
+                pitch_semitones: voice.pitch_semitones,
+                format: request.format,
+            },
+        )?;
+        Ok(Spoken {
+            audio: speech.audio,
+            format: speech.format,
+            duration_ms: speech.duration_ms,
+            sentences: speech
+                .sentences
+                .into_iter()
+                .map(|sentence| SpokenSpan {
+                    text: sentence.text,
+                    start_ms: sentence.start_ms,
+                    end_ms: sentence.end_ms,
+                })
+                .collect(),
+        })
+    }
+
+    fn class(&self, error: &MinimaxError) -> ErrorClass {
+        error.class()
+    }
+
+    fn certainly_not_accepted(&self, error: &MinimaxError) -> bool {
+        error.certainly_not_accepted()
+    }
 }
 
 /// The local demo: free, offline, and the same for the same line.
@@ -506,18 +579,25 @@ pub fn estimate_duration_ms(text: &str, speed_permille: u16) -> u32 {
         .map_or(0, |span| span.end_ms)
 }
 
+/// A MiniMax client shared by a session's threads.
+pub type SpeechClient = MinimaxClient<SharedTransport>;
+
 /// Which provider a session speaks with.
 #[derive(Debug, Clone, Default)]
 pub enum SpeechProvider {
     /// A tone for every line. Free.
     #[default]
     LocalDemo,
+    /// MiniMax `speech-2.8-hd`. Paid. Without a client, speech an earlier
+    /// session finished is recorded but nothing new is asked for.
+    Minimax(Option<SpeechClient>),
 }
 
 /// Which speech provider a session speaks with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeechProviderKind {
     LocalDemo,
+    Minimax,
 }
 
 /// What the director needs to know about the session's speech provider
@@ -532,16 +612,23 @@ pub struct SpeechProviderInfo {
 }
 
 impl SpeechProvider {
-    /// The provider named by `selection`: `local-demo` for the free demo.
-    /// `None` when nothing is named, so the session follows its image
-    /// provider.
+    /// The provider named by `selection`: `local-demo` for the free demo,
+    /// `minimax` for MiniMax with the key `secrets` holds. `None` when
+    /// nothing is named, so the session follows its image provider. A paid
+    /// provider is used only when it is named.
     pub fn select(
         selection: Option<&str>,
-        _secrets: &impl SecretSource,
+        secrets: &impl SecretSource,
     ) -> Result<Option<Self>, ProviderSelectionError> {
         match selection.map(str::trim) {
             None | Some("") => Ok(None),
             Some(DEMO_PROVIDER) => Ok(Some(Self::LocalDemo)),
+            Some(MINIMAX_PROVIDER) => Ok(Some(Self::Minimax(
+                secrets
+                    .api_key(MINIMAX_PROVIDER)
+                    .map_err(ProviderSelectionError::Secret)?
+                    .map(MinimaxClient::shared),
+            ))),
             Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
         }
     }
@@ -550,6 +637,7 @@ impl SpeechProvider {
     pub const fn kind(&self) -> SpeechProviderKind {
         match self {
             Self::LocalDemo => SpeechProviderKind::LocalDemo,
+            Self::Minimax(_) => SpeechProviderKind::Minimax,
         }
     }
 
@@ -557,6 +645,7 @@ impl SpeechProvider {
     pub fn capabilities(&self) -> SpeechCapabilities {
         match self {
             Self::LocalDemo => demo_speech_capabilities(),
+            Self::Minimax(_) => speech_capabilities(),
         }
     }
 
@@ -564,7 +653,10 @@ impl SpeechProvider {
     pub fn info(&self) -> SpeechProviderInfo {
         SpeechProviderInfo {
             kind: self.kind(),
-            ready: true,
+            ready: match self {
+                Self::LocalDemo => true,
+                Self::Minimax(client) => client.is_some(),
+            },
             character_cost_micros: self
                 .capabilities()
                 .price_per_character
@@ -1692,6 +1784,28 @@ mod tests {
             SpeechProvider::select(Some("elevenlabs"), &secrets),
             Err(ProviderSelectionError::Unknown(name)) if name == "elevenlabs"
         ));
+
+        let keyless = EnvSecretSource::with_lookup(|_| None);
+        let minimax = SpeechProvider::select(Some("minimax"), &keyless)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            minimax.info(),
+            SpeechProviderInfo {
+                kind: SpeechProviderKind::Minimax,
+                ready: false,
+                character_cost_micros: Some(100),
+            }
+        );
+        assert_eq!(minimax.estimate(LINE), Some(2_800));
+        let keyed = EnvSecretSource::with_lookup(|_| Some("sk-test".into()));
+        assert!(
+            SpeechProvider::select(Some("minimax"), &keyed)
+                .unwrap()
+                .unwrap()
+                .info()
+                .ready
+        );
     }
 
     #[test]
@@ -1822,6 +1936,104 @@ mod tests {
             .unwrap();
         assert_eq!(generator.calls(), 2);
         assert_eq!(attached(&project).len(), 1);
+    }
+
+    /// MiniMax as it answers over the wire: refused first, then a line and
+    /// its sentence timings.
+    struct RecordedMinimax(std::sync::Mutex<Vec<Vec<u8>>>);
+
+    impl kineto_provider_minimax::Transport for RecordedMinimax {
+        fn post_json(
+            &self,
+            url: &str,
+            _api_key: &kineto_providers::secret::SecretString,
+            _body: &[u8],
+        ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+        {
+            assert!(url.ends_with("/v1/t2a_v2"));
+            Ok(kineto_provider_minimax::HttpResponse {
+                status: 200,
+                body: self.0.lock().unwrap().remove(0),
+            })
+        }
+
+        fn get(
+            &self,
+            _url: &str,
+            _api_key: &kineto_providers::secret::SecretString,
+        ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+        {
+            unreachable!("speech never GETs the API")
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _max_bytes: u64,
+        ) -> Result<kineto_provider_minimax::HttpResponse, kineto_provider_minimax::TransportFailure>
+        {
+            Ok(kineto_provider_minimax::HttpResponse {
+                status: 200,
+                body: br#"[{"text":"I waited for you.","time_begin":0,"time_end":1400},
+                           {"text":"All night!","time_begin":1650,"time_end":2400}]"#
+                    .to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn minimax_speech_is_kept_as_mp3_and_a_spent_plan_costs_nothing_to_retry() {
+        let dir = TempDir::new();
+        let project = project(&dir.0);
+        let minimax = MinimaxClient::with_transport(
+            RecordedMinimax(std::sync::Mutex::new(vec![
+                br#"{"base_resp":{"status_code":2056,"status_msg":"Token Plan usage limit reached"}}"#
+                    .to_vec(),
+                br#"{"data":{"audio":"494433040000","status":2,
+                     "subtitle_file":"https://cdn.example.test/sub.json"},
+                     "extra_info":{"audio_length":2400,"usage_characters":28},
+                     "base_resp":{"status_code":0,"status_msg":"success"}}"#
+                    .to_vec(),
+            ])),
+            kineto_providers::secret::SecretString::new("sk-test".to_owned()).unwrap(),
+            "https://example.test",
+        );
+        let voice = VoiceSettings {
+            emotion: Some(Emotion::Sad),
+            ..VoiceSettings::new("English_Wiselady", "en")
+        };
+        let (mut jobs, _) =
+            SpeechJobs::<Lines, _>::open(&project, &minimax, |_| true, Submission::Once).unwrap();
+        let error = jobs
+            .speak(&plan("line_0001", LINE), LINE, &voice, &mut NoHooks)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "MiniMax refused the request (2056): Token Plan usage limit reached"
+        );
+        drop(jobs);
+
+        // MiniMax said no, so asking again needs no risk of paying twice.
+        let (mut jobs, recovery) =
+            SpeechJobs::<Lines, _>::open(&project, &minimax, |_| true, Submission::Once).unwrap();
+        assert!(recovery.unresolved.is_empty());
+        let spoken = jobs
+            .speak(&plan("line_0001", LINE), LINE, &voice, &mut NoHooks)
+            .unwrap();
+        assert_eq!(path_text(&spoken.media_path), "voice/line_0001.mp3");
+        assert_eq!(spoken.provider, MINIMAX_SPEECH_PROVIDER);
+        assert_eq!(spoken.model, "speech-2.8-hd");
+        assert_eq!(spoken.format, AudioFormat::Mp3);
+        assert_eq!(spoken.duration_ms, 2400);
+        assert_eq!(spoken.sentences[1].start_ms, 1650);
+        assert_eq!(
+            spoken.parameters,
+            "voice=English_Wiselady;language=en;emotion=sad;speed=1000;pitch=0;format=mp3"
+        );
+        assert_eq!(
+            project.root().read(&spoken.media_path).unwrap(),
+            [b'I', b'D', b'3', 4, 0, 0]
+        );
     }
 
     #[test]

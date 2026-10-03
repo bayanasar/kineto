@@ -722,7 +722,7 @@ impl ProjectSession {
         let video_provider = videos.info();
         let speech_provider = options
             .speech_provider
-            .get_or_insert_with(SpeechProvider::default)
+            .get_or_insert_with(|| speech_provider_for(&provider))
             .info();
         let image_prices = ImagePrices {
             sample: style::sample_cost(&provider),
@@ -1303,7 +1303,8 @@ pub struct SessionOptions {
     /// The provider videos are made with. `None` follows the image
     /// provider: MiniMax with its key, otherwise the local demo.
     pub video_provider: Option<VideoProvider>,
-    /// The provider lines are spoken with. `None` is the local demo.
+    /// The provider lines are spoken with. `None` follows the image
+    /// provider: MiniMax with its key, otherwise the local demo.
     pub speech_provider: Option<SpeechProvider>,
 }
 
@@ -2464,6 +2465,15 @@ fn video_provider_for(images: &ImageProvider) -> VideoProvider {
     match images {
         ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
         ImageProvider::LocalDemo => VideoProvider::LocalDemo,
+    }
+}
+
+/// The speech provider a session follows its image provider with: MiniMax
+/// with the same key, otherwise the local demo.
+fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
+    match images {
+        ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
+        ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
     }
 }
 
@@ -3808,6 +3818,11 @@ mod tests {
             let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
             assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
             assert_eq!(session.video_provider().kind, VideoProviderKind::Minimax);
+            assert_eq!(
+                session.speech_provider().kind,
+                crate::speech::SpeechProviderKind::Minimax
+            );
+            assert_eq!(session.speech_provider().character_cost_micros, Some(100));
             session.submit(1, ShotCommand::GenerateVideo, 10).unwrap();
             assert!(
                 completion(&events, 10)

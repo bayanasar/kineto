@@ -1,4 +1,5 @@
-//! MiniMax image generation (`image-01`) over blocking HTTPS.
+//! MiniMax image generation (`image-01`), Hailuo video and `t2a_v2` speech
+//! over blocking HTTPS.
 //!
 //! This crate is the vendor edge: it knows MiniMax's endpoint, request and
 //! response shapes and status codes, and nothing about projects, artifacts or
@@ -24,8 +25,13 @@ use kineto_providers::{
 };
 use serde::{Deserialize, Serialize};
 
+mod speech;
 mod video;
 
+pub use speech::{
+    CatalogVoice, MAX_SPEECH_CHARS, SPEECH_MODEL, SPEECH_PRICE_MICROS_PER_CHARACTER, SpeechRequest,
+    SpokenSentence, SynthesizedSpeech, audio_format, language_boost, speech_capabilities,
+};
 pub use video::{
     MAX_VIDEO_BYTES, VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask,
     VideoTaskState, camera_command, video_capabilities,
@@ -345,8 +351,9 @@ impl MinimaxError {
             },
             Self::Api { code, .. } => match code {
                 // unknown error, timeout, rate limit, internal error,
-                // connection limit, rate-growth limit
-                1000 | 1001 | 1002 | 1013 | 1041 | 2045 => ErrorClass::Retryable,
+                // tokens-per-minute limit, connection limit, rate-growth
+                // limit
+                1000 | 1001 | 1002 | 1013 | 1039 | 1041 | 2045 => ErrorClass::Retryable,
                 _ => ErrorClass::Terminal,
             },
             Self::Http { .. }
