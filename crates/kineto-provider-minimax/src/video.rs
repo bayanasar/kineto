@@ -8,7 +8,7 @@
 use base64::Engine as _;
 use kineto_jobs::{CostEstimate, CurrencyCode};
 use kineto_providers::{
-    CameraControl, ImageFormat, Price, VideoCapabilities, VideoContainer, VideoMode,
+    CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,15 +20,27 @@ pub const VIDEO_MODEL: &str = "MiniMax-Hailuo-02";
 pub const MAX_VIDEO_PROMPT_CHARS: usize = 2000;
 /// A 10-second 1080P clip is tens of MiB; anything far larger is not one.
 pub const MAX_VIDEO_BYTES: u64 = 256 * 1024 * 1024;
-/// Hailuo accepts a first frame of at most 20 MB.
+/// Hailuo accepts a first or last frame of at most 20 MB.
 const MAX_FIRST_FRAME_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TASK_ID_LEN: usize = 128;
 
+/// The clips `MiniMax-Hailuo-02` renders, as its documentation lists them:
+/// 512P and 768P in 6 or 10 seconds, 1080P in 6.
+const CLIPS: [(VideoDuration, VideoResolution); 5] = [
+    (VideoDuration::Six, VideoResolution::P512),
+    (VideoDuration::Ten, VideoResolution::P512),
+    (VideoDuration::Six, VideoResolution::P768),
+    (VideoDuration::Ten, VideoResolution::P768),
+    (VideoDuration::Six, VideoResolution::P1080),
+];
+
 /// What `MiniMax-Hailuo-02` does through this adapter: image-to-video from
-/// a first frame, at 768P, in clips of 6 or 10 seconds. The prompt takes
-/// Hailuo's bracketed camera commands. A task outlives the client and is
-/// followed again after a restart. The model can take a last frame too, but
-/// this adapter does not send one, so none is declared.
+/// a first frame, closing on a last frame when one is sent, at 512P, 768P
+/// or 1080P, in clips of 6 or 10 seconds (1080P in 6 only). Each clip's
+/// published price is declared. The prompt takes Hailuo's bracketed camera
+/// commands. A task outlives the client and is followed again after a
+/// restart. Hailuo takes no last frame at 512P; the workflow never asks for
+/// 512P from a provider that renders taller.
 #[must_use]
 pub fn video_capabilities() -> VideoCapabilities {
     VideoCapabilities {
@@ -36,6 +48,7 @@ pub fn video_capabilities() -> VideoCapabilities {
         min_duration_ms: Some(6_000),
         max_duration_ms: Some(10_000),
         start_frame: true,
+        end_frame: true,
         camera_control: CameraControl::Parametric,
         async_jobs: true,
         resumable_remote_handle: true,
@@ -49,11 +62,27 @@ pub fn video_capabilities() -> VideoCapabilities {
             .into_iter()
             .collect(),
         max_start_frame_bytes: Some(MAX_FIRST_FRAME_BYTES as u64),
-        clip_prices: [VideoDuration::Six, VideoDuration::Ten]
-            .map(|duration| {
+        end_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+            .into_iter()
+            .collect(),
+        max_end_frame_bytes: Some(MAX_FIRST_FRAME_BYTES as u64),
+        resolutions: [
+            VideoResolution::P512,
+            VideoResolution::P768,
+            VideoResolution::P1080,
+        ]
+        .map(VideoResolution::lines)
+        .into_iter()
+        .collect(),
+        clips: CLIPS
+            .map(|(duration, resolution)| clip(duration, resolution))
+            .into_iter()
+            .collect(),
+        clip_prices: CLIPS
+            .map(|(duration, resolution)| {
                 (
-                    duration.seconds(),
-                    Price::usd(clip_price_micros(duration, VideoResolution::P768)),
+                    clip(duration, resolution),
+                    Price::usd(clip_price_micros(duration, resolution)),
                 )
             })
             .into_iter()
@@ -80,11 +109,22 @@ pub fn camera_command(motion: &str) -> Option<&'static str> {
     })
 }
 
-/// Published price of one Hailuo-02 clip.
+const fn clip(duration: VideoDuration, resolution: VideoResolution) -> VideoClip {
+    VideoClip {
+        seconds: duration.seconds(),
+        lines: resolution.lines(),
+    }
+}
+
+/// Published price of one Hailuo-02 clip; 1080P is rendered in 6 seconds
+/// only, and a 10-second request at 1080P is refused before it is sent.
 const fn clip_price_micros(duration: VideoDuration, resolution: VideoResolution) -> u64 {
     match (resolution, duration) {
+        (VideoResolution::P512, VideoDuration::Six) => 100_000,
+        (VideoResolution::P512, VideoDuration::Ten) => 150_000,
         (VideoResolution::P768, VideoDuration::Six) => 280_000,
         (VideoResolution::P768, VideoDuration::Ten) => 560_000,
+        (VideoResolution::P1080, _) => 490_000,
     }
 }
 
@@ -112,16 +152,41 @@ impl VideoDuration {
     }
 }
 
-/// Output resolutions this adapter requests.
+/// Output resolutions Hailuo renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoResolution {
+    P512,
     P768,
+    P1080,
 }
 
 impl VideoResolution {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::P512 => "512P",
             Self::P768 => "768P",
+            Self::P1080 => "1080P",
+        }
+    }
+
+    /// Its height, in lines.
+    #[must_use]
+    pub const fn lines(self) -> u16 {
+        match self {
+            Self::P512 => 512,
+            Self::P768 => 768,
+            Self::P1080 => 1080,
+        }
+    }
+
+    /// The resolution `lines` tall, if Hailuo renders one.
+    #[must_use]
+    pub const fn from_lines(lines: u16) -> Option<Self> {
+        match lines {
+            512 => Some(Self::P512),
+            768 => Some(Self::P768),
+            1080 => Some(Self::P1080),
+            _ => None,
         }
     }
 }
@@ -132,6 +197,8 @@ pub struct VideoRequest {
     pub prompt: String,
     pub first_frame: Vec<u8>,
     pub first_frame_format: ImageFormat,
+    /// The frame the clip closes on, if one is asked for.
+    pub last_frame: Option<(Vec<u8>, ImageFormat)>,
     pub duration: VideoDuration,
     pub resolution: VideoResolution,
 }
@@ -143,6 +210,13 @@ impl std::fmt::Debug for VideoRequest {
             .field("prompt", &self.prompt)
             .field("first_frame", &self.first_frame.len())
             .field("first_frame_format", &self.first_frame_format)
+            .field(
+                "last_frame",
+                &self
+                    .last_frame
+                    .as_ref()
+                    .map(|(bytes, format)| (bytes.len(), *format)),
+            )
             .field("duration", &self.duration)
             .field("resolution", &self.resolution)
             .finish()
@@ -186,6 +260,8 @@ struct WireSubmit<'a> {
     model: &'a str,
     prompt: &'a str,
     first_frame_image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_frame_image: Option<String>,
     duration: u8,
     resolution: &'a str,
     prompt_optimizer: bool,
@@ -275,15 +351,43 @@ impl<T: Transport> MinimaxClient<T> {
                 "first frame is empty or too large",
             ));
         }
-        let first_frame_image = format!(
-            "data:{};base64,{}",
-            mime(request.first_frame_format),
-            base64::engine::general_purpose::STANDARD.encode(&request.first_frame)
-        );
+        if matches!(
+            (request.resolution, request.duration),
+            (VideoResolution::P1080, VideoDuration::Ten)
+        ) {
+            return Err(MinimaxError::InvalidRequest(
+                "Hailuo renders 1080P in 6 seconds only",
+            ));
+        }
+        if let Some((frame, _)) = &request.last_frame {
+            if frame.is_empty() || frame.len() > MAX_FIRST_FRAME_BYTES {
+                return Err(MinimaxError::InvalidRequest(
+                    "last frame is empty or too large",
+                ));
+            }
+            if request.resolution == VideoResolution::P512 {
+                return Err(MinimaxError::InvalidRequest(
+                    "Hailuo takes no last frame at 512P",
+                ));
+            }
+        }
+        let data_url = |frame: &[u8], format: ImageFormat| {
+            format!(
+                "data:{};base64,{}",
+                mime(format),
+                base64::engine::general_purpose::STANDARD.encode(frame)
+            )
+        };
+        let first_frame_image = data_url(&request.first_frame, request.first_frame_format);
+        let last_frame_image = request
+            .last_frame
+            .as_ref()
+            .map(|(frame, format)| data_url(frame, *format));
         let body = serde_json::to_vec(&WireSubmit {
             model: VIDEO_MODEL,
             prompt: &request.prompt,
             first_frame_image,
+            last_frame_image,
             duration: request.duration.seconds(),
             resolution: request.resolution.as_str(),
             prompt_optimizer: false,
@@ -468,6 +572,7 @@ mod tests {
             prompt: "Slow dolly in on the filmmaker.".to_owned(),
             first_frame: vec![0xff, 0xd8, 0xff, 0xe0],
             first_frame_format: ImageFormat::Jpeg,
+            last_frame: None,
             duration: VideoDuration::Six,
             resolution: VideoResolution::P768,
         }
@@ -480,7 +585,15 @@ mod tests {
             capabilities.modes,
             [VideoMode::ImageToVideo].into_iter().collect()
         );
-        assert!(capabilities.start_frame && !capabilities.end_frame);
+        assert!(capabilities.start_frame && capabilities.end_frame);
+        assert_eq!(
+            capabilities.end_frame_formats,
+            capabilities.start_frame_formats
+        );
+        assert_eq!(
+            capabilities.max_end_frame_bytes,
+            Some(MAX_FIRST_FRAME_BYTES as u64)
+        );
         assert!(capabilities.async_jobs && capabilities.resumable_remote_handle);
         assert_eq!(capabilities.camera_control, CameraControl::Parametric);
         assert_eq!(capabilities.max_prompt_chars, Some(MAX_VIDEO_PROMPT_CHARS));
@@ -492,16 +605,78 @@ mod tests {
             assert!(!mime(*format).is_empty());
         }
         let client = client([]);
-        for duration in [VideoDuration::Six, VideoDuration::Ten] {
+        for (duration, resolution) in CLIPS {
             assert!(capabilities.clip_seconds.contains(&duration.seconds()));
+            assert!(capabilities.resolutions.contains(&resolution.lines()));
             assert_eq!(
-                capabilities.clip_prices[&duration.seconds()].amount_micros,
+                VideoResolution::from_lines(resolution.lines()),
+                Some(resolution)
+            );
+            assert_eq!(
+                capabilities.clip_prices[&clip(duration, resolution)].amount_micros,
                 client
-                    .estimate_video_cost(duration, VideoResolution::P768)
+                    .estimate_video_cost(duration, resolution)
                     .amount_micros
             );
         }
         assert_eq!(capabilities.clip_seconds.len(), 2);
+        assert!(!capabilities.renders(VideoClip {
+            seconds: 10,
+            lines: 1080
+        }));
+        // A production clip is 768P, at the price the documentation lists.
+        assert_eq!(capabilities.clip_lines(6), Some(768));
+        assert_eq!(capabilities.clip_lines(10), Some(768));
+        assert_eq!(capabilities.clip_price(6), Some(Price::usd(280_000)));
+        assert_eq!(capabilities.clip_price(10), Some(Price::usd(560_000)));
+    }
+
+    #[test]
+    fn a_last_frame_is_sent_where_hailuo_takes_one_and_refused_where_it_cannot() {
+        let sending = client([json(
+            200,
+            r#"{"task_id":"447576615924185","base_resp":{"status_code":0}}"#,
+        )]);
+        let closing = VideoRequest {
+            last_frame: Some((vec![0x89, b'P', b'N', b'G'], ImageFormat::Png)),
+            ..request()
+        };
+        sending.submit_video(&closing).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(&sending.transport.bodies.lock().unwrap()[0]).unwrap();
+        assert_eq!(sent["last_frame_image"], "data:image/png;base64,iVBORw==");
+        assert_eq!(sent["first_frame_image"], "data:image/jpeg;base64,/9j/4A==");
+
+        // Refused before anything is sent: no last frame at 512P, no
+        // 10-second clip at 1080P.
+        let quiet = client([]);
+        for refused in [
+            VideoRequest {
+                resolution: VideoResolution::P512,
+                ..closing.clone()
+            },
+            VideoRequest {
+                resolution: VideoResolution::P1080,
+                duration: VideoDuration::Ten,
+                ..request()
+            },
+        ] {
+            let error = quiet.submit_video(&refused).unwrap_err();
+            assert!(error.certainly_not_accepted(), "{error}");
+        }
+        assert!(quiet.transport.calls.lock().unwrap().is_empty());
+        // Without a last frame, none is named.
+        let plain = serde_json::to_value(WireSubmit {
+            model: VIDEO_MODEL,
+            prompt: "p",
+            first_frame_image: String::new(),
+            last_frame_image: None,
+            duration: 6,
+            resolution: "768P",
+            prompt_optimizer: false,
+        })
+        .unwrap();
+        assert!(plain.get("last_frame_image").is_none());
     }
 
     #[test]

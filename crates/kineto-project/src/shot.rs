@@ -454,6 +454,13 @@ const BRANCH_RECORD: &str = "branched_from";
 /// Artifact fields holding a video's clip length and provider parameters.
 const CLIP_SECONDS_RECORD: &str = "clip_seconds";
 const PARAMETERS_RECORD: &str = "parameters";
+/// When a video was locked, as RFC 3339 UTC; videos locked before this was
+/// recorded have none.
+const LOCKED_AT_RECORD: &str = "locked_at";
+/// The shot whose locked keyframe a video closes on, as `scene/shot`.
+const END_FRAME_SHOT_RECORD: &str = "end_frame_shot";
+/// The dependency field of a video's closing frame.
+pub const END_FRAME_FIELD: &str = "end_frame";
 
 /// Where a video candidate's bytes live: beside the shot's canonical files,
 /// named by its stable artifact ID.
@@ -477,6 +484,19 @@ pub struct VideoGenerationSpec<'a> {
     pub notes: &'a [String],
     /// The take this generation branches from.
     pub branched_from: Option<&'a str>,
+    /// The locked keyframe of the shot that continues from this one, when
+    /// the clip closes on it.
+    pub end_frame: Option<&'a ArtifactDependency>,
+}
+
+/// The locked keyframe of the shot that continues from this one, sent as
+/// the frame a video closes on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndFrame {
+    /// The dependency on it, field [`END_FRAME_FIELD`].
+    pub keyframe: ArtifactDependency,
+    /// The shot whose keyframe it is.
+    pub shot: ShotKey,
 }
 
 /// One video candidate of a generation for a shot, decided before anything
@@ -564,6 +584,8 @@ pub struct VideoOutput {
     /// The provider parameters it was asked with, such as
     /// `duration=6;resolution=768P`.
     pub parameters: Option<String>,
+    /// The frame it closes on, when one was sent.
+    pub end_frame: Option<EndFrame>,
 }
 
 /// A shot's locked video, with what made it: everything a handoff says
@@ -583,6 +605,11 @@ pub struct LockedVideo {
     pub branched_from: Option<String>,
     pub clip_seconds: Option<u8>,
     pub parameters: Option<String>,
+    /// When it was locked, as RFC 3339 UTC; `None` for a video locked
+    /// before Kineto recorded it.
+    pub locked_at: Option<String>,
+    /// The frame it closes on, when one was sent.
+    pub end_frame: Option<EndFrame>,
 }
 
 /// Output of the deterministic local demo generator for one candidate.
@@ -827,10 +854,53 @@ pub struct ShotWorkflow {
     hash_issues: Vec<ShotHashIssue>,
     hash_migration_records: Vec<ShotHashMigrationRecord>,
     legacy_artifacts_bytes: Option<Vec<u8>>,
+    /// For a current video that closes on another shot's keyframe: that
+    /// shot's locked keyframe as it is now, as (artifact ID, content hash),
+    /// or `None` when it has none or no longer continues from this shot.
+    /// Read from the project when the shot is loaded and before a video is
+    /// locked.
+    end_frame_now: Option<(String, String)>,
 }
 
 impl ShotWorkflow {
+    /// Load the shot, and the keyframe its current video closes on, if any.
     pub fn load(project: &CanonicalProject, key: &ShotKey) -> Result<Self, ShotWorkflowError> {
+        let mut workflow = Self::load_alone(project, key)?;
+        workflow.refresh_end_frame(project)?;
+        Ok(workflow)
+    }
+
+    /// Read again the keyframe the current video closes on, which another
+    /// shot holds: what decides whether it is still the frame the video was
+    /// made to close on.
+    pub fn refresh_end_frame(
+        &mut self,
+        project: &CanonicalProject,
+    ) -> Result<(), ShotWorkflowError> {
+        self.end_frame_now = None;
+        let Some(next) = self
+            .current_video()
+            .and_then(|video| video.extra.get(END_FRAME_SHOT_RECORD))
+            .and_then(Value::as_str)
+            .and_then(|key| key.split_once('/'))
+            .and_then(|(scene, shot)| ShotKey::new(scene, shot).ok())
+        else {
+            return Ok(());
+        };
+        let next = Self::load_alone(project, &next)?;
+        let continues = next
+            .intent()?
+            .and_then(|intent| intent.continuity_from)
+            .is_some_and(|from| from == self.key.shot);
+        if continues {
+            self.end_frame_now = next
+                .locked_keyframe()
+                .map(|keyframe| (keyframe.artifact_id.clone(), keyframe.content_hash.clone()));
+        }
+        Ok(())
+    }
+
+    fn load_alone(project: &CanonicalProject, key: &ShotKey) -> Result<Self, ShotWorkflowError> {
         let shot_id = key.shot().to_owned();
         let shot_file = shot_path(key, "shot.json")?;
         let artifacts_file = shot_path(key, "artifacts.json")?;
@@ -865,6 +935,7 @@ impl ShotWorkflow {
             hash_issues: Vec::new(),
             hash_migration_records: Vec::new(),
             legacy_artifacts_bytes: artifacts_bytes,
+            end_frame_now: None,
         };
         workflow.normalize_legacy_demo_hashes()?;
         if workflow.hash_migration_records.is_empty() {
@@ -1517,6 +1588,20 @@ impl ShotWorkflow {
         if !from_locked_keyframe {
             causes.push("first_frame".to_owned());
         }
+        // A clip made to close on the next shot's keyframe no longer meets
+        // that shot when its keyframe changed or it no longer follows on.
+        if let Some(end_frame) = video
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.field.as_deref() == Some(END_FRAME_FIELD))
+        {
+            let still = self.end_frame_now.as_ref().is_some_and(|(id, hash)| {
+                *id == end_frame.artifact_id && *hash == end_frame.content_hash
+            });
+            if !still {
+                causes.push(END_FRAME_FIELD.to_owned());
+            }
+        }
         causes.extend(self.changed_intent(video)?);
         Ok(causes)
     }
@@ -1599,8 +1684,11 @@ impl ShotWorkflow {
             intent.extend_from_slice(b"branch:");
             intent.extend_from_slice(branch.as_bytes());
         }
+        // Unchanged for a clip that closes on no other shot's keyframe.
+        let mut dependencies = vec![dependency.clone()];
+        dependencies.extend(spec.end_frame.cloned());
         let input_hash = InputHash::derive(InputHashMaterial {
-            dependencies: std::slice::from_ref(&dependency),
+            dependencies: &dependencies,
             canonical_intent: &intent,
             provider: spec.provider,
             model: spec.model,
@@ -1706,6 +1794,16 @@ impl ShotWorkflow {
                 Value::String(parameters.clone()),
             );
         }
+        if let Some(end_frame) = &output.end_frame {
+            extra.insert(
+                END_FRAME_SHOT_RECORD.to_owned(),
+                Value::String(format!(
+                    "{}/{}",
+                    end_frame.shot.scene(),
+                    end_frame.shot.shot()
+                )),
+            );
+        }
         let provenance = output.provenance.as_ref();
         next_artifacts.push(StoredArtifactRecord {
             artifact_id: plan.artifact_id.as_str().to_owned(),
@@ -1728,13 +1826,16 @@ impl ShotWorkflow {
             applied_constraints: provenance.map(|p| p.applied_constraints.clone()),
             dropped_constraints: provenance.map(|p| p.dropped_constraints.clone()),
             degradation: provenance.map(PromptProvenance::degradation),
-            dependencies: vec![StoredArtifactDependency {
-                artifact_id: output.keyframe.artifact_id.as_str().to_owned(),
-                content_hash: output.keyframe.content_hash.as_str().to_owned(),
-                impact: output.keyframe.impact.into(),
-                field: output.keyframe.field.clone(),
-                extra: BTreeMap::new(),
-            }],
+            dependencies: std::iter::once(&output.keyframe)
+                .chain(output.end_frame.as_ref().map(|end| &end.keyframe))
+                .map(|dependency| StoredArtifactDependency {
+                    artifact_id: dependency.artifact_id.as_str().to_owned(),
+                    content_hash: dependency.content_hash.as_str().to_owned(),
+                    impact: dependency.impact.into(),
+                    field: dependency.field.clone(),
+                    extra: BTreeMap::new(),
+                })
+                .collect(),
             extra,
         });
 
@@ -1748,6 +1849,7 @@ impl ShotWorkflow {
         )?;
         self.shot = next_shot;
         self.artifacts = next_artifacts;
+        self.refresh_end_frame(project)?;
         Ok(AttachOutcome::Attached)
     }
 
@@ -1837,7 +1939,18 @@ impl ShotWorkflow {
     /// Approve the chosen video, or the only one of the latest generation,
     /// as production truth.
     pub fn lock_video(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
+        self.lock_video_at(project, std::time::SystemTime::now())
+    }
+
+    /// [`Self::lock_video`], recording `locked_at` as when it was locked.
+    pub fn lock_video_at(
+        &mut self,
+        project: &CanonicalProject,
+        locked_at: std::time::SystemTime,
+    ) -> Result<(), ShotWorkflowError> {
         self.ensure_mutation_allowed()?;
+        // Judged by the shots as they are now, not as they were loaded.
+        self.refresh_end_frame(project)?;
         let videos = self.current_videos();
         if videos.is_empty() {
             return Err(ShotWorkflowError::NoVideo);
@@ -1870,6 +1983,10 @@ impl ShotWorkflow {
             video.transition(ArtifactStatus::Selected)?;
         }
         video.transition(ArtifactStatus::Locked)?;
+        video.extra.insert(
+            LOCKED_AT_RECORD.to_owned(),
+            Value::String(crate::time::rfc3339(locked_at)),
+        );
         write_json(
             project,
             &shot_path(&self.key, "artifacts.json")?,
@@ -1946,6 +2063,43 @@ impl ShotWorkflow {
                 .get(PARAMETERS_RECORD)
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            locked_at: video
+                .extra
+                .get(LOCKED_AT_RECORD)
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            end_frame: self.recorded_end_frame(video)?,
+        }))
+    }
+
+    /// The frame `video` was made to close on, as it recorded it.
+    fn recorded_end_frame(
+        &self,
+        video: &StoredArtifactRecord,
+    ) -> Result<Option<EndFrame>, ShotWorkflowError> {
+        let Some(dependency) = video
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.field.as_deref() == Some(END_FRAME_FIELD))
+        else {
+            return Ok(None);
+        };
+        let shot = video
+            .extra
+            .get(END_FRAME_SHOT_RECORD)
+            .and_then(Value::as_str)
+            .and_then(|key| key.split_once('/'))
+            .and_then(|(scene, shot)| ShotKey::new(scene, shot).ok())
+            .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+        Ok(Some(EndFrame {
+            keyframe: ArtifactDependency {
+                artifact_id: ArtifactId::new(dependency.artifact_id.clone())?,
+                content_hash: ContentHash::new(dependency.content_hash.clone())
+                    .map_err(ShotWorkflowError::Hash)?,
+                impact: DependencyImpact::Semantic,
+                field: Some(END_FRAME_FIELD.to_owned()),
+            },
+            shot,
         }))
     }
 
@@ -3157,6 +3311,7 @@ mod tests {
             compiler_version: "video-prompt/1",
             notes: &[],
             branched_from: None,
+            end_frame: None,
         }
     }
 
@@ -3177,6 +3332,7 @@ mod tests {
             branched_from: None,
             clip_seconds: None,
             parameters: None,
+            end_frame: None,
         }
     }
 

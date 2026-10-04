@@ -226,15 +226,15 @@ Voice files join it when P5 brings voice.
 
 Each shot's sidecar (`schemas/export-shot.schema.json`) says which take was locked and what made it:
 
-- the video's file, artifact ID, content hash, provider, model, clip length and the parameters it was asked with;
-- the keyframe it starts from, by artifact ID and hash, and its image beside it when it has one;
+- the video's file, artifact ID, content hash, provider, model, clip length, the parameters it was asked with, and when it was locked;
+- the keyframe it starts from, by artifact ID and hash, and its image beside it when it has one, and the keyframe it closes on, by shot, artifact ID and hash, when it closes on one;
 - the prompt exactly as the provider got it, with its hash, compiler version, applied constraints and the dropped ones with why;
 - the shot's planned intent: action, framing, lens, camera motion, mood, dialogue, characters, target duration and continuity;
 - the director's notes and the take it branched from.
 
 The project manifest (`schemas/export-manifest.schema.json`) holds the project and recipe, the export time, the scenes in screenplay order with location and time, each shot's place among the shots in play and its files, what is missing from a partial package and why, and the total runtime.
 
-Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Kineto does not stamp a lock time on its records, so a sidecar does not carry one; the manifest records when the package was made.
+Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Replacing a package of the same name exchanges the two in one step where the system can (Linux, macOS), so the name always holds a whole package; where it cannot (Windows), an interruption can leave the earlier package set aside, and the next export puts it back first. A sidecar's lock time is the one the video's record kept when it was locked (`null` for a video locked before Kineto recorded it); the manifest records when the package was made.
 
 Later ecosystem exports can add:
 
