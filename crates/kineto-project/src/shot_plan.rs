@@ -6,8 +6,13 @@
 //! locked bible: [`ShotPlan::check_against`] holds it to their scenes and
 //! cast, and [`staleness`] says what has changed since. A shot's location is
 //! its scene's.
+//!
+//! A shot's ID is its identity: the takes and videos kept under it are its
+//! own. A shot keeps its ID while it stays in the plan; a removed shot keeps
+//! its ID and its history, and no shot added later ever takes either
+//! ([`with_fresh_ids`]), even one added in the same edit that removed it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -440,11 +445,128 @@ pub fn staleness(
     Ok(causes)
 }
 
-/// The director's edit of one scene's shots.
+/// Every shot ID the project has used: each shot written under `scenes/`,
+/// whether in play or removed, and each shot any plan revision names.
+pub fn used_shot_ids(project: &CanonicalProject) -> Result<BTreeSet<String>, RevisionError> {
+    let mut used = BTreeSet::new();
+    for record in revisions::revisions(project, DocumentKind::ShotPlan)? {
+        let plan: ShotPlan = revisions::read(project, &record)?;
+        used.extend(plan.shots().map(|(_, shot)| shot.id.clone()));
+    }
+    let scenes = project
+        .root()
+        .resolve(&ProjectRelativePath::new("scenes").map_err(RevisionError::Path)?);
+    let io = |error| RevisionError::Fs(crate::fs::ProjectFsError::Io(error));
+    let entries = match std::fs::read_dir(&scenes) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(io(error)),
+    };
+    for scene in entries.into_iter().flatten() {
+        let shots = match std::fs::read_dir(scene.map_err(io)?.path().join("shots")) {
+            Ok(shots) => shots,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+        };
+        for shot in shots {
+            let shot = shot.map_err(io)?;
+            if shot.path().join("shot.json").is_file()
+                && let Some(id) = shot.file_name().to_str()
+            {
+                used.insert(id.to_owned());
+            }
+        }
+    }
+    Ok(used)
+}
+
+/// `plan` with each shot it adds to `base` (every shot, without one) given
+/// a new ID where the project has used its ID before, so a new shot never
+/// takes the identity, takes or video of a shot removed earlier. A shot is
+/// added when `base` does not have its ID, or when it is in `added`: a
+/// shot the director added in the edit, whatever ID it was given, is new
+/// even if the edit removed a shot of that ID. The new ID is the scene's ID
+/// and the first number no shot has used; each shot that continues from a
+/// renamed one follows it.
+pub fn with_fresh_ids(
+    project: &CanonicalProject,
+    base: Option<&ShotPlan>,
+    added: &BTreeSet<String>,
+    plan: ShotPlan,
+) -> Result<ShotPlan, RevisionError> {
+    fresh_ids(&used_shot_ids(project)?, base, added, plan).map_err(RevisionError::InvalidDocument)
+}
+
+/// [`with_fresh_ids`] given the IDs [`used_shot_ids`] read, for a caller
+/// that cannot read the project where it renames, such as while checking a
+/// model's answer.
+pub fn fresh_ids(
+    used: &BTreeSet<String>,
+    base: Option<&ShotPlan>,
+    added: &BTreeSet<String>,
+    mut plan: ShotPlan,
+) -> Result<ShotPlan, String> {
+    let kept: BTreeSet<&str> = base
+        .map(|base| {
+            base.shots()
+                .map(|(_, shot)| shot.id.as_str())
+                .filter(|id| !added.contains(*id))
+                .collect()
+        })
+        .unwrap_or_default();
+    let reused: Vec<(String, String)> = plan
+        .shots()
+        .filter(|(_, shot)| !kept.contains(shot.id.as_str()) && used.contains(&shot.id))
+        .map(|(scene, shot)| (scene.to_owned(), shot.id.clone()))
+        .collect();
+    if reused.is_empty() {
+        return Ok(plan);
+    }
+    let mut taken = used.clone();
+    taken.extend(plan.shots().map(|(_, shot)| shot.id.clone()));
+    let mut renamed = BTreeMap::new();
+    for (scene, id) in reused {
+        let fresh = fresh_id(&scene, &taken)
+            .ok_or_else(|| format!("scene {scene:?} has no shot ID left"))?;
+        taken.insert(fresh.clone());
+        renamed.insert(id, fresh);
+    }
+    for scene in &mut plan.scenes {
+        for shot in &mut scene.shots {
+            if let Some(fresh) = renamed.get(&shot.id) {
+                shot.id.clone_from(fresh);
+            }
+            if let Some(fresh) = shot
+                .continuity_from
+                .as_ref()
+                .and_then(|from| renamed.get(from))
+            {
+                shot.continuity_from = Some(fresh.clone());
+            }
+        }
+    }
+    plan.validate()?;
+    Ok(plan)
+}
+
+/// `<scene>_NN` with the first number not in `taken`.
+fn fresh_id(scene: &str, taken: &BTreeSet<String>) -> Option<String> {
+    (1..=9_999).find_map(|number: u32| {
+        let suffix = format!("_{number:02}");
+        let room = MAX_SHOT_ID.checked_sub(suffix.len())?;
+        let prefix: String = scene.chars().take(room).collect();
+        let id = format!("{prefix}{suffix}");
+        (!taken.contains(&id)).then_some(id)
+    })
+}
+
+/// The director's edit of one scene's shots. `added` names the shots the
+/// director added in the edit, which are new shots whatever IDs they carry.
 pub fn edit_scene(
     project: &CanonicalProject,
     based_on: u32,
     scene: ScenePlan,
+    added: &BTreeSet<String>,
 ) -> Result<RevisionRecord, RevisionError> {
     let latest = revisions::latest(project, DocumentKind::ShotPlan)?
         .ok_or(RevisionError::NoSuchRevision(based_on))?;
@@ -458,6 +580,7 @@ pub fn edit_scene(
     let edited = base
         .with_scene(scene)
         .map_err(RevisionError::InvalidDocument)?;
+    let edited = with_fresh_ids(project, Some(&base), added, edited)?;
     check_references(project, &edited)?;
     revisions::save_edit(
         project,
@@ -828,5 +951,50 @@ mod tests {
         assert_eq!(replaced.scenes[0].shots.len(), 1);
         scene.scene_id = "office_dawn".to_owned();
         assert!(plan.with_scene(scene).is_err());
+    }
+
+    #[test]
+    fn an_added_shot_with_a_used_id_is_renamed_and_followed() {
+        let plan = parse(&sample()).unwrap();
+        let used: BTreeSet<String> = ["office_night_01", "office_night_02", "office_night_03"]
+            .map(str::to_owned)
+            .into();
+        // Only the first shot is kept; the second was used before.
+        let mut base = plan.clone();
+        base.scenes[0].shots.truncate(1);
+        let fresh = fresh_ids(&used, Some(&base), &BTreeSet::new(), plan.clone()).unwrap();
+        let shots: Vec<_> = fresh
+            .shots()
+            .map(|(_, shot)| (shot.id.as_str(), shot.continuity_from.as_deref()))
+            .collect();
+        assert_eq!(
+            shots,
+            [
+                ("office_night_01", None),
+                ("office_night_04", Some("office_night_01"))
+            ]
+        );
+        // Without a base every shot is added; the one continued from is
+        // followed under its new ID.
+        let fresh = fresh_ids(&used, None, &BTreeSet::new(), plan.clone()).unwrap();
+        assert_eq!(
+            fresh.scenes[0].shots[1].continuity_from.as_deref(),
+            Some(fresh.scenes[0].shots[0].id.as_str())
+        );
+        // A plan that reuses nothing is returned as it is.
+        assert_eq!(
+            fresh_ids(&BTreeSet::new(), None, &BTreeSet::new(), plan.clone()).unwrap(),
+            plan
+        );
+        // A shot the director added is new although the base has its ID: the
+        // edit removed that shot and gave the new one its number.
+        let added: BTreeSet<String> = ["office_night_02".to_owned()].into();
+        let fresh = fresh_ids(&used, Some(&plan), &added, plan.clone()).unwrap();
+        let ids: Vec<_> = fresh.shots().map(|(_, shot)| shot.id.as_str()).collect();
+        assert_eq!(ids, ["office_night_01", "office_night_04"]);
+        // A long scene ID is cut so the shot ID still fits.
+        let long = "s".repeat(80);
+        let id = fresh_id(&long, &BTreeSet::new()).unwrap();
+        assert_eq!((id.len(), id.ends_with("_01")), (MAX_SHOT_ID, true));
     }
 }

@@ -21,11 +21,17 @@
 //! has room; a cut one is reported, props first, then the location, then
 //! wardrobe and notes, and a cast character's forbidden changes last.
 //! Nothing is truncated.
+//!
+//! The locked keyframe of the shot it continues from is sent as a
+//! composition reference to a provider that declares it takes one, when a
+//! reference image is left after the cast's identities, and the keyframe
+//! then depends on it. Otherwise the shot follows it in words only, a
+//! cosmetic drop that says why.
 
 use std::{error::Error, fmt};
 
 use kineto_project::{
-    ArtifactDependency,
+    ArtifactDependency, ArtifactId, ContentHash, DependencyImpact,
     bible::Bible,
     cast::{self, CharacterLock, LockedImage},
     shot::{SceneIntent, ShotDirection, ShotIntent},
@@ -62,6 +68,37 @@ pub struct Locks<'a> {
     pub note: Option<&'a str>,
     /// The director's preferences in force, read for what a still can show.
     pub preferences: Option<&'a InForce>,
+    /// The locked keyframe of the shot this one continues from, if it has
+    /// one.
+    pub previous: Option<&'a PreviousFrame>,
+}
+
+/// The dependency field a keyframe records on the locked keyframe it was
+/// sent as a composition reference.
+pub const PREVIOUS_FRAME_FIELD: &str = "continuity.previous_frame";
+
+/// The locked keyframe of the shot a shot continues from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousFrame {
+    /// The shot whose keyframe it is.
+    pub shot_id: String,
+    pub artifact_id: ArtifactId,
+    pub content_hash: ContentHash,
+    /// Its image, relative to the project.
+    pub media_path: String,
+}
+
+impl PreviousFrame {
+    /// What a keyframe sent it as a reference records.
+    #[must_use]
+    pub fn dependency(&self) -> ArtifactDependency {
+        ArtifactDependency {
+            artifact_id: self.artifact_id.clone(),
+            content_hash: self.content_hash.clone(),
+            impact: DependencyImpact::Semantic,
+            field: Some(PREVIOUS_FRAME_FIELD.to_owned()),
+        }
+    }
 }
 
 /// The bible entries a shot's keyframe reads for continuity: the entry of
@@ -113,6 +150,9 @@ pub struct KeyframePrompt {
     /// The canonical portraits to send as identity references, at most as
     /// many as the provider takes, in the shot's order.
     pub identities: Vec<LockedImage>,
+    /// The previous shot's locked keyframe, to send as a composition
+    /// reference.
+    pub composition: Option<PreviousFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +349,7 @@ pub fn compile(
             format!("Director's note: {}", clause(note)),
         )?;
     }
+    let mut composition = None;
     if let Some(from) = &shot.continuity_from {
         needed(
             &mut required,
@@ -318,12 +359,50 @@ pub fn compile(
                 words(from)
             ),
         )?;
-        dropped.push(drop(
-            "continuity.previous_frame",
-            "the previous shot's keyframe is not sent as a reference; the shot follows it in \
-             words only",
-            DegradationLevel::Cosmetic,
-        )?);
+        let room = usize::from(capabilities.max_reference_images).saturating_sub(identities.len());
+        let previous = locks.previous.filter(|frame| &frame.shot_id == from);
+        let reason = match previous {
+            None => Some(format!(
+                "shot {from} has no locked keyframe yet; the shot follows it in words only"
+            )),
+            Some(_) if capabilities.reference_limit(ReferenceRole::Composition) == 0 => {
+                Some(format!(
+                    "the provider takes no composition reference; shot {from}'s keyframe is not \
+                     sent and the shot follows it in words only"
+                ))
+            }
+            Some(_) if room == 0 => Some(format!(
+                "the provider takes {} reference image{} per image, all given to the cast's \
+                 identities; shot {from}'s keyframe is not sent and the shot follows it in \
+                 words only",
+                capabilities.max_reference_images,
+                if capabilities.max_reference_images == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )),
+            Some(frame) => {
+                needed(
+                    &mut required,
+                    PREVIOUS_FRAME_FIELD,
+                    format!(
+                        "The composition reference image is the keyframe of shot {}",
+                        words(from)
+                    ),
+                )?;
+                dependencies.push(frame.dependency());
+                composition = Some(frame.clone());
+                None
+            }
+        };
+        if let Some(reason) = reason {
+            dropped.push(DroppedConstraint {
+                constraint: constraint(PREVIOUS_FRAME_FIELD)?,
+                reason,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
     }
     if let Some(bible) = locks.bible {
         let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
@@ -431,11 +510,12 @@ pub fn compile(
         dropped,
         capabilities.max_prompt_chars,
         KEYFRAME_COMPILER_VERSION,
-        &canonical_intent(scene, shot, direction, locks),
+        &canonical_intent(scene, shot, direction, locks, composition.as_ref()),
     )?;
     Ok(KeyframePrompt {
         dependencies,
         identities,
+        composition,
         ..prompt
     })
 }
@@ -511,6 +591,7 @@ fn canonical_intent(
     shot: &ShotIntent,
     direction: ShotDirection,
     locks: Locks<'_>,
+    composition: Option<&PreviousFrame>,
 ) -> Vec<u8> {
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
@@ -576,6 +657,11 @@ fn canonical_intent(
                 .map(|lock| serde_json::to_vec(lock).expect("a cast lock always encodes"))
                 .unwrap_or_default(),
         );
+    }
+    // The frame sent with it, by the bytes it holds. Last and only when
+    // sent, so every prompt without one hashes as it always has.
+    if let Some(frame) = composition {
+        field(frame.content_hash.as_str().as_bytes());
     }
     // The prompt hash frames this again; a digest keeps it fixed-size.
     hasher.finalize().to_vec()
@@ -1171,6 +1257,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -1205,6 +1292,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -1244,6 +1332,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -1268,6 +1357,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -1315,6 +1405,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &text_only,
         )
@@ -1353,6 +1444,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &two,
         )
@@ -1396,6 +1488,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &three,
         )
@@ -1428,6 +1521,7 @@ mod tests {
                 bible: None,
                 note: None,
                 preferences: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -1440,5 +1534,126 @@ mod tests {
             prompt.compiled.prompt().chars().count() <= kineto_provider_minimax::MAX_PROMPT_CHARS
         );
         assert_eq!(prompt.identities, [locks[0].portrait.clone()]);
+    }
+
+    fn previous_frame(shot_id: &str) -> PreviousFrame {
+        PreviousFrame {
+            shot_id: shot_id.to_owned(),
+            artifact_id: ArtifactId::new("office_night_01_g0001_candidate_b").unwrap(),
+            content_hash: ContentHash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            media_path: "scenes/office_night/shots/office_night_01/candidates/b.png".to_owned(),
+        }
+    }
+
+    /// A provider that takes `max` references, of identity and composition.
+    fn composing(max: u16) -> ImageCapabilities {
+        ImageCapabilities {
+            max_reference_images: max,
+            reference_roles: [ReferenceRole::Identity, ReferenceRole::Composition]
+                .into_iter()
+                .collect(),
+            ..minimax()
+        }
+    }
+
+    fn previous_frame_drop(prompt: &KeyframePrompt) -> Option<&str> {
+        prompt
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .find(|dropped| dropped.constraint.as_str() == PREVIOUS_FRAME_FIELD)
+            .map(|dropped| {
+                assert_eq!(dropped.degradation, DegradationLevel::Cosmetic);
+                dropped.reason.as_str()
+            })
+    }
+
+    #[test]
+    fn the_previous_locked_frame_is_sent_where_the_provider_takes_it() {
+        let frame = previous_frame("office_night_01");
+        let locks = [cast("filmmaker", "The Filmmaker")];
+        let with = |previous: Option<&PreviousFrame>, capabilities: &ImageCapabilities| {
+            compile(
+                Some(&night()),
+                Some(&continuing()),
+                ShotDirection::Reaction,
+                Locks {
+                    characters: &locks,
+                    previous,
+                    ..Locks::default()
+                },
+                capabilities,
+            )
+            .unwrap()
+        };
+
+        // Room after the cast's identity: the frame goes as composition,
+        // and the keyframe depends on it.
+        let sent = with(Some(&frame), &composing(2));
+        assert_eq!(sent.identities, [locks[0].portrait.clone()]);
+        assert_eq!(sent.composition.as_ref(), Some(&frame));
+        assert!(previous_frame_drop(&sent).is_none());
+        assert!(
+            sent.compiled
+                .applied_constraints()
+                .iter()
+                .any(|applied| applied.as_str() == PREVIOUS_FRAME_FIELD)
+        );
+        assert!(
+            sent.compiled.prompt().contains(
+                "The composition reference image is the keyframe of shot office night 01."
+            )
+        );
+        assert_eq!(sent.dependencies.last(), Some(&frame.dependency()));
+
+        // The frame's bytes are part of what the prompt is for.
+        let other = PreviousFrame {
+            content_hash: ContentHash::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            ..frame.clone()
+        };
+        assert_ne!(
+            with(Some(&other), &composing(2)).prompt_hash,
+            sent.prompt_hash
+        );
+
+        // Otherwise it is not sent, nothing depends on it, and the drop says
+        // why.
+        for (previous, capabilities, why) in [
+            (
+                None,
+                composing(2),
+                "shot office_night_01 has no locked keyframe yet",
+            ),
+            (
+                Some(previous_frame("office_night_07")),
+                composing(2),
+                "shot office_night_01 has no locked keyframe yet",
+            ),
+            (
+                Some(frame.clone()),
+                minimax(),
+                "the provider takes no composition reference",
+            ),
+            (
+                Some(frame.clone()),
+                composing(1),
+                "the provider takes 1 reference image per image, all given to the cast's identities",
+            ),
+        ] {
+            let prompt = with(previous.as_ref(), &capabilities);
+            assert!(prompt.composition.is_none(), "{why}");
+            assert!(
+                previous_frame_drop(&prompt).is_some_and(|reason| reason.starts_with(why)),
+                "{why}: {:?}",
+                previous_frame_drop(&prompt)
+            );
+            assert!(
+                prompt
+                    .dependencies
+                    .iter()
+                    .all(|dependency| dependency.field.as_deref() != Some(PREVIOUS_FRAME_FIELD))
+            );
+            assert_ne!(prompt.prompt_hash, sent.prompt_hash, "{why}");
+        }
     }
 }

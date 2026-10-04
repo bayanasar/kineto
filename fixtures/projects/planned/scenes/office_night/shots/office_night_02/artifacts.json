@@ -50,7 +50,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],
@@ -153,7 +153,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],
@@ -256,7 +256,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],
@@ -360,7 +360,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],
@@ -464,7 +464,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],
@@ -568,7 +568,7 @@
       },
       {
         "constraint": "continuity.previous_frame",
-        "reason": "the previous shot's keyframe is not sent as a reference; the shot follows it in words only",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
         "degradation": "cosmetic"
       }
     ],

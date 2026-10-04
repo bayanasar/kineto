@@ -8,7 +8,7 @@ mod production;
 mod project_session;
 mod voices;
 
-const KINETO_NATIVE_ABI_VERSION: u32 = 35;
+const KINETO_NATIVE_ABI_VERSION: u32 = 37;
 
 /// Stop a Rust panic at the C ABI.
 ///
@@ -90,7 +90,7 @@ mod tests {
     fn ffi_handle_round_trip_is_minimal_and_typed() {
         let engine = kineto_engine_create();
         assert!(!engine.is_null());
-        assert_eq!(kineto_engine_abi_version(), 35);
+        assert_eq!(kineto_engine_abi_version(), 37);
 
         // SAFETY: `engine` was created above and has not yet been destroyed.
         unsafe { kineto_engine_destroy(engine) };

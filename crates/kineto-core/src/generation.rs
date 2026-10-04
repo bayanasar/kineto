@@ -56,7 +56,9 @@ use kineto_providers::{
 
 use crate::{
     documents::document_error,
-    keyframe_prompt::{self, KeyframePrompt, KeyframePromptError, Locks},
+    keyframe_prompt::{
+        self, KeyframePrompt, KeyframePromptError, Locks, PREVIOUS_FRAME_FIELD, PreviousFrame,
+    },
     minimax::MinimaxKeyframes,
 };
 
@@ -80,19 +82,20 @@ pub const KEYFRAME_ASPECT: AspectRatio = AspectRatio {
     height: 9,
 };
 
-/// An approved picture of the person an image must show, sent to providers
-/// that take an identity reference.
+/// An approved image sent with a request as a reference: a cast's portrait,
+/// to providers that take an identity reference, or a locked keyframe, to
+/// providers that take a composition reference.
 #[derive(Clone, PartialEq, Eq)]
-pub struct IdentityReference {
+pub struct ReferenceImage {
     pub artifact_id: ArtifactId,
     pub bytes: Arc<[u8]>,
 }
 
-impl fmt::Debug for IdentityReference {
+impl fmt::Debug for ReferenceImage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "IdentityReference({}, {} bytes)",
+            "ReferenceImage({}, {} bytes)",
             self.artifact_id.as_str(),
             self.bytes.len()
         )
@@ -108,7 +111,10 @@ pub struct CandidateRequest {
     pub aspect_ratio: AspectRatio,
     /// Approved pictures of the people the image must show, at most as many
     /// as the provider takes.
-    pub identities: Vec<IdentityReference>,
+    pub identities: Vec<ReferenceImage>,
+    /// The locked keyframe of the shot this one continues from, for a
+    /// provider that takes a composition reference and has room for it.
+    pub composition: Option<ReferenceImage>,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -974,6 +980,7 @@ pub fn generate_noted<G: CandidateGenerator>(
                 owner: CandidateOwner::Shot(shot.key().clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             })
         {
@@ -1037,6 +1044,7 @@ fn compile_prompt<G: CandidateGenerator>(
     let (style, characters) = locks_of(project, intent.as_ref())?;
     let bible = locked_bible(project)?;
     let preferences = crate::preferences::in_force(project)?;
+    let previous = previous_frame(project, intent.as_ref())?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
         intent.as_ref(),
@@ -1047,6 +1055,7 @@ fn compile_prompt<G: CandidateGenerator>(
             bible: bible.as_ref(),
             note,
             preferences: preferences.as_ref(),
+            previous: previous.as_ref(),
         },
         &generator.capabilities(),
     )?)))
@@ -1065,6 +1074,46 @@ fn locked_bible(project: &CanonicalProject) -> Result<Option<Bible>, GenerationE
     revisions::read(project, &record)
         .map(Some)
         .map_err(document_error)
+}
+
+/// The locked keyframe of the shot `intent` continues from, if that shot
+/// has one with an image.
+fn previous_frame(
+    project: &CanonicalProject,
+    intent: Option<&ShotIntent>,
+) -> Result<Option<PreviousFrame>, GenerationError> {
+    let Some(from) = intent.and_then(|intent| intent.continuity_from.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(key) = kineto_project::shot::locate(project, from)? else {
+        return Ok(None);
+    };
+    let Some((keyframe, Some(media))) = ShotWorkflow::load(project, &key)?.first_frame()? else {
+        return Ok(None);
+    };
+    Ok(Some(PreviousFrame {
+        shot_id: from.to_owned(),
+        artifact_id: keyframe.artifact_id,
+        content_hash: keyframe.content_hash,
+        media_path: media.as_path().to_string_lossy().into_owned(),
+    }))
+}
+
+/// The previous shot's locked keyframe, read and checked against its hash,
+/// to send as the composition reference.
+fn frame_reference(
+    project: &CanonicalProject,
+    frame: &PreviousFrame,
+) -> Result<ReferenceImage, GenerationError> {
+    let path = ProjectRelativePath::new(&frame.media_path).map_err(document_error)?;
+    let bytes = project.root().read(&path).map_err(document_error)?;
+    if ContentHash::of(&bytes) != frame.content_hash {
+        return Err(ShotWorkflowError::MediaMismatch(frame.media_path.clone()).into());
+    }
+    Ok(ReferenceImage {
+        artifact_id: frame.artifact_id.clone(),
+        bytes: Arc::from(bytes),
+    })
 }
 
 /// The locked style and the locked casts of the shot's characters.
@@ -1090,7 +1139,7 @@ fn locks_of(
 fn identity_reference(
     project: &CanonicalProject,
     locked: &LockedImage,
-) -> Result<IdentityReference, GenerationError> {
+) -> Result<ReferenceImage, GenerationError> {
     let path = ProjectRelativePath::new(&locked.media_path).map_err(document_error)?;
     let bytes = project.root().read(&path).map_err(document_error)?;
     if ContentHash::of(&bytes).as_str() != locked.content_hash {
@@ -1098,7 +1147,7 @@ fn identity_reference(
             locked.media_path.clone(),
         )));
     }
-    Ok(IdentityReference {
+    Ok(ReferenceImage {
         artifact_id: ArtifactId::new(locked.artifact_id.clone())
             .map_err(|_| GenerationError::Unexpected("a locked portrait has an invalid ID"))?,
         bytes: Arc::from(bytes),
@@ -1128,6 +1177,7 @@ pub fn keyframe_staleness(
         intent.as_ref(),
         locked_bible(project)?.as_ref(),
     ));
+    let previous = previous_frame(project, intent.as_ref())?.map(|frame| frame.dependency());
     let intent_changes = shot.candidate_intent_changes()?;
     Ok(shot
         .candidate_dependencies()?
@@ -1144,6 +1194,15 @@ pub fn keyframe_staleness(
                     .filter(|dependency| dependency.impact == DependencyImpact::Semantic)
                     .map(DependencyRecord::from)
                     .collect();
+                // A candidate sent the previous shot's keyframe follows it
+                // like a lock; one made without it does not.
+                let sent = recorded
+                    .iter()
+                    .any(|dependency| dependency.field.as_deref() == Some(PREVIOUS_FRAME_FIELD));
+                let mut current = current.clone();
+                if sent {
+                    current.extend(previous.clone());
+                }
                 stale.extend(cast::stale_parents(&recorded, &current));
             }
             stale
@@ -1234,6 +1293,7 @@ fn complete_inner<G: CandidateGenerator>(
                 owner: CandidateOwner::Shot(shot.key().clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             },
         ));
@@ -1286,9 +1346,18 @@ fn complete_inner<G: CandidateGenerator>(
             .collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
     };
+    let composition = match &prompt {
+        Some(prompt) if to_invoke > 0 => prompt
+            .composition
+            .as_ref()
+            .map(|frame| frame_reference(project, frame))
+            .transpose()?,
+        _ => None,
+    };
     for (_, request) in &mut requests {
         request.prompt.clone_from(&prompt);
         request.identities.clone_from(&identities);
+        request.composition.clone_from(&composition);
     }
 
     // Every provider call runs on its own thread; recovering a finished call
@@ -1488,6 +1557,7 @@ pub fn unfinished_with<G: CandidateGenerator>(
                 owner: CandidateOwner::Shot(key.clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             })
             && !unfinished.unresolved.contains(&key)
@@ -1788,6 +1858,7 @@ mod tests {
             owner: CandidateOwner::Shot(ShotKey::bootstrap(1)),
             aspect_ratio: KEYFRAME_ASPECT,
             identities: Vec::new(),
+            composition: None,
             prompt: None,
         };
 

@@ -1,5 +1,6 @@
 //! Where a project stands in its recipe, computed from its files: a copy of
-//! `fixtures/projects/production` and a project just created.
+//! `fixtures/projects/production`, one whose story has no main character,
+//! and a project just created.
 
 use std::{
     collections::BTreeMap,
@@ -10,12 +11,13 @@ use std::{
 
 use kineto_core::workflow::{self, StepState, StepStatus, WorkflowError};
 use kineto_project::{
+    ContentHash,
     bible::{self, Bible, EntryEdit, EntryKind},
     manifest::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
-    recipe::RecipeError,
+    recipe::{RecipeError, SkipCondition},
     revisions::{self, DocumentKind},
 };
 
@@ -139,6 +141,67 @@ fn each_step_says_where_the_film_stands_and_what_it_waits_for() {
     drop(project);
 
     // Nothing here lives in .kineto.
+    fs::remove_dir_all(target.join(".kineto")).unwrap();
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(workflow::status(&project).unwrap(), before);
+}
+
+#[test]
+fn casting_is_skipped_once_the_locked_bible_has_no_main_character() {
+    let temp = TempDir::new();
+    let target = production(&temp);
+    // Everyone in the story is minor: the film has no one to cast.
+    let path = target.join("story/analysis/story_analysis_r0001.json");
+    let mut analysis: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for character in analysis["characters"].as_array_mut().unwrap() {
+        character["role"] = "minor".into();
+    }
+    let bytes = serde_json::to_vec_pretty(&analysis).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let hash = ContentHash::of(&bytes);
+    // The analysis's record, and the locked screenplay written from it.
+    for (index, at) in [
+        ("story/analysis/revisions.json", "/revisions/0/content_hash"),
+        (
+            "screenplay/revisions.json",
+            "/revisions/0/dependencies/0/content_hash",
+        ),
+    ] {
+        let index = target.join(index);
+        let mut revisions: serde_json::Value =
+            serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+        *revisions.pointer_mut(at).unwrap() = hash.as_str().into();
+        fs::write(&index, serde_json::to_vec_pretty(&revisions).unwrap()).unwrap();
+    }
+    let project = CanonicalProject::open(&target).unwrap();
+
+    // An unlocked bible may yet gain a main character.
+    let statuses = workflow::status(&project).unwrap();
+    assert_eq!(step(&statuses, "casting").state, StepState::Waiting);
+    assert_eq!(step(&statuses, "casting").waiting_on, ["bible"]);
+    assert!(step(&statuses, "casting").skipped_when.is_empty());
+
+    bible::lock(&project, 1).unwrap();
+    let statuses = workflow::status(&project).unwrap();
+    let casting = step(&statuses, "casting");
+    assert_eq!(casting.state, StepState::Skipped);
+    assert_eq!(casting.skipped_when, [SkipCondition::NoMainCharacters]);
+    assert!(casting.waiting_on.is_empty() && casting.stale.is_empty());
+    // It counts as done for what follows.
+    assert!(step(&statuses, "shot_plan").waiting_on.is_empty());
+    assert_eq!(step(&statuses, "shot_plan").state, StepState::Ready);
+    assert_eq!(step(&statuses, "keyframes").waiting_on, ["shot_plan"]);
+    // A step the recipe names no condition for is never skipped.
+    assert!(
+        statuses
+            .iter()
+            .filter(|status| status.id != "casting")
+            .all(|status| status.state != StepState::Skipped)
+    );
+
+    let before = statuses;
+    drop(project);
     fs::remove_dir_all(target.join(".kineto")).unwrap();
     let project = CanonicalProject::open(&target).unwrap();
     assert_eq!(workflow::status(&project).unwrap(), before);

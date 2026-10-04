@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kineto.local/schemas/recipe.schema.json",
   "title": "Kineto Workflow Recipe",
-  "description": "A filmmaking workflow as data: the steps a project goes through, what each produces, which steps it follows and whether the director approves it. A project names its recipe by ID and version in project.toml; the engine runs the recipe it ships with that ID and version and refuses any other.",
+  "description": "A filmmaking workflow as data: the steps a project goes through, what each produces, which steps it follows, whether the director approves it and when it does not apply. A project names its recipe by ID and version in project.toml; the engine runs the recipe it ships with that ID and version and refuses any other.",
   "type": "object",
   "required": ["schema_version", "recipe_id", "recipe_version", "name", "steps"],
   "properties": {
@@ -27,7 +27,14 @@
             "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}
           },
           "approval": {"type": "boolean"},
-          "description": {"type": "string", "minLength": 1}
+          "description": {"type": "string", "minLength": 1},
+          "skip_when": {
+            "description": "Conditions the engine reads from the project's files; once the steps this one follows are done and any holds, the step is skipped and counts as done. no_main_characters: the locked bible has no main character.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"enum": ["no_main_characters"]}
+          }
         },
         "additionalProperties": false
       }

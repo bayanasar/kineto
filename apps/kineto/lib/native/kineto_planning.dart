@@ -74,6 +74,9 @@ final class _NativePlannedShot extends Struct {
 
   @Uint64()
   external int continuityFromLength;
+
+  @Bool()
+  external bool added;
 }
 
 @Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>, Uint64, Pointer<_NativePlannedShot>, Uint64, Uint64)>(
@@ -235,6 +238,7 @@ final class KinetoPlannedShot {
     this.continuityFrom,
     this.dialogueMillis = 0,
     this.tooShort = false,
+    this.added = false,
   });
 
   final String id;
@@ -271,6 +275,11 @@ final class KinetoPlannedShot {
 
   /// Shorter than its dialogue, as the engine last found it.
   final bool tooShort;
+
+  /// Added by the director in the edit being saved: a new shot whatever ID
+  /// it carries. The engine never gives it the identity or history of a
+  /// shot that had that ID.
+  final bool added;
 
   KinetoPlannedShot copyWith({
     String? purpose,
@@ -341,7 +350,10 @@ enum KinetoStepState {
   waiting('waiting', 'Waiting'),
   ready('ready', 'Ready'),
   awaitingApproval('awaiting_approval', 'Awaiting approval'),
-  done('done', 'Done');
+  done('done', 'Done'),
+
+  /// It does not apply to this project, and counts as done.
+  skipped('skipped', 'Skipped');
 
   const KinetoStepState(this.wireName, this.label);
 
@@ -358,6 +370,7 @@ final class KinetoWorkflowStep {
     this.approval = false,
     this.waitingOn = const <String>[],
     this.stale = const <String>[],
+    this.skippedWhen = const <String>[],
   });
 
   final String id;
@@ -372,6 +385,10 @@ final class KinetoWorkflowStep {
 
   /// What changed since its work was made.
   final List<String> stale;
+
+  /// The recipe's conditions that hold when it is skipped, such as
+  /// `no_main_characters`.
+  final List<String> skippedWhen;
 }
 
 /// The shot plan and where the project stands in its recipe, as the engine
@@ -535,7 +552,8 @@ extension KinetoProjectPlanning on KinetoProjectSession {
             ..continuity = texts(shot.continuity)
             ..continuityCount = shot.continuity.length
             ..continuityFrom = from.pointer
-            ..continuityFromLength = from.length;
+            ..continuityFromLength = from.length
+            ..added = shot.added;
         }
         final sceneId = _encodeUtf8(arena, scene.sceneId);
         return _kinetoProjectSaveScenePlan(
@@ -774,6 +792,10 @@ final class _PlanningReader {
         stale: <String>[
           for (var item = 0; item < count('step_stale', group: group); item++)
             text('step_stale', group: group, item: item),
+        ],
+        skippedWhen: <String>[
+          for (var item = 0; item < count('step_skipped', group: group); item++)
+            text('step_skipped', group: group, item: item),
         ],
       );
 

@@ -179,6 +179,8 @@ pub enum DocumentCommand {
     SaveScenePlan {
         based_on: u32,
         scene: ScenePlan,
+        /// The shots the director added in the edit, by the IDs they carry.
+        added: BTreeSet<String>,
     },
     LockShotPlan {
         revision: u32,
@@ -2028,11 +2030,13 @@ impl Worker {
             } => ask(DocumentKind::ShotPlan, &|| {
                 shot_plan::replan_scene(project, model, &scene_id, direction.as_deref())
             }),
-            DocumentCommand::SaveScenePlan { based_on, scene } => {
-                shot_plan_document::edit_scene(project, based_on, scene)
-                    .map(|_| ())
-                    .map_err(revision_error)
-            }
+            DocumentCommand::SaveScenePlan {
+                based_on,
+                scene,
+                added,
+            } => shot_plan_document::edit_scene(project, based_on, scene, &added)
+                .map(|_| ())
+                .map_err(revision_error),
             DocumentCommand::LockShotPlan { revision } => {
                 shot_plan_document::lock(project, revision).map_err(revision_error)
             }
@@ -5416,7 +5420,11 @@ mod tests {
             document(
                 &session,
                 &events,
-                DocumentCommand::SaveScenePlan { based_on: 1, scene },
+                DocumentCommand::SaveScenePlan {
+                    based_on: 1,
+                    scene,
+                    added: BTreeSet::new(),
+                },
             )
             .unwrap();
             document(
@@ -5570,7 +5578,11 @@ mod tests {
             document(
                 &session,
                 &events,
-                DocumentCommand::SaveScenePlan { based_on: 1, scene },
+                DocumentCommand::SaveScenePlan {
+                    based_on: 1,
+                    scene,
+                    added: BTreeSet::new(),
+                },
             )
             .unwrap();
             document(
