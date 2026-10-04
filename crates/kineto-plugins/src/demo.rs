@@ -1,6 +1,8 @@
 //! A free, deterministic `kineto-plugin/1` plugin for tests and for trying
 //! the protocol: `image.generate` answers a small JPEG made from the
-//! request, `tts.speak` a silent WAV as long as the text takes to say.
+//! request, `tts.speak` a silent WAV as long as the text takes to say, and
+//! `video.generate` a job that is finished the first time it is asked
+//! about, with the bundled demo clip.
 //!
 //! An argument makes it misbehave on purpose, for tests of the host. Asked
 //! to `invoke`: `--sleep` never answers, `--crash` exits without answering,
@@ -18,7 +20,9 @@
 //! off before it said so. Every request it is sent is appended to
 //! `requests.log` there, one line each, for tests to read.
 //!
-//! `--square-only` declares 1:1 images only.
+//! `--square-only` declares 1:1 images only. Asked about a video job,
+//! `--video-fails` says it failed and `--not-mp4` answers with a file that
+//! is not an MP4.
 
 use std::{
     env, fs,
@@ -83,10 +87,21 @@ fn describe(mode: &str) -> Value {
                 "speed_permille": [500, 2000],
                 "max_text_chars": 2000,
                 "price_per_character_micros": 0
+            },
+            "video.generate": {
+                "model": "demo-video",
+                "clip_seconds": [6],
+                "clip_prices_micros": {"6": 0},
+                "start_frame_formats": ["jpeg", "png"],
+                "max_start_frame_bytes": 10_485_760,
+                "max_prompt_chars": 2000
             }
         }
     })
 }
+
+/// The clip every demo video job finishes with.
+const DEMO_CLIP: &[u8] = include_bytes!("../../kineto-core/assets/demo-clip.mp4");
 
 /// A JPEG-shaped file that differs with every request.
 fn image(request: &Value) -> Vec<u8> {
@@ -180,6 +195,20 @@ pub fn serve(args: &[String]) {
             {"id": "demo_plain", "name": "Plain", "description": "An even voice."},
             {"id": "demo_warm", "name": "Warm", "description": "A warm voice."}
         ]}}),
+        ("reconcile", _) if capability == "video.generate" => {
+            let job = request["job"].as_str().unwrap_or_default();
+            match mode.as_str() {
+                _ if !job.starts_with("demo-video-") => {
+                    json!({"protocol": PROTOCOL, "status": "unknown"})
+                }
+                "--video-fails" => json!({"protocol": PROTOCOL, "status": "failed",
+                    "class": "terminal", "message": "the demo's render failed"}),
+                "--not-mp4" => json!({"protocol": PROTOCOL, "status": "completed",
+                    "outputs": [file("clip.mp4", &image(&request))]}),
+                _ => json!({"protocol": PROTOCOL, "status": "completed",
+                    "outputs": [file("clip.mp4", DEMO_CLIP)], "metadata": {"model": "demo-video"}}),
+            }
+        }
         ("reconcile", _) => {
             let key = request["idempotency_key"].as_str().unwrap_or_default();
             match state.as_deref().map(|state| fs::read(kept(state, key))) {
@@ -219,6 +248,21 @@ pub fn serve(args: &[String]) {
             }
             json!({"protocol": PROTOCOL, "status": "completed", "outputs": [declared],
                 "metadata": {"model": "demo-image", "request_id": hex(&Sha256::digest(line.as_bytes()))[..16]}})
+        }
+        ("invoke", _) if capability == "video.generate" => {
+            let frame = request["request"]["first_frame"]
+                .as_str()
+                .unwrap_or_default();
+            if fs::metadata(frame).is_err() {
+                json!({"protocol": PROTOCOL, "status": "failed", "class": "terminal",
+                    "accepted": false, "message": "the demo needs a first frame"})
+            } else {
+                let job = format!(
+                    "demo-video-{}",
+                    &hex(&Sha256::digest(line.as_bytes()))[..16]
+                );
+                json!({"protocol": PROTOCOL, "status": "pending", "job": job})
+            }
         }
         ("invoke", _) if capability == "tts.speak" => {
             let text = request["request"]["text"].as_str().unwrap_or_default();

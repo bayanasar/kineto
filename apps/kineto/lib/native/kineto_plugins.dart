@@ -41,6 +41,7 @@ const Set<String> kinetoPluginValueFields = <String>{
   'image_price_micros',
   'speech_price_known',
   'speech_character_price_micros',
+  'makes_videos',
 };
 
 /// The text fields of a plugin these bindings read.
@@ -55,6 +56,8 @@ const Set<String> kinetoPluginTextFields = <String>{
   'problem',
   'aspect_ratios',
   'languages',
+  'video_model',
+  'clip_seconds',
 };
 
 /// What a plugin said it can do when it described itself.
@@ -70,6 +73,8 @@ final class KinetoPluginDescription {
     this.speechModel,
     this.languages = const <String>[],
     this.speechCharacterPriceMicros,
+    this.videoModel,
+    this.clipSeconds = const <int>[],
   });
 
   final String name;
@@ -101,8 +106,15 @@ final class KinetoPluginDescription {
   /// not say.
   final int? speechCharacterPriceMicros;
 
+  /// Its video model; null when it makes no video.
+  final String? videoModel;
+
+  /// Clip lengths it renders, in seconds.
+  final List<int> clipSeconds;
+
   bool get makesImages => imageModel != null;
   bool get speaks => speechModel != null;
+  bool get makesVideos => videoModel != null;
 }
 
 /// A provider plugin the user registered in `plugins.toml` (ADR-0006). Read
@@ -198,6 +210,8 @@ List<KinetoPlugin> loadKinetoPlugins() {
                     speechCharacterPriceMicros: number(index, 'speech_price_known') == 0
                         ? null
                         : number(index, 'speech_character_price_micros'),
+                    videoModel: number(index, 'makes_videos') == 0 ? null : text(index, 'video_model'),
+                    clipSeconds: lines(index, 'clip_seconds').map(int.parse).toList(growable: false),
                   ),
           ),
       ];

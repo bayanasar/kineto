@@ -197,11 +197,13 @@ const IMAGE_PROVIDERS: [(&str, u32); 3] = [
 
 pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
+pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 
 /// Video provider codes returned by `kineto_project_video_provider`.
-const VIDEO_PROVIDERS: [(&str, u32); 2] = [
+const VIDEO_PROVIDERS: [(&str, u32); 3] = [
     ("local_demo", VIDEO_PROVIDER_LOCAL_DEMO),
     ("minimax", VIDEO_PROVIDER_MINIMAX),
+    ("plugin", VIDEO_PROVIDER_PLUGIN),
 ];
 
 /// What `kineto_project_video_take_count` counts.
@@ -910,7 +912,7 @@ pub(crate) const SPEECH_PROVIDERS: [(&str, u32); 3] =
     [("local_demo", 1), ("minimax", 2), ("plugin", 3)];
 
 /// Number fields `kineto_plugins_value` reads of a registered plugin.
-pub(crate) const PLUGIN_VALUES: [(&str, u32); 11] = [
+pub(crate) const PLUGIN_VALUES: [(&str, u32); 12] = [
     ("enabled", 1),
     ("described", 2),
     ("selected", 3),
@@ -922,11 +924,12 @@ pub(crate) const PLUGIN_VALUES: [(&str, u32); 11] = [
     ("image_price_micros", 9),
     ("speech_price_known", 10),
     ("speech_character_price_micros", 11),
+    ("makes_videos", 12),
 ];
 
 /// Text fields `kineto_plugins_text_copy` copies of a registered plugin.
 /// Lists are one item per line.
-pub(crate) const PLUGIN_TEXTS: [(&str, u32); 10] = [
+pub(crate) const PLUGIN_TEXTS: [(&str, u32); 12] = [
     ("id", 1),
     ("name", 2),
     ("version", 3),
@@ -937,6 +940,8 @@ pub(crate) const PLUGIN_TEXTS: [(&str, u32); 10] = [
     ("problem", 8),
     ("aspect_ratios", 9),
     ("languages", 10),
+    ("video_model", 11),
+    ("clip_seconds", 12),
 ];
 
 /// What the director decides about a suggestion.
@@ -1272,8 +1277,8 @@ mod tests {
             PROJECT_OK
         );
         assert_eq!(kind, ENTRY_PLUGIN_TEXT);
-        assert_eq!(&name[..len as usize], b"languages");
-        assert_eq!((value, extra), (10, 0));
+        assert_eq!(&name[..len as usize], b"clip_seconds");
+        assert_eq!((value, extra), (12, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

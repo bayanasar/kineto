@@ -60,7 +60,7 @@ use crate::{
     learning,
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
-    plugin::PluginSpeech,
+    plugin::{PluginSpeech, PluginVideos},
     screenplay, shot_plan,
     speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
@@ -1509,13 +1509,22 @@ struct Videos {
 impl Videos {
     /// Follow `job` on its own thread, with the provider it was submitted
     /// to, until its video is on disk or failed. A MiniMax job waits for a
-    /// session with the key.
+    /// session with the key, a plugin's for a session that uses it.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
         if job.provider == video::DEMO_VIDEO_PROVIDER {
             self.spawn_watcher(LocalDemoVideos, job, root);
-        } else if let VideoProvider::Minimax(Some(client)) = &self.provider {
-            let client = client.clone();
-            self.spawn_watcher(client, job, root);
+        } else if job.provider == self.provider.key() {
+            match &self.provider {
+                VideoProvider::Minimax(Some(client)) => {
+                    let client = client.clone();
+                    self.spawn_watcher(client, job, root);
+                }
+                VideoProvider::Plugin(plugin) => {
+                    let videos = PluginVideos::new(Arc::clone(plugin));
+                    self.spawn_watcher(videos, job, root);
+                }
+                VideoProvider::LocalDemo | VideoProvider::Minimax(None) => {}
+            }
         }
     }
 
@@ -1766,6 +1775,19 @@ impl Worker {
             VideoProvider::Minimax(None) => {
                 return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
+            VideoProvider::Plugin(plugin) => {
+                let videos = PluginVideos::new(plugin);
+                self.with_shot(key, |project, _, shot| {
+                    video::start_videos(
+                        project,
+                        shot,
+                        &videos,
+                        ask,
+                        &mut NoHooks,
+                        risk_paying_twice,
+                    )
+                })
+            }
         }
         .map_err(generation_error)?;
         // Candidates submitted before one could not be are followed whatever
@@ -1790,17 +1812,20 @@ impl Worker {
 
     /// Watch again the videos an earlier session submitted. Nothing is
     /// submitted. The demo's are always followed; MiniMax's wait for a
-    /// session with the key.
+    /// session with the key, a plugin's for a session that uses it.
     fn resume_videos(&mut self) -> usize {
         if self.project.is_read_only() {
             return 0;
         }
-        let keyed = matches!(self.videos.provider, VideoProvider::Minimax(Some(_)));
+        let mut providers = vec![video::DEMO_VIDEO_PROVIDER.to_owned()];
+        if matches!(
+            self.videos.provider,
+            VideoProvider::Minimax(Some(_)) | VideoProvider::Plugin(_)
+        ) {
+            providers.push(self.videos.provider.key());
+        }
         let mut needs_attention = 0;
-        for provider in [video::DEMO_VIDEO_PROVIDER, video::VIDEO_PROVIDER] {
-            if provider == video::VIDEO_PROVIDER && !keyed {
-                continue;
-            }
+        for provider in &providers {
             match video::in_flight(&self.project, provider) {
                 Ok(found) => {
                     for job in found.jobs {
@@ -2999,10 +3024,14 @@ impl Worker {
 }
 
 /// The video provider a session follows its image provider with: MiniMax
-/// with the same key, otherwise the local demo. Plugins make no video yet.
+/// with the same key, the same plugin when it makes video, otherwise the
+/// local demo.
 fn video_provider_for(images: &ImageProvider) -> VideoProvider {
     match images {
         ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
+        ImageProvider::Plugin(plugin) if plugin.video_capabilities().is_some() => {
+            VideoProvider::Plugin(Arc::clone(plugin))
+        }
         ImageProvider::LocalDemo | ImageProvider::Plugin(_) => VideoProvider::LocalDemo,
     }
 }

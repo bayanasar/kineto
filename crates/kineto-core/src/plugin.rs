@@ -1,4 +1,4 @@
-//! Provider plugins (ADR-0006) as image and speech providers.
+//! Provider plugins (ADR-0006) as image, video and speech providers.
 //!
 //! A plugin the user registered is described once, when a session selects
 //! it: what it declares is read into the same `ImageCapabilities` and
@@ -25,13 +25,17 @@
 //! again only on the director's decision to risk paying twice.
 //!
 //! Speech runs through the same speech jobs and receipts as every speech
-//! provider; the plugin only speaks.
+//! provider; the plugin only speaks. Video runs through the same video jobs
+//! as every video provider: the plugin's `invoke` answers a job to follow,
+//! and asking about that job (`reconcile`) is free; its clip is checked as
+//! an MP4 before it reaches the project.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     num::NonZeroU16,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -54,8 +58,9 @@ use kineto_project::{
     style,
 };
 use kineto_providers::{
-    AspectRatio, AudioFormat, Emotion, ImageCapabilities, ImageFormat, Price, ReferenceRole,
-    SpeechCapabilities, SpeechTiming, VoiceSource,
+    AspectRatio, AudioFormat, CameraControl, Emotion, ImageCapabilities, ImageFormat, Price,
+    ReferenceRole, SpeechCapabilities, SpeechTiming, VideoCapabilities, VideoContainer, VideoMode,
+    VoiceSource,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -66,6 +71,7 @@ use crate::{
         parse_candidate_key, provenance,
     },
     speech::{SpeechGenerator, SpeechRequest, Spoken, Voice},
+    video::{TaskState, VideoGenerator, VideoSubmission},
 };
 
 const RECORD_SCHEMA_VERSION: u32 = 1;
@@ -246,6 +252,7 @@ pub struct PluginProvider {
     version: String,
     image: Option<(ImageCapabilities, String)>,
     speech: Option<(SpeechCapabilities, String)>,
+    video: Option<(VideoCapabilities, String)>,
     /// How long an `invoke` may take: 15 minutes, or less if it says so.
     invoke: Limits,
 }
@@ -285,9 +292,14 @@ impl PluginProvider {
             .map(speech_capabilities)
             .transpose()
             .map_err(PluginError::Described)?;
-        if image.is_none() && speech.is_none() {
+        let video = capabilities
+            .get("video.generate")
+            .map(video_capabilities)
+            .transpose()
+            .map_err(PluginError::Described)?;
+        if image.is_none() && speech.is_none() && video.is_none() {
             return Err(PluginError::Described(
-                "it declares neither image.generate nor tts.speak".to_owned(),
+                "it declares none of image.generate, video.generate and tts.speak".to_owned(),
             ));
         }
         let deadline = number(&body, "invoke_deadline_seconds")
@@ -303,6 +315,7 @@ impl PluginProvider {
             version: text("version"),
             image,
             speech,
+            video,
             invoke: Limits {
                 deadline,
                 ..Limits::INVOKE
@@ -345,6 +358,16 @@ impl PluginProvider {
     #[must_use]
     pub fn speech_capabilities(&self) -> Option<&SpeechCapabilities> {
         self.speech.as_ref().map(|(capabilities, _)| capabilities)
+    }
+
+    #[must_use]
+    pub fn video_capabilities(&self) -> Option<&VideoCapabilities> {
+        self.video.as_ref().map(|(capabilities, _)| capabilities)
+    }
+
+    #[must_use]
+    pub fn video_model(&self) -> Option<&str> {
+        self.video.as_ref().map(|(_, model)| model.as_str())
     }
 
     #[must_use]
@@ -522,6 +545,75 @@ pub fn speech_capabilities(declared: &Value) -> Result<(SpeechCapabilities, Stri
     if capabilities.languages.is_empty() || capabilities.output_formats.is_empty() {
         return Err("tts.speak declares no language or no output format".to_owned());
     }
+    Ok((capabilities, model(declared)?))
+}
+
+/// What a plugin declares for `video.generate`, and its model. A plugin
+/// starts every clip from the shot's locked keyframe, renders the lengths it
+/// lists, and answers a job to follow.
+pub fn video_capabilities(declared: &Value) -> Result<(VideoCapabilities, String), String> {
+    let clip_seconds = match &declared["clip_seconds"] {
+        Value::Array(lengths) => lengths
+            .iter()
+            .map(|length| {
+                length
+                    .as_u64()
+                    .and_then(|length| u8::try_from(length).ok())
+                    .filter(|length| *length > 0)
+                    .ok_or_else(|| "clip_seconds lists something other than a length".to_owned())
+            })
+            .collect::<Result<BTreeSet<u8>, _>>()?,
+        _ => return Err("video.generate declares no clip_seconds".to_owned()),
+    };
+    if clip_seconds.is_empty() {
+        return Err("video.generate declares no clip_seconds".to_owned());
+    }
+    let clip_prices = match &declared["clip_prices_micros"] {
+        Value::Null => BTreeMap::new(),
+        Value::Object(prices) => prices
+            .iter()
+            .map(|(length, price)| {
+                let length = length
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|length| clip_seconds.contains(length))
+                    .ok_or_else(|| format!("{length:?} is not a clip length it declares"))?;
+                let price = price
+                    .as_u64()
+                    .ok_or_else(|| "a clip price is not a whole number".to_owned())?;
+                Ok((length, Price::usd(price)))
+            })
+            .collect::<Result<_, String>>()?,
+        _ => return Err("clip_prices_micros is not a map of lengths to prices".to_owned()),
+    };
+    let start_frame_formats: BTreeSet<ImageFormat> = names(declared, "start_frame_formats")?
+        .iter()
+        .map(|name| image_format(name))
+        .collect::<Result<_, _>>()?;
+    if start_frame_formats.is_empty() {
+        return Err("video.generate declares no start_frame_formats".to_owned());
+    }
+    let to_ms = |seconds: Option<&u8>| seconds.map(|seconds| u64::from(*seconds) * 1000);
+    let fps = number(declared, "fps")?
+        .and_then(|fps| u16::try_from(fps).ok())
+        .unwrap_or(24);
+    let capabilities = VideoCapabilities {
+        modes: BTreeSet::from([VideoMode::ImageToVideo]),
+        min_duration_ms: to_ms(clip_seconds.first()),
+        max_duration_ms: to_ms(clip_seconds.last()),
+        fps_options: BTreeSet::from([fps]),
+        start_frame: true,
+        camera_control: CameraControl::None,
+        async_jobs: true,
+        resumable_remote_handle: true,
+        output_containers: BTreeSet::from([VideoContainer::Mp4]),
+        clip_seconds,
+        max_prompt_chars: limit(declared, "max_prompt_chars")?,
+        start_frame_formats,
+        max_start_frame_bytes: number(declared, "max_start_frame_bytes")?,
+        clip_prices,
+        ..VideoCapabilities::default()
+    };
     Ok((capabilities, model(declared)?))
 }
 
@@ -1175,6 +1267,172 @@ impl SpeechGenerator for PluginSpeech<'_> {
                 "a job to follow, which speech does not take",
             )),
             Answer::Ok { .. } | Answer::Unknown => Err(PluginError::Unexpected("no speech")),
+        }
+    }
+
+    fn class(&self, error: &PluginError) -> ErrorClass {
+        error.class()
+    }
+
+    fn certainly_not_accepted(&self, error: &PluginError) -> bool {
+        error.certainly_not_accepted()
+    }
+}
+
+/// Whether `bytes` read as an MP4: an ISO base media file whose first box
+/// is `ftyp`.
+fn is_mp4(bytes: &[u8]) -> bool {
+    bytes.get(4..8) == Some(b"ftyp")
+}
+
+/// A plugin's videos. Owned, so a watcher thread can follow a job with it.
+/// Its jobs are kept under `plugin.<id>-video`, apart from its images, as
+/// MiniMax's are.
+#[derive(Debug)]
+pub struct PluginVideos {
+    plugin: Arc<PluginProvider>,
+    key: String,
+    /// Clips a query found finished, until they are fetched.
+    finished: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl PluginVideos {
+    #[must_use]
+    pub fn new(plugin: Arc<PluginProvider>) -> Self {
+        Self {
+            key: video_key(plugin.key()),
+            plugin,
+            finished: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn finished(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<u8>>> {
+        self.finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The key a plugin's video jobs are kept under.
+#[must_use]
+pub fn video_key(plugin_key: &str) -> String {
+    format!("{plugin_key}-video")
+}
+
+impl VideoGenerator for PluginVideos {
+    type Error = PluginError;
+
+    fn provider(&self) -> &str {
+        &self.key
+    }
+
+    fn model(&self) -> &str {
+        self.plugin.video_model().unwrap_or_default()
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        self.plugin
+            .video_capabilities()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn canonical_params(&self, clip_seconds: u8) -> String {
+        format!("duration={clip_seconds}")
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, PluginError> {
+        if self.plugin.video.is_none() {
+            return Err(PluginError::Unsupported("the plugin makes no videos"));
+        }
+        let Some((frame, format)) = &request.first_frame else {
+            return Err(PluginError::Unsupported(
+                "a plugin's video starts from an image",
+            ));
+        };
+        let name = format!("first-frame.{}", extension(*format));
+        let fields = json!({
+            "capability": "video.generate",
+            "request": {
+                "prompt": request.prompt,
+                "clip_seconds": request.clip_seconds,
+                "first_frame": format!("inputs/{name}"),
+            },
+        });
+        let inputs = [Input {
+            name,
+            bytes: frame.clone(),
+        }];
+        let done = self
+            .plugin
+            .call("invoke", fields, &inputs, self.plugin.invoke)?;
+        match done.answer {
+            Answer::Pending { job } if !job.trim().is_empty() && job.len() <= 256 => Ok(job),
+            Answer::Failed {
+                class,
+                accepted,
+                message,
+            } => Err(PluginError::Failed {
+                class,
+                accepted,
+                message,
+            }),
+            // It may have been taken and charged: unresolved, not retried.
+            _ => Err(PluginError::Unexpected(
+                "something other than a job to follow for a video",
+            )),
+        }
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, PluginError> {
+        let done = self.plugin.call(
+            "reconcile",
+            json!({"capability": "video.generate", "job": task.as_str()}),
+            &[],
+            self.plugin.invoke,
+        )?;
+        match done.answer {
+            Answer::Pending { .. } => Ok(TaskState::Pending),
+            Answer::Completed { .. } => {
+                let [file] = done.files.as_slice() else {
+                    return Err(PluginError::Unexpected("other than one clip"));
+                };
+                if !is_mp4(&file.bytes) {
+                    return Err(PluginError::Unexpected("a clip that is not an MP4"));
+                }
+                self.finished()
+                    .insert(task.as_str().to_owned(), file.bytes.clone());
+                Ok(TaskState::Succeeded {
+                    file: task.as_str().to_owned(),
+                })
+            }
+            Answer::Failed {
+                class,
+                accepted,
+                message,
+            } => Err(PluginError::Failed {
+                class,
+                accepted,
+                message,
+            }),
+            Answer::Unknown => Err(PluginError::Unexpected("that it has no record of the job")),
+            Answer::Ok { .. } => Err(PluginError::Unexpected("no state of the job")),
+        }
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, PluginError> {
+        if let Some(bytes) = self.finished().remove(file) {
+            return Ok(bytes);
+        }
+        // Found finished by another follower: ask again, which is free.
+        let task =
+            ProviderJobId::new(file).map_err(|_| PluginError::Receipt("a job ID changed shape"))?;
+        match self.query(&task)? {
+            TaskState::Succeeded { .. } => self
+                .finished()
+                .remove(file)
+                .ok_or(PluginError::Unexpected("no clip")),
+            TaskState::Pending => Err(PluginError::Unexpected("a finished job as unfinished")),
         }
     }
 

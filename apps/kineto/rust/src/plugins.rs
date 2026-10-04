@@ -78,6 +78,7 @@ fn value(plugins: &KinetoPlugins, listing: &PluginListing, field: &str) -> Optio
         .and_then(|found| found.as_ref().ok());
     let images = described.and_then(|plugin| plugin.image_capabilities());
     let speech = described.and_then(|plugin| plugin.speech_capabilities());
+    let video = described.and_then(|plugin| plugin.video_capabilities());
     Some(match field {
         "enabled" => u64::from(listing.entry.enabled),
         "described" => u64::from(described.is_some()),
@@ -102,6 +103,7 @@ fn value(plugins: &KinetoPlugins, listing: &PluginListing, field: &str) -> Optio
         "speech_character_price_micros" => speech
             .and_then(|speech| speech.price_per_character)
             .map_or(0, |price| price.amount_micros),
+        "makes_videos" => u64::from(video.is_some()),
         _ => return None,
     })
 }
@@ -182,6 +184,22 @@ fn text(listing: &PluginListing, field: &str) -> Option<String> {
             described
                 .and_then(|plugin| plugin.speech_capabilities())
                 .map(|speech| speech.languages.iter().cloned().collect())
+                .unwrap_or_default(),
+        ),
+        "video_model" => described
+            .and_then(|plugin| plugin.video_model())
+            .unwrap_or_default()
+            .to_owned(),
+        "clip_seconds" => lines(
+            described
+                .and_then(|plugin| plugin.video_capabilities())
+                .map(|video| {
+                    video
+                        .clip_seconds
+                        .iter()
+                        .map(|seconds| seconds.to_string())
+                        .collect()
+                })
                 .unwrap_or_default(),
         ),
         _ => return None,

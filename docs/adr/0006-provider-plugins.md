@@ -71,7 +71,7 @@ A plugin call runs through the write-ahead job runtime under provider key `plugi
 
 ### What plugins do not cover
 
-`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers. The first implementation takes images that arrive in the answer and speech; video, whose results arrive as jobs to follow, is tracked separately.
+`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers. Images and speech arrive in the answer to `invoke`. A video is always a job to follow: `invoke` answers `pending` with the job, which is recorded as the video's task before anything else, and the job is followed with `reconcile` by that job until it is `completed` (one MP4 clip) or `failed`; `unknown` is a failure. Video jobs are kept under `plugin.<id>-video`, apart from the plugin's images, as MiniMax's are. The selected plugin also makes the session's video when it declares `video.generate`, unless `KINETO_VIDEO_PROVIDER` names another provider.
 
 ## Consequences
 

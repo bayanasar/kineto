@@ -320,8 +320,9 @@ unsafe fn spawn(
         Ok(provider) => provider,
         Err(code) => return code,
     };
-    let Ok(video_provider) = video_provider_from_environment() else {
-        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    let video_provider = match video_provider_from_environment() {
+        Ok(provider) => provider,
+        Err(code) => return code,
     };
     let Ok(model) = document_model_from_environment() else {
         return PROJECT_ERR_MODEL_UNKNOWN;
@@ -360,14 +361,8 @@ fn image_provider_from_environment() -> Result<ImageProvider, i32> {
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|error| {
-        match error {
-            ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
-            ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
-                PROJECT_ERR_PROVIDER_UNKNOWN
-            }
-        }
-    })
+    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process())
+        .map_err(selection_error)
 }
 
 /// The environment variable that names the video provider a session uses:
@@ -376,13 +371,23 @@ fn image_provider_from_environment() -> Result<ImageProvider, i32> {
 /// provider. As for images, a paid provider is used only when named.
 const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
 
-fn video_provider_from_environment() -> Result<Option<VideoProvider>, ()> {
+fn video_provider_from_environment() -> Result<Option<VideoProvider>, i32> {
     let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process())
+        .map_err(selection_error)
+}
+
+fn selection_error(error: ProviderSelectionError) -> i32 {
+    match error {
+        ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
+        ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
+            PROJECT_ERR_PROVIDER_UNKNOWN
+        }
+    }
 }
 
 /// The language model named by `KINETO_LLM_PROVIDER` (see
@@ -670,6 +675,7 @@ pub unsafe extern "C" fn kineto_project_video_provider(
         match session.session.video_provider().kind {
             VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
             VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
+            VideoProviderKind::Plugin => VIDEO_PROVIDER_PLUGIN,
         }
     })
 }

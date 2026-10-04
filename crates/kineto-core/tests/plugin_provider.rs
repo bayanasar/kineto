@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,12 +29,13 @@ use std::{
 use kineto_core::{
     bible, cast,
     generation::{self, GenerationError, ImageProvider, NoHooks, ProviderSelectionError},
-    plugin::{self, PluginProvider, PluginSpeech},
+    plugin::{self, PluginProvider, PluginSpeech, PluginVideos},
     screenplay,
     session::{OpenRequest, ProjectSession, Recovery, SessionError, SessionSink},
     speech::{SpeechGenerator, SpeechProvider, VoiceSettings},
     story,
     style::{self, SampleRequest, Submission},
+    video::{self, VideoProvider},
     voice::{self, VoiceChoice},
 };
 use kineto_llm::fake::FakeLlm;
@@ -47,7 +48,7 @@ use kineto_project::{
         ProjectWorkflow,
     },
     screenplay::SAMPLE_SCREENPLAY_JSON,
-    shot::{AttachOutcome, ShotKey, ShotWorkflow},
+    shot::{AttachOutcome, ShotKey, ShotWorkflow, VideoState},
     story::SAMPLE_ANALYSIS_JSON,
     style as style_document,
 };
@@ -62,7 +63,7 @@ fn main() {
         return;
     }
     let filter = args.iter().find(|arg| !arg.starts_with('-')).cloned();
-    let tests: [(&str, fn()); 7] = [
+    let tests: [(&str, fn()); 9] = [
         (
             "only_a_registered_enabled_plugin_is_selected",
             only_a_registered_enabled_plugin_is_selected,
@@ -90,6 +91,14 @@ fn main() {
         (
             "refusals_failures_and_false_files_fail_closed",
             refusals_failures_and_false_files_fail_closed,
+        ),
+        (
+            "a_plugin_video_is_followed_by_its_job_after_a_restart",
+            a_plugin_video_is_followed_by_its_job_after_a_restart,
+        ),
+        (
+            "a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed",
+            a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed,
         ),
     ];
     let mut failed = 0;
@@ -210,6 +219,7 @@ fn manifest() -> ProjectManifest {
 enum Event {
     Recovered(String),
     Opened(Result<(), String>),
+    Video(Result<(), String>),
 }
 
 struct Sink(Mutex<mpsc::Sender<Event>>);
@@ -234,7 +244,13 @@ impl SessionSink for Sink {
 
     fn completed(&self, _token: u64, _shot_index: u32, _result: &Result<(), SessionError>) {}
 
-    fn video_finished(&self, _shot_index: u32, _revision: u16, _result: &Result<(), SessionError>) {
+    fn video_finished(&self, _shot_index: u32, _revision: u16, result: &Result<(), SessionError>) {
+        let _ = self.0.lock().unwrap().send(Event::Video(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}")),
+        ));
     }
 
     fn document_completed(&self, _token: u64, _result: &Result<(), SessionError>) {}
@@ -242,6 +258,15 @@ impl SessionSink for Sink {
 
 /// Open as the app does with `provider`; what recovery reported, once open.
 fn open(request: OpenRequest, provider: ImageProvider) -> (ProjectSession, Vec<String>) {
+    let (session, recovered, _) = open_watching(request, provider);
+    (session, recovered)
+}
+
+/// [`open`], with what the session reports after it opened.
+fn open_watching(
+    request: OpenRequest,
+    provider: ImageProvider,
+) -> (ProjectSession, Vec<String>, mpsc::Receiver<Event>) {
     let (sender, events) = mpsc::channel();
     let session =
         ProjectSession::spawn(request, provider, Box::new(Sink(Mutex::new(sender)))).unwrap();
@@ -253,9 +278,10 @@ fn open(request: OpenRequest, provider: ImageProvider) -> (ProjectSession, Vec<S
                 result.unwrap();
                 break;
             }
+            Event::Video(_) => {}
         }
     }
-    (session, recovered)
+    (session, recovered, events)
 }
 
 /// A new project with its bootstrap shot, made as the app makes one.
@@ -343,6 +369,14 @@ fn only_a_registered_enabled_plugin_is_selected() {
     assert!(matches!(
         SpeechProvider::select(Some("plugin:demo"), &secrets),
         Ok(Some(SpeechProvider::Plugin(_)))
+    ));
+    assert!(matches!(
+        VideoProvider::select(Some("plugin:demo"), &secrets),
+        Ok(Some(VideoProvider::Plugin(_)))
+    ));
+    assert!(matches!(
+        VideoProvider::select(Some("plugin:off"), &secrets),
+        Err(ProviderSelectionError::Plugin(_))
     ));
     for refused in ["plugin:off", "plugin:missing", "plugin:broken"] {
         assert!(
@@ -531,8 +565,10 @@ fn a_plugin_makes_keyframes_and_the_session_follows_it_for_speech() {
     assert!(session.speech_provider().ready);
     assert_eq!(
         session.video_provider().kind,
-        kineto_core::video::VideoProviderKind::LocalDemo
+        kineto_core::video::VideoProviderKind::Plugin
     );
+    assert!(session.video_provider().ready);
+    assert_eq!(session.video_provider().clip_seconds, 6);
 }
 
 fn a_plugin_cut_off_after_taking_a_call_is_never_paid_again_unasked() {
@@ -660,5 +696,139 @@ fn refusals_failures_and_false_files_fail_closed() {
             ),
             "{why}: unresolved until the director risks it"
         );
+    }
+}
+
+/// A project whose bootstrap shot has a keyframe made by `plugin`, locked.
+fn keyframed(target: &Path, plugin: &Arc<PluginProvider>) -> (CanonicalProject, ShotWorkflow) {
+    let project = created(target);
+    let mut shot = shot(&project);
+    generation::generate(
+        &project,
+        &mut shot,
+        &ImageProvider::Plugin(Arc::clone(plugin)),
+        &mut NoHooks,
+    )
+    .unwrap();
+    shot.select(&project, 0).unwrap();
+    shot.lock(&project).unwrap();
+    (project, shot)
+}
+
+fn videos_under(target: &Path) -> Vec<PathBuf> {
+    files_under(&target.join("scenes"))
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "mp4"))
+        .collect()
+}
+
+fn a_plugin_video_is_followed_by_its_job_after_a_restart() {
+    let temp = TempDir::new();
+    let state = temp.0.join("state");
+    let target = temp.0.join("film");
+    let plugin = keeping(&state, &[]);
+    let (project, shot) = keyframed(&target, &plugin);
+    let videos = PluginVideos::new(Arc::clone(&plugin));
+    let job = video::start(&project, &shot, &videos).unwrap();
+    assert_eq!(job.provider, "plugin.demo-video");
+    let submitted = || {
+        requests(&state)
+            .iter()
+            .filter(|request| {
+                request["operation"] == "invoke" && request["capability"] == "video.generate"
+            })
+            .count()
+    };
+    assert_eq!(submitted(), 1);
+    let sent = requests(&state)
+        .into_iter()
+        .find(|request| request["capability"] == "video.generate")
+        .unwrap();
+    assert_eq!(sent["request"]["first_frame"], "inputs/first-frame.jpg");
+    assert_eq!(sent["inputs"][0]["path"], "inputs/first-frame.jpg");
+    drop((shot, project));
+
+    // A session opened with the plugin follows the job by its ID and keeps
+    // the clip; nothing is submitted again.
+    let (session, _, events) = open_watching(
+        OpenRequest::Open {
+            path: target.clone(),
+        },
+        ImageProvider::Plugin(Arc::clone(&plugin)),
+    );
+    let finished = loop {
+        if let Event::Video(result) = events.recv_timeout(WAIT).unwrap() {
+            break result;
+        }
+    };
+    finished.unwrap();
+    assert_eq!(session.snapshot(0).unwrap().video, VideoState::Ready);
+    assert_eq!(submitted(), 1);
+    drop(session);
+
+    // The same job, followed by hand on a project restored to before it
+    // finished, is not submitted again either.
+    let (project, shot) = keyframed(&temp.0.join("again"), &plugin);
+    let job = video::start(&project, &shot, &videos).unwrap();
+    drop((shot, project));
+    let target = temp.0.join("again");
+    let project = CanonicalProject::open(&target).unwrap();
+    let mut found = video::in_flight(&project, "plugin.demo-video").unwrap();
+    assert_eq!(found.jobs, [job]);
+    let done = video::watch(
+        &videos,
+        project.root(),
+        found.jobs.remove(0),
+        &AtomicBool::new(false),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    video::finish(&project, &mut shot, done).unwrap();
+    assert_eq!(shot.snapshot().unwrap().video, VideoState::Ready);
+    let media = shot.video_media().unwrap().unwrap();
+    assert_eq!(&project.root().read(&media).unwrap()[4..8], b"ftyp");
+    assert_eq!(submitted(), 2, "each job submitted once, then followed");
+    assert!(
+        video::in_flight(&project, "plugin.demo-video")
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
+}
+
+fn a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed() {
+    for mode in ["--video-fails", "--not-mp4"] {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let plugin = demo(&[mode]);
+        let (project, mut shot) = keyframed(&target, &plugin);
+        let videos = PluginVideos::new(Arc::clone(&plugin));
+        let job = video::start(&project, &shot, &videos).unwrap();
+        let done = video::watch(
+            &videos,
+            project.root(),
+            job,
+            &AtomicBool::new(false),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(done.result.is_err(), "{mode}");
+        assert!(
+            matches!(
+                video::finish(&project, &mut shot, done),
+                Err(GenerationError::Provider { .. })
+            ),
+            "{mode}: the failure is reported"
+        );
+        assert_ne!(shot.snapshot().unwrap().video, VideoState::Ready, "{mode}");
+        assert!(
+            videos_under(&target).is_empty(),
+            "{mode}: nothing reaches the project"
+        );
+        // The job is retired: asking again submits afresh, unasked consent
+        // not needed, since the plugin answered.
+        let healthy = PluginVideos::new(demo(&[]));
+        assert!(video::start(&project, &shot, &healthy).is_ok(), "{mode}");
     }
 }
