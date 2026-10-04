@@ -2,9 +2,11 @@
 //! the locked style leads the prompt, the shot's cast character is shown
 //! from their canonical portrait sent as identity reference, the candidates
 //! depend on both locks and go stale when either changes, a stale one is
-//! not locked, and a project that blocks identity drift waits for the
-//! director's consent.
+//! not locked, a project that blocks identity drift waits for the
+//! director's consent, and a shot that continues from another is sent that
+//! shot's locked keyframe where the provider takes a composition reference.
 
+use kineto_project::shot::ShotKey;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -21,8 +23,8 @@ use kineto_core::{
     bible, bootstrap, cast,
     generation::{
         self, CandidateGenerator, CandidateOwner, CandidateRequest, Consent, GeneratedCandidate,
-        GenerationError, IdentityReference, KEYFRAME_ASPECT, LocalDemoAdapter, LocalDemoError,
-        NoHooks,
+        GenerationError, KEYFRAME_ASPECT, LocalDemoAdapter, LocalDemoError, NoHooks,
+        ReferenceImage,
     },
     minimax::MinimaxKeyframes,
     screenplay, story,
@@ -236,11 +238,14 @@ fn cast_character(project: &CanonicalProject, minimax: &Minimax, character: &str
     cast::lock(project, &provider, character).unwrap();
 }
 
-/// The demo generator, declaring it takes two identity references and
-/// keeping every request it is asked to invoke.
+/// The demo generator, declaring it takes two references, of identity and,
+/// when `composition`, of composition too, and keeping every request it is
+/// asked to invoke. With `composition` its candidates are its own and record
+/// what their prompt depends on, as a provider's do.
 #[derive(Clone, Default)]
 struct TwoFaces {
     seen: Arc<Mutex<Vec<CandidateRequest>>>,
+    composition: bool,
 }
 
 impl PaidJobAdapter for TwoFaces {
@@ -258,7 +263,19 @@ impl PaidJobAdapter for TwoFaces {
         key: &IdempotencyKey,
     ) -> Result<Invocation<GeneratedCandidate>, LocalDemoError> {
         self.seen.lock().unwrap().push(request.clone());
-        LocalDemoAdapter.invoke(request, key)
+        let invocation = LocalDemoAdapter.invoke(request, key)?;
+        Ok(match invocation {
+            Invocation::Completed(mut candidate) if self.composition => {
+                candidate.output.provider = self.provider().as_str().to_owned();
+                candidate.output.dependencies = request
+                    .prompt
+                    .as_ref()
+                    .map(|prompt| prompt.dependencies.clone())
+                    .unwrap_or_default();
+                Invocation::Completed(candidate)
+            }
+            other => other,
+        })
     }
 
     fn reconcile(
@@ -294,9 +311,13 @@ impl CandidateGenerator for TwoFaces {
     }
 
     fn capabilities(&self) -> ImageCapabilities {
+        let mut roles: std::collections::BTreeSet<_> = [ReferenceRole::Identity].into();
+        if self.composition {
+            roles.insert(ReferenceRole::Composition);
+        }
         ImageCapabilities {
             max_reference_images: 2,
-            reference_roles: [ReferenceRole::Identity].into_iter().collect(),
+            reference_roles: roles,
             ..generation::local_demo_capabilities()
         }
     }
@@ -327,7 +348,7 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
     let target = temp.0.join("film");
     let project = film(&target, true);
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
         .unwrap();
     assert_eq!(minimax.calls(), 3);
@@ -375,7 +396,7 @@ fn a_keyframe_shows_the_cast_from_its_portrait_in_the_locked_style() {
 
     // Another style is locked: every candidate is stale, and kept.
     lock_style(&project, &minimax, "film_realism");
-    let shot = ShotWorkflow::load(&project, 1).unwrap();
+    let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     let stale = generation::keyframe_staleness(&project, &shot).unwrap();
     assert_eq!(stale.len(), 3);
     assert!(
@@ -392,13 +413,13 @@ fn a_keyframe_made_before_its_character_was_cast_is_not_locked() {
     let target = temp.0.join("film");
     let project = film(&target, false);
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
         .unwrap();
     shot.select(&project, 0).unwrap();
 
     cast_character(&project, &minimax, "filmmaker");
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     assert_eq!(
         generation::keyframe_staleness(&project, &shot).unwrap()[0],
         ["cast.filmmaker.0001"]
@@ -432,7 +453,7 @@ fn a_provider_that_takes_two_references_is_sent_the_first_two_cast_of_the_shot()
     fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
 
     let generator = TwoFaces::default();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     generation::generate_with(&project, &mut shot, generator.clone(), &mut NoHooks).unwrap();
     let seen = generator.seen.lock().unwrap();
     assert_eq!(seen.len(), 3);
@@ -475,21 +496,22 @@ fn minimax_is_never_sent_more_identity_references_than_it_takes() {
     let target = temp.0.join("film");
     let project = film(&target, false);
     let minimax = Minimax::new();
-    let reference = IdentityReference {
+    let reference = ReferenceImage {
         artifact_id: ArtifactId::new("cast.filmmaker.0001").unwrap(),
         bytes: Arc::from(&[0xff_u8, 0xd8, 0xff, 0xe0][..]),
     };
     let request = CandidateRequest {
         artifact_id: ArtifactId::new("shot_001_g0001_candidate_a").unwrap(),
         input_hash: InputHash::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        owner: CandidateOwner::Shot(1),
+        owner: CandidateOwner::Shot(ShotKey::bootstrap(1)),
         aspect_ratio: KEYFRAME_ASPECT,
         identities: vec![reference.clone(), reference],
+        composition: None,
         prompt: Some(Arc::new(
             kineto_core::keyframe_prompt::compile(
                 None,
                 Some(
-                    &ShotWorkflow::load(&project, 1)
+                    &ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
                         .unwrap()
                         .intent()
                         .unwrap()
@@ -523,7 +545,7 @@ fn a_project_that_blocks_identity_drift_waits_for_consent() {
         generation::IdentityPolicy::Block
     );
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     let Err(GenerationError::IdentityDrift(lost)) =
         generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
     else {
@@ -568,11 +590,129 @@ fn a_portrait_changed_on_disk_is_not_sent() {
         .portrait;
     fs::write(target.join(&portrait.media_path), b"\xff\xd8\xff\xe0edited").unwrap();
     let minimax = Minimax::new();
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
     assert!(
         generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
             .is_err()
     );
     assert_eq!(minimax.calls(), 0);
     assert!(!shot.snapshot().unwrap().generated);
+}
+
+#[test]
+fn a_shot_continuing_from_another_is_sent_its_locked_keyframe_as_composition() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let minimax = Minimax::new();
+    // Shot 2 continues from shot 1, whose keyframe is locked.
+    let path = target.join("scenes/scene_001/shots/shot_002/shot.json");
+    let mut intent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent["continuity_from"] = "shot_001".into();
+    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+    let mut first = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    generation::generate_with(
+        &project,
+        &mut first,
+        minimax.adapter(&project),
+        &mut NoHooks,
+    )
+    .unwrap();
+    first.select(&project, 2).unwrap();
+    generation::lock(&project, &mut first).unwrap();
+    let (keyframe, media) = first.first_frame().unwrap().unwrap();
+    let frame = fs::read(target.join(media.unwrap().as_path())).unwrap();
+
+    let generator = TwoFaces {
+        composition: true,
+        ..TwoFaces::default()
+    };
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(2)).unwrap();
+    generation::generate_with(&project, &mut shot, generator.clone(), &mut NoHooks).unwrap();
+    let seen = generator.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    for request in seen.iter() {
+        let composition = request.composition.as_ref().unwrap();
+        assert_eq!(composition.artifact_id, keyframe.artifact_id);
+        assert_eq!(&*composition.bytes, frame.as_slice());
+        // The cast's identity comes first, in the other reference.
+        assert_eq!(request.identities.len(), 1);
+        let prompt = request.prompt.as_ref().unwrap();
+        assert!(
+            prompt
+                .compiled
+                .prompt()
+                .contains("The composition reference image is the keyframe of shot shot 001.")
+        );
+        assert!(
+            prompt
+                .compiled
+                .dropped_constraints()
+                .iter()
+                .all(|dropped| dropped.constraint.as_str() != "continuity.previous_frame")
+        );
+    }
+    // Every candidate depends on the frame, by its bytes, and is fresh.
+    for recorded in shot.candidate_dependencies().unwrap() {
+        let previous = recorded
+            .iter()
+            .find(|dependency| dependency.field.as_deref() == Some("continuity.previous_frame"))
+            .unwrap();
+        assert_eq!(
+            (&previous.artifact_id, &previous.content_hash),
+            (&keyframe.artifact_id, &keyframe.content_hash)
+        );
+    }
+    assert!(
+        generation::keyframe_staleness(&project, &shot)
+            .unwrap()
+            .iter()
+            .all(Vec::is_empty)
+    );
+    // Continuing from nothing, they no longer follow the frame they were
+    // sent, and say so.
+    let continuing = fs::read(&path).unwrap();
+    let mut intent: serde_json::Value = serde_json::from_slice(&continuing).unwrap();
+    intent.as_object_mut().unwrap().remove("continuity_from");
+    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+    let detached = ShotWorkflow::load(&project, &ShotKey::bootstrap(2)).unwrap();
+    for causes in generation::keyframe_staleness(&project, &detached).unwrap() {
+        assert!(
+            causes.contains(&"intent.continuity_from".to_owned()),
+            "{causes:?}"
+        );
+        assert!(
+            causes.contains(&keyframe.artifact_id.as_str().to_owned()),
+            "{causes:?}"
+        );
+    }
+    fs::write(&path, continuing).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(2)).unwrap();
+
+    // MiniMax takes no composition reference: only the portrait is sent,
+    // the drop says why, and its candidates do not follow the frame.
+    generation::generate_with(&project, &mut shot, minimax.adapter(&project), &mut NoHooks)
+        .unwrap();
+    let bodies = minimax.bodies.lock().unwrap();
+    let last = bodies.last().unwrap();
+    assert_eq!(last["subject_reference"].as_array().unwrap().len(), 1);
+    assert!(
+        !last["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("composition reference")
+    );
+    for recorded in shot.candidate_dependencies().unwrap() {
+        assert!(
+            recorded
+                .iter()
+                .all(|dependency| dependency.field.as_deref() != Some("continuity.previous_frame"))
+        );
+    }
+    assert!(
+        generation::keyframe_staleness(&project, &shot)
+            .unwrap()
+            .iter()
+            .all(Vec::is_empty)
+    );
 }

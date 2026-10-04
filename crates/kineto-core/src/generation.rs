@@ -35,14 +35,15 @@ use kineto_jobs::{
 };
 use kineto_project::{
     ArtifactId, ContentHash, InputHash,
+    bible::Bible,
     cast::{self, CastError, CastImageKind, CharacterLock, LockedImage},
     fs::ProjectRelativePath,
     manifest::CanonicalProject,
-    revisions::DependencyRecord,
+    revisions::{self, DependencyRecord, DocumentKind, RevisionStatus},
     shot::{
-        AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
-        GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotIntent, ShotWorkflow,
-        ShotWorkflowError, demo_candidate_output, load_scene_intent,
+        self, AttachOutcome, CandidateOutput, DEMO_PROVIDER, Degradation, DroppedConstraintRecord,
+        GENERATED_CANDIDATE_COUNT, GenerationPlan, PromptProvenance, ShotIntent, ShotKey,
+        ShotWorkflow, ShotWorkflowError, demo_candidate_output, load_scene_intent,
     },
     style::StyleLock,
 };
@@ -55,7 +56,9 @@ use kineto_providers::{
 
 use crate::{
     documents::document_error,
-    keyframe_prompt::{self, KeyframePrompt, KeyframePromptError, Locks},
+    keyframe_prompt::{
+        self, KeyframePrompt, KeyframePromptError, Locks, PREVIOUS_FRAME_FIELD, PreviousFrame,
+    },
     minimax::MinimaxKeyframes,
 };
 
@@ -65,8 +68,8 @@ pub const GENERATE_OPERATION: &str = "image.generate";
 /// What a generated image belongs to, which decides where it is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateOwner {
-    /// A keyframe candidate of the shot with this 1-based number.
-    Shot(u32),
+    /// A keyframe candidate of this shot.
+    Shot(ShotKey),
     /// A sample of a style direction.
     Style,
     /// A casting image of a character.
@@ -79,19 +82,20 @@ pub const KEYFRAME_ASPECT: AspectRatio = AspectRatio {
     height: 9,
 };
 
-/// An approved picture of the person an image must show, sent to providers
-/// that take an identity reference.
+/// An approved image sent with a request as a reference: a cast's portrait,
+/// to providers that take an identity reference, or a locked keyframe, to
+/// providers that take a composition reference.
 #[derive(Clone, PartialEq, Eq)]
-pub struct IdentityReference {
+pub struct ReferenceImage {
     pub artifact_id: ArtifactId,
     pub bytes: Arc<[u8]>,
 }
 
-impl fmt::Debug for IdentityReference {
+impl fmt::Debug for ReferenceImage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "IdentityReference({}, {} bytes)",
+            "ReferenceImage({}, {} bytes)",
             self.artifact_id.as_str(),
             self.bytes.len()
         )
@@ -107,7 +111,10 @@ pub struct CandidateRequest {
     pub aspect_ratio: AspectRatio,
     /// Approved pictures of the people the image must show, at most as many
     /// as the provider takes.
-    pub identities: Vec<IdentityReference>,
+    pub identities: Vec<ReferenceImage>,
+    /// The locked keyframe of the shot this one continues from, for a
+    /// provider that takes a composition reference and has room for it.
+    pub composition: Option<ReferenceImage>,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -668,6 +675,10 @@ pub enum Prerequisite {
     SelectedPortrait,
     /// The image provider takes no identity reference, or not this portrait.
     IdentityReference,
+    /// Shots are planned from the locked bible as well as the screenplay.
+    LockedBible,
+    /// A scene is planned again within a shot plan.
+    ShotPlan,
 }
 
 impl fmt::Display for Prerequisite {
@@ -690,6 +701,8 @@ impl fmt::Display for Prerequisite {
             Self::IdentityReference => {
                 "the image provider takes no identity reference, or not this portrait"
             }
+            Self::LockedBible => "lock the bible first",
+            Self::ShotPlan => "plan the shots before planning a scene again",
         })
     }
 }
@@ -865,6 +878,45 @@ pub fn generate_consenting<G: CandidateGenerator>(
     hooks: &mut dyn GenerationHooks,
     consent: Consent,
 ) -> Result<AttachOutcome, GenerationError> {
+    generate_noted(project, shot, generator, hooks, consent, None)
+}
+
+/// Generate the shot's candidates again as the director's `note` asks,
+/// such as "warmer light, tighter on his hands". The note reaches the
+/// prompt as `director.note` for this generation only; everything else is
+/// as [`generate_with_consent`].
+pub fn refine(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    provider: &ImageProvider,
+    hooks: &mut dyn GenerationHooks,
+    consent: Consent,
+    note: &str,
+) -> Result<AttachOutcome, GenerationError> {
+    match provider {
+        ImageProvider::LocalDemo => {
+            generate_noted(project, shot, LocalDemoAdapter, hooks, consent, Some(note))
+        }
+        ImageProvider::Minimax(client) => generate_noted(
+            project,
+            shot,
+            MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+            consent,
+            Some(note),
+        ),
+    }
+}
+
+/// [`generate_consenting`] with the director's note for this generation.
+pub fn generate_noted<G: CandidateGenerator>(
+    project: &CanonicalProject,
+    shot: &mut ShotWorkflow,
+    generator: G,
+    hooks: &mut dyn GenerationHooks,
+    consent: Consent,
+    note: Option<&str>,
+) -> Result<AttachOutcome, GenerationError> {
     let risk_paying_twice = consent.risk_paying_twice;
     shot.plan_generation(project)?;
     // Refuse before writing anything: a provider that cannot be called or a
@@ -873,7 +925,7 @@ pub fn generate_consenting<G: CandidateGenerator>(
         return Err(GenerationError::NotConfigured);
     }
     require_synchronous(&generator.capabilities())?;
-    let prompt = compile_prompt(project, shot, &generator)?;
+    let prompt = compile_prompt(project, shot, &generator, note)?;
     if let Some(prompt) = &prompt
         && !consent.identity_drift
         && identity_policy(project) == IdentityPolicy::Block
@@ -909,9 +961,10 @@ pub fn generate_consenting<G: CandidateGenerator>(
             && !generator.may_call_again(&CandidateRequest {
                 artifact_id: candidate.clone(),
                 input_hash: record.intent().input_hash().clone(),
-                owner: CandidateOwner::Shot(plan.shot_number()),
+                owner: CandidateOwner::Shot(shot.key().clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             })
         {
@@ -965,13 +1018,16 @@ fn compile_prompt<G: CandidateGenerator>(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
     generator: &G,
+    note: Option<&str>,
 ) -> Result<Option<Arc<KeyframePrompt>>, GenerationError> {
     if !generator.needs_prompt() {
         return Ok(None);
     }
-    let scene = load_scene_intent(project)?;
+    let scene = load_scene_intent(project, shot.key().scene())?;
     let intent = shot.intent()?;
     let (style, characters) = locks_of(project, intent.as_ref())?;
+    let bible = locked_bible(project)?;
+    let previous = previous_frame(project, intent.as_ref())?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
         intent.as_ref(),
@@ -979,9 +1035,67 @@ fn compile_prompt<G: CandidateGenerator>(
         Locks {
             style: style.as_ref(),
             characters: &characters,
+            bible: bible.as_ref(),
+            note,
+            previous: previous.as_ref(),
         },
         &generator.capabilities(),
     )?)))
+}
+
+/// The locked bible, which keyframes read continuity from; `None` when no
+/// bible is locked.
+fn locked_bible(project: &CanonicalProject) -> Result<Option<Bible>, GenerationError> {
+    let Some(record) = revisions::revisions(project, DocumentKind::Bible)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|record| record.status == RevisionStatus::Locked)
+    else {
+        return Ok(None);
+    };
+    revisions::read(project, &record)
+        .map(Some)
+        .map_err(document_error)
+}
+
+/// The locked keyframe of the shot `intent` continues from, if that shot
+/// has one with an image.
+fn previous_frame(
+    project: &CanonicalProject,
+    intent: Option<&ShotIntent>,
+) -> Result<Option<PreviousFrame>, GenerationError> {
+    let Some(from) = intent.and_then(|intent| intent.continuity_from.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(key) = kineto_project::shot::locate(project, from)? else {
+        return Ok(None);
+    };
+    let Some((keyframe, Some(media))) = ShotWorkflow::load(project, &key)?.first_frame()? else {
+        return Ok(None);
+    };
+    Ok(Some(PreviousFrame {
+        shot_id: from.to_owned(),
+        artifact_id: keyframe.artifact_id,
+        content_hash: keyframe.content_hash,
+        media_path: media.as_path().to_string_lossy().into_owned(),
+    }))
+}
+
+/// The previous shot's locked keyframe, read and checked against its hash,
+/// to send as the composition reference.
+fn frame_reference(
+    project: &CanonicalProject,
+    frame: &PreviousFrame,
+) -> Result<ReferenceImage, GenerationError> {
+    let path = ProjectRelativePath::new(&frame.media_path).map_err(document_error)?;
+    let bytes = project.root().read(&path).map_err(document_error)?;
+    if ContentHash::of(&bytes) != frame.content_hash {
+        return Err(ShotWorkflowError::MediaMismatch(frame.media_path.clone()).into());
+    }
+    Ok(ReferenceImage {
+        artifact_id: frame.artifact_id.clone(),
+        bytes: Arc::from(bytes),
+    })
 }
 
 /// The locked style and the locked casts of the shot's characters.
@@ -1007,7 +1121,7 @@ fn locks_of(
 fn identity_reference(
     project: &CanonicalProject,
     locked: &LockedImage,
-) -> Result<IdentityReference, GenerationError> {
+) -> Result<ReferenceImage, GenerationError> {
     let path = ProjectRelativePath::new(&locked.media_path).map_err(document_error)?;
     let bytes = project.root().read(&path).map_err(document_error)?;
     if ContentHash::of(&bytes).as_str() != locked.content_hash {
@@ -1015,7 +1129,7 @@ fn identity_reference(
             locked.media_path.clone(),
         )));
     }
-    Ok(IdentityReference {
+    Ok(ReferenceImage {
         artifact_id: ArtifactId::new(locked.artifact_id.clone())
             .map_err(|_| GenerationError::Unexpected("a locked portrait has an invalid ID"))?,
         bytes: Arc::from(bytes),
@@ -1023,9 +1137,10 @@ fn identity_reference(
 }
 
 /// What makes each current candidate of `shot` stale, in candidate order:
-/// each lock its prompt followed that changed or went, and each lock made
-/// since that it did not follow, by artifact ID. Empty for a fresh
-/// candidate and for a demo candidate, which follows no lock.
+/// each intent field changed since it was made (`intent.<field>`), each
+/// lock or bible entry its prompt followed that changed or went, and each
+/// lock made since that it did not follow, by artifact ID. Empty for a
+/// fresh candidate; a demo candidate follows no lock.
 pub fn keyframe_staleness(
     project: &CanonicalProject,
     shot: &ShotWorkflow,
@@ -1038,17 +1153,36 @@ pub fn keyframe_staleness(
         .into_iter()
         .collect();
     current.extend(characters.iter().filter_map(cast::lock_dependency));
+    let scene = load_scene_intent(project, shot.key().scene())?;
+    current.extend(keyframe_prompt::continuity_dependencies(
+        scene.as_ref(),
+        intent.as_ref(),
+        locked_bible(project)?.as_ref(),
+    ));
+    let previous = previous_frame(project, intent.as_ref())?.map(|frame| frame.dependency());
+    let intent_changes = shot.candidate_intent_changes()?;
     Ok(shot
         .candidate_dependencies()?
         .iter()
         .zip(shot.candidate_origins()?)
-        .map(|(recorded, origin)| {
-            if origin.provider == DEMO_PROVIDER {
-                return Vec::new();
+        .zip(intent_changes)
+        .map(|((recorded, origin), mut stale)| {
+            // A demo candidate follows no lock, but it was made for an intent.
+            if origin.provider != DEMO_PROVIDER {
+                let recorded: Vec<DependencyRecord> =
+                    recorded.iter().map(DependencyRecord::from).collect();
+                // A candidate sent the previous shot's keyframe follows it
+                // like a lock; one made without it does not.
+                let sent = recorded
+                    .iter()
+                    .any(|dependency| dependency.field.as_deref() == Some(PREVIOUS_FRAME_FIELD));
+                let mut current = current.clone();
+                if sent {
+                    current.extend(previous.clone());
+                }
+                stale.extend(cast::stale_parents(&recorded, &current));
             }
-            let recorded: Vec<DependencyRecord> =
-                recorded.iter().map(DependencyRecord::from).collect();
-            cast::stale_parents(&recorded, &current)
+            stale
         })
         .collect())
 }
@@ -1111,9 +1245,10 @@ fn complete_inner<G: CandidateGenerator>(
             CandidateRequest {
                 artifact_id: candidate.clone(),
                 input_hash: plan.input_hash().clone(),
-                owner: CandidateOwner::Shot(plan.shot_number()),
+                owner: CandidateOwner::Shot(shot.key().clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             },
         ));
@@ -1155,7 +1290,7 @@ fn complete_inner<G: CandidateGenerator>(
             return Err(GenerationError::NotConfigured);
         }
         if prompt.is_none() {
-            prompt = compile_prompt(project, shot, &generator)?;
+            prompt = compile_prompt(project, shot, &generator, None)?;
         }
     }
     let identities = match &prompt {
@@ -1166,9 +1301,18 @@ fn complete_inner<G: CandidateGenerator>(
             .collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
     };
+    let composition = match &prompt {
+        Some(prompt) if to_invoke > 0 => prompt
+            .composition
+            .as_ref()
+            .map(|frame| frame_reference(project, frame))
+            .transpose()?,
+        _ => None,
+    };
     for (_, request) in &mut requests {
         request.prompt.clone_from(&prompt);
         request.identities.clone_from(&identities);
+        request.composition.clone_from(&composition);
     }
 
     // Every provider call runs on its own thread; recovering a finished call
@@ -1296,7 +1440,7 @@ pub struct Unfinished {
     pub needs_attention: usize,
     /// Shots with a candidate whose paid call may have been accepted without
     /// leaving its result; see [`resubmit`].
-    pub unresolved: Vec<u32>,
+    pub unresolved: Vec<ShotKey>,
 }
 
 /// Find generations that stopped before they were acknowledged.
@@ -1357,18 +1501,23 @@ pub fn unfinished_with<G: CandidateGenerator>(
             unfinished.needs_attention += 1;
             continue;
         };
+        let Ok(Some(key)) = shot::locate(project, plan.shot_id()) else {
+            unfinished.needs_attention += 1;
+            continue;
+        };
         if record.attempts() > 0
             && !generator.may_call_again(&CandidateRequest {
                 artifact_id: candidate,
                 input_hash,
-                owner: CandidateOwner::Shot(plan.shot_number()),
+                owner: CandidateOwner::Shot(key.clone()),
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
+                composition: None,
                 prompt: None,
             })
-            && !unfinished.unresolved.contains(&plan.shot_number())
+            && !unfinished.unresolved.contains(&key)
         {
-            unfinished.unresolved.push(plan.shot_number());
+            unfinished.unresolved.push(key);
         }
     }
     if !generator.invokes_on_recovery() {
@@ -1380,9 +1529,9 @@ pub fn unfinished_with<G: CandidateGenerator>(
             })
         });
     }
-    unfinished
-        .plans
-        .sort_by_key(|plan| (plan.shot_number(), plan.revision()));
+    unfinished.plans.sort_by(|left, right| {
+        (left.shot_id(), left.revision()).cmp(&(right.shot_id(), right.revision()))
+    });
     Ok(unfinished)
 }
 
@@ -1488,7 +1637,7 @@ mod tests {
 
     fn stop_at(target: &Path, point: GenerationPoint) {
         let project = project(target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             generate(
                 &project,
@@ -1506,7 +1655,11 @@ mod tests {
         assert_eq!(found.needs_attention, 0);
         assert_eq!(found.plans.len(), 1, "exactly one interrupted generation");
         let plan = &found.plans[0];
-        let mut shot = ShotWorkflow::load(&project, plan.shot_number()).unwrap();
+        let mut shot = ShotWorkflow::load(
+            &project,
+            &shot::locate(&project, plan.shot_id()).unwrap().unwrap(),
+        )
+        .unwrap();
         let outcome = complete(
             &project,
             &mut shot,
@@ -1526,7 +1679,10 @@ mod tests {
 
     fn assert_one_generation(target: &Path) {
         let project = CanonicalProject::open(target).unwrap();
-        let snapshot = ShotWorkflow::load(&project, 1).unwrap().snapshot().unwrap();
+        let snapshot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
+            .unwrap()
+            .snapshot()
+            .unwrap();
         assert!(snapshot.generated);
         assert_eq!(snapshot.generation_revision, 1);
         assert_eq!(snapshot.candidate_count, 3);
@@ -1539,7 +1695,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
 
         assert_eq!(
             generate(&project, &mut shot, &ImageProvider::LocalDemo, &mut NoHooks).unwrap(),
@@ -1619,7 +1775,7 @@ mod tests {
             let project = CanonicalProject::open(&target).unwrap();
             let found = unfinished(&project, &ImageProvider::LocalDemo).unwrap();
             assert_eq!(found.plans.len(), 1);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let error = complete(
                 &project,
                 &mut shot,
@@ -1654,9 +1810,10 @@ mod tests {
         let request = CandidateRequest {
             artifact_id: candidate,
             input_hash: input,
-            owner: CandidateOwner::Shot(1),
+            owner: CandidateOwner::Shot(ShotKey::bootstrap(1)),
             aspect_ratio: KEYFRAME_ASPECT,
             identities: Vec::new(),
+            composition: None,
             prompt: None,
         };
 
@@ -1774,7 +1931,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert!(matches!(
             generate_with(&project, &mut shot, RemoteJobs, &mut NoHooks),
             Err(GenerationError::Prerequisite(
@@ -1911,7 +2068,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
 
             let outcome = generate_with(
@@ -1939,7 +2096,7 @@ mod tests {
                 assert_eq!(artifact["provider"], "minimax");
                 assert_eq!(artifact["model"], "image-01");
                 assert_eq!(artifact["media_state"], "present");
-                assert_eq!(artifact["compiler_version"], "keyframe-prompt/2");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/3");
                 assert_eq!(artifact["degradation"], "identity_affecting");
                 assert!(artifact["media_path"].as_str().unwrap().starts_with(
                     "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"
@@ -1959,7 +2116,7 @@ mod tests {
             let target = temp.0.join("film");
             {
                 let project = bootstrap_project(&target);
-                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                 let (client, calls) = client(FakeMinimax::default());
                 let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     generate_with(
@@ -1984,7 +2141,7 @@ mod tests {
             .unwrap();
             assert_eq!(found.needs_attention, 0);
             assert_eq!(found.plans.len(), 1);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let outcome = complete_with(
                 &project,
                 &mut shot,
@@ -2006,7 +2163,7 @@ mod tests {
                 let target = temp.0.join("film");
                 {
                     let project = bootstrap_project(&target);
-                    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                     let (client, _calls) = client(FakeMinimax::default());
                     let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         generate_with(
@@ -2039,7 +2196,7 @@ mod tests {
                     MinimaxKeyframes::<FakeMinimax>::new(&project, None),
                 )
                 .unwrap();
-                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                 let outcome = complete_with(
                     &project,
                     &mut shot,
@@ -2073,7 +2230,7 @@ mod tests {
             let target = temp.0.join("film");
             {
                 let project = bootstrap_project(&target);
-                let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+                let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
                 let (client, _calls) = client(FakeMinimax::default());
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     generate_with(
@@ -2103,7 +2260,7 @@ mod tests {
                 found.needs_attention, 1,
                 "the tampered candidate needs a person"
             );
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             assert!(
                 complete_with(
                     &project,
@@ -2122,7 +2279,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let fake = FakeMinimax::default();
             *fake.refuse.lock().unwrap() = Some(
                 r#"{"base_resp":{"status_code":1026,"status_msg":"input new_sensitive"}}"#
@@ -2181,7 +2338,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
             let crash = || panic!("the process dies as MiniMax answers");
 
@@ -2204,7 +2361,10 @@ mod tests {
                 Err(GenerationError::UnresolvedSubmission)
             ));
             let found = unfinished_with(&project, minimax()).unwrap();
-            assert_eq!((found.plans.len(), found.unresolved), (0, vec![1]));
+            assert_eq!(
+                (found.plans.len(), found.unresolved),
+                (0, vec![ShotKey::bootstrap(1)])
+            );
             assert_eq!(calls.load(Ordering::SeqCst), 3, "never paid twice unasked");
 
             // The director decides to risk it.
@@ -2227,7 +2387,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
             let minimax = || MinimaxKeyframes::new(&project, Some(&client));
             let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2249,7 +2409,7 @@ mod tests {
                 }
             }
 
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let outcome = generate_with(&project, &mut shot, minimax(), &mut NoHooks).unwrap();
             assert_eq!(outcome, AttachOutcome::Attached);
             assert_eq!(
@@ -2265,7 +2425,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let fake = FakeMinimax::default();
             *fake.lose.lock().unwrap() = Some(TransportFailure::Timeout);
             let (client, calls) = client(fake);
@@ -2295,7 +2455,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
             let plan = shot.plan_generation(&project).unwrap();
             // A candidate prepared but never invoked, as after a crash.
@@ -2332,7 +2492,7 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let project = bootstrap_project(&target);
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             assert!(matches!(
                 generate_with(
                     &project,
@@ -2345,7 +2505,7 @@ mod tests {
 
             let bare_target = temp.0.join("bare");
             let bare = project_without_intent(&bare_target);
-            let mut shot = ShotWorkflow::load(&bare, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&bare, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
             assert!(matches!(
                 generate_with(
@@ -2371,7 +2531,7 @@ mod tests {
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             intent["action"] = format!("A filmmaker {}", "waits ".repeat(300)).into();
             fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
-            let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+            let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             let (client, calls) = client(FakeMinimax::default());
 
             assert!(matches!(

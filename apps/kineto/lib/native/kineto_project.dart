@@ -86,6 +86,21 @@ external int _kinetoProjectIdCopy(
   Pointer<Uint64> outLength,
 );
 
+@Native<Uint32 Function(Pointer<Void>)>(symbol: 'kineto_project_shot_count')
+external int _kinetoProjectShotCount(Pointer<Void> session);
+
+@Native<Int32 Function(Pointer<Void>, Uint32, Bool, Pointer<Uint8>, Uint64, Pointer<Uint64>)>(
+  symbol: 'kineto_project_shot_id_copy',
+)
+external int _kinetoProjectShotIdCopy(
+  Pointer<Void> session,
+  int shotIndex,
+  bool scene,
+  Pointer<Uint8> outBuffer,
+  int outCapacity,
+  Pointer<Uint64> outLength,
+);
+
 @Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint64>)>(
   symbol: 'kineto_project_title_copy',
 )
@@ -394,6 +409,9 @@ final class KinetoImageProvider {
 final class KinetoProjectException implements Exception {
   const KinetoProjectException(this.code, this.message);
 
+  /// An argument the engine cannot take, such as an empty note.
+  static const int invalidArgument = 100;
+
   /// The create target already exists; nothing was overwritten.
   static const int alreadyExists = 103;
 
@@ -480,6 +498,12 @@ final class KinetoProjectException implements Exception {
   /// The selected portrait's reference pack is not complete.
   static const int packIncomplete = 153;
 
+  /// Shots are planned from the locked bible as well as the screenplay.
+  static const int needsLockedBible = 154;
+
+  /// A scene is planned again within a shot plan, which does not exist yet.
+  static const int needsShotPlan = 155;
+
   final int code;
   final String message;
 
@@ -503,8 +527,6 @@ final class KinetoProjectSession implements Finalizable {
     _finalizer.attach(this, _handle, detach: this);
     _portFinalizer.attach(this, _port, detach: this);
   }
-
-  static const int shotCount = 2;
 
   static final NativeFinalizer _finalizer = NativeFinalizer(
     Native.addressOf<NativeFunction<_DestroyProjectNative>>(
@@ -624,6 +646,35 @@ final class KinetoProjectSession implements Finalizable {
   bool get isReadOnly {
     _ensureOpen();
     return _kinetoProjectIsReadOnly(_handle) != 0;
+  }
+
+  /// How many shots are in play: those of the locked shot plan, or of the
+  /// bootstrap scene before one is locked. Read from published state.
+  int get shotCount {
+    _ensureOpen();
+    return _kinetoProjectShotCount(_handle);
+  }
+
+  /// The ID of shot [shotIndex], as the shot plan names it.
+  String shotId(int shotIndex) {
+    _checkShotIndex(shotIndex);
+    return _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) =>
+          _kinetoProjectShotIdCopy(session, shotIndex, false, buffer, capacity, length),
+      'shot id',
+    );
+  }
+
+  /// The ID of the scene shot [shotIndex] belongs to.
+  String shotSceneId(int shotIndex) {
+    _checkShotIndex(shotIndex);
+    return _copyProjectUtf8(
+      _handle,
+      (session, buffer, capacity, length) =>
+          _kinetoProjectShotIdCopy(session, shotIndex, true, buffer, capacity, length),
+      'scene id',
+    );
   }
 
   String get projectId {
@@ -997,6 +1048,7 @@ final class _SessionPort {
               -2 => KinetoDocumentKind.storyAnalysis,
               -3 => KinetoDocumentKind.screenplay,
               -4 => KinetoDocumentKind.bible,
+              -7 => KinetoDocumentKind.shotPlan,
               _ => null,
             },
             images: switch (values[3]) {
@@ -1217,6 +1269,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'no_identity_reference': 151,
   'rejected': 152,
   'pack_incomplete': 153,
+  'needs_locked_bible': 154,
+  'needs_shot_plan': 155,
   'panic': 199,
 };
 
@@ -1279,6 +1333,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   151: 'The image provider cannot take this portrait as an identity reference',
   152: 'A rejected sample or portrait cannot be chosen',
   153: "The selected portrait's reference pack is not complete; make the pack first",
+  154: 'Lock the bible before planning shots',
+  155: 'Plan the shots before planning a scene again',
   199: 'Native project call failed unexpectedly',
 };
 

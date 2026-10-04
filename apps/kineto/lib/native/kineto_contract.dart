@@ -43,6 +43,7 @@ final class KinetoNativeContract {
     this._codes,
     this._documentFields,
     this._productionFields,
+    this._planFields,
   );
 
   /// Loaded once, on first use, after the ABI revision check.
@@ -76,6 +77,7 @@ final class KinetoNativeContract {
   final Map<int, Map<String, int>> _codes;
   final Map<String, (int, int)> _documentFields;
   final Map<String, (int, int)> _productionFields;
+  final Map<String, (int, int)> _planFields;
 
   static const int _llmProviderKind = 6;
   static const int _documentFieldKind = 7;
@@ -98,6 +100,18 @@ final class KinetoNativeContract {
   static const int _entryKindKind = 24;
   static const int _decisionKind = 25;
   static const int _imageCostKind = 26;
+  static const int _planFieldKind = 27;
+  static const int _planCountKind = 28;
+  static const int _planValueKind = 29;
+  static const int _planTextKind = 30;
+  static const int _framingKind = 31;
+  static const int _cameraMotionKind = 32;
+  static const int _planStaleCauseKind = 33;
+  static const int _stepStateKind = 34;
+  static const int _takeCountKind = 35;
+  static const int _takeValueKind = 36;
+  static const int _takeTextKind = 37;
+  static const int _takeStatusKind = 38;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -135,6 +149,37 @@ final class KinetoNativeContract {
   Map<String, int> get entryKinds => _table(_entryKindKind);
   Map<String, int> get decisions => _table(_decisionKind);
   Map<String, int> get imageCosts => _table(_imageCostKind);
+
+  /// What `kineto_project_plan_count` counts, by name.
+  Map<String, int> get planCounts => _table(_planCountKind);
+
+  /// Number fields of the published plan and recipe, by name.
+  Map<String, int> get planValues => _table(_planValueKind);
+
+  /// Text fields of the published plan and recipe, by name.
+  Map<String, int> get planTexts => _table(_planTextKind);
+
+  Map<String, int> get framings => _table(_framingKind);
+  Map<String, int> get cameraMotions => _table(_cameraMotionKind);
+  Map<String, int> get planStaleCauses => _table(_planStaleCauseKind);
+  Map<String, int> get stepStates => _table(_stepStateKind);
+  Map<String, int> get takeCounts => _table(_takeCountKind);
+  Map<String, int> get takeValues => _table(_takeValueKind);
+  Map<String, int> get takeTexts => _table(_takeTextKind);
+  Map<String, int> get takeStatuses => _table(_takeStatusKind);
+
+  /// Names of the packed plan state's fields.
+  Iterable<String> get planFields => _planFields.keys;
+
+  /// Read the named field out of a packed plan state.
+  int planField(int bits, String name) {
+    final layout = _planFields[name];
+    if (layout == null) {
+      throw StateError('Kineto native plan state has no field "$name"');
+    }
+    final (shift, width) = layout;
+    return (bits >>> shift) & ((1 << width) - 1);
+  }
 
   /// Names of the packed production state's fields.
   Iterable<String> get productionFields => _productionFields.keys;
@@ -208,6 +253,7 @@ final class KinetoNativeContract {
     final codes = <int, Map<String, int>>{};
     final documentFields = <String, (int, int)>{};
     final productionFields = <String, (int, int)>{};
+    final planFields = <String, (int, int)>{};
     final arena = Arena();
     try {
       final kind = arena<Uint32>();
@@ -236,6 +282,8 @@ final class KinetoNativeContract {
             documentFields[entryName] = (value.value, extra.value);
           case _productionFieldKind:
             productionFields[entryName] = (value.value, extra.value);
+          case _planFieldKind:
+            planFields[entryName] = (value.value, extra.value);
           default:
             (codes[kind.value] ??= <String, int>{})[entryName] = value.value;
         }
@@ -255,6 +303,7 @@ final class KinetoNativeContract {
       }),
       Map.unmodifiable(documentFields),
       Map.unmodifiable(productionFields),
+      Map.unmodifiable(planFields),
     );
   }
 }

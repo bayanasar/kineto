@@ -1,0 +1,20 @@
+{
+  "action": "The interviewer closes her notebook; the filmmaker waits.",
+  "camera_motion": "static",
+  "characters": [
+    "filmmaker",
+    "interviewer"
+  ],
+  "continuity": [
+    "Rain on the window behind them."
+  ],
+  "dialogue": "",
+  "direction": "spatial_clarity",
+  "duration_target": 4.0,
+  "emotion": "A held breath.",
+  "framing": "wide",
+  "lens": "28mm",
+  "purpose": "Establish the two of them across the desk.",
+  "schema_version": 1,
+  "shot_id": "office_night_01"
+}

@@ -1,0 +1,69 @@
+{
+  "world": {
+    "setting": "A city at night in the rain, seen through small interiors.",
+    "period": "The present day; phones exist but nobody looks at one.",
+    "visual_rules": [
+      "Practical light only: desk lamps, street light through windows."
+    ],
+    "continuity_rules": [
+      "It rains through the whole film."
+    ]
+  },
+  "characters": [
+    {
+      "id": "filmmaker",
+      "name": "The Filmmaker",
+      "description": "A director at the end of a long career, guarded and tired.",
+      "appearance": "A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes.",
+      "wardrobe": "A dark wool coat over a black sweater.",
+      "wardrobe_changes": [],
+      "forbidden_changes": [
+        "Grey at the temples.",
+        "Never without the coat."
+      ],
+      "continuity_notes": [
+        "His coat is wet from the rain."
+      ]
+    },
+    {
+      "id": "interviewer",
+      "name": "The Interviewer",
+      "description": "A patient journalist who has saved her hardest question for last.",
+      "appearance": "A woman in her thirties, short black hair, round glasses.",
+      "wardrobe": "A grey blazer, a notebook always in hand.",
+      "wardrobe_changes": [],
+      "forbidden_changes": [
+        "Round glasses."
+      ],
+      "continuity_notes": []
+    }
+  ],
+  "locations": [
+    {
+      "id": "small_office",
+      "name": "A small office",
+      "description": "Where the interview takes place.",
+      "appearance": "One table, two chairs, a rain-streaked window, a single desk lamp.",
+      "forbidden_changes": [
+        "The window is behind the interviewer."
+      ],
+      "continuity_notes": []
+    }
+  ],
+  "props": [
+    {
+      "id": "notebook",
+      "name": "The notebook",
+      "description": "Where the interviewer keeps her questions.",
+      "appearance": "A small black notebook with a red elastic band.",
+      "characters": [
+        "interviewer"
+      ],
+      "scenes": [
+        "office_night"
+      ],
+      "forbidden_changes": [],
+      "continuity_notes": []
+    }
+  ]
+}

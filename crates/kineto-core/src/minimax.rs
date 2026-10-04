@@ -368,8 +368,8 @@ impl<T: Transport> PaidJobAdapter for MinimaxKeyframes<'_, T> {
         }
 
         let media_path = match &request.owner {
-            CandidateOwner::Shot(shot_number) => {
-                keyframe_media_path(*shot_number, &request.artifact_id, extension(image.format))
+            CandidateOwner::Shot(key) => {
+                keyframe_media_path(key, &request.artifact_id, extension(image.format))
                     .map_err(|_| MinimaxKeyframeError::Receipt("keyframe path is invalid"))?
             }
             CandidateOwner::Style => {

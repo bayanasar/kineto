@@ -9,6 +9,7 @@ import 'native/kineto_engine.dart';
 import 'production_workspace.dart';
 import 'project_busy.dart';
 import 'screenplay_workspace.dart';
+import 'shot_plan_workspace.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -107,7 +108,7 @@ class KinetoApp extends StatefulWidget {
 }
 
 /// The workspaces the director moves between.
-enum KinetoWorkspace { screenplay, production, shots }
+enum KinetoWorkspace { screenplay, production, shotPlan, shots }
 
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
@@ -148,6 +149,7 @@ class _KinetoAppState extends State<KinetoApp> {
           for (final (workspace, label) in <(KinetoWorkspace, String)>[
             (KinetoWorkspace.screenplay, 'Story & screenplay'),
             (KinetoWorkspace.production, 'Bible, style & cast'),
+            (KinetoWorkspace.shotPlan, 'Shot plan'),
             (KinetoWorkspace.shots, 'Shots'),
           ])
             WabButton(
@@ -172,6 +174,12 @@ class _KinetoAppState extends State<KinetoApp> {
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.production => ProductionWorkspaceScreen(
+            project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+        KinetoWorkspace.shotPlan => ShotPlanWorkspaceScreen(
             project: widget.project,
             navigation: _navigation(),
             isDarkMode: _darkMode,

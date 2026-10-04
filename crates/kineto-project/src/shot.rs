@@ -22,6 +22,26 @@ const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const GENERATED_CANDIDATE_COUNT: usize = 3;
 const LEGACY_HASH_BACKUP_FILE: &str = "artifacts.pre-sha256-migration.json";
 
+/// The intent a candidate records it was made for, by `shot.json` field.
+/// A field whose value changes since makes the candidate stale.
+const INTENT_FIELDS: [&str; 12] = [
+    "direction",
+    "purpose",
+    "action",
+    "framing",
+    "lens",
+    "camera_motion",
+    "emotion",
+    "dialogue",
+    "characters",
+    "duration_target",
+    "continuity",
+    "continuity_from",
+];
+
+/// The artifact field holding a candidate's intent snapshot.
+const INTENT_RECORD: &str = "intent";
+
 /// Provider key recorded on candidates from the deterministic local demo
 /// generator. It stands in for a real image provider until P0.5.
 pub const DEMO_PROVIDER: &str = "local-demo";
@@ -148,7 +168,7 @@ pub struct ShotMigrationReport {
 /// input hash they are generated for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationPlan {
-    shot_number: u32,
+    shot_id: String,
     revision: u16,
     input_hash: InputHash,
     candidate_ids: Vec<ArtifactId>,
@@ -162,21 +182,21 @@ impl GenerationPlan {
         candidate: &ArtifactId,
         input_hash: InputHash,
     ) -> Result<Self, ShotWorkflowError> {
-        let (shot_number, revision) = parse_candidate_id(candidate.as_str()).ok_or(
+        let (shot_id, revision) = parse_candidate_id(candidate.as_str()).ok_or(
             ShotWorkflowError::InvalidTarget(std::path::PathBuf::from(candidate.as_str())),
         )?;
-        let shot_id = format!("shot_{shot_number:03}");
         Ok(Self {
-            shot_number,
+            candidate_ids: candidate_ids(shot_id, revision)?,
+            shot_id: shot_id.to_owned(),
             revision,
             input_hash,
-            candidate_ids: candidate_ids(&shot_id, revision)?,
         })
     }
 
+    /// The shot the generation belongs to.
     #[must_use]
-    pub const fn shot_number(&self) -> u32 {
-        self.shot_number
+    pub fn shot_id(&self) -> &str {
+        &self.shot_id
     }
 
     #[must_use]
@@ -218,6 +238,19 @@ pub struct CandidateOutput {
 pub struct CandidateOrigin {
     pub provider: String,
     pub model: String,
+}
+
+/// One keyframe candidate as the shot's history keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRecord {
+    pub artifact_id: String,
+    /// The generation it came from.
+    pub generation: u16,
+    pub status: ArtifactStatus,
+    pub media_path: Option<ProjectRelativePath>,
+    pub origin: CandidateOrigin,
+    /// The constraints its prompt applied, such as `director.note`.
+    pub applied: Vec<String>,
 }
 
 /// How much a compilation lost, derived from its dropped constraints.
@@ -275,7 +308,7 @@ impl PromptProvenance {
 /// Where a keyframe candidate's bytes live: beside the shot's canonical
 /// files, named by the candidate's stable artifact ID.
 pub fn keyframe_media_path(
-    shot_number: u32,
+    key: &ShotKey,
     artifact_id: &ArtifactId,
     extension: &str,
 ) -> Result<ProjectRelativePath, ShotWorkflowError> {
@@ -283,7 +316,7 @@ pub fn keyframe_media_path(
         return Err(ShotWorkflowError::InvalidCanonicalState);
     }
     shot_path(
-        shot_number,
+        key,
         &format!("keyframes/{}.{extension}", artifact_id.as_str()),
     )
 }
@@ -310,11 +343,17 @@ pub struct ShotIntent {
     pub dialogue: Option<String>,
     pub characters: Vec<String>,
     pub duration_target: Option<f64>,
+    /// What must stay as it was, in words.
+    pub continuity: Vec<String>,
+    /// The earlier shot this one continues from.
+    pub continuity_from: Option<String>,
 }
 
 /// The scene a shot belongs to, as written in its `scene.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneIntent {
+    /// The scene's ID, as its directory is named.
+    pub id: String,
     pub location: Option<String>,
     pub time: Option<String>,
     pub dramatic_goal: Option<String>,
@@ -339,6 +378,10 @@ struct StoredShotIntent {
     characters: Vec<String>,
     #[serde(default)]
     duration_target: Option<f64>,
+    #[serde(default)]
+    continuity: Vec<String>,
+    #[serde(default)]
+    continuity_from: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -359,16 +402,17 @@ fn non_blank(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// The intent of the bootstrap scene, or `None` when it has no `scene.json`.
+/// The intent of scene `scene_id`, or `None` when it has no `scene.json`.
 pub fn load_scene_intent(
     project: &CanonicalProject,
+    scene_id: &str,
 ) -> Result<Option<SceneIntent>, ShotWorkflowError> {
-    let path =
-        ProjectRelativePath::new("scenes/scene_001/scene.json").map_err(ShotWorkflowError::Path)?;
+    let path = scene_path(scene_id, "scene.json")?;
     let Some(stored) = read_json_optional::<StoredSceneIntent>(project, &path)? else {
         return Ok(None);
     };
     Ok(Some(SceneIntent {
+        id: scene_id.to_owned(),
         location: non_blank(stored.location),
         time: non_blank(stored.time),
         dramatic_goal: non_blank(stored.dramatic_goal),
@@ -382,10 +426,10 @@ pub const VIDEO_ARTIFACT_TYPE: &str = "shot_video";
 /// Where a video candidate's bytes live: beside the shot's canonical files,
 /// named by its stable artifact ID.
 pub fn video_media_path(
-    shot_number: u32,
+    key: &ShotKey,
     artifact_id: &ArtifactId,
 ) -> Result<ProjectRelativePath, ShotWorkflowError> {
-    shot_path(shot_number, &format!("videos/{}.mp4", artifact_id.as_str()))
+    shot_path(key, &format!("videos/{}.mp4", artifact_id.as_str()))
 }
 
 /// What a video generation is asked for, beyond the keyframe it starts from.
@@ -402,7 +446,7 @@ pub struct VideoGenerationSpec<'a> {
 /// One video generation for a shot, decided before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoPlan {
-    shot_number: u32,
+    shot_id: String,
     revision: u16,
     artifact_id: ArtifactId,
     input_hash: InputHash,
@@ -418,11 +462,11 @@ impl VideoPlan {
         artifact_id: &ArtifactId,
         input_hash: InputHash,
     ) -> Result<Self, ShotWorkflowError> {
-        let (shot_number, revision) = parse_video_id(artifact_id.as_str()).ok_or(
+        let (shot_id, revision) = parse_video_id(artifact_id.as_str()).ok_or(
             ShotWorkflowError::InvalidTarget(std::path::PathBuf::from(artifact_id.as_str())),
         )?;
         Ok(Self {
-            shot_number,
+            shot_id: shot_id.to_owned(),
             revision,
             artifact_id: artifact_id.clone(),
             input_hash,
@@ -430,9 +474,10 @@ impl VideoPlan {
         })
     }
 
+    /// The shot the video belongs to.
     #[must_use]
-    pub const fn shot_number(&self) -> u32 {
-        self.shot_number
+    pub fn shot_id(&self) -> &str {
+        &self.shot_id
     }
 
     #[must_use]
@@ -706,7 +751,7 @@ impl StoredSelectionManifest {
 
 #[derive(Debug, Clone)]
 pub struct ShotWorkflow {
-    shot_number: u32,
+    key: ShotKey,
     shot: ShotProductionManifest,
     artifacts: Vec<StoredArtifactRecord>,
     selection: StoredSelectionManifest,
@@ -716,14 +761,11 @@ pub struct ShotWorkflow {
 }
 
 impl ShotWorkflow {
-    pub fn load(project: &CanonicalProject, shot_number: u32) -> Result<Self, ShotWorkflowError> {
-        if shot_number == 0 {
-            return Err(ShotWorkflowError::InvalidShotNumber);
-        }
-        let shot_id = format!("shot_{shot_number:03}");
-        let shot_file = shot_path(shot_number, "shot.json")?;
-        let artifacts_file = shot_path(shot_number, "artifacts.json")?;
-        let selection_file = shot_path(shot_number, "selection.json")?;
+    pub fn load(project: &CanonicalProject, key: &ShotKey) -> Result<Self, ShotWorkflowError> {
+        let shot_id = key.shot().to_owned();
+        let shot_file = shot_path(key, "shot.json")?;
+        let artifacts_file = shot_path(key, "artifacts.json")?;
+        let selection_file = shot_path(key, "selection.json")?;
 
         let shot =
             read_json_optional(project, &shot_file)?.unwrap_or_else(|| ShotProductionManifest {
@@ -747,7 +789,7 @@ impl ShotWorkflow {
             .unwrap_or_default();
         let selection = read_json_optional(project, &selection_file)?.unwrap_or_default();
         let mut workflow = Self {
-            shot_number,
+            key: key.clone(),
             shot,
             artifacts,
             selection,
@@ -845,12 +887,19 @@ impl ShotWorkflow {
             dialogue: non_blank(stored.dialogue),
             characters: stored.characters,
             duration_target: stored.duration_target,
+            continuity: stored
+                .continuity
+                .into_iter()
+                .filter_map(|note| non_blank(Some(note)))
+                .collect(),
+            continuity_from: non_blank(stored.continuity_from),
         }))
     }
 
+    /// Where the shot lives.
     #[must_use]
-    pub const fn shot_number(&self) -> u32 {
-        self.shot_number
+    pub const fn key(&self) -> &ShotKey {
+        &self.key
     }
 
     #[must_use]
@@ -862,7 +911,7 @@ impl ShotWorkflow {
     /// attaching it again would change nothing.
     #[must_use]
     pub fn is_attached(&self, plan: &GenerationPlan) -> bool {
-        plan.shot_number == self.shot_number
+        plan.shot_id == self.key.shot
             && self.shot.generation_revision >= plan.revision
             && plan
                 .candidate_ids
@@ -884,6 +933,50 @@ impl ShotWorkflow {
                     .as_ref()
                     .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
                     .transpose()
+            })
+            .collect()
+    }
+
+    /// What changed in the shot's intent since each current candidate was
+    /// made, in candidate order, as `intent.<field>`.
+    pub fn candidate_intent_changes(&self) -> Result<Vec<Vec<String>>, ShotWorkflowError> {
+        self.selection
+            .domain()?
+            .candidate_artifact_ids
+            .iter()
+            .map(|candidate| {
+                self.changed_intent(
+                    self.artifact(candidate)
+                        .ok_or(ShotWorkflowError::InvalidCanonicalState)?,
+                )
+            })
+            .collect()
+    }
+
+    /// Every keyframe candidate the shot has had, current or superseded,
+    /// oldest generation first: what the director compares across takes.
+    pub fn candidate_history(&self) -> Result<Vec<CandidateRecord>, ShotWorkflowError> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type == "shot_candidate")
+            .map(|artifact| {
+                let (_, generation) = parse_candidate_id(&artifact.artifact_id)
+                    .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
+                Ok(CandidateRecord {
+                    artifact_id: artifact.artifact_id.clone(),
+                    generation,
+                    status: artifact.status.into(),
+                    media_path: artifact
+                        .media_path
+                        .as_ref()
+                        .map(|path| ProjectRelativePath::new(path).map_err(ShotWorkflowError::Path))
+                        .transpose()?,
+                    origin: CandidateOrigin {
+                        provider: artifact.provider.clone().unwrap_or_default(),
+                        model: artifact.model.clone().unwrap_or_default(),
+                    },
+                    applied: artifact.applied_constraints.clone().unwrap_or_default(),
+                })
             })
             .collect()
     }
@@ -955,7 +1048,7 @@ impl ShotWorkflow {
             .legacy_artifacts_bytes
             .as_ref()
             .ok_or(ShotWorkflowError::InvalidCanonicalState)?;
-        let backup_path = shot_path(self.shot_number, LEGACY_HASH_BACKUP_FILE)?;
+        let backup_path = shot_path(&self.key, LEGACY_HASH_BACKUP_FILE)?;
         match read_bytes_optional(project, &backup_path)? {
             Some(existing) if existing != *original => {
                 return Err(ShotWorkflowError::MigrationBackupConflict(
@@ -969,7 +1062,7 @@ impl ShotWorkflow {
                 .map_err(ShotWorkflowError::Fs)?,
         }
 
-        let artifacts_path = shot_path(self.shot_number, "artifacts.json")?;
+        let artifacts_path = shot_path(&self.key, "artifacts.json")?;
         write_json(project, &artifacts_path, &self.artifacts)?;
         let report = ShotMigrationReport {
             backup_path: Some(backup_path.as_path().to_string_lossy().into_owned()),
@@ -1000,7 +1093,7 @@ impl ShotWorkflow {
 
         let mut next = self.shot.clone();
         next.direction = direction;
-        write_json(project, &shot_path(self.shot_number, "shot.json")?, &next)?;
+        write_json(project, &shot_path(&self.key, "shot.json")?, &next)?;
         self.shot = next;
         Ok(())
     }
@@ -1034,7 +1127,7 @@ impl ShotWorkflow {
             .ok_or(ShotWorkflowError::GenerationOverflow)?;
         let input_hash = generation_input_hash(&self.shot, parents)?;
         Ok(GenerationPlan {
-            shot_number: self.shot_number,
+            shot_id: self.key.shot.clone(),
             revision,
             input_hash,
             candidate_ids: candidate_ids(&self.shot.shot_id, revision)?,
@@ -1053,7 +1146,7 @@ impl ShotWorkflow {
         plan: &GenerationPlan,
         outputs: &[CandidateOutput],
     ) -> Result<AttachOutcome, ShotWorkflowError> {
-        if plan.shot_number != self.shot_number
+        if plan.shot_id != self.key.shot
             || outputs.len() != plan.candidate_ids.len()
             || outputs
                 .iter()
@@ -1087,7 +1180,7 @@ impl ShotWorkflow {
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
         for output in outputs {
-            verify_output(project, plan.shot_number, output)?;
+            verify_output(project, &self.key, output)?;
         }
 
         let mut next_shot = self.shot.clone();
@@ -1135,7 +1228,7 @@ impl ShotWorkflow {
                         extra: BTreeMap::new(),
                     })
                     .collect(),
-                extra: BTreeMap::new(),
+                extra: BTreeMap::from([(INTENT_RECORD.to_owned(), intent_snapshot(&self.shot)?)]),
             });
             candidate_artifact_ids.push(output.artifact_id.as_str().to_owned());
         }
@@ -1209,12 +1302,12 @@ impl ShotWorkflow {
         // selection.json, which is the authority for the human selection.
         write_json(
             project,
-            &shot_path(self.shot_number, "artifacts.json")?,
+            &shot_path(&self.key, "artifacts.json")?,
             &next_artifacts,
         )?;
         write_json(
             project,
-            &shot_path(self.shot_number, "selection.json")?,
+            &shot_path(&self.key, "selection.json")?,
             &next_selection,
         )?;
         self.artifacts = next_artifacts;
@@ -1246,7 +1339,7 @@ impl ShotWorkflow {
             .transition(ArtifactStatus::Locked)?;
         write_json(
             project,
-            &shot_path(self.shot_number, "artifacts.json")?,
+            &shot_path(&self.key, "artifacts.json")?,
             &next_artifacts,
         )?;
         self.artifacts = next_artifacts;
@@ -1374,7 +1467,7 @@ impl ShotWorkflow {
             compiler_version: spec.compiler_version,
         });
         Ok(VideoPlan {
-            shot_number: self.shot_number,
+            shot_id: self.key.shot.clone(),
             revision,
             artifact_id: video_artifact_id(&self.shot.shot_id, revision)?,
             input_hash,
@@ -1385,7 +1478,7 @@ impl ShotWorkflow {
     /// Whether the planned video is already in canonical state.
     #[must_use]
     pub fn is_video_attached(&self, plan: &VideoPlan) -> bool {
-        plan.shot_number == self.shot_number
+        plan.shot_id == self.key.shot
             && self.shot.video_revision >= plan.revision
             && self.artifact(&plan.artifact_id).is_some()
     }
@@ -1398,7 +1491,7 @@ impl ShotWorkflow {
         plan: &VideoPlan,
         output: &VideoOutput,
     ) -> Result<AttachOutcome, ShotWorkflowError> {
-        if plan.shot_number != self.shot_number
+        if plan.shot_id != self.key.shot
             || output.artifact_id != plan.artifact_id
             || output.provider.trim().is_empty()
             || output.model.trim().is_empty()
@@ -1428,7 +1521,7 @@ impl ShotWorkflow {
         if let Some(provenance) = &output.provenance {
             provenance.validate()?;
         }
-        let expected = video_media_path(self.shot_number, &plan.artifact_id)?;
+        let expected = video_media_path(&self.key, &plan.artifact_id)?;
         if output.media_path != expected {
             return Err(ShotWorkflowError::InvalidCanonicalState);
         }
@@ -1476,14 +1569,10 @@ impl ShotWorkflow {
 
         // The revision is published first; a video revision without its
         // record is no current video, and attaching again completes it.
+        write_json(project, &shot_path(&self.key, "shot.json")?, &next_shot)?;
         write_json(
             project,
-            &shot_path(self.shot_number, "shot.json")?,
-            &next_shot,
-        )?;
-        write_json(
-            project,
-            &shot_path(self.shot_number, "artifacts.json")?,
+            &shot_path(&self.key, "artifacts.json")?,
             &next_artifacts,
         )?;
         self.shot = next_shot;
@@ -1548,7 +1637,7 @@ impl ShotWorkflow {
         video.transition(ArtifactStatus::Locked)?;
         write_json(
             project,
-            &shot_path(self.shot_number, "artifacts.json")?,
+            &shot_path(&self.key, "artifacts.json")?,
             &next_artifacts,
         )?;
         self.artifacts = next_artifacts;
@@ -1575,17 +1664,9 @@ impl ShotWorkflow {
         // records second, and the selection pointer last. load() recognizes the
         // intermediate states and reconciles them so every completed file boundary
         // is forward-recoverable after a process or power failure.
-        write_json(project, &shot_path(self.shot_number, "shot.json")?, shot)?;
-        write_json(
-            project,
-            &shot_path(self.shot_number, "artifacts.json")?,
-            artifacts,
-        )?;
-        write_json(
-            project,
-            &shot_path(self.shot_number, "selection.json")?,
-            selection,
-        )
+        write_json(project, &shot_path(&self.key, "shot.json")?, shot)?;
+        write_json(project, &shot_path(&self.key, "artifacts.json")?, artifacts)?;
+        write_json(project, &shot_path(&self.key, "selection.json")?, selection)
     }
 
     fn normalize_legacy_demo_hashes(&mut self) -> Result<(), ShotWorkflowError> {
@@ -1912,12 +1993,48 @@ impl ShotWorkflow {
                 })
                 .collect::<Result<Vec<_>, ShotWorkflowError>>()?;
             let expected = generation_input_hash(&self.shot, &parents)?;
-            if artifact.input_hash.as_deref() != Some(expected.as_str()) {
+            if artifact.input_hash.as_deref() != Some(expected.as_str())
+                || !self.changed_intent(artifact)?.is_empty()
+            {
                 return Ok(true);
             }
         }
         Ok(false)
     }
+
+    /// The intent fields that changed since `artifact` was made, as
+    /// `intent.<field>`; none for a candidate that recorded no intent.
+    fn changed_intent(
+        &self,
+        artifact: &StoredArtifactRecord,
+    ) -> Result<Vec<String>, ShotWorkflowError> {
+        let Some(Value::Object(recorded)) = artifact.extra.get(INTENT_RECORD) else {
+            return Ok(Vec::new());
+        };
+        let Value::Object(current) = intent_snapshot(&self.shot)? else {
+            return Err(ShotWorkflowError::InvalidCanonicalState);
+        };
+        Ok(INTENT_FIELDS
+            .iter()
+            .filter(|field| recorded.get(**field) != current.get(**field))
+            .map(|field| format!("intent.{field}"))
+            .collect())
+    }
+}
+
+/// The intent `shot` is written with now, field by field.
+fn intent_snapshot(shot: &ShotProductionManifest) -> Result<Value, ShotWorkflowError> {
+    let mut snapshot = serde_json::Map::new();
+    snapshot.insert(
+        "direction".to_owned(),
+        serde_json::to_value(shot.direction).map_err(ShotWorkflowError::Json)?,
+    );
+    for field in &INTENT_FIELDS[1..] {
+        if let Some(value) = shot.extra.get(*field) {
+            snapshot.insert((*field).to_owned(), value.clone());
+        }
+    }
+    Ok(Value::Object(snapshot))
 }
 
 /// The input hash of a generation of `shot` compiled from `parents`: the
@@ -1945,7 +2062,7 @@ fn generation_input_hash(
 /// exactly the bytes its content hash names.
 fn verify_output(
     project: &CanonicalProject,
-    shot_number: u32,
+    key: &ShotKey,
     output: &CandidateOutput,
 ) -> Result<(), ShotWorkflowError> {
     if let Some(provenance) = &output.provenance {
@@ -1954,7 +2071,7 @@ fn verify_output(
     let Some(media_path) = &output.media_path else {
         return Ok(());
     };
-    let expected_dir = shot_path(shot_number, "keyframes")?;
+    let expected_dir = shot_path(key, "keyframes")?;
     if media_path.as_path().parent() != Some(expected_dir.as_path())
         || media_path
             .as_path()
@@ -2022,23 +2139,18 @@ fn video_artifact_id(shot_id: &str, revision: u16) -> Result<ArtifactId, ShotWor
     ArtifactId::new(format!("{shot_id}_v{revision:04}")).map_err(ShotWorkflowError::ArtifactId)
 }
 
-/// Parse `shot_NNN_vRRRR` back into its shot number and video revision.
-fn parse_video_id(value: &str) -> Option<(u32, u16)> {
-    let rest = value.strip_prefix("shot_")?;
-    let (shot, revision) = rest.split_once("_v")?;
-    if shot.len() < 3
-        || revision.len() != 4
-        || !shot.bytes().all(|byte| byte.is_ascii_digit())
-        || !revision.bytes().all(|byte| byte.is_ascii_digit())
-    {
+/// A four-digit revision from 0001 on.
+fn parse_revision(value: &str) -> Option<u16> {
+    if value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let shot_number = shot.parse::<u32>().ok().filter(|number| *number != 0)?;
-    let revision = revision
-        .parse::<u16>()
-        .ok()
-        .filter(|revision| *revision != 0)?;
-    Some((shot_number, revision))
+    value.parse::<u16>().ok().filter(|revision| *revision != 0)
+}
+
+/// Parse `<shot_id>_vRRRR` back into its shot ID and video revision.
+fn parse_video_id(value: &str) -> Option<(&str, u16)> {
+    let (shot, revision) = value.rsplit_once("_v")?;
+    ShotKey::is_id(shot).then_some((shot, parse_revision(revision)?))
 }
 
 fn input_hash(shot: &ShotProductionManifest) -> Result<InputHash, ShotWorkflowError> {
@@ -2078,26 +2190,16 @@ fn candidate_ids(shot_id: &str, revision: u16) -> Result<Vec<ArtifactId>, ShotWo
         .collect()
 }
 
-/// Parse `shot_NNN_gRRRR_candidate_x` back into its shot number and revision.
-fn parse_candidate_id(value: &str) -> Option<(u32, u16)> {
-    let rest = value.strip_prefix("shot_")?;
-    let (shot, rest) = rest.split_once("_g")?;
-    let (revision, label) = rest.split_once("_candidate_")?;
-    if shot.len() < 3
-        || revision.len() != 4
-        || label.len() != 1
-        || !shot.bytes().all(|byte| byte.is_ascii_digit())
-        || !revision.bytes().all(|byte| byte.is_ascii_digit())
-    {
+/// Parse `<shot_id>_gRRRR_candidate_x` back into its shot ID and revision.
+fn parse_candidate_id(value: &str) -> Option<(&str, u16)> {
+    let (rest, label) = value.rsplit_once("_candidate_")?;
+    let (shot, revision) = rest.rsplit_once("_g")?;
+    if label.len() != 1 || !ShotKey::is_id(shot) {
         return None;
     }
-    let shot_number = shot.parse::<u32>().ok().filter(|number| *number != 0)?;
-    let revision = revision
-        .parse::<u16>()
-        .ok()
-        .filter(|revision| *revision != 0)?;
+    let revision = parse_revision(revision)?;
     let index = usize::from(label.as_bytes()[0].checked_sub(b'a')?);
-    (index < GENERATED_CANDIDATE_COUNT).then_some((shot_number, revision))
+    (index < GENERATED_CANDIDATE_COUNT).then_some((shot, revision))
 }
 
 fn find_artifact_mut<'a>(
@@ -2109,11 +2211,127 @@ fn find_artifact_mut<'a>(
         .find(|artifact| artifact.artifact_id == artifact_id.as_str())
 }
 
-fn shot_path(shot_number: u32, file: &str) -> Result<ProjectRelativePath, ShotWorkflowError> {
-    ProjectRelativePath::new(format!(
-        "scenes/scene_001/shots/shot_{shot_number:03}/{file}"
-    ))
-    .map_err(ShotWorkflowError::Path)
+fn shot_path(key: &ShotKey, file: &str) -> Result<ProjectRelativePath, ShotWorkflowError> {
+    scene_path(&key.scene, &format!("shots/{}/{file}", key.shot))
+}
+
+fn scene_path(scene_id: &str, file: &str) -> Result<ProjectRelativePath, ShotWorkflowError> {
+    if !ShotKey::is_id(scene_id) {
+        return Err(ShotWorkflowError::InvalidShotNumber);
+    }
+    ProjectRelativePath::new(format!("scenes/{scene_id}/{file}")).map_err(ShotWorkflowError::Path)
+}
+
+/// Where a shot lives: its scene and its own ID, both portable identifiers
+/// of at most 64 characters. Shot IDs are unique across the project.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShotKey {
+    scene: String,
+    shot: String,
+}
+
+impl ShotKey {
+    /// The longest scene or shot ID.
+    pub const MAX_ID: usize = 64;
+
+    pub fn new(
+        scene: impl Into<String>,
+        shot: impl Into<String>,
+    ) -> Result<Self, ShotWorkflowError> {
+        let (scene, shot) = (scene.into(), shot.into());
+        if Self::is_id(&scene) && Self::is_id(&shot) {
+            Ok(Self { scene, shot })
+        } else {
+            Err(ShotWorkflowError::InvalidShotNumber)
+        }
+    }
+
+    /// Shot `number` of the bootstrap scene, as in `scene_001/shot_002`.
+    #[must_use]
+    pub fn bootstrap(number: u32) -> Self {
+        Self {
+            scene: BOOTSTRAP_SCENE.to_owned(),
+            shot: format!("shot_{number:03}"),
+        }
+    }
+
+    #[must_use]
+    pub fn scene(&self) -> &str {
+        &self.scene
+    }
+
+    #[must_use]
+    pub fn shot(&self) -> &str {
+        &self.shot
+    }
+
+    /// Whether `value` can name a scene or a shot.
+    #[must_use]
+    pub fn is_id(value: &str) -> bool {
+        value.len() <= Self::MAX_ID && crate::story::is_portable_id(value)
+    }
+}
+
+/// Whether `shot_id` names a bootstrap shot, as in `shot_002`.
+fn is_bootstrap_shot(shot_id: &str) -> bool {
+    shot_id.strip_prefix("shot_").is_some_and(|number| {
+        number.len() >= 3
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+            && number.parse::<u32>().is_ok_and(|number| number != 0)
+    })
+}
+
+/// The scene every project created by the desktop app starts with.
+pub const BOOTSTRAP_SCENE: &str = "scene_001";
+
+/// Shots of the bootstrap scene, `shot_001` on.
+pub const BOOTSTRAP_SHOTS: u32 = 2;
+
+/// Where shot `shot_id` lives: the scene directory holding it, found by
+/// looking. `None` when no scene has it.
+pub fn locate(
+    project: &CanonicalProject,
+    shot_id: &str,
+) -> Result<Option<ShotKey>, ShotWorkflowError> {
+    if !ShotKey::is_id(shot_id) {
+        return Ok(None);
+    }
+    let scenes = project
+        .root()
+        .resolve(&ProjectRelativePath::new("scenes").map_err(ShotWorkflowError::Path)?);
+    let entries = match std::fs::read_dir(&scenes) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ShotWorkflowError::Fs(crate::fs::ProjectFsError::Io(error))),
+    };
+    let mut found = Vec::new();
+    for entry in entries.into_iter().flatten() {
+        let entry =
+            entry.map_err(|error| ShotWorkflowError::Fs(crate::fs::ProjectFsError::Io(error)))?;
+        let Some(scene) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if ShotKey::is_id(&scene)
+            && entry
+                .path()
+                .join("shots")
+                .join(shot_id)
+                .join("shot.json")
+                .is_file()
+        {
+            found.push(ShotKey::new(scene, shot_id)?);
+        }
+    }
+    match found.len() {
+        // A bootstrap shot is in the bootstrap scene, written or not.
+        0 => Ok(is_bootstrap_shot(shot_id).then(|| ShotKey {
+            scene: BOOTSTRAP_SCENE.to_owned(),
+            shot: shot_id.to_owned(),
+        })),
+        1 => Ok(found.pop()),
+        // A shot ID names one shot; two scenes claiming it is damage.
+        _ => Err(ShotWorkflowError::InvalidCanonicalState),
+    }
 }
 
 fn read_bytes_optional(
@@ -2428,10 +2646,13 @@ mod tests {
         let target = temp.0.join("film");
         let project = project(&target);
         assert_eq!(
-            ShotWorkflow::load(&project, 1).unwrap().intent().unwrap(),
+            ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
+                .unwrap()
+                .intent()
+                .unwrap(),
             None
         );
-        assert_eq!(load_scene_intent(&project).unwrap(), None);
+        assert_eq!(load_scene_intent(&project, BOOTSTRAP_SCENE).unwrap(), None);
 
         fs::create_dir_all(shot_dir(&target)).unwrap();
         fs::write(
@@ -2447,7 +2668,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         let expected = ShotIntent {
             action: "Alice picks up the sealed letter".to_owned(),
             framing: Some("medium_close_up".to_owned()),
@@ -2457,11 +2678,14 @@ mod tests {
             dialogue: None,
             characters: vec!["alice".to_owned()],
             duration_target: Some(4.0),
+            continuity: Vec::new(),
+            continuity_from: None,
         };
         assert_eq!(shot.intent().unwrap(), Some(expected.clone()));
         assert_eq!(
-            load_scene_intent(&project).unwrap(),
+            load_scene_intent(&project, BOOTSTRAP_SCENE).unwrap(),
             Some(SceneIntent {
+                id: "scene_001".to_owned(),
                 location: Some("empty_room".to_owned()),
                 time: Some("day".to_owned()),
                 dramatic_goal: Some("Alice discovers the letter".to_owned()),
@@ -2471,7 +2695,7 @@ mod tests {
 
         shot.set_direction(&project, ShotDirection::Tension)
             .unwrap();
-        let reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        let reloaded = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(reloaded.direction(), ShotDirection::Tension);
         assert_eq!(reloaded.intent().unwrap(), Some(expected));
     }
@@ -2487,7 +2711,7 @@ mod tests {
 
     /// Write a fake clip for `plan` and the output that names it.
     fn video_output(project: &CanonicalProject, plan: &VideoPlan, bytes: &[u8]) -> VideoOutput {
-        let media_path = video_media_path(plan.shot_number(), plan.artifact_id()).unwrap();
+        let media_path = video_media_path(&ShotKey::bootstrap(1), plan.artifact_id()).unwrap();
         project.root().write_atomic(&media_path, bytes).unwrap();
         VideoOutput {
             artifact_id: plan.artifact_id().clone(),
@@ -2501,7 +2725,7 @@ mod tests {
     }
 
     fn locked_shot(project: &CanonicalProject) -> ShotWorkflow {
-        let mut shot = ShotWorkflow::load(project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(project).unwrap();
         shot.select(project, 1).unwrap();
         shot.lock(project).unwrap();
@@ -2513,7 +2737,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert!(matches!(
             shot.plan_video(&project, spec()),
             Err(ShotWorkflowError::KeyframeNotLocked)
@@ -2551,7 +2775,7 @@ mod tests {
         assert_eq!(snapshot.superseded_count, 0);
 
         shot.lock_video(&project).unwrap();
-        let reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        let reloaded = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(reloaded.snapshot().unwrap().video, VideoState::Locked);
         assert_eq!(
             reloaded.video_media().unwrap().unwrap().as_path(),
@@ -2641,7 +2865,7 @@ mod tests {
             format!("sha256:{}", "0".repeat(64)).into();
         fs::write(&path, serde_json::to_vec(&artifacts).unwrap()).unwrap();
 
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(shot.snapshot().unwrap().video, VideoState::Stale);
         assert!(matches!(
             shot.lock_video(&project),
@@ -2698,7 +2922,9 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            ShotWorkflow::load(&project, 1).unwrap().intent(),
+            ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
+                .unwrap()
+                .intent(),
             Err(ShotWorkflowError::Json(_))
         ));
     }
@@ -2727,7 +2953,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.set_direction(&project, ShotDirection::Tension)
             .unwrap();
         shot.generate(&project).unwrap();
@@ -2741,7 +2967,7 @@ mod tests {
         fs::remove_dir_all(target.join(".kineto")).unwrap();
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let reopened_shot = ShotWorkflow::load(&reopened, 1).unwrap();
+        let reopened_shot = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(reopened_shot.snapshot().unwrap(), before);
         assert_eq!(before.direction, ShotDirection::Tension);
         assert_eq!(before.selected_index, Some(2));
@@ -2753,7 +2979,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         shot.select(&project, 1).unwrap();
         let selected_before = shot.selection.selected_artifact_id.clone();
@@ -2801,7 +3027,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.set_direction(&project, ShotDirection::SpatialClarity)
             .unwrap();
         shot.generate(&project).unwrap();
@@ -2822,7 +3048,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.set_direction(&project, ShotDirection::Tension)
             .unwrap();
 
@@ -2851,7 +3077,7 @@ mod tests {
         let temp = TempDir::new();
         let source_target = temp.0.join("source-film");
         let source_project = project(&source_target);
-        let mut source_shot = ShotWorkflow::load(&source_project, 1).unwrap();
+        let mut source_shot = ShotWorkflow::load(&source_project, &ShotKey::bootstrap(1)).unwrap();
         source_shot.generate(&source_project).unwrap();
         let generation_one = read_state_files(&source_target);
         source_shot.generate(&source_project).unwrap();
@@ -2882,7 +3108,7 @@ mod tests {
             let target = temp.0.join(name);
             let project = project(&target);
             write_state_files(&target, &state);
-            let mut recovered = ShotWorkflow::load(&project, 1).unwrap();
+            let mut recovered = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
             recovered.generate(&project).unwrap();
             let snapshot = recovered.snapshot().unwrap();
             assert_eq!(snapshot.generation_revision, 3, "case {name}");
@@ -2896,7 +3122,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         shot.select(&project, 0).unwrap();
         let selection_before = fs::read(shot_dir(&target).join("selection.json")).unwrap();
@@ -2908,7 +3134,7 @@ mod tests {
         fs::write(shot_dir(&target).join("artifacts.json"), artifacts_after).unwrap();
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let mut recovered = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut recovered = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(recovered.snapshot().unwrap().selected_index, Some(0));
         assert_eq!(
             recovered
@@ -2927,7 +3153,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         shot.select(&project, 1).unwrap();
         let selection_before = fs::read(shot_dir(&target).join("selection.json")).unwrap();
@@ -2944,7 +3170,7 @@ mod tests {
         .unwrap();
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let mut recovered = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut recovered = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         let snapshot = recovered.snapshot().unwrap();
         assert_eq!(snapshot.candidate_count, 0);
         assert_eq!(snapshot.selected_index, None);
@@ -2957,7 +3183,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         shot.select(&project, 0).unwrap();
 
@@ -2982,7 +3208,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
 
         for artifact in &shot.artifacts {
@@ -3001,7 +3227,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.set_direction(&project, ShotDirection::Tension)
             .unwrap();
         shot.generate(&project).unwrap();
@@ -3021,7 +3247,7 @@ mod tests {
         drop(project);
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let mut normalized = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut normalized = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         let mut expected_pending = before;
         expected_pending.migration_pending = true;
         assert_eq!(normalized.snapshot().unwrap(), expected_pending);
@@ -3051,7 +3277,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
 
         let shot_path = shot_dir(&target).join("shot.json");
@@ -3076,7 +3302,7 @@ mod tests {
         .unwrap();
         assert!(read_only.is_read_only());
 
-        let mut first = ShotWorkflow::load(&read_only, 1).unwrap();
+        let mut first = ShotWorkflow::load(&read_only, &ShotKey::bootstrap(1)).unwrap();
         assert!(first.snapshot().unwrap().migration_pending);
         assert_eq!(fs::read(&shot_path).unwrap(), shot_bytes);
         assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
@@ -3087,7 +3313,7 @@ mod tests {
             PROJECT_FORMAT_VERSION + 1,
         )
         .unwrap();
-        let second = ShotWorkflow::load(&reopened, 1).unwrap();
+        let second = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         assert!(second.snapshot().unwrap().migration_pending);
         assert_eq!(fs::read(&shot_path).unwrap(), shot_bytes);
         assert_eq!(fs::read(&artifacts_path).unwrap(), legacy_bytes);
@@ -3110,7 +3336,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
 
         let artifacts_path = shot_dir(&target).join("artifacts.json");
@@ -3126,7 +3352,7 @@ mod tests {
         drop(project);
 
         let reopened = CanonicalProject::open(&target).unwrap();
-        let mut degraded = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut degraded = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         let snapshot = degraded.snapshot().unwrap();
         assert_eq!(snapshot.invalid_hash_count, 1);
         assert!(!snapshot.migration_pending);
@@ -3168,11 +3394,11 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let shot = ShotWorkflow::load(&project, 1).unwrap();
+        let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         let before = project.root().canonical_snapshot().unwrap();
 
         let plan = shot.plan_generation(&project).unwrap();
-        assert_eq!(plan.shot_number(), 1);
+        assert_eq!(plan.shot_id(), "shot_001");
         assert_eq!(plan.revision(), 1);
         assert_eq!(plan.candidate_ids().len(), GENERATED_CANDIDATE_COUNT);
         assert_eq!(project.root().canonical_snapshot().unwrap(), before);
@@ -3183,7 +3409,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         let plan = shot.plan_generation(&project).unwrap();
         let outputs = demo_outputs(&plan);
 
@@ -3197,7 +3423,7 @@ mod tests {
             AttachOutcome::AlreadyAttached
         );
         // A fresh load (as after a restart) sees the same generation as done.
-        let mut reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        let mut reloaded = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert_eq!(
             reloaded
                 .attach_generation(&project, &plan, &outputs)
@@ -3225,7 +3451,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         let orphan = shot.plan_generation(&project).unwrap();
         assert_eq!(orphan.revision(), 2);
@@ -3234,8 +3460,13 @@ mod tests {
         // then moved the shot on to revision 3 without it.
         let mut half = shot.shot.clone();
         half.generation_revision = orphan.revision();
-        write_json(&project, &shot_path(1, "shot.json").unwrap(), &half).unwrap();
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        write_json(
+            &project,
+            &shot_path(&ShotKey::bootstrap(1), "shot.json").unwrap(),
+            &half,
+        )
+        .unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
         assert_eq!(shot.snapshot().unwrap().generation_revision, 3);
 
@@ -3264,15 +3495,20 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let shot = ShotWorkflow::load(&project, 1).unwrap();
+        let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         let plan = shot.plan_generation(&project).unwrap();
 
         // A crash after the revision was published but before the artifacts.
         let mut half = shot.shot.clone();
         half.generation_revision = plan.revision();
-        write_json(&project, &shot_path(1, "shot.json").unwrap(), &half).unwrap();
+        write_json(
+            &project,
+            &shot_path(&ShotKey::bootstrap(1), "shot.json").unwrap(),
+            &half,
+        )
+        .unwrap();
 
-        let mut reloaded = ShotWorkflow::load(&project, 1).unwrap();
+        let mut reloaded = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         assert!(!reloaded.snapshot().unwrap().generated);
         assert_eq!(
             reloaded
@@ -3280,7 +3516,10 @@ mod tests {
                 .unwrap(),
             AttachOutcome::Attached
         );
-        let snapshot = ShotWorkflow::load(&project, 1).unwrap().snapshot().unwrap();
+        let snapshot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1))
+            .unwrap()
+            .snapshot()
+            .unwrap();
         assert!(snapshot.generated);
         assert_eq!(snapshot.generation_revision, plan.revision());
         assert_eq!(
@@ -3294,18 +3533,24 @@ mod tests {
         let input = input_hash_for("shot_002", ShotDirection::Tension).unwrap();
         let candidate = ArtifactId::new("shot_002_g0007_candidate_c").unwrap();
         let plan = GenerationPlan::for_candidate(&candidate, input.clone()).unwrap();
-        assert_eq!(plan.shot_number(), 2);
+        assert_eq!(plan.shot_id(), "shot_002");
         assert_eq!(plan.revision(), 7);
         assert_eq!(plan.input_hash(), &input);
         assert_eq!(plan.candidate_ids()[2], candidate);
 
+        // A planned shot's ID is whatever the plan named it.
+        let planned = ArtifactId::new("office_night_02_g0001_candidate_a").unwrap();
+        let plan = GenerationPlan::for_candidate(&planned, input.clone()).unwrap();
+        assert_eq!(plan.shot_id(), "office_night_02");
+        assert_eq!(plan.revision(), 1);
+
         for malformed in [
             "shot_002_g07_candidate_a",
-            "shot_000_g0001_candidate_a",
             "shot_002_g0000_candidate_a",
             "shot_002_g0001_candidate_d",
             "shot_002_g0001_candidate_ab",
-            "take_002_g0001_candidate_a",
+            "g0001_candidate_a",
+            "shot_002_candidate_a",
         ] {
             let id = ArtifactId::new(malformed).unwrap();
             assert!(
@@ -3320,7 +3565,7 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
-        let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
         shot.generate(&project).unwrap();
 
         let artifacts_path = shot_dir(&target).join("artifacts.json");
@@ -3335,7 +3580,7 @@ mod tests {
         // Both conditions are reported at once. Migration is refused while
         // any hash is unrecognised, so a caller must not offer it then.
         let reopened = CanonicalProject::open(&target).unwrap();
-        let mut shot = ShotWorkflow::load(&reopened, 1).unwrap();
+        let mut shot = ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1)).unwrap();
         let snapshot = shot.snapshot().unwrap();
         assert!(snapshot.migration_pending);
         assert_eq!(snapshot.invalid_hash_count, 1);

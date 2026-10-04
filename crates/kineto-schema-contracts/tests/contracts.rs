@@ -16,7 +16,7 @@ use kineto_project::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
-    shot::ShotWorkflow,
+    shot::{ShotKey, ShotWorkflow},
 };
 use serde_json::Value;
 
@@ -183,11 +183,14 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "character.schema.json",
             "job.schema.json",
             "project.schema.json",
+            "recipe.schema.json",
             "revisions.schema.json",
             "scene.schema.json",
             "screenplay-scene.schema.json",
             "screenplay.schema.json",
             "selection.schema.json",
+            "shot-plan-scene.schema.json",
+            "shot-plan.schema.json",
             "shot.schema.json",
             "source.schema.json",
             "story-analysis.schema.json",
@@ -199,6 +202,21 @@ fn committed_schema_inventory_is_explicit_and_supported() {
     for file in files {
         let _ = schema(&file);
     }
+}
+
+#[test]
+fn every_shipped_recipe_matches_the_committed_schema() {
+    let recipe_schema = schema("recipe.schema.json");
+    let root = repo_root().join("recipes");
+    let mut files = Vec::new();
+    collect_files(&root, &root, &mut files);
+    assert_eq!(files, ["default-film-1.json"]);
+    for file in files {
+        validate(&recipe_schema, &json_file(&root.join(&file)), &file);
+    }
+    let mut drifted = json_file(&root.join("default-film-1.json"));
+    drifted["steps"][0]["produces"] = "music".into();
+    assert!(validate_value(&recipe_schema, &drifted, "$").is_err());
 }
 
 #[test]
@@ -281,7 +299,7 @@ fn real_project_and_shot_persistence_match_committed_schemas() {
         "production project.toml",
     );
 
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
     shot.generate(&project)
         .expect("shot generation should persist");
     let shot_root = temp.0.join("scenes/scene_001/shots/shot_001");
@@ -324,7 +342,8 @@ fn bootstrap_scene_written_at_creation_matches_committed_schemas() {
         validate(&shot_schema, &json_file(&shot_json), "bootstrap shot.json");
 
         // A canonical write keeps the intent and still matches the schema.
-        let mut shot = ShotWorkflow::load(&project, shot_number).expect("shot should load");
+        let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(shot_number))
+            .expect("shot should load");
         shot.generate(&project)
             .expect("bootstrap shot should accept a generation");
         let written = json_file(&shot_json);
@@ -344,7 +363,7 @@ fn shot_video_records_match_committed_schemas() {
     let temp = TempDir::new();
     let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
         .expect("test project should be creatable");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
     shot.generate(&project)
         .expect("shot generation should persist");
     shot.select(&project, 0)
@@ -362,8 +381,9 @@ fn shot_video_records_match_committed_schemas() {
             },
         )
         .expect("a video should be plannable from the locked keyframe");
-    let media_path = kineto_project::shot::video_media_path(1, plan.artifact_id())
-        .expect("video path should be valid");
+    let media_path =
+        kineto_project::shot::video_media_path(&ShotKey::bootstrap(1), plan.artifact_id())
+            .expect("video path should be valid");
     let bytes = b"\0\0\0\x18ftypisomschema";
     project
         .root()
@@ -593,6 +613,64 @@ fn generated_and_edited_bibles_and_their_revision_log_match_committed_schemas() 
 }
 
 #[test]
+fn generated_and_edited_shot_plans_and_their_revision_log_match_committed_schemas() {
+    use kineto_llm::fake::FakeLlm;
+    use kineto_project::shot_plan::{SAMPLE_SHOT_PLAN_JSON, ShotPlan};
+    let plan_schema = schema("shot-plan.schema.json");
+    let scene_schema = schema("shot-plan-scene.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    kineto_core::story::analyze(
+        &project,
+        &FakeLlm::answering([kineto_project::story::SAMPLE_ANALYSIS_JSON]),
+    )
+    .expect("the analysis should be generated");
+    kineto_core::screenplay::write(
+        &project,
+        &FakeLlm::answering([kineto_project::screenplay::SAMPLE_SCREENPLAY_JSON]),
+    )
+    .expect("the screenplay should be written");
+    kineto_project::screenplay::lock(&project, 1).expect("the screenplay should lock");
+    kineto_core::bible::write(
+        &project,
+        &FakeLlm::answering([kineto_project::bible::SAMPLE_BIBLE_JSON]),
+    )
+    .expect("the bible should be written");
+    kineto_project::bible::lock(&project, 1).expect("the bible should lock");
+    let sample: Value = serde_json::from_str(SAMPLE_SHOT_PLAN_JSON).expect("the sample is JSON");
+    validate(&plan_schema, &sample, "sample shot plan");
+    validate(&scene_schema, &sample["scenes"][0], "sample scene plan");
+    let written =
+        kineto_core::shot_plan::write(&project, &FakeLlm::answering([SAMPLE_SHOT_PLAN_JSON]))
+            .expect("the plan should be written");
+    let plan: ShotPlan =
+        kineto_project::revisions::read(&project, &written).expect("the plan is readable");
+    let mut scene = plan.scenes[0].clone();
+    scene.shots[0].continuity_from = None;
+    scene.shots[1].dialogue = String::new();
+    let edited = kineto_project::shot_plan::edit_scene(&project, 1, scene, &Default::default())
+        .expect("the edit is saved");
+    kineto_project::shot_plan::lock(&project, 2).expect("the plan should lock");
+    for record in [&written, &edited] {
+        validate(
+            &plan_schema,
+            &json_file(&temp.0.join(&record.path)),
+            &record.path,
+        );
+    }
+    validate(
+        &revisions_schema,
+        &json_file(&temp.0.join("shot_plan/revisions.json")),
+        "shot plan revisions",
+    );
+    let mut drifted = sample;
+    drifted["scenes"][0]["shots"][0]["camera_motion"] = "whip_pan".into();
+    assert!(validate_value(&plan_schema, &drifted, "$").is_err());
+}
+
+#[test]
 fn the_bible_schema_rejects_drift() {
     let bible_schema = schema("bible.schema.json");
     let sample: Value =
@@ -808,7 +886,7 @@ fn production_generation_jobs_and_candidates_match_committed_schemas() {
     let temp = TempDir::new();
     let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
         .expect("test project should be creatable");
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
 
     generation::generate(&project, &mut shot, &ImageProvider::LocalDemo, &mut NoHooks)
         .expect("generation should run as write-ahead jobs");
@@ -895,7 +973,7 @@ fn provider_generated_keyframe_candidates_match_committed_schemas() {
             .expect("test key is not blank"),
         "https://example.test",
     );
-    let mut shot = ShotWorkflow::load(&project, 1).expect("shot should load");
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("shot should load");
 
     generation::generate_with(
         &project,

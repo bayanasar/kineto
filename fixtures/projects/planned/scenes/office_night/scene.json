@@ -1,0 +1,15 @@
+{
+  "characters": [
+    "filmmaker",
+    "interviewer"
+  ],
+  "dramatic_goal": "The last question lands and he cannot stay to answer it.",
+  "location": "small_office",
+  "scene_id": "office_night",
+  "schema_version": 1,
+  "shots": [
+    "office_night_01",
+    "office_night_02"
+  ],
+  "time": "night"
+}

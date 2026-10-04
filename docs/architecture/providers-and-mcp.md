@@ -196,13 +196,15 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
-The keyframe compiler is `keyframe-prompt/2` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
+The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
 
 - The locked style's directives and note lead the prompt; without a locked style it asks for a photorealistic film still.
-- A character whose cast is locked is shown from their canonical portrait, sent as the identity reference, when the provider takes one. One reference is sent per image, to the first such character of the shot.
+- A character whose cast is locked is shown from their canonical portrait, sent as an identity reference, up to as many references as the provider declares it takes in one image, in the shot's order.
 - Every other named character is an identity-affecting drop, and the reason says why: not cast yet, one reference per image, or a provider that takes none.
 - A cast character's forbidden changes are said while the prompt has room; dropping them is identity-affecting too.
 - Camera motion, dialogue and duration are reported as cosmetic drops kept for the video step.
+- A generation the director refines carries their note for that generation only, as `director.note`.
+- Continuity comes from the locked bible and the shot's plan, each said while the prompt has room and reported when cut: what each character wears in this scene (its wardrobe change there, or its usual wardrobe), the location's look and what never changes there, the props the bible places in the scene, and the shot's own continuity notes. A shot that continues from another says so in words. The earlier shot's locked keyframe is sent as a composition reference (`continuity.previous_frame`) when the provider declares `ReferenceRole::Composition` and has a reference image left after the cast's identities, which come first; the keyframe then depends on that frame by its bytes (dependency field `continuity.previous_frame`) and is stale when the shot no longer continues from it. Otherwise, when the earlier shot has no locked keyframe, the provider takes no composition reference, or every reference image went to identities, the frame is not sent, a cosmetic drop that says which, and nothing depends on it. MiniMax takes no composition reference. A keyframe depends on every bible entry it read (`bible_character.<id>`, `bible_location.<id>`, `bible_prop.<id>`), and is stale when one changes.
 
 The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 

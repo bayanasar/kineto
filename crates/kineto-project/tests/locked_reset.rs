@@ -10,7 +10,7 @@ use kineto_project::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
-    shot::{ShotDirection, ShotWorkflow},
+    shot::{ShotDirection, ShotKey, ShotWorkflow},
 };
 
 struct TempDir(PathBuf);
@@ -77,7 +77,7 @@ fn reset_is_an_explicit_destructive_action_that_supersedes_a_lock() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     let project = project(&target);
-    let mut shot = ShotWorkflow::load(&project, 1).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
 
     shot.set_direction(&project, ShotDirection::Tension)
         .unwrap();
@@ -98,7 +98,7 @@ fn reset_is_an_explicit_destructive_action_that_supersedes_a_lock() {
     drop(project);
     let reopened = CanonicalProject::open(&target).unwrap();
     assert_eq!(
-        ShotWorkflow::load(&reopened, 1)
+        ShotWorkflow::load(&reopened, &ShotKey::bootstrap(1))
             .unwrap()
             .snapshot()
             .unwrap(),

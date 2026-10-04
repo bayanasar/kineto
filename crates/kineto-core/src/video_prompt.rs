@@ -228,6 +228,8 @@ mod tests {
             dialogue: None,
             characters: vec!["filmmaker".to_owned()],
             duration_target: Some(4.0),
+            continuity: Vec::new(),
+            continuity_from: None,
         }
     }
 

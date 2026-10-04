@@ -1,0 +1,47 @@
+{
+  "scenes": [
+    {
+      "scene_id": "office_night",
+      "shots": [
+        {
+          "id": "office_night_01",
+          "purpose": "Establish the two of them across the desk.",
+          "direction": "spatial_clarity",
+          "framing": "wide",
+          "lens": "28mm",
+          "camera_motion": "static",
+          "action": "The interviewer closes her notebook; the filmmaker waits.",
+          "dialogue": "",
+          "emotion": "A held breath.",
+          "duration_target": 4.0,
+          "characters": [
+            "filmmaker",
+            "interviewer"
+          ],
+          "continuity": [
+            "Rain on the window behind them."
+          ]
+        },
+        {
+          "id": "office_night_02",
+          "purpose": "Let the last question land on him.",
+          "direction": "reaction",
+          "framing": "medium_close_up",
+          "lens": "50mm",
+          "camera_motion": "slow_dolly_in",
+          "action": "He hears the question and does not answer.",
+          "dialogue": "Was it worth it?",
+          "emotion": "A quiet, withheld reaction.",
+          "duration_target": 5.0,
+          "characters": [
+            "filmmaker"
+          ],
+          "continuity": [
+            "Same coat, same light as the wide."
+          ],
+          "continuity_from": "office_night_01"
+        }
+      ]
+    }
+  ]
+}

@@ -6,7 +6,7 @@
   "required": ["schema_version", "kind", "revisions"],
   "properties": {
     "schema_version": {"type": "integer", "minimum": 1},
-    "kind": {"enum": ["story_analysis", "screenplay", "bible"]},
+    "kind": {"enum": ["story_analysis", "screenplay", "bible", "shot_plan"]},
     "revisions": {
       "type": "array",
       "items": {

@@ -8,6 +8,7 @@
 //! the requested `VideoPoint`: no destructors, no rollback. The parent then
 //! opens the project the way the app does.
 
+use kineto_project::shot::ShotKey;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -127,7 +128,7 @@ fn crash_child() {
     }
 
     let project = CanonicalProject::open(path).expect("child opens the project");
-    let shot = ShotWorkflow::load(&project, 1).expect("child loads shot 1");
+    let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).expect("child loads shot 1");
     let fake = Arc::new(FakeMinimax::default());
     let _ = video::start_with(&project, &shot, &client(&fake), &mut AbortAt(point));
     panic!("the child must abort at {point:?}");

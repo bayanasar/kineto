@@ -50,11 +50,12 @@ const MESSAGE_VIDEO: i64 = 4;
 /// The `shot` of a `RECOVERED` message for unplaced job records, and of a
 /// `COMPLETED` message for a document command.
 const NO_SHOT: i64 = -1;
-/// The `shot` of a `RECOVERED` message for a story analysis, screenplay or
-/// bible revision kept from an interrupted session.
+/// The `shot` of a `RECOVERED` message for a story analysis, screenplay,
+/// bible or shot plan revision kept from an interrupted session.
 const RECOVERED_ANALYSIS: i64 = -2;
 const RECOVERED_SCREENPLAY: i64 = -3;
 const RECOVERED_BIBLE: i64 = -4;
+const RECOVERED_SHOT_PLAN: i64 = -7;
 /// The `shot` of a `RECOVERED` message for style samples or casting images
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
@@ -149,6 +150,7 @@ impl SessionSink for DartPort {
                     DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
                     DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
                     DocumentKind::Bible => RECOVERED_BIBLE,
+                    DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
                 },
             ],
             Recovery::Images { kind, count } => [
@@ -616,7 +618,7 @@ pub unsafe extern "C" fn kineto_project_shot_state(
     })
 }
 
-fn snapshot_error_code(error: &SnapshotError) -> i32 {
+pub(crate) fn snapshot_error_code(error: &SnapshotError) -> i32 {
     match error {
         SnapshotError::InvalidShot => PROJECT_ERR_INVALID_SHOT,
         SnapshotError::InvalidCandidate => PROJECT_ERR_INVALID_CANDIDATE,
@@ -663,6 +665,51 @@ pub unsafe extern "C" fn kineto_project_candidate_media_copy(
         };
         // SAFETY: the caller's sizing contract matches `copy_utf8`'s.
         unsafe { copy_utf8(path.as_bytes(), out_buf, out_cap, out_len) }
+    })
+}
+
+/// How many shots are in play: those of the locked shot plan, or of the
+/// bootstrap scene before one is locked. 0 for a null handle or before the
+/// open finishes. Reads published state only; never does I/O.
+///
+/// # Safety
+/// `session` must be null or a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_count(session: *const KinetoProjectSession) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        unsafe { session.as_ref() }.map_or(0, |session| {
+            u32::try_from(session.session.shot_count()).unwrap_or(u32::MAX)
+        })
+    })
+}
+
+/// Copy the ID of shot `shot_index` (`shot`) or of its scene (`scene`) into
+/// caller-owned memory, with the sizing contract of project metadata. Reads
+/// published state only; never does I/O.
+///
+/// # Safety
+/// Same output-buffer contract as [`kineto_project_id_copy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_shot_id_copy(
+    session: *const KinetoProjectSession,
+    shot_index: u32,
+    scene: bool,
+    out_buf: *mut u8,
+    out_cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        };
+        let Some(key) = session.session.shot_key(shot_index) else {
+            return PROJECT_ERR_INVALID_SHOT;
+        };
+        let id = if scene { key.scene() } else { key.shot() };
+        // SAFETY: forwarded caller-owned output contract.
+        unsafe { copy_utf8(id.as_bytes(), out_buf, out_cap, out_len) }
     })
 }
 
@@ -788,7 +835,7 @@ unsafe fn copy_candidate_origin(
     unsafe { copy_utf8(field(origin).as_bytes(), out_buf, out_cap, out_len) }
 }
 
-unsafe fn submit(
+pub(crate) unsafe fn submit_shot(
     session: *const KinetoProjectSession,
     shot_index: u32,
     command: ShotCommand,
@@ -825,7 +872,7 @@ pub unsafe extern "C" fn kineto_project_shot_set_direction(
         };
         // SAFETY: forwarded caller contract.
         unsafe {
-            submit(
+            submit_shot(
                 session,
                 shot_index,
                 ShotCommand::SetDirection(direction),
@@ -847,7 +894,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Generate, token)
+        submit_shot(session, shot_index, ShotCommand::Generate, token)
     })
 }
 
@@ -866,7 +913,7 @@ pub unsafe extern "C" fn kineto_project_shot_resubmit_keyframes(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::ResubmitKeyframes, token)
+        submit_shot(session, shot_index, ShotCommand::ResubmitKeyframes, token)
     })
 }
 
@@ -892,7 +939,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate_consenting(
     };
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(
+        submit_shot(
             session,
             shot_index,
             ShotCommand::GenerateConsenting(consent),
@@ -918,7 +965,7 @@ pub unsafe extern "C" fn kineto_project_shot_select(
         };
         // SAFETY: forwarded caller contract.
         unsafe {
-            submit(
+            submit_shot(
                 session,
                 shot_index,
                 ShotCommand::Select(candidate_index),
@@ -940,7 +987,7 @@ pub unsafe extern "C" fn kineto_project_shot_lock(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Lock, token)
+        submit_shot(session, shot_index, ShotCommand::Lock, token)
     })
 }
 
@@ -958,7 +1005,7 @@ pub unsafe extern "C" fn kineto_project_shot_generate_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::GenerateVideo, token)
+        submit_shot(session, shot_index, ShotCommand::GenerateVideo, token)
     })
 }
 
@@ -977,7 +1024,7 @@ pub unsafe extern "C" fn kineto_project_shot_resubmit_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::ResubmitVideo, token)
+        submit_shot(session, shot_index, ShotCommand::ResubmitVideo, token)
     })
 }
 
@@ -993,7 +1040,7 @@ pub unsafe extern "C" fn kineto_project_shot_lock_video(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::LockVideo, token)
+        submit_shot(session, shot_index, ShotCommand::LockVideo, token)
     })
 }
 
@@ -1046,7 +1093,7 @@ pub unsafe extern "C" fn kineto_project_shot_reset(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::Reset, token)
+        submit_shot(session, shot_index, ShotCommand::Reset, token)
     })
 }
 
@@ -1065,7 +1112,7 @@ pub unsafe extern "C" fn kineto_project_shot_migrate_legacy_hashes(
 ) -> i32 {
     // SAFETY: forwarded caller contract.
     guarded(PROJECT_ERR_PANIC, || unsafe {
-        submit(session, shot_index, ShotCommand::MigrateLegacyHashes, token)
+        submit_shot(session, shot_index, ShotCommand::MigrateLegacyHashes, token)
     })
 }
 
@@ -1137,6 +1184,8 @@ fn generation_error_code(error: &GenerationError) -> i32 {
             PROJECT_ERR_NO_IDENTITY_REFERENCE
         }
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
+        GenerationError::Prerequisite(Prerequisite::LockedBible) => PROJECT_ERR_NEEDS_LOCKED_BIBLE,
+        GenerationError::Prerequisite(Prerequisite::ShotPlan) => PROJECT_ERR_NEEDS_SHOT_PLAN,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall

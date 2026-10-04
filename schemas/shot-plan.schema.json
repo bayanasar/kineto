@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/shot-plan.schema.json",
+  "title": "Kineto Shot Plan",
+  "description": "The shots of every scene of the locked screenplay, in screenplay order: what each shot is for, how it is framed and moves, what happens and is said in it, how long it should run, who is in it (cast IDs of its scene) and what must carry over from an earlier shot. A shot's location is its scene's.",
+  "type": "object",
+  "required": [
+    "scenes"
+  ],
+  "properties": {
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "scene_id",
+          "shots"
+        ],
+        "properties": {
+          "scene_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "shots": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "purpose",
+                "direction",
+                "framing",
+                "lens",
+                "camera_motion",
+                "action",
+                "dialogue",
+                "emotion",
+                "duration_target",
+                "characters",
+                "continuity"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                },
+                "purpose": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "direction": {
+                  "enum": [
+                    "reaction",
+                    "spatial_clarity",
+                    "intimacy",
+                    "tension"
+                  ]
+                },
+                "framing": {
+                  "enum": [
+                    "extreme_wide",
+                    "wide",
+                    "full",
+                    "medium_wide",
+                    "medium",
+                    "medium_close_up",
+                    "close_up",
+                    "extreme_close_up",
+                    "over_the_shoulder",
+                    "insert"
+                  ]
+                },
+                "lens": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                },
+                "camera_motion": {
+                  "enum": [
+                    "static",
+                    "slow_dolly_in",
+                    "dolly_in",
+                    "slow_dolly_out",
+                    "dolly_out",
+                    "pan_left",
+                    "pan_right",
+                    "tilt_up",
+                    "tilt_down",
+                    "tracking",
+                    "handheld"
+                  ]
+                },
+                "action": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dialogue": {
+                  "type": "string"
+                },
+                "emotion": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "duration_target": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 30
+                },
+                "characters": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+                  }
+                },
+                "continuity": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "continuity_from": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

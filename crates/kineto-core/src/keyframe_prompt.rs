@@ -12,12 +12,27 @@
 //! identity-affecting drop: two takes of the same shot can show different
 //! faces. A cast character's forbidden changes are
 //! said as long as the prompt has room, and dropping them is
-//! identity-affecting too. Nothing is truncated.
+//! identity-affecting too.
+//!
+//! Continuity comes from the locked bible and the shot's plan: what each
+//! character wears in this scene, how the location looks and what never
+//! changes there, the props the scene holds, the shot's own continuity
+//! notes, and the shot it continues from. Each is said as long as the prompt
+//! has room; a cut one is reported, props first, then the location, then
+//! wardrobe and notes, and a cast character's forbidden changes last.
+//! Nothing is truncated.
+//!
+//! The locked keyframe of the shot it continues from is sent as a
+//! composition reference to a provider that declares it takes one, when a
+//! reference image is left after the cast's identities, and the keyframe
+//! then depends on it. Otherwise the shot follows it in words only, a
+//! cosmetic drop that says why.
 
 use std::{error::Error, fmt};
 
 use kineto_project::{
-    ArtifactDependency,
+    ArtifactDependency, ArtifactId, ContentHash, DependencyImpact,
+    bible::Bible,
     cast::{self, CharacterLock, LockedImage},
     shot::{SceneIntent, ShotDirection, ShotIntent},
     style::{self, StyleLock},
@@ -33,9 +48,9 @@ use crate::style_prompt::{Part, fit, sentence};
 
 /// Version recorded with every keyframe compiled by this module. Change it
 /// whenever the same intent would compile to a different prompt.
-pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/2";
+pub const KEYFRAME_COMPILER_VERSION: &str = "keyframe-prompt/3";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.keyframe-intent.v2";
+const INTENT_DOMAIN: &[u8] = b"kineto.keyframe-intent.v3";
 
 /// What production has locked that a keyframe follows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,6 +58,80 @@ pub struct Locks<'a> {
     pub style: Option<&'a StyleLock>,
     /// The locked casts of characters, in any order.
     pub characters: &'a [CharacterLock],
+    /// The locked bible, whose entries say what carries over.
+    pub bible: Option<&'a Bible>,
+    /// The director's note for this generation only, such as "warmer light,
+    /// tighter on his hands".
+    pub note: Option<&'a str>,
+    /// The locked keyframe of the shot this one continues from, if it has
+    /// one.
+    pub previous: Option<&'a PreviousFrame>,
+}
+
+/// The dependency field a keyframe records on the locked keyframe it was
+/// sent as a composition reference.
+pub const PREVIOUS_FRAME_FIELD: &str = "continuity.previous_frame";
+
+/// The locked keyframe of the shot a shot continues from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousFrame {
+    /// The shot whose keyframe it is.
+    pub shot_id: String,
+    pub artifact_id: ArtifactId,
+    pub content_hash: ContentHash,
+    /// Its image, relative to the project.
+    pub media_path: String,
+}
+
+impl PreviousFrame {
+    /// What a keyframe sent it as a reference records.
+    #[must_use]
+    pub fn dependency(&self) -> ArtifactDependency {
+        ArtifactDependency {
+            artifact_id: self.artifact_id.clone(),
+            content_hash: self.content_hash.clone(),
+            impact: DependencyImpact::Semantic,
+            field: Some(PREVIOUS_FRAME_FIELD.to_owned()),
+        }
+    }
+}
+
+/// The bible entries a shot's keyframe reads for continuity: the entry of
+/// each character it shows, of its scene's location, and of each prop the
+/// scene holds. A keyframe depends on each.
+#[must_use]
+pub fn continuity_dependencies(
+    scene: Option<&SceneIntent>,
+    shot: Option<&ShotIntent>,
+    bible: Option<&Bible>,
+) -> Vec<ArtifactDependency> {
+    let Some(bible) = bible else {
+        return Vec::new();
+    };
+    let mut dependencies: Vec<ArtifactDependency> = shot
+        .map_or(&[][..], |shot| shot.characters.as_slice())
+        .iter()
+        .filter_map(|character| bible.character_dependency(character))
+        .collect();
+    if let Some(location) = scene.and_then(|scene| scene.location.as_deref()) {
+        dependencies.extend(bible.location_dependency(location));
+    }
+    for prop in props_in(bible, scene) {
+        dependencies.extend(bible.prop_dependency(&prop.id));
+    }
+    dependencies
+}
+
+/// The props the bible places in `scene`.
+fn props_in<'a>(
+    bible: &'a Bible,
+    scene: Option<&'a SceneIntent>,
+) -> impl Iterator<Item = &'a kineto_project::bible::Prop> {
+    let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
+    bible
+        .props
+        .iter()
+        .filter(move |prop| !scene_id.is_empty() && prop.scenes.iter().any(|id| id == scene_id))
 }
 
 /// A compiled keyframe prompt with the hash that ties it to its intent.
@@ -56,6 +145,9 @@ pub struct KeyframePrompt {
     /// The canonical portraits to send as identity references, at most as
     /// many as the provider takes, in the shot's order.
     pub identities: Vec<LockedImage>,
+    /// The previous shot's locked keyframe, to send as a composition
+    /// reference.
+    pub composition: Option<PreviousFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,11 +331,153 @@ pub fn compile(
                         .collect::<Vec<_>>()
                         .join("; ")
                 )),
-                rank: 0,
+                // Identity outlasts every continuity part when room runs out.
+                rank: 3,
                 degradation: DegradationLevel::IdentityAffecting,
             });
         }
     }
+    if let Some(note) = locks.note.map(str::trim).filter(|note| !note.is_empty()) {
+        needed(
+            &mut required,
+            "director.note",
+            format!("Director's note: {}", clause(note)),
+        )?;
+    }
+    let mut composition = None;
+    if let Some(from) = &shot.continuity_from {
+        needed(
+            &mut required,
+            "continuity.from",
+            format!(
+                "It continues directly from shot {}: keep its light, framing and wardrobe",
+                words(from)
+            ),
+        )?;
+        let room = usize::from(capabilities.max_reference_images).saturating_sub(identities.len());
+        let previous = locks.previous.filter(|frame| &frame.shot_id == from);
+        let reason = match previous {
+            None => Some(format!(
+                "shot {from} has no locked keyframe yet; the shot follows it in words only"
+            )),
+            Some(_) if capabilities.reference_limit(ReferenceRole::Composition) == 0 => {
+                Some(format!(
+                    "the provider takes no composition reference; shot {from}'s keyframe is not \
+                     sent and the shot follows it in words only"
+                ))
+            }
+            Some(_) if room == 0 => Some(format!(
+                "the provider takes {} reference image{} per image, all given to the cast's \
+                 identities; shot {from}'s keyframe is not sent and the shot follows it in \
+                 words only",
+                capabilities.max_reference_images,
+                if capabilities.max_reference_images == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )),
+            Some(frame) => {
+                needed(
+                    &mut required,
+                    PREVIOUS_FRAME_FIELD,
+                    format!(
+                        "The composition reference image is the keyframe of shot {}",
+                        words(from)
+                    ),
+                )?;
+                dependencies.push(frame.dependency());
+                composition = Some(frame.clone());
+                None
+            }
+        };
+        if let Some(reason) = reason {
+            dropped.push(DroppedConstraint {
+                constraint: constraint(PREVIOUS_FRAME_FIELD)?,
+                reason,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+    }
+    if let Some(bible) = locks.bible {
+        let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
+        for character in &shot.characters {
+            let Some(entry) = bible.character(character) else {
+                continue;
+            };
+            let wardrobe = if scene_id.is_empty() {
+                entry.wardrobe.as_str()
+            } else {
+                entry.wardrobe_in(scene_id)
+            };
+            optional.push(Part {
+                constraint: format!("wardrobe.{character}"),
+                text: sentence(&format!("{} wears {}", entry.name, clause(wardrobe))),
+                rank: 2,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+        if let Some(location) = scene
+            .and_then(|scene| scene.location.as_deref())
+            .and_then(|id| bible.location(id))
+        {
+            optional.push(Part {
+                constraint: format!("location.{}", location.id),
+                text: sentence(&format!(
+                    "{}: {}",
+                    location.name,
+                    clause(&location.appearance)
+                )),
+                rank: 1,
+                degradation: DegradationLevel::Cosmetic,
+            });
+            if !location.forbidden_changes.is_empty() {
+                optional.push(Part {
+                    constraint: format!("location_forbidden.{}", location.id),
+                    text: sentence(&format!(
+                        "{}, always: {}",
+                        location.name,
+                        location
+                            .forbidden_changes
+                            .iter()
+                            .map(|change| clause(change))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )),
+                    rank: 1,
+                    degradation: DegradationLevel::Cosmetic,
+                });
+            }
+        }
+        for prop in props_in(bible, scene) {
+            optional.push(Part {
+                constraint: format!("prop.{}", prop.id),
+                text: sentence(&format!("{}: {}", prop.name, clause(&prop.appearance))),
+                rank: 0,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+        dependencies.extend(continuity_dependencies(scene, Some(shot), Some(bible)));
+    }
+    if !shot.continuity.is_empty() {
+        optional.push(Part {
+            constraint: "shot.continuity".to_owned(),
+            text: sentence(&format!(
+                "Keep: {}",
+                shot.continuity
+                    .iter()
+                    .map(|note| clause(note))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+            rank: 2,
+            degradation: DegradationLevel::Cosmetic,
+        });
+    }
+    for part in &optional {
+        ConstraintId::new(part.constraint.as_str())?;
+    }
+
     // A locked style says how the image looks; only the default names a
     // photograph.
     let look = if locks.style.is_some() {
@@ -259,11 +493,12 @@ pub fn compile(
         dropped,
         capabilities.max_prompt_chars,
         KEYFRAME_COMPILER_VERSION,
-        &canonical_intent(scene, shot, direction, locks),
+        &canonical_intent(scene, shot, direction, locks, composition.as_ref()),
     )?;
     Ok(KeyframePrompt {
         dependencies,
         identities,
+        composition,
         ..prompt
     })
 }
@@ -316,6 +551,11 @@ fn drop(
     })
 }
 
+/// A phrase to embed in a sentence: without its closing stop.
+fn clause(value: &str) -> &str {
+    value.trim().trim_end_matches(['.', ' '])
+}
+
 /// `medium_close_up` reads as `medium close up`.
 fn words(value: &str) -> String {
     value.replace('_', " ")
@@ -334,6 +574,7 @@ fn canonical_intent(
     shot: &ShotIntent,
     direction: ShotDirection,
     locks: Locks<'_>,
+    composition: Option<&PreviousFrame>,
 ) -> Vec<u8> {
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
@@ -367,6 +608,18 @@ fn canonical_intent(
             .map_or_else(Vec::new, |seconds| seconds.to_bits().to_be_bytes().to_vec()),
     );
     field(&[direction.code()]);
+    field(scene.map_or(&b""[..], |scene| scene.id.as_bytes()));
+    field(&(shot.continuity.len() as u64).to_be_bytes());
+    for note in &shot.continuity {
+        field(note.as_bytes());
+    }
+    field(&optional(&shot.continuity_from));
+    field(&optional(&locks.note.map(str::to_owned)));
+    // The entries continuity reads, as they say it now.
+    for dependency in continuity_dependencies(scene, Some(shot), locks.bible) {
+        field(dependency.artifact_id.as_str().as_bytes());
+        field(dependency.content_hash.as_str().as_bytes());
+    }
     field(
         &locks
             .style
@@ -382,6 +635,11 @@ fn canonical_intent(
                 .map(|lock| serde_json::to_vec(lock).expect("a cast lock always encodes"))
                 .unwrap_or_default(),
         );
+    }
+    // The frame sent with it, by the bytes it holds. Last and only when
+    // sent, so every prompt without one hashes as it always has.
+    if let Some(frame) = composition {
+        field(frame.content_hash.as_str().as_bytes());
     }
     // The prompt hash frames this again; a digest keeps it fixed-size.
     hasher.finalize().to_vec()
@@ -401,11 +659,14 @@ mod tests {
             dialogue: None,
             characters: vec!["filmmaker".to_owned()],
             duration_target: Some(4.0),
+            continuity: Vec::new(),
+            continuity_from: None,
         }
     }
 
     fn scene() -> SceneIntent {
         SceneIntent {
+            id: "scene_001".to_owned(),
             location: Some("small_office".to_owned()),
             time: Some("night".to_owned()),
             dramatic_goal: None,
@@ -415,6 +676,288 @@ mod tests {
 
     fn minimax() -> ImageCapabilities {
         kineto_provider_minimax::image_capabilities()
+    }
+
+    fn bible() -> Bible {
+        serde_json::from_str(kineto_project::bible::SAMPLE_BIBLE_JSON).unwrap()
+    }
+
+    /// The sample bible, the filmmaker in a wardrobe change for this scene.
+    fn dressed_bible() -> Bible {
+        let mut bible = bible();
+        bible.characters[0].wardrobe_changes = vec![kineto_project::bible::WardrobeChange {
+            scenes: vec!["office_night".to_owned()],
+            wardrobe: "Shirtsleeves, the coat over the chair.".to_owned(),
+        }];
+        bible
+    }
+
+    fn night() -> SceneIntent {
+        SceneIntent {
+            id: "office_night".to_owned(),
+            ..scene()
+        }
+    }
+
+    fn continuing() -> ShotIntent {
+        ShotIntent {
+            continuity: vec!["The lamp is still on.".to_owned()],
+            continuity_from: Some("office_night_01".to_owned()),
+            ..shot()
+        }
+    }
+
+    #[test]
+    fn continuity_from_the_bible_and_the_plan_reaches_the_prompt() {
+        let bible = dressed_bible();
+        let prompt = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        let text = prompt.compiled.prompt();
+        for said in [
+            "It continues directly from shot office night 01: keep its light, framing and wardrobe.",
+            "The Filmmaker wears Shirtsleeves, the coat over the chair.",
+            "A small office: One table, two chairs, a rain-streaked window, a single desk lamp.",
+            "A small office, always: The window is behind the interviewer.",
+            "The notebook: A small black notebook with a red elastic band.",
+            "Keep: The lamp is still on.",
+        ] {
+            assert!(text.contains(said), "{said:?} in {text:?}");
+        }
+        let applied: Vec<_> = prompt
+            .compiled
+            .applied_constraints()
+            .iter()
+            .map(ConstraintId::as_str)
+            .collect();
+        for constraint in [
+            "continuity.from",
+            "wardrobe.filmmaker",
+            "location.small_office",
+            "location_forbidden.small_office",
+            "prop.notebook",
+            "shot.continuity",
+        ] {
+            assert!(applied.contains(&constraint), "{constraint}");
+        }
+        assert!(prompt.compiled.dropped_constraints().iter().any(|dropped| {
+            dropped.constraint.as_str() == "continuity.previous_frame"
+                && dropped.degradation == DegradationLevel::Cosmetic
+        }));
+        let depends_on: Vec<_> = prompt
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            depends_on,
+            [
+                "bible_character.filmmaker",
+                "bible_location.small_office",
+                "bible_prop.notebook"
+            ]
+        );
+        assert_eq!(
+            prompt.dependencies,
+            continuity_dependencies(Some(&night()), Some(&continuing()), Some(&bible)),
+            "staleness reads what compilation read"
+        );
+
+        // A change to an entry the shot reads changes the prompt's hash.
+        let mut changed = bible.clone();
+        changed.locations[0].appearance = "A bare office.".to_owned();
+        let again = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&changed),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert_ne!(again.prompt_hash, prompt.prompt_hash);
+        // Another scene's wardrobe change does not apply here.
+        let usual = compile(
+            Some(&SceneIntent {
+                id: "office_dawn".to_owned(),
+                ..scene()
+            }),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert!(
+            usual
+                .compiled
+                .prompt()
+                .contains("The Filmmaker wears A dark wool coat over a black sweater.")
+        );
+        assert!(
+            !usual.compiled.prompt().contains("notebook"),
+            "the notebook is in another scene"
+        );
+    }
+
+    #[test]
+    fn the_directors_note_is_said_for_its_generation_and_changes_the_hash() {
+        let plain = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks::default(),
+            &minimax(),
+        )
+        .unwrap();
+        let noted = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks {
+                note: Some(" Warmer light, tighter on his hands. "),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert!(
+            noted
+                .compiled
+                .prompt()
+                .contains("Director's note: Warmer light, tighter on his hands.")
+        );
+        assert!(
+            noted
+                .compiled
+                .applied_constraints()
+                .iter()
+                .any(|applied| applied.as_str() == "director.note")
+        );
+        assert_ne!(noted.prompt_hash, plain.prompt_hash);
+        let blank = compile(
+            Some(&scene()),
+            Some(&shot()),
+            ShotDirection::Reaction,
+            Locks {
+                note: Some("  "),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        assert_eq!(blank.compiled.prompt(), plain.compiled.prompt());
+    }
+
+    #[test]
+    fn identity_is_cut_after_every_continuity_part() {
+        let bible = dressed_bible();
+        let casts = [cast("filmmaker", "The Filmmaker")];
+        let locks = Locks {
+            characters: &casts,
+            bible: Some(&bible),
+            ..Locks::default()
+        };
+        let full = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            locks,
+            &minimax(),
+        )
+        .unwrap();
+        let forbidden = "The Filmmaker, always: Grey at the temples.";
+        assert!(full.compiled.prompt().contains(forbidden));
+        // Room for everything but the prop and one more part: the second
+        // to go is a continuity part, not the forbidden change.
+        let prop = "The notebook: A small black notebook with a red elastic band.";
+        assert!(full.compiled.prompt().contains(prop));
+        let tight = ImageCapabilities {
+            max_prompt_chars: Some(
+                full.compiled.prompt().chars().count() - prop.chars().count() - 2,
+            ),
+            ..minimax()
+        };
+        let cut = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            locks,
+            &tight,
+        )
+        .unwrap();
+        assert!(cut.compiled.prompt().contains(forbidden));
+        assert!(!cut.compiled.prompt().contains(prop));
+        assert_eq!(
+            cut.compiled.dropped_constraints().len(),
+            full.compiled.dropped_constraints().len() + 2
+        );
+        let identity_cut = cut
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .filter(|dropped| dropped.degradation == DegradationLevel::IdentityAffecting)
+            .count();
+        assert_eq!(identity_cut, 0);
+    }
+
+    #[test]
+    fn continuity_is_cut_props_first_when_the_prompt_has_no_room() {
+        let bible = dressed_bible();
+        let full = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &minimax(),
+        )
+        .unwrap();
+        let length = full.compiled.prompt().chars().count();
+        let tight = ImageCapabilities {
+            max_prompt_chars: Some(length - 10),
+            ..minimax()
+        };
+        let cut = compile(
+            Some(&night()),
+            Some(&continuing()),
+            ShotDirection::Reaction,
+            Locks {
+                bible: Some(&bible),
+                ..Locks::default()
+            },
+            &tight,
+        )
+        .unwrap();
+        let dropped: Vec<_> = cut
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .map(|dropped| dropped.constraint.as_str())
+            .collect();
+        assert!(dropped.contains(&"prop.notebook"), "{dropped:?}");
+        assert!(!dropped.contains(&"wardrobe.filmmaker"), "{dropped:?}");
+        // What was cut was still read: the keyframe depends on it.
+        assert!(
+            cut.dependencies
+                .iter()
+                .any(|dependency| dependency.artifact_id.as_str() == "bible_prop.notebook")
+        );
     }
 
     #[test]
@@ -689,6 +1232,9 @@ mod tests {
             Locks {
                 style: Some(&style),
                 characters: &[],
+                bible: None,
+                note: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -720,6 +1266,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -756,6 +1305,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &recast,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -777,6 +1329,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -821,6 +1376,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &text_only,
         )
@@ -856,6 +1414,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &two,
         )
@@ -896,6 +1457,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks[1..],
+                bible: None,
+                note: None,
+                previous: None,
             },
             &three,
         )
@@ -925,6 +1489,9 @@ mod tests {
             Locks {
                 style: None,
                 characters: &locks,
+                bible: None,
+                note: None,
+                previous: None,
             },
             &minimax(),
         )
@@ -937,5 +1504,126 @@ mod tests {
             prompt.compiled.prompt().chars().count() <= kineto_provider_minimax::MAX_PROMPT_CHARS
         );
         assert_eq!(prompt.identities, [locks[0].portrait.clone()]);
+    }
+
+    fn previous_frame(shot_id: &str) -> PreviousFrame {
+        PreviousFrame {
+            shot_id: shot_id.to_owned(),
+            artifact_id: ArtifactId::new("office_night_01_g0001_candidate_b").unwrap(),
+            content_hash: ContentHash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            media_path: "scenes/office_night/shots/office_night_01/candidates/b.png".to_owned(),
+        }
+    }
+
+    /// A provider that takes `max` references, of identity and composition.
+    fn composing(max: u16) -> ImageCapabilities {
+        ImageCapabilities {
+            max_reference_images: max,
+            reference_roles: [ReferenceRole::Identity, ReferenceRole::Composition]
+                .into_iter()
+                .collect(),
+            ..minimax()
+        }
+    }
+
+    fn previous_frame_drop(prompt: &KeyframePrompt) -> Option<&str> {
+        prompt
+            .compiled
+            .dropped_constraints()
+            .iter()
+            .find(|dropped| dropped.constraint.as_str() == PREVIOUS_FRAME_FIELD)
+            .map(|dropped| {
+                assert_eq!(dropped.degradation, DegradationLevel::Cosmetic);
+                dropped.reason.as_str()
+            })
+    }
+
+    #[test]
+    fn the_previous_locked_frame_is_sent_where_the_provider_takes_it() {
+        let frame = previous_frame("office_night_01");
+        let locks = [cast("filmmaker", "The Filmmaker")];
+        let with = |previous: Option<&PreviousFrame>, capabilities: &ImageCapabilities| {
+            compile(
+                Some(&night()),
+                Some(&continuing()),
+                ShotDirection::Reaction,
+                Locks {
+                    characters: &locks,
+                    previous,
+                    ..Locks::default()
+                },
+                capabilities,
+            )
+            .unwrap()
+        };
+
+        // Room after the cast's identity: the frame goes as composition,
+        // and the keyframe depends on it.
+        let sent = with(Some(&frame), &composing(2));
+        assert_eq!(sent.identities, [locks[0].portrait.clone()]);
+        assert_eq!(sent.composition.as_ref(), Some(&frame));
+        assert!(previous_frame_drop(&sent).is_none());
+        assert!(
+            sent.compiled
+                .applied_constraints()
+                .iter()
+                .any(|applied| applied.as_str() == PREVIOUS_FRAME_FIELD)
+        );
+        assert!(
+            sent.compiled.prompt().contains(
+                "The composition reference image is the keyframe of shot office night 01."
+            )
+        );
+        assert_eq!(sent.dependencies.last(), Some(&frame.dependency()));
+
+        // The frame's bytes are part of what the prompt is for.
+        let other = PreviousFrame {
+            content_hash: ContentHash::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            ..frame.clone()
+        };
+        assert_ne!(
+            with(Some(&other), &composing(2)).prompt_hash,
+            sent.prompt_hash
+        );
+
+        // Otherwise it is not sent, nothing depends on it, and the drop says
+        // why.
+        for (previous, capabilities, why) in [
+            (
+                None,
+                composing(2),
+                "shot office_night_01 has no locked keyframe yet",
+            ),
+            (
+                Some(previous_frame("office_night_07")),
+                composing(2),
+                "shot office_night_01 has no locked keyframe yet",
+            ),
+            (
+                Some(frame.clone()),
+                minimax(),
+                "the provider takes no composition reference",
+            ),
+            (
+                Some(frame.clone()),
+                composing(1),
+                "the provider takes 1 reference image per image, all given to the cast's identities",
+            ),
+        ] {
+            let prompt = with(previous.as_ref(), &capabilities);
+            assert!(prompt.composition.is_none(), "{why}");
+            assert!(
+                previous_frame_drop(&prompt).is_some_and(|reason| reason.starts_with(why)),
+                "{why}: {:?}",
+                previous_frame_drop(&prompt)
+            );
+            assert!(
+                prompt
+                    .dependencies
+                    .iter()
+                    .all(|dependency| dependency.field.as_deref() != Some(PREVIOUS_FRAME_FIELD))
+            );
+            assert_ne!(prompt.prompt_hash, sent.prompt_hash, "{why}");
+        }
     }
 }

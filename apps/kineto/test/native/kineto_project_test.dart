@@ -404,7 +404,7 @@ void main() {
       final project = await _createProject(target, 'ffi_project_bounds');
       expect(() => project.shotSnapshot(-1), throwsRangeError);
       expect(
-        () => project.shotSnapshot(KinetoProjectSession.shotCount),
+        () => project.shotSnapshot(project.shotCount),
         throwsRangeError,
       );
       project.close();

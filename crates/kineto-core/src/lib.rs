@@ -9,11 +9,13 @@ pub mod minimax;
 pub mod paid_image;
 pub mod screenplay;
 pub mod session;
+pub mod shot_plan;
 pub mod story;
 pub mod style;
 pub mod style_prompt;
 pub mod video;
 pub mod video_prompt;
+pub mod workflow;
 
 /// Process-local engine state shared by all machine-local Kineto work.
 ///

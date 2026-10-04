@@ -145,6 +145,11 @@ void main() {
       // The cast was made from the entry the director just changed.
       expect(production.characters.first.stale, <String>['bible_character.filmmaker']);
 
+      // No plan is locked: the bootstrap scene's shots are in play.
+      expect(session.shotCount, 2);
+      expect(session.shotId(1), 'shot_002');
+      expect(session.shotSceneId(1), 'scene_001');
+
       // Keyframes go on with what the director accepted.
       await session.generateShotCandidatesConsenting(0, identityDrift: true);
       session.close();

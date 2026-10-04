@@ -200,7 +200,8 @@ external int _kinetoProjectDocumentCost(
 enum KinetoDocumentKind {
   storyAnalysis('analysis', 'Story analysis'),
   screenplay('screenplay', 'Screenplay'),
-  bible('bible', 'Bible');
+  bible('bible', 'Bible'),
+  shotPlan('shot_plan', 'Shot plan');
 
   const KinetoDocumentKind(this.wireName, this.label);
 
@@ -640,7 +641,8 @@ extension KinetoProjectDocuments on KinetoProjectSession {
       if (code == KinetoProjectException.costUnknown ||
           code == KinetoProjectException.modelNotConfigured ||
           code == KinetoProjectException.needsAnalysis ||
-          code == KinetoProjectException.needsLockedScreenplay) {
+          code == KinetoProjectException.needsLockedScreenplay ||
+          code == KinetoProjectException.needsLockedBible) {
         return null;
       }
       throw _projectException(code);

@@ -97,7 +97,17 @@ void main() {
         'production_damaged',
       ]),
     );
+    expect(names(KinetoFraming.values, (framing) => framing.wireName), contract.framings.keys.toSet());
+    expect(names(KinetoCameraMotion.values, (motion) => motion.wireName), contract.cameraMotions.keys.toSet());
+    expect(names(KinetoPlanStaleCause.values, (cause) => cause.wireName), contract.planStaleCauses.keys.toSet());
+    expect(names(KinetoStepState.values, (state) => state.wireName), contract.stepStates.keys.toSet());
+    expect(names(KinetoTakeStatus.values, (status) => status.wireName), contract.takeStatuses.keys.toSet());
+    expect(
+      contract.planFields,
+      containsAll(<String>['plan_revision', 'plan_locked_revision', 'plan_stale', 'workflow_unknown']),
+    );
     final statuses = <int, String>{
+      KinetoProjectException.invalidArgument: 'invalid_argument',
       KinetoProjectException.locked: 'locked',
       KinetoProjectException.invalidDocument: 'invalid_document',
       KinetoProjectException.identityDrift: 'identity_drift',
@@ -110,6 +120,8 @@ void main() {
       KinetoProjectException.noIdentityReference: 'no_identity_reference',
       KinetoProjectException.rejected: 'rejected',
       KinetoProjectException.packIncomplete: 'pack_incomplete',
+      KinetoProjectException.needsLockedBible: 'needs_locked_bible',
+      KinetoProjectException.needsShotPlan: 'needs_shot_plan',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);

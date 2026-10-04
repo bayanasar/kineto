@@ -1,14 +1,15 @@
 //! The bootstrap scene every project created by the desktop app starts with.
 //!
-//! The app works one fixed scene of [`SHOT_COUNT`](crate::session::SHOT_COUNT)
-//! shots until screenplay and shot planning exist. Its intent is written into
-//! the project when the project is created, so generation compiles from
+//! The app works this scene's [`SHOT_COUNT`] shots until a shot plan is
+//! locked, whose shots then take their place. Its intent is written into the
+//! project when the project is created, so generation compiles from
 //! canonical files rather than from text held in the application.
 
 use kineto_project::fs::ProjectRelativePath;
 use serde_json::{Value, json};
 
-use crate::session::SHOT_COUNT;
+/// Shots of the bootstrap scene.
+pub const SHOT_COUNT: usize = kineto_project::shot::BOOTSTRAP_SHOTS as usize;
 
 const SCENE_PATH: &str = "scenes/scene_001/scene.json";
 
@@ -92,7 +93,7 @@ mod tests {
             CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest,
             ProjectSource, ProjectWorkflow,
         },
-        shot::{ShotWorkflow, load_scene_intent},
+        shot::{BOOTSTRAP_SCENE, ShotKey, ShotWorkflow, load_scene_intent},
     };
     use std::collections::BTreeMap;
 
@@ -135,9 +136,11 @@ mod tests {
         )
         .unwrap();
 
-        let scene = load_scene_intent(&project).unwrap().unwrap();
+        let scene = load_scene_intent(&project, BOOTSTRAP_SCENE)
+            .unwrap()
+            .unwrap();
         for shot_number in 1..=u32::try_from(SHOT_COUNT).unwrap() {
-            let shot = ShotWorkflow::load(&project, shot_number).unwrap();
+            let shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(shot_number)).unwrap();
             let intent = shot.intent().unwrap().expect("bootstrap shot has intent");
             let compiled = keyframe_prompt::compile(
                 Some(&scene),

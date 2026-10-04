@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'native/kineto_engine.dart';
+import 'screenplay_workspace.dart' show TextPromptDialog;
 
 final class DemoCandidateContent {
   const DemoCandidateContent({
@@ -101,6 +102,32 @@ List<String> describeRecoveries(List<KinetoRecovery> recoveries) => <String>[
               'time the project opens.',
     ];
 
+/// What shot [shotId] of scene [sceneId] is: a bootstrap shot's demo
+/// content, or a planned shot named by its IDs.
+DemoShotContent shotContent(String sceneId, String shotId, [KinetoPlannedShot? planned]) {
+  if (planned != null) {
+    return DemoShotContent(
+      label: shotId,
+      setting: '${sceneId.replaceAll('_', ' ')} · ${planned.framing.label} · ${planned.lens} · '
+          '${planned.cameraMotion.label}',
+      description: '${planned.purpose} ${planned.action}',
+      candidates: demoShots.first.candidates,
+    );
+  }
+  final number = sceneId == 'scene_001' && shotId.startsWith('shot_')
+      ? int.tryParse(shotId.substring('shot_'.length))
+      : null;
+  if (number != null && number >= 1 && number <= demoShots.length) {
+    return demoShots[number - 1];
+  }
+  return DemoShotContent(
+    label: shotId,
+    setting: sceneId,
+    description: '',
+    candidates: demoShots.first.candidates,
+  );
+}
+
 String _shotLabel(int shotIndex) =>
     shotIndex < demoShots.length ? demoShots[shotIndex].label : 'Shot ${shotIndex + 1}';
 
@@ -167,7 +194,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 
   List<KinetoShotSnapshot> _readShotSnapshots() =>
       List<KinetoShotSnapshot>.generate(
-        KinetoProjectSession.shotCount,
+        widget.project.shotCount,
         widget.project.shotSnapshot,
         growable: false,
       );
@@ -233,10 +260,32 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     });
   }
 
+  /// What each shot in play is: a bootstrap shot shows its demo content, a
+  /// planned shot its own IDs.
+  List<DemoShotContent> _shots() {
+    final planning = widget.project.planning;
+    return <DemoShotContent>[
+      for (var index = 0; index < _shotSnapshots.length; index++)
+        shotContent(
+          widget.project.shotSceneId(index),
+          widget.project.shotId(index),
+          planning.shot(widget.project.shotId(index)),
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final snapshot = _shotSnapshots[_activeShotIndex];
     return DemoWorkspaceView(
+      shots: _shots(),
+      takes: widget.project.takes(_activeShotIndex),
+      staleReasons: widget.project.staleReasons(_activeShotIndex),
+      onRefine: (note) => _run(
+        () => widget.project.refineShot(_activeShotIndex, note),
+        label: 'Refining',
+        consenting: () => widget.project.refineShot(_activeShotIndex, note, identityDrift: true),
+      ),
       engineSnapshot: _engineSnapshot,
       imageProvider: _imageProvider,
       candidateMedia: _candidateMedia(_activeShotIndex),
@@ -318,6 +367,10 @@ class DemoWorkspaceView extends StatelessWidget {
     this.keyframesUnresolved = false,
     this.onResubmitKeyframes,
     this.onGenerateDespiteIdentityDrift,
+    this.shots = demoShots,
+    this.takes = const <KinetoTake>[],
+    this.staleReasons = const <List<String>>[],
+    this.onRefine,
     this.imageProvider = const KinetoImageProvider(
       kind: KinetoImageProviderKind.localDemo,
       ready: true,
@@ -367,6 +420,19 @@ class DemoWorkspaceView extends StatelessWidget {
   /// reference; set only after the project's policy refused that.
   final VoidCallback? onGenerateDespiteIdentityDrift;
 
+  /// What each shot in play is, in order: the bootstrap scene's demo shots,
+  /// or the shots of the locked plan.
+  final List<DemoShotContent> shots;
+
+  /// Every take the active shot has had, oldest generation first.
+  final List<KinetoTake> takes;
+
+  /// Why each current candidate of the active shot is stale.
+  final List<List<String>> staleReasons;
+
+  /// Generate the active shot again as the director's note asks.
+  final ValueChanged<String>? onRefine;
+
   /// Who generates candidates for this session, and what one generation costs.
   final KinetoImageProvider imageProvider;
 
@@ -404,12 +470,18 @@ class DemoWorkspaceView extends StatelessWidget {
     final selectedIndex = shotSnapshot.selectedIndex;
     final blocked = shotSnapshot.changesBlocked || working;
     final canGenerate = !blocked && imageProvider.ready && !keyframesUnresolved;
+    // A take made in a style or cast since moved on from is not locked,
+    // even when the shot's own intent is unchanged.
+    final selectedStale = shotSnapshot.stale ||
+        (selectedIndex != null &&
+            selectedIndex < staleReasons.length &&
+            staleReasons[selectedIndex].isNotEmpty);
     final canLock = !blocked &&
         shotSnapshot.generated &&
         selectedIndex != null &&
         !shotSnapshot.locked &&
-        !shotSnapshot.stale;
-    final shot = demoShots[activeShotIndex];
+        !selectedStale;
+    final shot = shots[activeShotIndex];
     final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
 
     return WabScaffold(
@@ -486,7 +558,7 @@ class DemoWorkspaceView extends StatelessWidget {
                         spacing: 16,
                         runSpacing: 12,
                         children: <Widget>[
-                          for (var index = 0; index < demoShots.length; index++)
+                          for (var index = 0; index < shots.length; index++)
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
@@ -495,7 +567,7 @@ class DemoWorkspaceView extends StatelessWidget {
                                       ? WabMaterialKind.seal
                                       : WabMaterialKind.zhuwen,
                                   onPressed: () => onShotChanged(index),
-                                  child: Text(demoShots[index].label),
+                                  child: Text(shots[index].label),
                                 ),
                                 const SizedBox(width: 8),
                                 WabStatusBadge(
@@ -629,6 +701,17 @@ class DemoWorkspaceView extends StatelessWidget {
                                     : 'Regenerate',
                               ),
                             ),
+                            if (onRefine != null) ...<Widget>[
+                              const SizedBox(width: 12),
+                              WabButton(
+                                key: const ValueKey<String>('refine-shot'),
+                                kind: WabMaterialKind.paper,
+                                onPressed: shotSnapshot.locked || !canGenerate
+                                    ? null
+                                    : () => _refineDialog(context),
+                                child: const Text('Refine with a note'),
+                              ),
+                            ],
                           ],
                         ),
                     ],
@@ -692,18 +775,28 @@ class DemoWorkspaceView extends StatelessWidget {
                       ),
                     ),
                   ),
+                  for (var index = 0; index < staleReasons.length; index++)
+                    if (staleReasons[index].isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Take ${String.fromCharCode(0x41 + index)} no longer follows: '
+                          '${staleReasons[index].join(', ')}',
+                        ),
+                      ),
                   const SizedBox(height: 20),
                   Row(
                     children: <Widget>[
                       Expanded(
                         child: WabButton(
+                          key: const ValueKey<String>('lock-selection'),
                           kind: WabMaterialKind.seal,
                           onPressed: canLock ? onLock : null,
                           expand: true,
                           child: Text(
                             shotSnapshot.locked
                                 ? 'Selection locked'
-                                : shotSnapshot.stale
+                                : selectedStale
                                     ? 'Regenerate before locking'
                                     : 'Lock selection',
                           ),
@@ -720,6 +813,10 @@ class DemoWorkspaceView extends StatelessWidget {
                       ),
                     ],
                   ),
+                  if (takes.any((take) => take.status == KinetoTakeStatus.superseded)) ...<Widget>[
+                    const SizedBox(height: 20),
+                    _EarlierTakes(takes: takes),
+                  ],
                 ],
                 if (shotSnapshot.locked) ...<Widget>[
                   const SizedBox(height: 20),
@@ -772,6 +869,26 @@ class DemoWorkspaceView extends StatelessWidget {
     );
   }
 
+  Future<void> _refineDialog(BuildContext context) async {
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => TextPromptDialog(
+        title: 'Refine ${shots[activeShotIndex].label}',
+        width: 560,
+        fieldKey: 'refine-shot-note',
+        minLines: 2,
+        maxLines: 5,
+        hint: 'What should change, such as "warmer light, tighter on his hands"',
+        confirmKey: 'refine-shot-confirm',
+        confirmLabel: imageProvider.isPaid
+            ? 'Generate · ≈ ${imageProvider.generationCostLabel}'
+            : 'Generate',
+      ),
+    );
+    if (note == null || note.trim().isEmpty) return;
+    onRefine?.call(note.trim());
+  }
+
   static String _generateLabel(KinetoImageProvider provider) => provider.isPaid
       ? 'Generate 3 keyframes · ${provider.kind.label} · ≈ ${provider.generationCostLabel}'
       : 'Generate 3 deterministic candidates';
@@ -801,6 +918,39 @@ class DemoWorkspaceView extends StatelessWidget {
     if (snapshot.generated) return WabBadgeKind.progress;
     return WabBadgeKind.neutral;
   }
+}
+
+/// Takes of earlier generations, kept to compare with the current ones.
+class _EarlierTakes extends StatelessWidget {
+  const _EarlierTakes({required this.takes});
+
+  final List<KinetoTake> takes;
+
+  @override
+  Widget build(BuildContext context) => WabPanel(
+        title: 'Earlier takes',
+        child: Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: <Widget>[
+            for (final take in takes.where((take) => take.status == KinetoTakeStatus.superseded))
+              SizedBox(
+                width: 200,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    if (take.mediaPath != null) _Keyframe(path: take.mediaPath!),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Generation ${take.generation}${take.refined ? ' · refined' : ''} · '
+                      '${take.id.split('_').last}',
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
 }
 
 /// One keyframe candidate, as a 16:9 still read from the project directory.

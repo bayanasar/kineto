@@ -1,0 +1,623 @@
+[
+  {
+    "artifact_id": "office_night_02_g0001_candidate_a",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "superseded",
+    "content_hash": "sha256:ffaa8e5144b104f700f43c0455db0cbc8e625a788c94cfe398f1f00579efdce8",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0001_candidate_a.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:b8864777ec65a9df040ba3fc51c24d6aa6e771210535cfac2c31b1dd6d2939d4",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  },
+  {
+    "artifact_id": "office_night_02_g0001_candidate_b",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "superseded",
+    "content_hash": "sha256:ffaa8e5144b104f700f43c0455db0cbc8e625a788c94cfe398f1f00579efdce8",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0001_candidate_b.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:b8864777ec65a9df040ba3fc51c24d6aa6e771210535cfac2c31b1dd6d2939d4",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  },
+  {
+    "artifact_id": "office_night_02_g0001_candidate_c",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "superseded",
+    "content_hash": "sha256:ffaa8e5144b104f700f43c0455db0cbc8e625a788c94cfe398f1f00579efdce8",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0001_candidate_c.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:b8864777ec65a9df040ba3fc51c24d6aa6e771210535cfac2c31b1dd6d2939d4",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  },
+  {
+    "artifact_id": "office_night_02_g0002_candidate_a",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "candidate",
+    "content_hash": "sha256:dd7b39991f369217de7a78a39ff0f346c179834fcffd3b245cb0d17dbfd0248d",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0002_candidate_a.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. Director's note: Tighter on his hands. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:95a8efa8630cc7ee5fc495bc783f62007d373a3ca59a200bfc8993692efddd2a",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "director.note",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  },
+  {
+    "artifact_id": "office_night_02_g0002_candidate_b",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "candidate",
+    "content_hash": "sha256:dd7b39991f369217de7a78a39ff0f346c179834fcffd3b245cb0d17dbfd0248d",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0002_candidate_b.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. Director's note: Tighter on his hands. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:95a8efa8630cc7ee5fc495bc783f62007d373a3ca59a200bfc8993692efddd2a",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "director.note",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  },
+  {
+    "artifact_id": "office_night_02_g0002_candidate_c",
+    "schema_version": 1,
+    "type": "shot_candidate",
+    "status": "candidate",
+    "content_hash": "sha256:dd7b39991f369217de7a78a39ff0f346c179834fcffd3b245cb0d17dbfd0248d",
+    "input_hash": "sha256:cf980cef329ce7c8ced92c65fbc614fb6f946d194985da3d1a03bde4459325f8",
+    "provider": "minimax",
+    "model": "image-01",
+    "media_path": "scenes/office_night/shots/office_night_02/keyframes/office_night_02_g0002_candidate_c.jpg",
+    "media_state": "present",
+    "compiler_version": "keyframe-prompt/3",
+    "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Medium close up shot. He hears the question and does not answer. Mood: A quiet, withheld reaction. Setting: small office, night. Shot on a 50mm lens. Favor the listener's reaction over the speaker. The Filmmaker is the person in the reference image. Director's note: Tighter on his hands. It continues directly from shot office night 01: keep its light, framing and wardrobe. No text, no watermark. The Filmmaker, always: Grey at the temples; Never without the coat. The Filmmaker wears A dark wool coat over a black sweater. A small office: One table, two chairs, a rain-streaked window, a single desk lamp. A small office, always: The window is behind the interviewer. The notebook: A small black notebook with a red elastic band. Keep: Same coat, same light as the wide.",
+    "prompt_hash": "sha256:95a8efa8630cc7ee5fc495bc783f62007d373a3ca59a200bfc8993692efddd2a",
+    "applied_constraints": [
+      "style.locked",
+      "shot.framing",
+      "shot.action",
+      "shot.emotion",
+      "scene.location",
+      "scene.time",
+      "shot.lens",
+      "shot.direction",
+      "identity.filmmaker",
+      "director.note",
+      "continuity.from",
+      "shot.still",
+      "forbidden.filmmaker",
+      "wardrobe.filmmaker",
+      "location.small_office",
+      "location_forbidden.small_office",
+      "prop.notebook",
+      "shot.continuity"
+    ],
+    "dropped_constraints": [
+      {
+        "constraint": "shot.camera_motion",
+        "reason": "a still keyframe cannot show camera motion; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.dialogue",
+        "reason": "a still keyframe carries no dialogue",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "shot.duration_target",
+        "reason": "a still keyframe has no duration; it is kept for the video step",
+        "degradation": "cosmetic"
+      },
+      {
+        "constraint": "continuity.previous_frame",
+        "reason": "shot office_night_01 has no locked keyframe yet; the shot follows it in words only",
+        "degradation": "cosmetic"
+      }
+    ],
+    "degradation": "cosmetic",
+    "dependencies": [
+      {
+        "artifact_id": "style_s0001",
+        "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "cast.filmmaker.0002",
+        "content_hash": "sha256:960f66d098c2be2008125d581bde5f83dbef62bc9e711395bc50e37d64e737ea",
+        "impact": "semantic",
+        "field": "character.filmmaker"
+      },
+      {
+        "artifact_id": "bible_character.filmmaker",
+        "content_hash": "sha256:cc3491447a6824b625cf86f18f2c175c450d8268f25f9739997a688664daa7ab",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_location.small_office",
+        "content_hash": "sha256:51bc93fadf937960e665b160e1f0551f0abbdb983716e9c78c415993a0d401fd",
+        "impact": "semantic"
+      },
+      {
+        "artifact_id": "bible_prop.notebook",
+        "content_hash": "sha256:0f681653c481e172b00526fc39225c2a86460fada0b69ef89b20d9fd2b9cfcd2",
+        "impact": "semantic"
+      }
+    ],
+    "intent": {
+      "action": "He hears the question and does not answer.",
+      "camera_motion": "slow_dolly_in",
+      "characters": [
+        "filmmaker"
+      ],
+      "continuity": [
+        "Same coat, same light as the wide."
+      ],
+      "continuity_from": "office_night_01",
+      "dialogue": "Was it worth it?",
+      "direction": "reaction",
+      "duration_target": 5.0,
+      "emotion": "A quiet, withheld reaction.",
+      "framing": "medium_close_up",
+      "lens": "50mm",
+      "purpose": "Let the last question land on him."
+    }
+  }
+]

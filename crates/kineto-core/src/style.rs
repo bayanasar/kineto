@@ -325,6 +325,7 @@ fn ask<T: Transport + Sync>(
         owner: CandidateOwner::Style,
         aspect_ratio: KEYFRAME_ASPECT,
         identities: Vec::new(),
+        composition: None,
         prompt: Some(Arc::new(prompt)),
     };
     jobs.generate(&plan, &call, 0, hooks)?;
