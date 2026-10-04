@@ -137,7 +137,7 @@ Dialogue duration (`kineto_core::dialogue`):
 - **Planning.** Shot planning (`shot-plan/2`, `shot-plan-scene/2`) is given each line's length between `<line_durations>` and `</line_durations>`, and asked to give a shot that carries dialogue at least as long. The plan's input label names the hash of those lengths.
 - **A shot's dialogue.** Its length is the sum of the screenplay lines it holds verbatim, with a 250 ms breath between them. Any other words are estimated, and a speaker's name before a colon is not said.
 - **Short shots.** A planned shot shorter than its dialogue is published as a short shot. It is reported, not refused.
-- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/5`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
+- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/6`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
 
 ## Stage 8 — Scene breakdown and shot planning
 
@@ -241,7 +241,7 @@ How it works now (`kineto_project::preferences`, `kineto_core::preferences`):
 
 - Shot planning (`shot-plan/3`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
 - Keyframes (`keyframe-prompt/4`) read lighting, framing, lens, colour, composition and performance, after the locked style.
-- Videos (`video-prompt/5`) read camera motion, lighting, colour, performance and pacing.
+- Videos (`video-prompt/6`) read camera motion, lighting, colour, performance and pacing.
 
 In a prompt, the preferences are the lowest-ranked part, the first cut when the prompt runs out of room.
 
@@ -292,15 +292,15 @@ Under a recipe with a dialogue step (`default-film` v2), a shot is not ready whi
 
 Each shot's sidecar (`schemas/export-shot.schema.json`) says which take was locked and what made it:
 
-- the video's file, artifact ID, content hash, provider, model, clip length and the parameters it was asked with;
-- the keyframe it starts from, by artifact ID and hash, and its image beside it when it has one;
+- the video's file, artifact ID, content hash, provider, model, clip length, the parameters it was asked with, and when it was locked;
+- the keyframe it starts from, by artifact ID and hash, and its image beside it when it has one, and the keyframe it closes on, by shot, artifact ID and hash, when it closes on one;
 - the prompt exactly as the provider got it, with its hash, compiler version, applied constraints and the dropped ones with why;
 - the shot's planned intent: action, framing, lens, camera motion, mood, dialogue, characters, target duration and continuity;
 - the director's notes and the take it branched from.
 
 The project manifest (`schemas/export-manifest.schema.json`) holds the project and recipe, the export time, the scenes in screenplay order with location and time, each shot's place among the shots in play and its files, what is missing from a partial package and why, and the total runtime.
 
-Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Kineto does not stamp a lock time on its records, so a sidecar does not carry one; the manifest records when the package was made.
+Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Replacing a package of the same name exchanges the two in one step where the system can (Linux, macOS), so the name always holds a whole package; where it cannot (Windows), an interruption can leave the earlier package set aside, and the next export puts it back first. A sidecar's lock time is the one the video's record kept when it was locked (`null` for a video locked before Kineto recorded it); the manifest records when the package was made.
 
 The package also holds its timeline (`timeline.otio`, OpenTimelineIO): the shots end to end on a video track and each shot's locked lines on a dialogue track, at 24 frames a second. A shot lasts as long as its file does, read from the MP4's movie header without decoding. A shot's lines follow one another from its start with a 250 ms breath between them, as planning times them, and a line running past its shot's end is cut there and listed in the manifest (`timeline.trimmed_lines`). Each clip names its file relative to the package and carries its Kineto identity, so the package can move as a whole. The same placement is written as a CMX 3600 edit decision list (`timeline.edl`, non-drop timecode): one video event a shot and one audio event a line, in record order, each with a comment naming its file, and a blank (`BL`) audio event for the silence before the first line. A list that would hold more than 999 events refuses the export rather than being cut short.
 

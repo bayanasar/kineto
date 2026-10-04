@@ -38,9 +38,9 @@ use crate::{
 };
 
 /// Version recorded with every video prompt compiled by this module.
-pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/5";
+pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/6";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v5";
+const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v6";
 
 /// Mood is cut last of what is optional, the shot's direction before it,
 /// its continuity notes first: the first frame already holds what carries
@@ -57,12 +57,39 @@ pub struct VideoPrompt {
     pub duration_seconds: u8,
 }
 
+/// What became of the frame a clip could close on: the locked keyframe of
+/// the shot that continues from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndFrameUse<'a> {
+    /// Sent: the clip closes on it.
+    Sent,
+    /// The provider takes no last frame.
+    NotTaken,
+    /// The next shot's keyframe is not locked yet.
+    NotLocked,
+    /// The next shot's keyframe has no image to send.
+    NoImage,
+    /// Its image is not one the provider takes as a last frame; why.
+    Unfit(&'a str),
+}
+
+impl EndFrameUse<'_> {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Sent => 1,
+            Self::NotTaken => 2,
+            Self::NotLocked => 3,
+            Self::NoImage => 4,
+            Self::Unfit(_) => 5,
+        }
+    }
+}
+
 /// The shot that continues from the one being compiled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Successor<'a> {
     pub shot_id: &'a str,
-    /// Whether its keyframe is locked, so it could close this clip.
-    pub keyframe_locked: bool,
+    pub end_frame: EndFrameUse<'a>,
 }
 
 /// Everything a video prompt is compiled from.
@@ -234,24 +261,30 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         }
     }
     if let Some(successor) = input.successor {
-        let reason = if !capabilities.end_frame {
-            format!(
-                "{} continues from this shot, but the provider takes no last frame",
-                successor.shot_id
-            )
-        } else if !successor.keyframe_locked {
-            format!(
-                "{} continues from this shot, but its keyframe is not locked yet",
-                successor.shot_id
-            )
-        } else {
-            format!(
-                "{} continues from this shot, but sending its keyframe as the last frame is not \
-                 built yet",
-                successor.shot_id
-            )
-        };
-        dropped.push(drop("continuity.end_frame", &reason)?);
+        let next = successor.shot_id;
+        let unsent = |why: &str| format!("{next} continues from this shot, but {why}");
+        match successor.end_frame {
+            EndFrameUse::Sent => needed(
+                &mut required,
+                "continuity.end_frame",
+                &format!("End on the opening frame of {next}, which continues from this shot"),
+            )?,
+            EndFrameUse::NotTaken => dropped.push(drop(
+                "continuity.end_frame",
+                &unsent("the provider takes no last frame"),
+            )?),
+            EndFrameUse::NotLocked => dropped.push(drop(
+                "continuity.end_frame",
+                &unsent("its keyframe is not locked yet"),
+            )?),
+            EndFrameUse::NoImage => dropped.push(drop(
+                "continuity.end_frame",
+                &unsent("its keyframe has no image to send"),
+            )?),
+            EndFrameUse::Unfit(why) => {
+                dropped.push(drop("continuity.end_frame", &unsent(why))?);
+            }
+        }
     }
 
     let prompt = fit(
@@ -418,11 +451,9 @@ fn canonical_intent(input: &VideoPromptInput<'_>, shot: &ShotIntent, duration: u
     field(&[
         input.direction.code(),
         duration,
-        u8::from(
-            input
-                .successor
-                .is_some_and(|successor| successor.keyframe_locked),
-        ),
+        input
+            .successor
+            .map_or(0, |successor| successor.end_frame.code()),
         input.capabilities.camera_control as u8,
         u8::from(input.capabilities.end_frame),
     ]);
@@ -575,7 +606,7 @@ mod tests {
         let prompt = compile(VideoPromptInput {
             successor: Some(Successor {
                 shot_id: "office_night_03",
-                keyframe_locked: true,
+                end_frame: EndFrameUse::NotTaken,
             }),
             ..input(&shot, &parametric, Some("Push in"))
         })
@@ -605,7 +636,7 @@ mod tests {
         let waiting = compile(VideoPromptInput {
             successor: Some(Successor {
                 shot_id: "office_night_03",
-                keyframe_locked: false,
+                end_frame: EndFrameUse::NotLocked,
             }),
             ..input(&shot, &takes_last_frame, Some("Push in"))
         })
@@ -614,6 +645,39 @@ mod tests {
             "continuity.end_frame",
             "office_night_03 continues from this shot, but its keyframe is not locked yet"
         )));
+        let unfit = compile(VideoPromptInput {
+            successor: Some(Successor {
+                shot_id: "office_night_03",
+                end_frame: EndFrameUse::Unfit("its keyframe is larger than the provider takes"),
+            }),
+            ..input(&shot, &takes_last_frame, Some("Push in"))
+        })
+        .unwrap();
+        assert!(dropped(&unfit).contains(&(
+            "continuity.end_frame",
+            "office_night_03 continues from this shot, but its keyframe is larger than the \
+             provider takes"
+        )));
+
+        // Sent, the clip is told to close on it, and the hash says so.
+        let closing = compile(VideoPromptInput {
+            successor: Some(Successor {
+                shot_id: "office_night_03",
+                end_frame: EndFrameUse::Sent,
+            }),
+            ..input(&shot, &takes_last_frame, Some("Push in"))
+        })
+        .unwrap();
+        assert!(applied(&closing).contains(&"continuity.end_frame"));
+        assert!(closing.compiled.prompt().contains(
+            "End on the opening frame of office_night_03, which continues from this shot."
+        ));
+        assert!(
+            !dropped(&closing)
+                .iter()
+                .any(|(constraint, _)| *constraint == "continuity.end_frame")
+        );
+        assert_ne!(closing.prompt_hash, waiting.prompt_hash);
     }
 
     #[test]

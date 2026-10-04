@@ -153,6 +153,7 @@ dependencies = [
  "kineto-prompts",
  "kineto-provider-minimax",
  "kineto-providers",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

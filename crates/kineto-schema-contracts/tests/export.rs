@@ -187,7 +187,11 @@ fn a_package_holds_the_locked_shots_with_their_sidecars_and_a_manifest() {
     );
     assert_eq!(sidecar["video"]["provider"], "local-demo-video");
     assert_eq!(sidecar["video"]["clip_seconds"], 2);
-    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/5");
+    assert!(
+        sidecar["video"]["locked_at"].is_string(),
+        "when it was locked"
+    );
+    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/6");
     assert!(sidecar["intent"]["action"].as_str().unwrap().len() > 10);
     assert_eq!(
         sidecar["first_frame"]["artifact_id"],
@@ -196,7 +200,7 @@ fn a_package_holds_the_locked_shots_with_their_sidecars_and_a_manifest() {
 
     // Every shot locked: a complete package, scene by scene in shot order.
     let mut second = ShotWorkflow::load(&project, &ShotKey::bootstrap(2)).unwrap();
-    second.lock_video(&project).unwrap();
+    second.lock_video_at(&project, UNIX_EPOCH + AT).unwrap();
     let Err(ExportError::Exists(_)) = export::export(
         &project,
         &request(&out, "dailies", false, false),
@@ -229,6 +233,11 @@ fn a_package_holds_the_locked_shots_with_their_sidecars_and_a_manifest() {
     );
     assert_eq!(manifest["total_runtime_seconds"], 4);
     assert!(manifest["missing"].as_array().unwrap().is_empty());
+    assert_eq!(
+        json(&package.join("scene_001_shot_002.json"))["video"]["locked_at"],
+        export::rfc3339(UNIX_EPOCH + AT),
+        "the lock time is the canonical record's"
+    );
 
     // Made again, the package is the same, byte for byte.
     export::export(

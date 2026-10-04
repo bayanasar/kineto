@@ -59,8 +59,8 @@ use kineto_project::{
 };
 use kineto_providers::{
     AspectRatio, AudioFormat, CameraControl, Emotion, ImageCapabilities, ImageFormat, Price,
-    ReferenceRole, SpeechCapabilities, SpeechTiming, VideoCapabilities, VideoContainer, VideoMode,
-    VoiceSource,
+    ReferenceRole, SpeechCapabilities, SpeechTiming, VideoCapabilities, VideoClip, VideoContainer,
+    VideoMode, VoiceSource,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -549,43 +549,38 @@ pub fn speech_capabilities(declared: &Value) -> Result<(SpeechCapabilities, Stri
 }
 
 /// What a plugin declares for `video.generate`, and its model. A plugin
-/// starts every clip from the shot's locked keyframe, renders the lengths it
-/// lists, and answers a job to follow.
+/// starts every clip from the shot's locked keyframe, lists each clip it
+/// renders by its length and height with its price, may close a clip on a
+/// last frame, and answers a job to follow.
 pub fn video_capabilities(declared: &Value) -> Result<(VideoCapabilities, String), String> {
-    let clip_seconds = match &declared["clip_seconds"] {
-        Value::Array(lengths) => lengths
-            .iter()
-            .map(|length| {
-                length
-                    .as_u64()
-                    .and_then(|length| u8::try_from(length).ok())
-                    .filter(|length| *length > 0)
-                    .ok_or_else(|| "clip_seconds lists something other than a length".to_owned())
-            })
-            .collect::<Result<BTreeSet<u8>, _>>()?,
-        _ => return Err("video.generate declares no clip_seconds".to_owned()),
+    let Value::Array(listed) = &declared["clips"] else {
+        return Err("video.generate declares no clips".to_owned());
     };
-    if clip_seconds.is_empty() {
-        return Err("video.generate declares no clip_seconds".to_owned());
+    let mut clips = BTreeSet::new();
+    let mut clip_prices = BTreeMap::new();
+    for clip in listed {
+        let whole = |field: &str| clip[field].as_u64().filter(|whole| *whole > 0);
+        let (Some(seconds), Some(lines)) = (
+            whole("seconds").and_then(|seconds| u8::try_from(seconds).ok()),
+            whole("lines").and_then(|lines| u16::try_from(lines).ok()),
+        ) else {
+            return Err("a clip is not a length in seconds and a height in lines".to_owned());
+        };
+        let rendered = VideoClip { seconds, lines };
+        if !clips.insert(rendered) {
+            return Err(format!(
+                "the {seconds}-second {lines}-line clip is listed twice"
+            ));
+        }
+        if let Some(price) = number(clip, "price_micros")? {
+            clip_prices.insert(rendered, Price::usd(price));
+        }
     }
-    let clip_prices = match &declared["clip_prices_micros"] {
-        Value::Null => BTreeMap::new(),
-        Value::Object(prices) => prices
-            .iter()
-            .map(|(length, price)| {
-                let length = length
-                    .parse::<u8>()
-                    .ok()
-                    .filter(|length| clip_seconds.contains(length))
-                    .ok_or_else(|| format!("{length:?} is not a clip length it declares"))?;
-                let price = price
-                    .as_u64()
-                    .ok_or_else(|| "a clip price is not a whole number".to_owned())?;
-                Ok((length, Price::usd(price)))
-            })
-            .collect::<Result<_, String>>()?,
-        _ => return Err("clip_prices_micros is not a map of lengths to prices".to_owned()),
-    };
+    if clips.is_empty() {
+        return Err("video.generate declares no clips".to_owned());
+    }
+    let clip_seconds: BTreeSet<u8> = clips.iter().map(|clip| clip.seconds).collect();
+    let resolutions: BTreeSet<u16> = clips.iter().map(|clip| clip.lines).collect();
     let start_frame_formats: BTreeSet<ImageFormat> = names(declared, "start_frame_formats")?
         .iter()
         .map(|name| image_format(name))
@@ -593,6 +588,10 @@ pub fn video_capabilities(declared: &Value) -> Result<(VideoCapabilities, String
     if start_frame_formats.is_empty() {
         return Err("video.generate declares no start_frame_formats".to_owned());
     }
+    let end_frame_formats: BTreeSet<ImageFormat> = names(declared, "end_frame_formats")?
+        .iter()
+        .map(|name| image_format(name))
+        .collect::<Result<_, _>>()?;
     let to_ms = |seconds: Option<&u8>| seconds.map(|seconds| u64::from(*seconds) * 1000);
     let fps = number(declared, "fps")?
         .and_then(|fps| u16::try_from(fps).ok())
@@ -603,6 +602,7 @@ pub fn video_capabilities(declared: &Value) -> Result<(VideoCapabilities, String
         max_duration_ms: to_ms(clip_seconds.last()),
         fps_options: BTreeSet::from([fps]),
         start_frame: true,
+        end_frame: !end_frame_formats.is_empty(),
         camera_control: CameraControl::None,
         async_jobs: true,
         resumable_remote_handle: true,
@@ -611,6 +611,10 @@ pub fn video_capabilities(declared: &Value) -> Result<(VideoCapabilities, String
         max_prompt_chars: limit(declared, "max_prompt_chars")?,
         start_frame_formats,
         max_start_frame_bytes: number(declared, "max_start_frame_bytes")?,
+        end_frame_formats,
+        max_end_frame_bytes: number(declared, "max_end_frame_bytes")?,
+        resolutions,
+        clips,
         clip_prices,
         ..VideoCapabilities::default()
     };
@@ -1337,8 +1341,11 @@ impl VideoGenerator for PluginVideos {
             .unwrap_or_default()
     }
 
-    fn canonical_params(&self, clip_seconds: u8) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
+        match lines {
+            Some(lines) => format!("duration={clip_seconds};lines={lines}"),
+            None => format!("duration={clip_seconds}"),
+        }
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, PluginError> {
@@ -1351,18 +1358,27 @@ impl VideoGenerator for PluginVideos {
             ));
         };
         let name = format!("first-frame.{}", extension(*format));
-        let fields = json!({
+        let mut fields = json!({
             "capability": "video.generate",
             "request": {
                 "prompt": request.prompt,
                 "clip_seconds": request.clip_seconds,
+                "lines": request.lines,
                 "first_frame": format!("inputs/{name}"),
             },
         });
-        let inputs = [Input {
+        let mut inputs = vec![Input {
             name,
             bytes: frame.clone(),
         }];
+        if let Some((frame, format)) = &request.last_frame {
+            let name = format!("last-frame.{}", extension(*format));
+            fields["request"]["last_frame"] = json!(format!("inputs/{name}"));
+            inputs.push(Input {
+                name,
+                bytes: frame.clone(),
+            });
+        }
         let done = self
             .plugin
             .call("invoke", fields, &inputs, self.plugin.invoke)?;

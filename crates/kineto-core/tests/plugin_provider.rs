@@ -63,7 +63,7 @@ fn main() {
         return;
     }
     let filter = args.iter().find(|arg| !arg.starts_with('-')).cloned();
-    let tests: [(&str, fn()); 9] = [
+    let tests: [(&str, fn()); 11] = [
         (
             "only_a_registered_enabled_plugin_is_selected",
             only_a_registered_enabled_plugin_is_selected,
@@ -99,6 +99,14 @@ fn main() {
         (
             "a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed",
             a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed,
+        ),
+        (
+            "a_plugin_video_closes_on_the_next_locked_keyframe",
+            a_plugin_video_closes_on_the_next_locked_keyframe,
+        ),
+        (
+            "a_plugin_declares_each_clip_by_its_length_and_height",
+            a_plugin_declares_each_clip_by_its_length_and_height,
         ),
     ];
     let mut failed = 0;
@@ -830,5 +838,85 @@ fn a_plugin_video_that_fails_or_is_not_an_mp4_fails_closed() {
         // not needed, since the plugin answered.
         let healthy = PluginVideos::new(demo(&[]));
         assert!(video::start(&project, &shot, &healthy).is_ok(), "{mode}");
+    }
+}
+
+fn a_plugin_video_closes_on_the_next_locked_keyframe() {
+    let temp = TempDir::new();
+    let state = temp.0.join("state");
+    let target = temp.0.join("film");
+    let plugin = keeping(&state, &[]);
+    let (project, shot) = keyframed(&target, &plugin);
+    let mut next = ShotWorkflow::load(&project, &ShotKey::bootstrap(2)).unwrap();
+    generation::generate(
+        &project,
+        &mut next,
+        &ImageProvider::Plugin(Arc::clone(&plugin)),
+        &mut NoHooks,
+    )
+    .unwrap();
+    next.select(&project, 0).unwrap();
+    next.lock(&project).unwrap();
+    // The second shot continues from the first.
+    let path = target.join("scenes/scene_001/shots/shot_002/shot.json");
+    let mut intent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent["continuity_from"] = "shot_001".into();
+    fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+
+    video::start(&project, &shot, &PluginVideos::new(Arc::clone(&plugin))).unwrap();
+    let sent = requests(&state)
+        .into_iter()
+        .find(|request| request["capability"] == "video.generate")
+        .unwrap();
+    assert_eq!(sent["request"]["clip_seconds"], 6);
+    assert_eq!(sent["request"]["lines"], 720);
+    assert_eq!(sent["request"]["last_frame"], "inputs/last-frame.jpg");
+    assert_eq!(sent["inputs"][1]["path"], "inputs/last-frame.jpg");
+    // What is sent is the next shot's locked keyframe.
+    let (keyframe, _) = next.first_frame().unwrap().unwrap();
+    assert_eq!(
+        format!("sha256:{}", sent["inputs"][1]["sha256"].as_str().unwrap()),
+        keyframe.content_hash.as_str()
+    );
+}
+
+fn a_plugin_declares_each_clip_by_its_length_and_height() {
+    let declared = |clips: serde_json::Value| {
+        plugin::video_capabilities(&serde_json::json!({
+            "model": "m",
+            "clips": clips,
+            "start_frame_formats": ["jpeg"],
+            "end_frame_formats": ["png"],
+            "max_end_frame_bytes": 1_000,
+        }))
+    };
+    let (capabilities, _) = declared(serde_json::json!([
+        {"seconds": 6, "lines": 768, "price_micros": 280_000},
+        {"seconds": 6, "lines": 1080, "price_micros": 490_000},
+        {"seconds": 10, "lines": 768},
+    ]))
+    .unwrap();
+    assert_eq!(capabilities.clip_lines(6), Some(768));
+    assert_eq!(
+        capabilities.clip_price(6),
+        Some(kineto_providers::Price::usd(280_000))
+    );
+    assert_eq!(capabilities.clip_lines(10), Some(768));
+    assert_eq!(capabilities.clip_price(10), None, "a clip with no price");
+    assert!(capabilities.end_frame);
+    assert_eq!(capabilities.max_end_frame_bytes, Some(1_000));
+
+    for (clips, error) in [
+        (serde_json::json!([]), "video.generate declares no clips"),
+        (
+            serde_json::json!([{"seconds": 6}]),
+            "a clip is not a length in seconds and a height in lines",
+        ),
+        (
+            serde_json::json!([{"seconds": 6, "lines": 720}, {"seconds": 6, "lines": 720}]),
+            "the 6-second 720-line clip is listed twice",
+        ),
+    ] {
+        assert_eq!(declared(clips).unwrap_err(), error);
     }
 }

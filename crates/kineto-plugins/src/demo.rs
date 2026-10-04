@@ -90,10 +90,11 @@ fn describe(mode: &str) -> Value {
             },
             "video.generate": {
                 "model": "demo-video",
-                "clip_seconds": [6],
-                "clip_prices_micros": {"6": 0},
+                "clips": [{"seconds": 6, "lines": 720, "price_micros": 0}],
                 "start_frame_formats": ["jpeg", "png"],
                 "max_start_frame_bytes": 10_485_760,
+                "end_frame_formats": ["jpeg", "png"],
+                "max_end_frame_bytes": 10_485_760,
                 "max_prompt_chars": 2000
             }
         }
@@ -253,9 +254,13 @@ pub fn serve(args: &[String]) {
             let frame = request["request"]["first_frame"]
                 .as_str()
                 .unwrap_or_default();
+            let last_frame = request["request"]["last_frame"].as_str();
             if fs::metadata(frame).is_err() {
                 json!({"protocol": PROTOCOL, "status": "failed", "class": "terminal",
                     "accepted": false, "message": "the demo needs a first frame"})
+            } else if last_frame.is_some_and(|last| fs::metadata(last).is_err()) {
+                json!({"protocol": PROTOCOL, "status": "failed", "class": "terminal",
+                    "accepted": false, "message": "the demo was not given the last frame it was named"})
             } else {
                 let job = format!(
                     "demo-video-{}",

@@ -47,7 +47,7 @@ Every message carries `"protocol": "kineto-plugin/1"`. A response with another m
 
 ### Operations
 
-- `describe`, when a session selects the plugin and when settings list it: the plugin's name and version, optionally `invoke_deadline_seconds`, and for each capability it offers the same declaration a built-in makes: aspect ratios, reference roles and limits, formats and size limits, clip lengths, voices listing, prompt limits, prices, and whether results arrive at once or as jobs to follow. Kineto routes by this declaration exactly as it routes built-ins, so a plugin that cannot do what a step needs is refused before anything is written (`GenerationError::Incapable`).
+- `describe`, when a session selects the plugin and when settings list it: the plugin's name and version, optionally `invoke_deadline_seconds`, and for each capability it offers the same declaration a built-in makes: aspect ratios, reference roles and limits, formats and size limits, each clip it renders by length and height with its price, the first and last frames it takes, voices listing, prompt limits, prices, and whether results arrive at once or as jobs to follow. Kineto routes by this declaration exactly as it routes built-ins, so a plugin that cannot do what a step needs is refused before anything is written (`GenerationError::Incapable`).
 - `estimate`: the cost of a request, or unknown.
 - `invoke`: a request with its idempotency key. The answer is `completed` (output files), `pending` (a provider job ID to follow), or `failed` with a class (`retryable` or `terminal`) and `accepted`: `false` when the plugin knows the provider did not take the request, `true` or absent otherwise.
 - `reconcile`: by provider job ID or by idempotency key, answering `completed`, `pending`, `failed` or `unknown`.
@@ -71,7 +71,7 @@ A plugin call runs through the write-ahead job runtime under provider key `plugi
 
 ### What plugins do not cover
 
-`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers. Images and speech arrive in the answer to `invoke`. A video is always a job to follow: `invoke` answers `pending` with the job, which is recorded as the video's task before anything else, and the job is followed with `reconcile` by that job until it is `completed` (one MP4 clip) or `failed`; `unknown` is a failure. Video jobs are kept under `plugin.<id>-video`, apart from the plugin's images, as MiniMax's are. The selected plugin also makes the session's video when it declares `video.generate`, unless `KINETO_VIDEO_PROVIDER` names another provider.
+`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers. Images and speech arrive in the answer to `invoke`. A video is always a job to follow: `invoke` is sent the first frame, the clip's length and height, and, where the plugin declares `end_frame_formats` and the next shot continues from this one with a locked keyframe, that keyframe as the last frame; it answers `pending` with the job, which is recorded as the video's task before anything else, and the job is followed with `reconcile` by that job until it is `completed` (one MP4 clip) or `failed`; `unknown` is a failure. Video jobs are kept under `plugin.<id>-video`, apart from the plugin's images, as MiniMax's are. The selected plugin also makes the session's video when it declares `video.generate`, unless `KINETO_VIDEO_PROVIDER` names another provider.
 
 ## Consequences
 

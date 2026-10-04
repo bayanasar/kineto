@@ -14,6 +14,7 @@ pub mod shot_plan;
 pub mod source;
 pub mod story;
 pub mod style;
+pub mod time;
 pub mod voice;
 
 use std::{collections::BTreeMap, error::Error, fmt};

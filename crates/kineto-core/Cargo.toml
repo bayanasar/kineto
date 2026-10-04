@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # A scripted language model for tests of code built on sessions.
 testing = ["kineto-llm/testing"]

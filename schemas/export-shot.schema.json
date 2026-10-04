@@ -12,6 +12,7 @@
     "order",
     "video",
     "first_frame",
+    "end_frame",
     "prompt",
     "intent",
     "notes",
@@ -50,7 +51,8 @@
         "provider",
         "model",
         "clip_seconds",
-        "parameters"
+        "parameters",
+        "locked_at"
       ],
       "properties": {
         "file": {
@@ -85,6 +87,14 @@
             "string",
             "null"
           ]
+        },
+        "locked_at": {
+          "description": "When the video was locked, RFC 3339 UTC; null for a video locked before Kineto recorded it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       },
       "additionalProperties": false
@@ -111,6 +121,38 @@
             "null"
           ],
           "pattern": "^[A-Za-z0-9_.-]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "end_frame": {
+      "description": "The locked keyframe of the shot that continues from this one, which the clip was made to close on; null when it closes on none.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "scene_id",
+        "shot_id",
+        "artifact_id",
+        "content_hash"
+      ],
+      "properties": {
+        "scene_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "shot_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         }
       },
       "additionalProperties": false
