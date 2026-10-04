@@ -391,6 +391,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
             name: "dailies".to_owned(),
             partial: true,
             replace: false,
+            timeline: true,
         },
         UNIX_EPOCH + Duration::from_secs(1_791_015_045),
     )

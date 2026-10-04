@@ -18,6 +18,7 @@ kineto-llm = { path = "../../../crates/kineto-llm" }
 kineto-plugins = { path = "../../../crates/kineto-plugins" }
 kineto-project = { path = "../../../crates/kineto-project" }
 kineto-providers = { path = "../../../crates/kineto-providers" }
+serde_json = "1"
 
 [dev-dependencies]
 kineto-core = { path = "../../../crates/kineto-core", features = ["testing"] }

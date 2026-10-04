@@ -80,10 +80,12 @@ pub(crate) const PROJECT_ERR_NEEDS_LOCKED_CAST: i32 = 163;
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_VOICE: i32 = 164;
 pub(crate) const PROJECT_ERR_PLUGIN_CONFIG_INVALID: i32 = 165;
 pub(crate) const PROJECT_ERR_PLUGIN_UNAVAILABLE: i32 = 166;
+pub(crate) const PROJECT_ERR_MCP_NOT_ALLOWED: i32 = 167;
+pub(crate) const PROJECT_ERR_INVALID_REFERENCE: i32 = 168;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 69] = [
+const STATUSES: [(&str, i32); 71] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -164,6 +166,8 @@ const STATUSES: [(&str, i32); 69] = [
     ("needs_locked_voice", PROJECT_ERR_NEEDS_LOCKED_VOICE),
     ("plugin_config_invalid", PROJECT_ERR_PLUGIN_CONFIG_INVALID),
     ("plugin_unavailable", PROJECT_ERR_PLUGIN_UNAVAILABLE),
+    ("mcp_not_allowed", PROJECT_ERR_MCP_NOT_ALLOWED),
+    ("invalid_reference", PROJECT_ERR_INVALID_REFERENCE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -911,6 +915,38 @@ pub(crate) const DURATION_SOURCES: [(&str, u32); 2] = [("estimated", 1), ("measu
 pub(crate) const SPEECH_PROVIDERS: [(&str, u32); 3] =
     [("local_demo", 1), ("minimax", 2), ("plugin", 3)];
 
+/// How a tool takes an argument, as `KinetoToolArgument.kind` says.
+pub(crate) const TOOL_ARGUMENT_KINDS: [(&str, u32); 3] = [("text", 1), ("number", 2), ("flag", 3)];
+
+/// Text fields `kineto_project_reference_text_copy` copies of a reference.
+pub(crate) const REFERENCE_TEXTS: [(&str, u32); 7] = [
+    ("id", 1),
+    ("server", 2),
+    ("tool", 3),
+    ("arguments", 4),
+    ("text", 5),
+    ("attached_to", 6),
+    ("content_hash", 7),
+];
+
+/// Number fields `kineto_mcp_value` reads of a server or a tool parameter.
+pub(crate) const MCP_VALUES: [(&str, u32); 4] =
+    [("enabled", 1), ("listed", 2), ("required", 3), ("kind", 4)];
+
+/// Text fields `kineto_mcp_text_copy` copies of a server, a tool or a tool
+/// parameter.
+pub(crate) const MCP_TEXTS: [(&str, u32); 9] = [
+    ("id", 1),
+    ("executable", 2),
+    ("secrets", 3),
+    ("allowed", 4),
+    ("problem", 5),
+    ("tool_name", 6),
+    ("tool_description", 7),
+    ("parameter_name", 8),
+    ("parameter_description", 9),
+];
+
 /// Number fields `kineto_plugins_value` reads of a registered plugin.
 pub(crate) const PLUGIN_VALUES: [(&str, u32); 12] = [
     ("enabled", 1),
@@ -1009,6 +1045,10 @@ const ENTRY_SPEECH_PROVIDER: u32 = 59;
 const ENTRY_SUGGESTION_DECISION: u32 = 60;
 const ENTRY_PLUGIN_VALUE: u32 = 61;
 const ENTRY_PLUGIN_TEXT: u32 = 62;
+const ENTRY_TOOL_ARGUMENT_KIND: u32 = 63;
+const ENTRY_REFERENCE_TEXT: u32 = 64;
+const ENTRY_MCP_VALUE: u32 = 65;
+const ENTRY_MCP_TEXT: u32 = 66;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1110,6 +1150,10 @@ fn entries() -> &'static [Entry] {
         );
         codes(&mut entries, ENTRY_PLUGIN_VALUE, &PLUGIN_VALUES);
         codes(&mut entries, ENTRY_PLUGIN_TEXT, &PLUGIN_TEXTS);
+        codes(&mut entries, ENTRY_TOOL_ARGUMENT_KIND, &TOOL_ARGUMENT_KINDS);
+        codes(&mut entries, ENTRY_REFERENCE_TEXT, &REFERENCE_TEXTS);
+        codes(&mut entries, ENTRY_MCP_VALUE, &MCP_VALUES);
+        codes(&mut entries, ENTRY_MCP_TEXT, &MCP_TEXTS);
         entries
     })
 }
@@ -1276,9 +1320,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_PLUGIN_TEXT);
-        assert_eq!(&name[..len as usize], b"clip_seconds");
-        assert_eq!((value, extra), (12, 0));
+        assert_eq!(kind, ENTRY_MCP_TEXT);
+        assert_eq!(&name[..len as usize], b"parameter_description");
+        assert_eq!((value, extra), (9, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'native/kineto_engine.dart';
+import 'references_panel.dart';
 import 'screenplay_workspace.dart';
 
 /// What paid images cost with the session's image provider, as it declares.
@@ -30,16 +32,35 @@ KinetoImageCost? timesImages(KinetoImageCost? cost, int count) => cost == null
 /// How many portrait candidates an audition asks to have.
 const List<int> auditionSizes = <int>[1, 2, 3, 4, 6];
 
+/// Asks the director for an image in the system's own open dialog; the
+/// only way a path outside the project reaches Kineto.
+Future<String?> pickImageFile() async {
+  final file = await openFile(
+    acceptedTypeGroups: const <XTypeGroup>[
+      XTypeGroup(label: 'Images', extensions: <String>['jpg', 'jpeg', 'png', 'webp']),
+    ],
+  );
+  return file?.path;
+}
+
 class ProductionWorkspaceScreen extends StatefulWidget {
   const ProductionWorkspaceScreen({
     required this.project,
     this.navigation,
     this.isDarkMode = true,
     this.onThemeToggle,
+    this.pickImage = pickImageFile,
+    this.loadServers = loadKinetoMcpServersInBackground,
     super.key,
   });
 
   final KinetoProjectSession project;
+
+  /// Asks the director for an image to import; null when they chose none.
+  final Future<String?> Function() pickImage;
+
+  /// Reads the registered MCP servers and their tools, off the UI thread.
+  final Future<List<KinetoMcpServer>> Function() loadServers;
 
   /// Switches to the other workspaces, shown above the bible.
   final Widget? navigation;
@@ -64,6 +85,10 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   /// request may already have been charged; offered only after that refusal.
   VoidCallback? _resubmit;
   String? _editingEntry;
+  late List<KinetoReference> _references;
+  List<KinetoMcpServer>? _servers;
+  String? _serversProblem;
+  bool _loadingTools = false;
 
   @override
   void initState() {
@@ -79,6 +104,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
 
   void _read() {
     _production = widget.project.production;
+    _references = widget.project.references;
     _screenplayLocked = widget.project.documents.screenplayLocked;
     _bibleCost = widget.project.documentCostMicros(KinetoDocumentKind.bible);
   }
@@ -121,10 +147,53 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
     });
   }
 
+  Future<void> _loadTools() async {
+    setState(() {
+      _loadingTools = true;
+      _serversProblem = null;
+    });
+    List<KinetoMcpServer>? servers;
+    String? problem;
+    try {
+      servers = await widget.loadServers();
+    } on KinetoProjectException catch (failure) {
+      problem = failure.message;
+    } on Object catch (failure) {
+      problem = failure.toString();
+    }
+    if (!mounted) return;
+    setState(() {
+      _loadingTools = false;
+      _servers = servers;
+      _serversProblem = problem;
+    });
+  }
+
+  Future<void> _importPortrait(String character) async {
+    if (_working) return;
+    final path = await widget.pickImage();
+    if (path == null || !mounted) return;
+    await _run(() => widget.project.importPortrait(character, path), 'Importing the portrait');
+  }
+
   @override
   Widget build(BuildContext context) {
     final project = widget.project;
     return ProductionWorkspaceView(
+      references: _references,
+      servers: _servers,
+      serversProblem: _serversProblem,
+      loadingTools: _loadingTools,
+      onLoadTools: _loadTools,
+      onAskReference: (server, tool, arguments, targets) => _run(
+        () => project.askReference(server: server, tool: tool, arguments: arguments, attachedTo: targets),
+        'Asking $server for $tool',
+      ),
+      onEditReference: (reference, text) => _run(() => project.editReference(reference, text), 'Saving'),
+      onAttachReference: (reference, target, attach) =>
+          _run(() => project.attachReference(reference, target, attach: attach), 'Saving'),
+      onRemoveReference: (reference) => _run(() => project.removeReference(reference), 'Removing'),
+      onImportPortrait: _importPortrait,
       production: _production,
       model: _model,
       prices: _prices,
@@ -204,6 +273,16 @@ class ProductionWorkspaceView extends StatelessWidget {
     required this.onSelectPortrait,
     required this.onRejectPortrait,
     required this.onLockCast,
+    this.references = const <KinetoReference>[],
+    this.servers,
+    this.serversProblem,
+    this.loadingTools = false,
+    this.onLoadTools,
+    this.onAskReference,
+    this.onEditReference,
+    this.onAttachReference,
+    this.onRemoveReference,
+    this.onImportPortrait,
     this.prices = const ProductionPrices(),
     this.screenplayLocked = false,
     this.bibleCostMicros,
@@ -258,6 +337,23 @@ class ProductionWorkspaceView extends StatelessWidget {
   final void Function(String character, String portrait) onRejectPortrait;
   final ValueChanged<String> onLockCast;
 
+  /// References from MCP tools, oldest first.
+  final List<KinetoReference> references;
+
+  /// The registered MCP servers and their tools; null until loaded.
+  final List<KinetoMcpServer>? servers;
+  final String? serversProblem;
+  final bool loadingTools;
+  final VoidCallback? onLoadTools;
+  final void Function(String server, String tool, List<KinetoToolArgument> arguments, List<String> targets)?
+      onAskReference;
+  final void Function(String reference, String text)? onEditReference;
+  final void Function(String reference, String target, bool attach)? onAttachReference;
+  final ValueChanged<String>? onRemoveReference;
+
+  /// Import an image the director chooses as a portrait of the character.
+  final ValueChanged<String>? onImportPortrait;
+
   bool get _idle => !working && editingEntry == null;
 
   @override
@@ -302,6 +398,22 @@ class ProductionWorkspaceView extends StatelessWidget {
                   ],
                   _biblePanel(context),
                   const SizedBox(height: 20),
+                  if (onAskReference != null) ...<Widget>[
+                    ReferencesPanel(
+                      references: references,
+                      targets: referenceTargets(production.bible),
+                      enabled: _idle,
+                      servers: servers,
+                      serversProblem: serversProblem,
+                      loadingTools: loadingTools,
+                      onLoadTools: onLoadTools ?? () {},
+                      onAsk: onAskReference!,
+                      onEdit: onEditReference ?? (_, _) {},
+                      onAttach: onAttachReference ?? (_, _, _) {},
+                      onRemove: onRemoveReference ?? (_) {},
+                    ),
+                    const SizedBox(height: 20),
+                  ],
                   _stylePanel(context),
                   const SizedBox(height: 20),
                   _castPanel(context),
@@ -363,7 +475,7 @@ class ProductionWorkspaceView extends StatelessWidget {
             )
           else ...<Widget>[
             if (production.bibleStale.isNotEmpty) ...<Widget>[
-              Text('May no longer match the locked screenplay: '
+              Text('May no longer match the locked screenplay or its references: '
                   '${production.bibleStale.map((cause) => cause.description).join('; ')}.'),
               const SizedBox(height: 12),
             ],
@@ -463,8 +575,8 @@ class ProductionWorkspaceView extends StatelessWidget {
         children: <Widget>[
           if (production.styleUnresolved) ...<Widget>[
             const Text(
-              'A style sample did not finish cleanly, and MiniMax may already have charged for an '
-              'image Kineto never received. Check your MiniMax account; sample again only if you '
+              'A style sample did not finish cleanly, and the image provider may already have charged '
+              'for an image Kineto never received. Check your account with it; sample again only if you '
               'accept paying twice.',
             ),
             const SizedBox(height: 12),
@@ -590,6 +702,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                 onSelectPortrait: (portrait) => onSelectPortrait(character.id, portrait),
                 onRejectPortrait: (portrait) => onRejectPortrait(character.id, portrait),
                 onLock: () => onLockCast(character.id),
+                onImport: onImportPortrait == null ? null : () => onImportPortrait!(character.id),
               ),
             ],
           ],
@@ -708,6 +821,7 @@ class CastingCard extends StatefulWidget {
     required this.onSelectPortrait,
     required this.onRejectPortrait,
     required this.onLock,
+    this.onImport,
     super.key,
   });
 
@@ -719,6 +833,9 @@ class CastingCard extends StatefulWidget {
   final ValueChanged<String> onSelectPortrait;
   final ValueChanged<String> onRejectPortrait;
   final VoidCallback onLock;
+
+  /// Import an image the director chooses as a portrait; free.
+  final VoidCallback? onImport;
 
   @override
   State<CastingCard> createState() => _CastingCardState();
@@ -753,8 +870,8 @@ class _CastingCardState extends State<CastingCard> {
         children: <Widget>[
           if (character.unresolved) ...<Widget>[
             Text(
-              'An image of ${character.name} did not finish cleanly, and MiniMax may already have '
-              'charged for it. Check your MiniMax account; ask again only if you accept paying twice.',
+              'An image of ${character.name} did not finish cleanly, and the image provider may already '
+              'have charged for it. Check your account with it; ask again only if you accept paying twice.',
             ),
             const SizedBox(height: 12),
           ],
@@ -785,6 +902,13 @@ class _CastingCardState extends State<CastingCard> {
                       : 'Audition · ${imageCostLabel(timesImages(widget.prices.portrait, toMake))}',
                 ),
               ),
+              if (widget.onImport != null)
+                WabButton(
+                  key: ValueKey<String>('import-portrait-$id'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: enabled ? widget.onImport : null,
+                  child: const Text('Import a portrait · free'),
+                ),
             ],
           ),
           if (character.portraits.isNotEmpty) ...<Widget>[

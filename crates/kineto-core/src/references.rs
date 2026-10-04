@@ -164,3 +164,79 @@ pub fn ask_within(
     )
     .map_err(document_error)
 }
+
+/// How a tool takes one of its arguments, as its input schema says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterKind {
+    Text,
+    Number,
+    Flag,
+    /// Anything else, which the director cannot give in a field.
+    Other,
+}
+
+/// One argument a tool takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolParameter {
+    pub name: String,
+    pub kind: ParameterKind,
+    pub description: String,
+    pub required: bool,
+}
+
+/// The arguments `tool` takes, in its schema's order.
+#[must_use]
+pub fn parameters(tool: &ToolInfo) -> Vec<ToolParameter> {
+    let required: Vec<&str> = tool.input_schema["required"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    tool.input_schema["properties"]
+        .as_object()
+        .map(|properties| {
+            properties
+                .iter()
+                .map(|(name, schema)| ToolParameter {
+                    name: name.clone(),
+                    kind: match schema["type"].as_str() {
+                        Some("string") => ParameterKind::Text,
+                        Some("number" | "integer") => ParameterKind::Number,
+                        Some("boolean") => ParameterKind::Flag,
+                        _ => ParameterKind::Other,
+                    },
+                    description: schema["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    required: required.contains(&name.as_str()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A registered server as settings show it.
+#[derive(Debug)]
+pub struct ServerListing {
+    pub entry: McpServerEntry,
+    /// `None` when it is disabled; otherwise the tools it offers that it
+    /// allows, or why they could not be listed.
+    pub tools: Option<Result<Vec<ToolInfo>, String>>,
+}
+
+/// Every server `config` registers, in its order, each enabled one started
+/// once to list its tools.
+#[must_use]
+pub fn list_servers(config: &McpConfig) -> Vec<ServerListing> {
+    config
+        .servers()
+        .iter()
+        .map(|entry| ServerListing {
+            entry: entry.clone(),
+            tools: entry.enabled.then(|| {
+                mcp::list_tools(entry, &environment_secret, McpLimits::DEFAULT)
+                    .map_err(|error| error.to_string())
+            }),
+        })
+        .collect()
+}

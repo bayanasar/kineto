@@ -153,6 +153,8 @@ void main() {
       KinetoProjectException.needsLockedVoice: 'needs_locked_voice',
       KinetoProjectException.pluginConfigInvalid: 'plugin_config_invalid',
       KinetoProjectException.pluginUnavailable: 'plugin_unavailable',
+      KinetoProjectException.mcpNotAllowed: 'mcp_not_allowed',
+      KinetoProjectException.invalidReference: 'invalid_reference',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);
@@ -226,5 +228,18 @@ void main() {
   test('every plugin field the bindings read is in the native tables', () {
     expect(contract.pluginValues.keys.toSet(), kinetoPluginValueFields);
     expect(contract.pluginTexts.keys.toSet(), kinetoPluginTextFields);
+  });
+
+  test('reference and MCP codes match the native tables name for name', () {
+    expect(
+      <String>{for (final kind in KinetoToolArgumentKind.values) kind.wireName},
+      contract.toolArgumentKinds.keys.toSet(),
+    );
+    expect(
+      contract.referenceTexts.keys.toSet(),
+      <String>{'id', 'server', 'tool', 'arguments', 'text', 'attached_to', 'content_hash'},
+    );
+    expect(contract.mcpValues.keys.toSet(), <String>{'enabled', 'listed', 'required', 'kind'});
+    expect(contract.mcpTexts.keys, containsAll(<String>['tool_name', 'parameter_name', 'problem']));
   });
 }

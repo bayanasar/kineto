@@ -11,10 +11,15 @@ import 'preferences_workspace.dart';
 import 'production_workspace.dart';
 import 'project_busy.dart';
 import 'screenplay_workspace.dart';
+import 'settings_workspace.dart';
 import 'shot_plan_workspace.dart';
 import 'voices_workspace.dart';
 
-Future<void> main() async {
+Future<void> main() => run();
+
+/// Open the demo project and run the app. [pickImage] asks the director for
+/// an image to import; the system's open dialog unless a test gives one.
+Future<void> run({Future<String?> Function()? pickImage}) async {
   WidgetsFlutterBinding.ensureInitialized();
   final engine = KinetoEngine.open();
   try {
@@ -24,6 +29,7 @@ Future<void> main() async {
         engine: engine,
         project: project,
         exportFolder: [Directory(_demoProjectPath()).parent.path, 'exports'].join(Platform.pathSeparator),
+        pickImage: pickImage ?? pickImageFile,
       ),
     );
   } on KinetoProjectException catch (error) {
@@ -111,11 +117,15 @@ class KinetoApp extends StatefulWidget {
     required this.engine,
     required this.project,
     this.exportFolder = '',
+    this.pickImage = pickImageFile,
     super.key,
   });
 
   final KinetoEngine engine;
   final KinetoProjectSession project;
+
+  /// Asks the director for an image to import.
+  final Future<String?> Function() pickImage;
 
   /// Where production packages are made unless the director names another
   /// folder.
@@ -126,7 +136,7 @@ class KinetoApp extends StatefulWidget {
 }
 
 /// The workspaces the director moves between.
-enum KinetoWorkspace { screenplay, production, voices, shotPlan, shots, handoff, preferences }
+enum KinetoWorkspace { screenplay, production, voices, shotPlan, shots, handoff, preferences, settings }
 
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
@@ -172,6 +182,7 @@ class _KinetoAppState extends State<KinetoApp> {
             (KinetoWorkspace.shots, 'Shots'),
             (KinetoWorkspace.handoff, 'Handoff'),
             (KinetoWorkspace.preferences, 'Preferences'),
+            (KinetoWorkspace.settings, 'Plugins & tools'),
           ])
             WabButton(
               key: ValueKey<String>('workspace-${workspace.name}'),
@@ -196,6 +207,7 @@ class _KinetoAppState extends State<KinetoApp> {
           ),
         KinetoWorkspace.production => ProductionWorkspaceScreen(
             project: widget.project,
+            pickImage: widget.pickImage,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
@@ -221,6 +233,11 @@ class _KinetoAppState extends State<KinetoApp> {
         KinetoWorkspace.shots => DemoWorkspaceScreen(
             engine: widget.engine,
             project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+        KinetoWorkspace.settings => SettingsWorkspaceScreen(
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,

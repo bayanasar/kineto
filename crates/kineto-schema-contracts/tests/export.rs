@@ -113,6 +113,7 @@ fn request(destination: &Path, name: &str, partial: bool, replace: bool) -> Expo
         name: name.to_owned(),
         partial,
         replace,
+        timeline: true,
     }
 }
 

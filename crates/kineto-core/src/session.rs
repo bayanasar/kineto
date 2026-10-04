@@ -35,6 +35,7 @@ use kineto_project::{
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     media::{self, MediaRecord},
     preferences::{self as preferences_document, Preferences},
+    references::{self as reference_document, Reference, ReferenceError},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
@@ -61,6 +62,7 @@ use crate::{
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
     plugin::{PluginSpeech, PluginVideos},
+    references::{self, Ask},
     screenplay, shot_plan,
     speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
@@ -259,6 +261,32 @@ pub enum ProductionCommand {
         character: String,
         path: PathBuf,
     },
+    /// Call `tool` of the registered MCP server `server` with `arguments`,
+    /// as the director asks, and keep its text as a reference about
+    /// `attached_to` (ADR-0007). Kineto pays nothing; the server is the
+    /// user's.
+    AskReference {
+        server: String,
+        tool: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        attached_to: Vec<String>,
+    },
+    /// The director's own words in place of a reference's text.
+    EditReference {
+        reference: String,
+        text: String,
+    },
+    AttachReference {
+        reference: String,
+        target: String,
+    },
+    DetachReference {
+        reference: String,
+        target: String,
+    },
+    RemoveReference {
+        reference: String,
+    },
     /// Free: ask the speech provider which voices it offers.
     LoadVoices,
     /// Paid: have each voice of `choices` say `line` as `character`, or
@@ -307,6 +335,7 @@ pub enum ProductionError {
     Cast(CastError),
     Voice(VoiceError),
     Dubbing(DubbingError),
+    References(ReferenceError),
 }
 
 impl fmt::Display for ProductionError {
@@ -316,6 +345,7 @@ impl fmt::Display for ProductionError {
             Self::Cast(error) => error.fmt(formatter),
             Self::Voice(error) => error.fmt(formatter),
             Self::Dubbing(error) => error.fmt(formatter),
+            Self::References(error) => error.fmt(formatter),
         }
     }
 }
@@ -327,6 +357,7 @@ impl Error for ProductionError {
             Self::Cast(error) => Some(error),
             Self::Voice(error) => Some(error),
             Self::Dubbing(error) => Some(error),
+            Self::References(error) => Some(error),
         }
     }
 }
@@ -624,6 +655,8 @@ pub struct PublishedProduction {
     pub voices: Vec<Voice>,
     /// Why the voices could not be listed, when they could not.
     pub voices_problem: Option<String>,
+    /// The references the director brought in, oldest first.
+    pub references: Vec<Reference>,
     /// The style or the cast could not be read; why.
     pub damaged: Option<String>,
 }
@@ -2306,6 +2339,43 @@ impl Worker {
             ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
                 .map(|_| ())
                 .map_err(generation_error),
+            ProductionCommand::AskReference {
+                server,
+                tool,
+                arguments,
+                attached_to,
+            } => references::server(server)
+                .and_then(|server| {
+                    references::ask(
+                        project,
+                        &server,
+                        Ask {
+                            tool,
+                            arguments: arguments.clone(),
+                            attached_to: attached_to.clone(),
+                        },
+                    )
+                })
+                .map(|_| ())
+                .map_err(generation_error),
+            ProductionCommand::EditReference { reference, text } => {
+                reference_document::edit(project, reference, text)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::AttachReference { reference, target } => {
+                reference_document::attach(project, reference, target)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::DetachReference { reference, target } => {
+                reference_document::detach(project, reference, target)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::RemoveReference { reference } => {
+                reference_document::remove(project, reference).map_err(reference_error)
+            }
         }))
         .unwrap_or(Err(SessionError::Panicked));
         // A paid call cut short may have been charged without its result;
@@ -2896,6 +2966,7 @@ impl Worker {
             lines,
             voices,
             voices_problem,
+            references: reference_document::references(project).map_err(reference_error)?,
             damaged: None,
         })
     }
@@ -3047,6 +3118,10 @@ fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
         }
         ImageProvider::LocalDemo | ImageProvider::Plugin(_) => SpeechProvider::LocalDemo,
     }
+}
+
+fn reference_error(error: ReferenceError) -> SessionError {
+    SessionError::Production(ProductionError::References(error))
 }
 
 /// The lines `unresolved` takes belong to.
@@ -4302,6 +4377,7 @@ mod tests {
                 name: "dailies".to_owned(),
                 partial,
                 replace: false,
+                timeline: true,
             };
             let export = |request: export::ExportRequest, token: u64| {
                 session.submit_export(request, token).unwrap();

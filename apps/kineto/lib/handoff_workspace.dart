@@ -107,10 +107,16 @@ class _HandoffWorkspaceScreenState extends State<HandoffWorkspaceScreen> {
         onPlanCollection: () => _run(widget.project.planCollection, 'Working out what can be let go'),
         onCollect: () => _run(widget.project.collectMedia, 'Letting go'),
         onVerify: () => _run(widget.project.verifyMedia, 'Reading every file'),
-        onExport: (folder, name, {required partial, required replace}) => _run(
+        onExport: (folder, name, {required partial, required replace, required timeline}) => _run(
           () async {
             Directory(folder).createSync(recursive: true);
-            await widget.project.exportPackage(destination: folder, name: name, partial: partial, replace: replace);
+            await widget.project.exportPackage(
+              destination: folder,
+              name: name,
+              partial: partial,
+              replace: replace,
+              timeline: timeline,
+            );
           },
           'Exporting',
         ),
@@ -151,7 +157,13 @@ class HandoffWorkspaceView extends StatefulWidget {
   final VoidCallback onPlanCollection;
   final VoidCallback onCollect;
   final VoidCallback onVerify;
-  final void Function(String folder, String name, {required bool partial, required bool replace}) onExport;
+  final void Function(
+    String folder,
+    String name, {
+    required bool partial,
+    required bool replace,
+    required bool timeline,
+  }) onExport;
   final ValueChanged<String>? onOpenFolder;
 
   @override
@@ -163,6 +175,7 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
   final TextEditingController _name = TextEditingController(text: 'dailies');
   bool _partial = false;
   bool _replace = false;
+  bool _timeline = true;
 
   @override
   void dispose() {
@@ -306,7 +319,9 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
         children: <Widget>[
           const Text(
             'Each locked video with a sidecar of what made it, and a manifest with scenes, shot order '
-            'and runtime: everything an editor needs without Kineto.',
+            'and runtime: everything an editor needs without Kineto. With the timeline, the shots and '
+            'their dubbed lines are laid end to end as timeline.otio (OpenTimelineIO) and timeline.edl '
+            '(CMX 3600), ready to open in an editing application.',
           ),
           if (export.missing.isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
@@ -337,6 +352,12 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
                   label: 'Export only the ready shots',
                 ),
               WabCheckbox(
+                key: const ValueKey<String>('export-timeline'),
+                value: _timeline,
+                onChanged: (value) => setState(() => _timeline = value ?? false),
+                label: 'Include the timeline (OTIO and EDL)',
+              ),
+              WabCheckbox(
                 key: const ValueKey<String>('export-replace'),
                 value: _replace,
                 onChanged: (value) => setState(() => _replace = value ?? false),
@@ -359,6 +380,7 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
                           _name.text.trim(),
                           partial: export.missing.isNotEmpty && _partial,
                           replace: _replace,
+                          timeline: _timeline,
                         )
                     : null,
                 child: Text(export.ready == 1 ? 'Export 1 shot' : 'Export ${export.ready} shots'),
