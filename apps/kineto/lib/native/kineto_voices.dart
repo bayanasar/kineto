@@ -241,7 +241,8 @@ enum KinetoDurationSource {
 
 enum KinetoSpeechProviderKind {
   localDemo('local_demo', 'Local demo'),
-  minimax('minimax', 'MiniMax');
+  minimax('minimax', 'MiniMax'),
+  plugin('plugin', 'Plugin');
 
   const KinetoSpeechProviderKind(this.wireName, this.label);
 

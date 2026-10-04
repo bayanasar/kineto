@@ -11,6 +11,7 @@ pub mod learning;
 pub mod llm;
 pub mod minimax;
 pub mod paid_image;
+pub mod plugin;
 pub mod preferences;
 pub mod screenplay;
 pub mod session;

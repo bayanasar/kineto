@@ -1,8 +1,9 @@
 //! Style exploration: paid sample images of style directions.
 //!
-//! Each sample is one paid image (see [`crate::paid_image`]) in the
-//! `minimax-style` partition, recorded in `style/samples.json` with what its
-//! plan kept: preset, note, scene and dependencies.
+//! Each sample is one paid image (see [`crate::paid_image`]) in its
+//! provider's style partition (`minimax-style` for MiniMax), recorded in
+//! `style/samples.json` with what its plan kept: preset, note, scene and
+//! dependencies.
 
 use std::sync::Arc;
 
@@ -13,7 +14,6 @@ use kineto_project::{
     revisions::{self, DependencyRecord, DocumentKind},
     style::{self as document, SampleStatus, StyleSample},
 };
-use kineto_provider_minimax::{IMAGE_MODEL, PROVIDER, Transport};
 use kineto_providers::Price;
 use serde::{Deserialize, Serialize};
 
@@ -22,14 +22,16 @@ use crate::{
     documents::document_error,
     generation::{
         CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate, GenerationError,
-        GenerationHooks, ImageProvider, KEYFRAME_ASPECT, Prerequisite, require_synchronous,
+        GenerationHooks, ImageProvider, KEYFRAME_ASPECT, Prerequisite, require_frame,
+        require_synchronous,
     },
     minimax::MinimaxKeyframes,
     paid_image::{self, Jobs, Ledger},
+    plugin::PluginImages,
     style_prompt::{self, StylePreset},
 };
 
-/// The job partition style samples are recorded under.
+/// The job partition MiniMax's style samples are recorded under.
 pub const STYLE_PROVIDER: &str = "minimax-style";
 
 /// The aspect ratio samples are generated at, as keyframes are.
@@ -109,8 +111,7 @@ struct Samples;
 impl Ledger for Samples {
     type Plan = SamplePlan;
 
-    const PARTITION: &'static str = STYLE_PROVIDER;
-    const PLAN: &'static str = "style";
+    const KIND: &'static str = "style";
 
     fn artifact_id(plan: &SamplePlan) -> &str {
         &plan.artifact_id
@@ -131,10 +132,27 @@ impl Ledger for Samples {
     }
 }
 
-/// Complete style samples an interrupted session left, as a project opens.
-/// Never calls MiniMax.
+/// Complete style samples an interrupted session left with MiniMax, as a
+/// project opens. Never calls MiniMax.
 pub fn recover(project: &CanonicalProject) -> Result<StyleRecovery, GenerationError> {
     paid_image::recover::<Samples>(project)
+}
+
+/// [`recover`], and the samples `provider` left when it is a plugin. Makes
+/// no new call; the plugin may be asked whether it kept a sent call's
+/// answer.
+pub fn recover_for(
+    project: &CanonicalProject,
+    provider: &ImageProvider,
+) -> Result<StyleRecovery, GenerationError> {
+    let mut recovery = recover(project)?;
+    if let ImageProvider::Plugin(plugin) = provider {
+        recovery.extend(paid_image::recover_with::<Samples, _>(
+            project,
+            PluginImages::new(project, plugin),
+        )?);
+    }
+    Ok(recovery)
 }
 
 /// What one sample, one call, costs with `provider`, as it declares; `None`
@@ -143,6 +161,9 @@ pub fn recover(project: &CanonicalProject) -> Result<StyleRecovery, GenerationEr
 pub fn sample_cost(provider: &ImageProvider) -> Option<Price> {
     match provider {
         ImageProvider::Minimax(Some(_)) => provider.capabilities().price_per_image,
+        ImageProvider::Plugin(plugin) => plugin
+            .image_capabilities()
+            .and_then(|capabilities| capabilities.price_per_image),
         ImageProvider::Minimax(None) | ImageProvider::LocalDemo => None,
     }
 }
@@ -167,13 +188,20 @@ pub fn sample(
             submission,
             hooks,
         ),
+        ImageProvider::Plugin(plugin) => sample_with(
+            project,
+            PluginImages::new(project, plugin),
+            request,
+            submission,
+            hooks,
+        ),
     }
 }
 
-/// [`sample`] with an explicit MiniMax adapter.
-pub fn sample_with<T: Transport + Sync>(
+/// [`sample`] with an explicit image generator.
+pub fn sample_with<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     request: SampleRequest<'_>,
     submission: Submission,
     hooks: &mut dyn GenerationHooks,
@@ -214,13 +242,21 @@ pub fn refine(
             submission,
             hooks,
         ),
+        ImageProvider::Plugin(plugin) => refine_with(
+            project,
+            PluginImages::new(project, plugin),
+            artifact_id,
+            note,
+            submission,
+            hooks,
+        ),
     }
 }
 
-/// [`refine`] with an explicit MiniMax adapter.
-pub fn refine_with<T: Transport + Sync>(
+/// [`refine`] with an explicit image generator.
+pub fn refine_with<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     artifact_id: &str,
     note: &str,
     submission: Submission,
@@ -246,9 +282,9 @@ pub fn refine_with<T: Transport + Sync>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ask<T: Transport + Sync>(
+fn ask<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     preset: &StylePreset,
     note: Option<&str>,
     refines: Option<&str>,
@@ -279,6 +315,7 @@ fn ask<T: Transport + Sync>(
         return Err(GenerationError::NotConfigured);
     }
     require_synchronous(&adapter.capabilities())?;
+    require_frame(&adapter.capabilities(), KEYFRAME_ASPECT)?;
     let note = note.map(str::trim).filter(|note| !note.is_empty());
     let prompt = style_prompt::compile(
         preset,
@@ -298,8 +335,8 @@ fn ask<T: Transport + Sync>(
     let input_hash = InputHash::derive(InputHashMaterial {
         dependencies: &dependencies,
         canonical_intent: &style_prompt::canonical_intent(preset, note, scene, bible.as_ref()),
-        provider: PROVIDER,
-        model: IMAGE_MODEL,
+        provider: adapter.provider().as_str(),
+        model: &adapter.model(),
         canonical_params: SAMPLE_PARAMS.as_bytes(),
         compiler_version: style_prompt::STYLE_COMPILER_VERSION,
     });

@@ -37,7 +37,7 @@ secrets = ["STUDIO_IMAGES_KEY"]              # secrets passed by name
 enabled = true
 ```
 
-A project may name a plugin as its provider for a capability (`plugin:<id>`), as it names `minimax` today; the name is resolved against the user's configuration and refused when no enabled plugin has that ID. A project never supplies an executable, an argument or an environment variable. Records keep the provider key (`plugin:<id>`), the model and the plugin's declared name and version as provenance.
+A session selects a plugin as its provider (`KINETO_IMAGE_PROVIDER=plugin:<id>`), as it selects `minimax` today; the name is resolved against the user's configuration and refused when no enabled plugin has that ID or the plugin cannot describe itself. The selected plugin also speaks when it declares `tts.speak`. A project never supplies an executable, an argument or an environment variable. Records keep the provider key `plugin.<id>` (provider keys take letters, digits, `.`, `_` and `-` only) and the model the plugin declared.
 
 ### One process per operation, one JSON message each way
 
@@ -47,7 +47,7 @@ Every message carries `"protocol": "kineto-plugin/1"`. A response with another m
 
 ### Operations
 
-- `describe`: the plugin's name and version, and for each capability it offers the same declaration a built-in makes: aspect ratios, reference roles and limits, formats and size limits, clip lengths, voices listing, prompt limits, prices, and whether results arrive at once or as jobs to follow. Kineto routes by this declaration exactly as it routes built-ins, so a plugin that cannot do what a step needs is refused before anything is written (`GenerationError::Incapable`).
+- `describe`, when a session selects the plugin and when settings list it: the plugin's name and version, optionally `invoke_deadline_seconds`, and for each capability it offers the same declaration a built-in makes: aspect ratios, reference roles and limits, formats and size limits, clip lengths, voices listing, prompt limits, prices, and whether results arrive at once or as jobs to follow. Kineto routes by this declaration exactly as it routes built-ins, so a plugin that cannot do what a step needs is refused before anything is written (`GenerationError::Incapable`).
 - `estimate`: the cost of a request, or unknown.
 - `invoke`: a request with its idempotency key. The answer is `completed` (output files), `pending` (a provider job ID to follow), or `failed` with a class (`retryable` or `terminal`) and `accepted`: `false` when the plugin knows the provider did not take the request, `true` or absent otherwise.
 - `reconcile`: by provider job ID or by idempotency key, answering `completed`, `pending`, `failed` or `unknown`.
@@ -59,19 +59,19 @@ For each operation Kineto creates a fresh directory outside the project and runs
 
 ### Paid calls keep every existing safety rule
 
-A plugin call runs through the write-ahead job runtime under provider key `plugin:<id>`, with the receipt written before the call and the idempotency key passed in the request. Kineto treats a failed call as certainly not charged only when the plugin answers `accepted: false`. Any other failure, including a crash, a timeout or an unreadable answer after the request was written, leaves the call unresolved, and it is never made again unless the director chooses to risk paying twice. A restart reconciles pending and unresolved plugin jobs as it does MiniMax's.
+A plugin call runs through the write-ahead job runtime under provider key `plugin.<id>` (style samples and casting images under `plugin.<id>-style` and `plugin.<id>-cast`, speech under `plugin.<id>-<kind>`, as MiniMax's are), with the idempotency key passed in the request. Before an image call is sent, a record of what it is (its prompt's provenance, what it depends on, where its image will be kept) is written beside where its receipt will be; the image and its receipt are written before the call returns. Kineto treats a failed call as certainly not charged only when the plugin never started, nothing was sent, or the plugin answers `accepted: false`. Any other failure, including a crash, a timeout or an unreadable answer after the request was written, leaves the call unresolved, and it is never made again unless the director chooses to risk paying twice. When a project opens with a plugin as its provider, a sent image call that left no receipt is reconciled by idempotency key, and a plugin that kept the answer gives it back without a new call; a call never sent is not asked about. Jobs of a plugin that is not the session's provider wait until it is. Speech keeps its receipts in Kineto as for every speech provider.
 
 ### Process and environment
 
 - Only the configured absolute executable starts, with its configured arguments, never through a shell.
 - The environment is cleared. The plugin gets a minimal `PATH`, `HOME`, the scratch directory, and the secrets its entry names, read from OS secure storage or, in development, the environment. No other variable reaches it.
-- Each operation has a deadline (`describe`, `estimate`, `voices` and `reconcile`: 30 s; `invoke`: up to 15 minutes, or the plugin's declared limit if shorter). Past it the process is killed.
+- Each operation has a deadline (`describe`, `estimate`, `voices` and `reconcile`: 30 s; `invoke`: up to 15 minutes, or the plugin's declared `invoke_deadline_seconds` if shorter). Past it the process is killed.
 - Stdout is capped at 1 MiB; output files are capped by the declared size limits.
 - Plugin answers are untrusted data under ADR-0003. A plugin cannot authorize spend, choose a fallback, run anything or write outside its scratch directory through Kineto. A plugin is still a program the user installed, with the user's network and file access; Kineto does not sandbox it beyond the process boundary and says so in its settings.
 
 ### What plugins do not cover
 
-`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers.
+`llm.complete` stays with `kineto-llm`: HTTP API backends and agent CLIs over ACP already cover it. Plugins are for image, video and speech providers. The first implementation takes images that arrive in the answer and speech; video, whose results arrive as jobs to follow, is tracked separately.
 
 ## Consequences
 

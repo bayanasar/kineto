@@ -8,6 +8,7 @@ rust-version.workspace = true
 kineto-job-runtime = { path = "../kineto-job-runtime" }
 kineto-jobs = { path = "../kineto-jobs" }
 kineto-llm = { path = "../kineto-llm" }
+kineto-plugins = { path = "../kineto-plugins" }
 kineto-project = { path = "../kineto-project" }
 kineto-prompts = { path = "../kineto-prompts" }
 kineto-provider-minimax = { path = "../kineto-provider-minimax" }
@@ -27,3 +28,7 @@ kineto-llm = { path = "../kineto-llm", features = ["testing"] }
 
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "plugin_provider"
+harness = false

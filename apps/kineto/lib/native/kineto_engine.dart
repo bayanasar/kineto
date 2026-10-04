@@ -9,6 +9,7 @@ part 'kineto_contract.dart';
 part 'kineto_documents.dart';
 part 'kineto_handoff.dart';
 part 'kineto_planning.dart';
+part 'kineto_plugins.dart';
 part 'kineto_production.dart';
 part 'kineto_project.dart';
 part 'kineto_voices.dart';
@@ -32,7 +33,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 38;
+const int kinetoExpectedNativeAbiVersion = 39;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);

@@ -452,6 +452,10 @@ impl<T: Transport + Sync> CandidateGenerator for MinimaxKeyframes<'_, T> {
         ProviderKey::new(PROVIDER).expect("static provider key is valid")
     }
 
+    fn model(&self) -> String {
+        IMAGE_MODEL.to_owned()
+    }
+
     fn policy(&self) -> JobRuntimePolicy {
         JobRuntimePolicy {
             // One call per candidate of a generation at once.

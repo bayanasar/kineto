@@ -134,6 +134,8 @@ final class KinetoNativeContract {
   static const int _durationSourceKind = 58;
   static const int _speechProviderKind = 59;
   static const int _suggestionDecisionKind = 60;
+  static const int _pluginValueKind = 61;
+  static const int _pluginTextKind = 62;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -218,6 +220,12 @@ final class KinetoNativeContract {
   Map<String, int> get durationSources => _table(_durationSourceKind);
   Map<String, int> get speechProviders => _table(_speechProviderKind);
   Map<String, int> get suggestionDecisions => _table(_suggestionDecisionKind);
+
+  /// Number fields of a registered plugin, by name.
+  Map<String, int> get pluginValues => _table(_pluginValueKind);
+
+  /// Text fields of a registered plugin, by name.
+  Map<String, int> get pluginTexts => _table(_pluginTextKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

@@ -343,7 +343,8 @@ external int _kinetoProjectCandidateModelCopy(
 /// `KINETO_IMAGE_PROVIDER`; a paid provider is never chosen implicitly.
 enum KinetoImageProviderKind {
   localDemo(1, 'local_demo', 'Local demo'),
-  minimax(2, 'minimax', 'MiniMax image-01');
+  minimax(2, 'minimax', 'MiniMax image-01'),
+  plugin(3, 'plugin', 'Plugin');
 
   const KinetoImageProviderKind(this.wireValue, this.wireName, this.label);
 
@@ -592,6 +593,13 @@ final class KinetoProjectException implements Exception {
 
   /// A line is dubbed in its character's locked voice.
   static const int needsLockedVoice = 164;
+
+  /// The user's plugin configuration could not be read.
+  static const int pluginConfigInvalid = 165;
+
+  /// `KINETO_IMAGE_PROVIDER` names a plugin that is not registered, is
+  /// disabled, or could not describe itself.
+  static const int pluginUnavailable = 166;
 
   final int code;
   final String message;
@@ -1405,6 +1413,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'media_changed': 162,
   'needs_locked_cast': 163,
   'needs_locked_voice': 164,
+  'plugin_config_invalid': 165,
+  'plugin_unavailable': 166,
   'panic': 199,
 };
 
@@ -1478,6 +1488,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   162: 'A file is not what its record says; check the project\'s media',
   163: 'Lock the character\'s cast before casting its voice',
   164: 'Lock the character\'s voice before dubbing its lines',
+  165: 'The plugin configuration (plugins.toml) could not be read',
+  166: 'KINETO_IMAGE_PROVIDER names a plugin that is not registered, is disabled, or did not describe itself',
   199: 'Native project call failed unexpectedly',
 };
 

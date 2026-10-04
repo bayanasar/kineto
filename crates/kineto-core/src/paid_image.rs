@@ -1,18 +1,19 @@
 //! Paid images kept as the provider answers them, as durable write-ahead
 //! jobs: style samples and casting images.
 //!
-//! Each image is one MiniMax `image-01` call run exactly as a keyframe
-//! candidate is: the intent is written before the call, the image and a
-//! receipt before the intent is marked invoked, and a refusal record when
-//! MiniMax certainly did not accept the call. Each kind of work keeps its
-//! jobs in its own partition (a job runtime provider key such as
-//! `minimax-style`) and writes what its canonical record needs beyond the
-//! receipt as a plan beside it, before the intent is prepared, so an
-//! interrupted image is recorded from disk when the project opens or before
-//! the next image of its kind, never by calling again.
+//! Each image is one provider call run exactly as a keyframe candidate is,
+//! by the same image generators: the intent is written before the call,
+//! the image and a receipt before the intent is marked invoked, and a
+//! refusal record when the provider certainly did not accept the call.
+//! Each kind of work keeps each provider's jobs in its own partition (a job
+//! runtime provider key such as `minimax-style` or `plugin.studio-cast`)
+//! and writes what its canonical record needs beyond the receipt as a plan
+//! beside it, before the intent is prepared, so an interrupted image is
+//! recorded from disk when the project opens or before the next image of
+//! its kind, never by calling again.
 //!
 //! ```text
-//! plan -> prepare -> MiniMax -> image + receipt -> invoked -> attach -> acknowledge
+//! plan -> prepare -> provider -> image + receipt -> invoked -> attach -> acknowledge
 //! ```
 //!
 //! An image whose call may have been accepted without its result being kept
@@ -28,7 +29,7 @@ use kineto_job_runtime::{
 };
 use kineto_jobs::JobId;
 use kineto_project::{ArtifactId, InputHash, fs::ProjectRelativePath, manifest::CanonicalProject};
-use kineto_provider_minimax::{MinimaxClient, Transport};
+use kineto_provider_minimax::MinimaxClient;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -46,11 +47,10 @@ pub(crate) trait Ledger {
     /// What the canonical record needs beyond the receipt.
     type Plan: Serialize + DeserializeOwned;
 
-    /// The job partition, apart from keyframes and every other kind.
-    const PARTITION: &'static str;
-
-    /// The plan file's suffix, as in `<artifact_id>.<suffix>.json`.
-    const PLAN: &'static str;
+    /// The kind of work: the plan file's suffix, as in
+    /// `<artifact_id>.<kind>.json`, and after the provider its job
+    /// partition, apart from keyframes and every other kind.
+    const KIND: &'static str;
 
     fn artifact_id(plan: &Self::Plan) -> &str;
 
@@ -76,6 +76,15 @@ pub struct ImageRecovery {
     pub needs_attention: usize,
 }
 
+impl ImageRecovery {
+    /// Add what another partition's recovery found.
+    pub fn extend(&mut self, other: Self) {
+        self.attached.extend(other.attached);
+        self.unresolved.extend(other.unresolved);
+        self.needs_attention += other.needs_attention;
+    }
+}
+
 /// Whether the director accepted the risk of paying twice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Submission {
@@ -88,7 +97,7 @@ pub enum Submission {
 }
 
 fn plan_path<L: Ledger>(artifact_id: &str) -> Result<ProjectRelativePath, GenerationError> {
-    ProjectRelativePath::new(format!(".kineto/generation/{artifact_id}.{}.json", L::PLAN))
+    ProjectRelativePath::new(format!(".kineto/generation/{artifact_id}.{}.json", L::KIND))
         .map_err(|_| GenerationError::Unexpected("an image ID is not a valid file name"))
 }
 
@@ -137,25 +146,27 @@ fn keyed(artifact_id: ArtifactId, input_hash: InputHash) -> CandidateRequest {
     }
 }
 
-fn partition<L: Ledger>() -> ProviderKey {
-    ProviderKey::new(L::PARTITION).expect("static partition key is valid")
+/// L's partition of `provider`'s jobs.
+pub(crate) fn partition<L: Ledger>(provider: &ProviderKey) -> ProviderKey {
+    ProviderKey::new(format!("{}-{}", provider.as_str(), L::KIND))
+        .expect("a provider key and a static kind make a valid key")
 }
 
-/// L's partition, opened for new images.
-pub(crate) struct Jobs<'p, 'a, L, T> {
+/// L's partition of one generator's jobs, opened for new images.
+pub(crate) struct Jobs<'p, L, G> {
     project: &'p CanonicalProject,
     runtime: JobRuntime<'p>,
-    adapter: MinimaxKeyframes<'a, T>,
+    adapter: G,
     ledger: PhantomData<L>,
 }
 
 /// Record images whose results arrived before an interruption, and sort
 /// out the intents that never finished: those never called are returned,
 /// as are those whose call may have been charged without a result.
-fn finish<L: Ledger, T: Transport + Sync>(
+fn finish<L: Ledger, G: CandidateGenerator>(
     project: &CanonicalProject,
     runtime: &JobRuntime<'_>,
-    adapter: &mut MinimaxKeyframes<'_, T>,
+    adapter: &mut G,
 ) -> Result<(ImageRecovery, Vec<JobId>), GenerationError> {
     let mut recovery = ImageRecovery::default();
     let mut waiting = Vec::new();
@@ -201,17 +212,33 @@ fn finish<L: Ledger, T: Transport + Sync>(
     Ok((recovery, waiting))
 }
 
-/// Record images of L an interrupted session left, as a project opens.
-/// Never calls MiniMax.
+/// Record images of L an interrupted session left with MiniMax, as a
+/// project opens. Never calls MiniMax.
 pub(crate) fn recover<L: Ledger>(
     project: &CanonicalProject,
 ) -> Result<ImageRecovery, GenerationError> {
-    let mut adapter = MinimaxKeyframes::new(project, None::<&MinimaxClient>);
-    let runtime = JobRuntime::new(project, partition::<L>(), adapter.policy());
+    recover_with::<L, _>(
+        project,
+        MinimaxKeyframes::new(project, None::<&MinimaxClient>),
+    )
+}
+
+/// Record images of L an interrupted session left with `adapter`'s
+/// provider. Makes no new call; a plugin may be asked whether it kept the
+/// answer to a call that was sent.
+pub(crate) fn recover_with<L: Ledger, G: CandidateGenerator>(
+    project: &CanonicalProject,
+    mut adapter: G,
+) -> Result<ImageRecovery, GenerationError> {
+    let runtime = JobRuntime::new(
+        project,
+        partition::<L>(&adapter.provider()),
+        adapter.policy(),
+    );
     finish::<L, _>(project, &runtime, &mut adapter).map(|(recovery, _)| recovery)
 }
 
-impl<'p, 'a, L: Ledger, T: Transport + Sync> Jobs<'p, 'a, L, T> {
+impl<'p, L: Ledger, G: CandidateGenerator> Jobs<'p, L, G> {
     /// Open L's partition for new images numbered where `numbering` says
     /// an image ID belongs: record images an interruption left, retire
     /// intents never called or certainly refused, and refuse while an image
@@ -221,11 +248,15 @@ impl<'p, 'a, L: Ledger, T: Transport + Sync> Jobs<'p, 'a, L, T> {
     /// accepted no risk for it.
     pub(crate) fn open(
         project: &'p CanonicalProject,
-        mut adapter: MinimaxKeyframes<'a, T>,
+        mut adapter: G,
         numbering: impl Fn(&str) -> bool,
         submission: Submission,
     ) -> Result<Self, GenerationError> {
-        let runtime = JobRuntime::new(project, partition::<L>(), adapter.policy());
+        let runtime = JobRuntime::new(
+            project,
+            partition::<L>(&adapter.provider()),
+            adapter.policy(),
+        );
         let (recovery, waiting) = finish::<L, _>(project, &runtime, &mut adapter)?;
         if submission == Submission::Once && recovery.unresolved.iter().any(|id| numbering(id)) {
             return Err(GenerationError::UnresolvedSubmission);

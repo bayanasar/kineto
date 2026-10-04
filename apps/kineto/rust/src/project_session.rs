@@ -17,7 +17,10 @@ use std::{collections::BTreeMap, ffi::CString, path::PathBuf, ptr, slice, str};
 use crate::{contract::*, guarded};
 use kineto_core::{
     export::ExportError,
-    generation::{Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
+    generation::{
+        Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite,
+        ProviderSelectionError,
+    },
     keyframe_prompt::KeyframePromptError,
     llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
     session::{
@@ -313,8 +316,9 @@ unsafe fn spawn(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    let Ok(provider) = image_provider_from_environment() else {
-        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    let provider = match image_provider_from_environment() {
+        Ok(provider) => provider,
+        Err(code) => return code,
     };
     let Ok(video_provider) = video_provider_from_environment() else {
         return PROJECT_ERR_PROVIDER_UNKNOWN;
@@ -344,17 +348,26 @@ unsafe fn spawn(
 
 /// The environment variable that names the image provider a session uses.
 /// Unset, empty or `local-demo` means the free demo generator; `minimax`
-/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`. A paid provider is
-/// used only when named here, never because a key happens to be set.
-const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
+/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`; `plugin:<id>` the
+/// plugin registered as `<id>` (ADR-0006), which also speaks when it can. A
+/// paid provider is used only when named here, never because a key happens
+/// to be set.
+pub(crate) const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
 
-fn image_provider_from_environment() -> Result<ImageProvider, ()> {
+fn image_provider_from_environment() -> Result<ImageProvider, i32> {
     let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|error| {
+        match error {
+            ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
+            ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
+                PROJECT_ERR_PROVIDER_UNKNOWN
+            }
+        }
+    })
 }
 
 /// The environment variable that names the video provider a session uses:
@@ -701,6 +714,7 @@ fn image_provider_code(kind: ImageProviderKind) -> u32 {
     match kind {
         ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
         ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
+        ImageProviderKind::Plugin => IMAGE_PROVIDER_PLUGIN,
     }
 }
 

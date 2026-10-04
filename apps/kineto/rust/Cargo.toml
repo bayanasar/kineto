@@ -15,6 +15,7 @@ ownership-test-hooks = []
 kineto-core = { path = "../../../crates/kineto-core" }
 kineto-jobs = { path = "../../../crates/kineto-jobs" }
 kineto-llm = { path = "../../../crates/kineto-llm" }
+kineto-plugins = { path = "../../../crates/kineto-plugins" }
 kineto-project = { path = "../../../crates/kineto-project" }
 kineto-providers = { path = "../../../crates/kineto-providers" }
 

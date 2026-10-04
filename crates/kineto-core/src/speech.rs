@@ -24,7 +24,9 @@
 //! them. A project without a key goes through voice casting, dubbing,
 //! locking and export with it.
 
-use std::{convert::Infallible, error::Error, fmt, marker::PhantomData, num::NonZeroU16};
+use std::{
+    convert::Infallible, error::Error, fmt, marker::PhantomData, num::NonZeroU16, sync::Arc,
+};
 
 use kineto_job_runtime::{
     DispatchOutcome, Invocation, InvokePreparedError, JobRuntime, JobRuntimePolicy, PaidJobAdapter,
@@ -53,8 +55,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     generation::{
         GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
+        selected_plugin,
     },
     paid_image::Submission,
+    plugin::PluginProvider,
 };
 
 /// The capability speech is made with.
@@ -225,8 +229,8 @@ pub trait SpeechGenerator {
 
     /// The key its speech is recorded under, which the audio it makes names
     /// as its provider.
-    fn provider(&self) -> &'static str;
-    fn model(&self) -> &'static str;
+    fn provider(&self) -> &str;
+    fn model(&self) -> &str;
     fn capabilities(&self) -> SpeechCapabilities;
     /// The voices it offers. Free.
     fn voices(&self) -> Result<Vec<Voice>, Self::Error>;
@@ -591,6 +595,9 @@ pub enum SpeechProvider {
     /// MiniMax `speech-2.8-hd`. Paid. Without a client, speech an earlier
     /// session finished is recorded but nothing new is asked for.
     Minimax(Option<SpeechClient>),
+    /// A plugin the user registered (ADR-0006), as it described itself.
+    /// One that declares no speech speaks none.
+    Plugin(Arc<PluginProvider>),
 }
 
 /// Which speech provider a session speaks with.
@@ -598,6 +605,7 @@ pub enum SpeechProvider {
 pub enum SpeechProviderKind {
     LocalDemo,
     Minimax,
+    Plugin,
 }
 
 /// What the director needs to know about the session's speech provider
@@ -613,9 +621,10 @@ pub struct SpeechProviderInfo {
 
 impl SpeechProvider {
     /// The provider named by `selection`: `local-demo` for the free demo,
-    /// `minimax` for MiniMax with the key `secrets` holds. `None` when
-    /// nothing is named, so the session follows its image provider. A paid
-    /// provider is used only when it is named.
+    /// `minimax` for MiniMax with the key `secrets` holds, `plugin:<id>` for
+    /// the plugin registered as `<id>`. `None` when nothing is named, so the
+    /// session follows its image provider. A paid provider is used only
+    /// when it is named.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
@@ -629,7 +638,10 @@ impl SpeechProvider {
                     .map_err(ProviderSelectionError::Secret)?
                     .map(MinimaxClient::shared),
             ))),
-            Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            Some(other) => match selected_plugin(other) {
+                Some(selected) => selected.map(|plugin| Some(Self::Plugin(plugin))),
+                None => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            },
         }
     }
 
@@ -638,6 +650,17 @@ impl SpeechProvider {
         match self {
             Self::LocalDemo => SpeechProviderKind::LocalDemo,
             Self::Minimax(_) => SpeechProviderKind::Minimax,
+            Self::Plugin(_) => SpeechProviderKind::Plugin,
+        }
+    }
+
+    /// The key its speech is recorded under.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        match self {
+            Self::LocalDemo => DEMO_SPEECH_PROVIDER,
+            Self::Minimax(_) => MINIMAX_SPEECH_PROVIDER,
+            Self::Plugin(plugin) => plugin.key(),
         }
     }
 
@@ -646,6 +669,7 @@ impl SpeechProvider {
         match self {
             Self::LocalDemo => demo_speech_capabilities(),
             Self::Minimax(_) => speech_capabilities(),
+            Self::Plugin(plugin) => plugin.speech_capabilities().cloned().unwrap_or_default(),
         }
     }
 
@@ -656,6 +680,7 @@ impl SpeechProvider {
             ready: match self {
                 Self::LocalDemo => true,
                 Self::Minimax(client) => client.is_some(),
+                Self::Plugin(plugin) => plugin.speech_capabilities().is_some(),
             },
             character_cost_micros: self
                 .capabilities()

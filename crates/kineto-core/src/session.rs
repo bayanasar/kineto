@@ -60,6 +60,7 @@ use crate::{
     learning,
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
+    plugin::PluginSpeech,
     screenplay, shot_plan,
     speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
@@ -1851,7 +1852,8 @@ impl Worker {
     ///
     /// Each provider's jobs are completed by that provider, whichever one this
     /// session generates with: a session without MiniMax credentials still
-    /// completes MiniMax calls that finished before the restart.
+    /// completes MiniMax calls that finished before the restart. A plugin's
+    /// jobs are completed while it is the session's provider.
     fn recover(&mut self) -> Vec<Recovery> {
         if self.project.is_read_only() {
             return Vec::new();
@@ -1866,13 +1868,14 @@ impl Worker {
             keyframes_unresolved,
             ..
         } = self;
-        let minimax = match provider {
-            ImageProvider::Minimax(_) => &*provider,
-            ImageProvider::LocalDemo => &keyless,
+        let (minimax, plugin) = match provider {
+            ImageProvider::Minimax(_) => (&*provider, None),
+            ImageProvider::LocalDemo => (&keyless, None),
+            ImageProvider::Plugin(_) => (&keyless, Some(&*provider)),
         };
         let mut recoveries = Vec::new();
         let mut unplaced = 0;
-        for provider in [&demo, minimax] {
+        for provider in [&demo, minimax].into_iter().chain(plugin) {
             let Unfinished {
                 plans,
                 needs_attention,
@@ -2177,6 +2180,13 @@ impl Worker {
                         })
                     }
                     SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    SpeechProvider::Plugin(plugin) => {
+                        let speech = PluginSpeech::new(plugin);
+                        speech.voices().map_err(|error| GenerationError::Provider {
+                            class: speech.class(&error),
+                            source: Box::new(error),
+                        })
+                    }
                 };
                 self.voices = Some(
                     listed
@@ -2207,6 +2217,15 @@ impl Worker {
                             project, client, character, choices, line, submission, &mut hooks,
                         ),
                         SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                        SpeechProvider::Plugin(plugin) => voice::audition(
+                            project,
+                            &PluginSpeech::new(plugin),
+                            character,
+                            choices,
+                            line,
+                            submission,
+                            &mut hooks,
+                        ),
                     }
                     .map(|_| ()),
                 )
@@ -2241,6 +2260,15 @@ impl Worker {
                         project, client, scene, *line, request, submission, &mut hooks,
                     ),
                     SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    SpeechProvider::Plugin(plugin) => dubbing::dub(
+                        project,
+                        &PluginSpeech::new(plugin),
+                        scene,
+                        *line,
+                        request,
+                        submission,
+                        &mut hooks,
+                    ),
                 }
                 .map(|_| ()),
             ),
@@ -2281,8 +2309,14 @@ impl Worker {
         let mut recoveries = Vec::new();
         let mut attention = 0;
         for (kind, recovered) in [
-            (ImageWork::StyleSample, style::recover(&self.project)),
-            (ImageWork::Casting, cast::recover(&self.project)),
+            (
+                ImageWork::StyleSample,
+                style::recover_for(&self.project, &self.provider),
+            ),
+            (
+                ImageWork::Casting,
+                cast::recover_for(&self.project, &self.provider),
+            ),
         ] {
             match recovered {
                 Ok(recovery) => {
@@ -2298,7 +2332,7 @@ impl Worker {
                 Err(_) => attention += 1,
             }
         }
-        match voice::recover(&self.project) {
+        match voice::recover_for(&self.project, &self.speech) {
             Ok(recovery) => {
                 attention += recovery.needs_attention;
                 if !recovery.attached.is_empty() {
@@ -2311,7 +2345,7 @@ impl Worker {
             }
             Err(_) => attention += 1,
         }
-        match dubbing::recover(&self.project) {
+        match dubbing::recover_for(&self.project, &self.speech) {
             Ok(recovery) => {
                 attention += recovery.needs_attention;
                 if !recovery.attached.is_empty() {
@@ -2331,25 +2365,25 @@ impl Worker {
     }
 
     fn note_unresolved_lines(&mut self) {
-        if let Ok(recovery) = dubbing::recover(&self.project) {
+        if let Ok(recovery) = dubbing::recover_for(&self.project, &self.speech) {
             self.lines_unresolved = unresolved_lines(&recovery.unresolved);
         }
     }
 
     fn note_unresolved_voices(&mut self) {
-        if let Ok(recovery) = voice::recover(&self.project) {
+        if let Ok(recovery) = voice::recover_for(&self.project, &self.speech) {
             self.voice_unresolved = unresolved_characters(&recovery.unresolved);
         }
     }
 
     fn note_unresolved_samples(&mut self) {
-        if let Ok(recovery) = style::recover(&self.project) {
+        if let Ok(recovery) = style::recover_for(&self.project, &self.provider) {
             self.note_unresolved(ImageWork::StyleSample, &recovery);
         }
     }
 
     fn note_unresolved_casting(&mut self) {
-        if let Ok(recovery) = cast::recover(&self.project) {
+        if let Ok(recovery) = cast::recover_for(&self.project, &self.provider) {
             self.note_unresolved(ImageWork::Casting, &recovery);
         }
     }
@@ -2965,20 +2999,24 @@ impl Worker {
 }
 
 /// The video provider a session follows its image provider with: MiniMax
-/// with the same key, otherwise the local demo.
+/// with the same key, otherwise the local demo. Plugins make no video yet.
 fn video_provider_for(images: &ImageProvider) -> VideoProvider {
     match images {
         ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
-        ImageProvider::LocalDemo => VideoProvider::LocalDemo,
+        ImageProvider::LocalDemo | ImageProvider::Plugin(_) => VideoProvider::LocalDemo,
     }
 }
 
 /// The speech provider a session follows its image provider with: MiniMax
-/// with the same key, otherwise the local demo.
+/// with the same key, the same plugin when it speaks, otherwise the local
+/// demo.
 fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
     match images {
         ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
-        ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
+        ImageProvider::Plugin(plugin) if plugin.speech_capabilities().is_some() => {
+            SpeechProvider::Plugin(Arc::clone(plugin))
+        }
+        ImageProvider::LocalDemo | ImageProvider::Plugin(_) => SpeechProvider::LocalDemo,
     }
 }
 
