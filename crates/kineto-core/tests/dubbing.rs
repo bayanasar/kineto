@@ -19,7 +19,7 @@ use kineto_core::{
     generation::{GenerationError, ImageProvider, NoHooks, Prerequisite},
     minimax::MinimaxKeyframes,
     screenplay, shot_plan,
-    speech::{LocalDemoVoices, VoiceSettings},
+    speech::{LocalDemoVoices, NORMAL_SPEED, VoiceSettings, estimate_duration_ms},
     story,
     style::{self, SampleRequest, Submission},
     video::{self, LocalDemoVideos},
@@ -546,4 +546,44 @@ fn nothing_is_spoken_without_a_locked_voice_of_this_provider_or_a_line() {
         Err(GenerationError::Incapable(missing)) if missing == ["speech.voice"]
     ));
     assert!(document::takes(&project, SCENE).unwrap().is_empty());
+}
+
+#[test]
+fn a_lines_estimate_follows_the_pace_of_its_speakers_locked_voice() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let screenplay: Screenplay = revisions::read(
+        &project,
+        &revisions::current(&project, DocumentKind::Screenplay)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let estimate = || dialogue::line_durations(&project, &screenplay).unwrap()[0].clone();
+    let plain = estimate_duration_ms("Was it worth it?", NORMAL_SPEED);
+    // The demo's audition ran exactly as long as estimated: the pace is 1.
+    let line = estimate();
+    assert_eq!(line.source, dialogue::DurationSource::Estimated);
+    assert_eq!(line.duration_ms, plain);
+
+    // The locked voice turns out slower or faster than estimated; every
+    // estimate of its lines follows, within twice either way.
+    let path = target.join("characters/interviewer/voice_auditions.json");
+    let original = fs::read(&path).unwrap();
+    let paced = |numerator: u32, denominator: u32| {
+        let mut log: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let audition = &mut log["auditions"][0];
+        let said = estimate_duration_ms(
+            audition["line"].as_str().unwrap(),
+            u16::try_from(audition["voice"]["speed_permille"].as_u64().unwrap()).unwrap(),
+        );
+        audition["duration_ms"] = (said * numerator / denominator).into();
+        fs::write(&path, serde_json::to_vec_pretty(&log).unwrap()).unwrap();
+        estimate().duration_ms
+    };
+    let near = |got: u32, want: u32| assert!(got.abs_diff(want) <= 2, "{got} is not about {want}");
+    near(paced(3, 2), plain * 3 / 2);
+    near(paced(10, 1), plain * 2);
+    near(paced(1, 4), plain / 2);
 }

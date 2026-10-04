@@ -133,7 +133,7 @@ Dubbing (`kineto_core::dubbing`):
 
 Dialogue duration (`kineto_core::dialogue`):
 
-- **Line length.** Every line of the screenplay has a length. Until it is voiced, it is estimated at the speaker's locked voice rate, or the normal rate while the speaker has no voice: about 2.6 words or 4 Chinese or Japanese characters a second. Such a length is marked as an estimate.
+- **Line length.** Every line of the screenplay has a length. Until it is voiced, it is estimated at the speaker's locked voice rate, or the normal rate while the speaker has no voice: about 2.6 words or 4 Chinese or Japanese characters a second. A locked voice also sets the pace: its locked audition is that voice saying a line, measured, so the estimate is scaled by the audition's measured length over its own estimate, at most twice either way. Such a length is marked as an estimate.
 - **Planning.** Shot planning (`shot-plan/2`, `shot-plan-scene/2`) is given each line's length between `<line_durations>` and `</line_durations>`, and asked to give a shot that carries dialogue at least as long. The plan's input label names the hash of those lengths.
 - **A shot's dialogue.** Its length is the sum of the screenplay lines it holds verbatim, with a 250 ms breath between them. Any other words are estimated, and a speaker's name before a colon is not said.
 - **Short shots.** A planned shot shorter than its dialogue is published as a short shot. It is reported, not refused.

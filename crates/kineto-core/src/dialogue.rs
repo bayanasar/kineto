@@ -3,7 +3,10 @@
 //!
 //! Before a line is voiced, its length is estimated at its speaker's locked
 //! voice rate, or the normal rate while the speaker has no voice
-//! ([`speech::estimate_duration_ms`]), and marked as an estimate. Shot
+//! ([`speech::estimate_duration_ms`]), and marked as an estimate. A locked
+//! voice also sets the pace: its locked audition is that voice saying a
+//! line, measured, so the estimate is scaled by how much longer or shorter
+//! the audition ran than its own estimate ([`PACE`]). Shot
 //! planning is told every line's length and asked to give a shot that
 //! carries dialogue at least as long. A planned shot shorter than its
 //! dialogue is reported, never refused: the director decides.
@@ -25,6 +28,10 @@ use crate::{
 
 /// The breath between two lines one shot carries.
 const PAUSE_MS: u32 = 250;
+
+/// How far a voice's measured pace may scale an estimate, in thousandths:
+/// a voice is taken as at most twice as slow or as fast as the estimate.
+pub const PACE: std::ops::RangeInclusive<u32> = 500..=2000;
 
 /// Where a line's length comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,14 +86,13 @@ pub fn line_durations(
             let (duration_ms, source) = match measured {
                 Some(take) => (take.duration_ms, DurationSource::Measured),
                 None => {
-                    let speed = match &block.character {
-                        Some(character) => voice_document::locked(project, character)
-                            .map_err(document_error)?
-                            .map_or(NORMAL_SPEED, |lock| lock.voice.speed_permille),
-                        None => NORMAL_SPEED,
+                    let (speed, pace) = match &block.character {
+                        Some(character) => voice_pace(project, character)?,
+                        None => (NORMAL_SPEED, 1000),
                     };
+                    let estimate = u64::from(speech::estimate_duration_ms(&block.text, speed));
                     (
-                        speech::estimate_duration_ms(&block.text, speed),
+                        u32::try_from(estimate * u64::from(pace) / 1000).unwrap_or(u32::MAX),
                         DurationSource::Estimated,
                     )
                 }
@@ -102,6 +108,34 @@ pub fn line_durations(
         }
     }
     Ok(lines)
+}
+
+/// The rate `character`'s locked voice speaks at, and its pace in
+/// thousandths: its locked audition's measured length over the estimate for
+/// what it said, within [`PACE`]. Normal and 1000 without a locked voice,
+/// and a pace of 1000 when the audition has no measured length.
+fn voice_pace(project: &CanonicalProject, character: &str) -> Result<(u16, u32), GenerationError> {
+    let Some(lock) = voice_document::locked(project, character).map_err(document_error)? else {
+        return Ok((NORMAL_SPEED, 1000));
+    };
+    let speed = lock.voice.speed_permille;
+    let audition = voice_document::auditions(project, character)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|audition| audition.artifact_id == lock.artifact_id);
+    let pace = audition
+        .and_then(|audition| {
+            let estimate =
+                speech::estimate_duration_ms(&audition.line, audition.voice.speed_permille);
+            (estimate > 0 && audition.duration_ms > 0).then(|| {
+                let pace = u64::from(audition.duration_ms) * 1000 / u64::from(estimate);
+                u32::try_from(pace)
+                    .unwrap_or(u32::MAX)
+                    .clamp(*PACE.start(), *PACE.end())
+            })
+        })
+        .unwrap_or(1000);
+    Ok((speed, pace))
 }
 
 /// How long the dialogue a shot of `scene_id` carries takes to say: each of
