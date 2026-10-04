@@ -1331,8 +1331,16 @@ fn run(
                                 | ShotCommand::GenerateConsenting(_)
                                 | ShotCommand::Refine { .. }
                         );
+                        // A keyframe locked or released may be the frame
+                        // another shot's video closes on.
+                        let keyframe_changed =
+                            matches!(command, ShotCommand::Lock | ShotCommand::Reset);
                         let result = worker.apply(index, command);
-                        worker.publish(view, index);
+                        if keyframe_changed {
+                            worker.publish_shots(view);
+                        } else {
+                            worker.publish(view, index);
+                        }
                         // A choice among takes counts toward suggestions.
                         worker.publish_documents(view);
                         worker.publish_workflow(view);
@@ -2850,6 +2858,7 @@ impl Worker {
         let video_provider = self.videos.provider.clone();
         let published = panic::catch_unwind(AssertUnwindSafe(|| {
             self.with_shot(&key, |project, _, shot| {
+                shot.refresh_end_frame(project)?;
                 Ok(PublishedShot {
                     snapshot: shot.snapshot()?,
                     media: shot

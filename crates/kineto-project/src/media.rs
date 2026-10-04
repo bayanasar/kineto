@@ -680,8 +680,18 @@ pub fn plan(project: &CanonicalProject, records: &[MediaRecord], recent: usize) 
 pub struct Collected {
     /// The records marked evicted and whose files were removed, by ID.
     pub evicted: Vec<String>,
-    /// Planned records that are no longer collectable, left as they are.
+    /// Planned records that are no longer collectable, or whose file is
+    /// not the bytes the dry run saw, left as they are.
     pub skipped: Vec<String>,
+}
+
+/// Whether the file at `record`'s path holds exactly the bytes it records.
+/// A file that cannot be read is not.
+fn holds_recorded_bytes(project: &CanonicalProject, record: &MediaRecord) -> bool {
+    project
+        .root()
+        .read(&record.path)
+        .is_ok_and(|bytes| ContentHash::of(&bytes) == record.content_hash)
 }
 
 /// Let go of the bytes `approved` lists, as a dry run showed them, and of
@@ -705,7 +715,9 @@ pub fn collect(
                 && now.record.path == item.record.path
                 && now.record.content_hash == item.record.content_hash
         });
-        if still {
+        // The file itself is checked too: bytes changed since the dry run
+        // are not what the director agreed to let go.
+        if still && holds_recorded_bytes(project, &item.record) {
             by_owner
                 .entry(item.record.owner.clone())
                 .or_default()
@@ -755,14 +767,16 @@ pub fn collect(
 }
 
 /// Remove the files of evicted records that are still there, as an
-/// interrupted collection leaves them. Returns how many were removed.
+/// interrupted collection leaves them, when they still hold the bytes that
+/// were let go: a file put there since is not touched. Returns how many
+/// were removed.
 pub fn reconcile(project: &CanonicalProject, records: &[MediaRecord]) -> Result<usize, MediaError> {
     let mut removed = 0;
     for record in records
         .iter()
         .filter(|record| record.state == MediaState::Evicted)
     {
-        if project.root().resolve(&record.path).is_file() {
+        if project.root().resolve(&record.path).is_file() && holds_recorded_bytes(project, record) {
             remove(project, record)?;
             removed += 1;
         }

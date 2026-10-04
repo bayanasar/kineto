@@ -487,3 +487,59 @@ fn an_interrupted_collection_is_finished_when_reconciled() {
         DEMO_CLIP
     );
 }
+
+#[test]
+fn bytes_changed_since_the_dry_run_are_never_let_go() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = CanonicalProject::create_with_files(
+        &target,
+        manifest(),
+        b"A filmmaker waits.\n",
+        &bootstrap::scene_files(),
+    )
+    .unwrap();
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    shot.generate(&project).unwrap();
+    shot.select(&project, 0).unwrap();
+    shot.lock(&project).unwrap();
+    for _ in 0..4 {
+        demo_video(&project, &mut shot);
+    }
+    shot.lock_video(&project).unwrap();
+    let records = media::catalog(&project).unwrap();
+    let plan = media::plan(&project, &records, 2);
+    let [first, second] = plan.items.as_slice() else {
+        panic!("two takes are collectable: {:?}", plan.items);
+    };
+    // Someone edits a file the director agreed to let go.
+    let edited = project.root().resolve(&first.record.path);
+    fs::write(&edited, b"an edit made after the dry run").unwrap();
+
+    let done = media::collect(&project, &plan, 2).unwrap();
+    assert_eq!(
+        done.evicted,
+        std::slice::from_ref(&second.record.artifact_id)
+    );
+    assert_eq!(
+        done.skipped,
+        std::slice::from_ref(&first.record.artifact_id)
+    );
+    assert_eq!(
+        fs::read(&edited).unwrap(),
+        b"an edit made after the dry run"
+    );
+    let after = media::catalog(&project).unwrap();
+    let kept = after
+        .iter()
+        .find(|record| record.artifact_id == first.record.artifact_id)
+        .unwrap();
+    assert_eq!(kept.state, MediaState::Present, "its record is untouched");
+
+    // A file put where an evicted one was is not removed by reconciling.
+    let gone = project.root().resolve(&second.record.path);
+    assert!(!gone.exists());
+    fs::write(&gone, b"a new file in the old place").unwrap();
+    assert_eq!(media::reconcile(&project, &after).unwrap(), 0);
+    assert_eq!(fs::read(&gone).unwrap(), b"a new file in the old place");
+}

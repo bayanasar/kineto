@@ -388,6 +388,7 @@ fn shot_video_records_match_committed_schemas() {
                 compiler_version: "video-prompt/1",
                 notes: &[],
                 branched_from: None,
+                end_frame: None,
             },
         )
         .expect("a video should be plannable from the locked keyframe");
@@ -415,6 +416,7 @@ fn shot_video_records_match_committed_schemas() {
             branched_from: Some("shot_001_v0001_candidate_b".to_owned()),
             clip_seconds: Some(6),
             parameters: Some("duration=6".to_owned()),
+            end_frame: None,
         },
     )
     .expect("the video should attach");

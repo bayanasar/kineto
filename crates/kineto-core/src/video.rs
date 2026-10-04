@@ -58,8 +58,9 @@ use kineto_project::{
     fs::{ProjectFsError, ProjectRelativePath, ProjectRoot},
     manifest::CanonicalProject,
     shot::{
-        AttachOutcome, DEMO_PROVIDER, MAX_VIDEO_CANDIDATES, PromptProvenance, ShotKey,
-        ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan, locate, video_media_path,
+        AttachOutcome, DEMO_PROVIDER, END_FRAME_FIELD, EndFrame, MAX_VIDEO_CANDIDATES,
+        PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan,
+        locate, video_media_path,
     },
     shot_plan::shots_in_play,
 };
@@ -69,7 +70,7 @@ use kineto_provider_minimax::{
     camera_command, sniff, video_capabilities,
 };
 use kineto_providers::{
-    CameraControl, ImageFormat, Price, VideoCapabilities, VideoContainer, VideoMode,
+    CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
     VideoRequirements, evaluate_video, secret::SecretSource,
 };
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{GenerationError, NoHooks, ProviderSelectionError, parse_job_key, provenance_of},
-    video_prompt::{self, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
+    video_prompt::{self, EndFrameUse, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
 };
 
 /// The capability a shot video is generated with.
@@ -94,7 +95,8 @@ pub const DEMO_VIDEO_MODEL: &str = "demo-clip";
 /// time.
 pub const DEMO_CLIP: &[u8] = include_bytes!("../assets/demo-clip.mp4");
 const DEMO_CLIP_SECONDS: u8 = 2;
-const RESOLUTION: VideoResolution = VideoResolution::P768;
+/// The demo clip's height, in lines.
+const DEMO_CLIP_LINES: u16 = 180;
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
 /// How often a watcher asks the provider about its task, and how often it
 /// checks that its session is still open while it waits.
@@ -119,6 +121,12 @@ pub struct VideoSubmission {
     pub first_frame: Option<(Vec<u8>, ImageFormat)>,
     /// One of the clip lengths the provider declares.
     pub clip_seconds: u8,
+    /// The clip's height in lines, one the provider declares; `None` for a
+    /// provider that declares none and chooses itself.
+    pub lines: Option<u16>,
+    /// The locked keyframe of the shot that continues from this one, for
+    /// the clip to close on, and its format.
+    pub last_frame: Option<(Vec<u8>, ImageFormat)>,
 }
 
 impl fmt::Debug for VideoSubmission {
@@ -134,6 +142,14 @@ impl fmt::Debug for VideoSubmission {
                     .map(|(bytes, format)| (bytes.len(), *format)),
             )
             .field("clip_seconds", &self.clip_seconds)
+            .field("lines", &self.lines)
+            .field(
+                "last_frame",
+                &self
+                    .last_frame
+                    .as_ref()
+                    .map(|(bytes, format)| (bytes.len(), *format)),
+            )
             .finish()
     }
 }
@@ -158,9 +174,9 @@ pub trait VideoGenerator {
     fn camera_command(&self, _motion: &str) -> Option<&'static str> {
         None
     }
-    /// The parameters a submission of `clip_seconds` is made with, as they
-    /// enter the input hash.
-    fn canonical_params(&self, clip_seconds: u8) -> String;
+    /// The parameters a submission of `clip_seconds` at `lines` is made
+    /// with, as they enter the input hash.
+    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String;
     /// Submit the video: the paid call. Returns the task to follow.
     fn submit(&self, request: &VideoSubmission) -> Result<String, Self::Error>;
     fn query(&self, task: &ProviderJobId) -> Result<TaskState, Self::Error>;
@@ -190,20 +206,29 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
         camera_command(motion)
     }
 
-    fn canonical_params(&self, clip_seconds: u8) -> String {
-        format!("duration={clip_seconds};resolution=768P")
+    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
+        format!(
+            "duration={clip_seconds};resolution={}P",
+            lines.unwrap_or(VideoResolution::P768.lines())
+        )
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, MinimaxError> {
         let Some((frame, format)) = &request.first_frame else {
             return Err(MinimaxError::InvalidRequest("Hailuo needs a first frame"));
         };
+        let resolution =
+            VideoResolution::from_lines(request.lines.unwrap_or(VideoResolution::P768.lines()))
+                .ok_or(MinimaxError::InvalidRequest(
+                    "Hailuo renders 512P, 768P or 1080P",
+                ))?;
         self.submit_video(&VideoRequest {
             prompt: request.prompt.clone(),
             first_frame: frame.clone(),
             first_frame_format: *format,
+            last_frame: request.last_frame.clone(),
             duration: VideoDuration::nearest(f64::from(request.clip_seconds)),
-            resolution: RESOLUTION,
+            resolution,
         })
         .map(|task| task.as_str().to_owned())
     }
@@ -253,7 +278,16 @@ pub fn demo_video_capabilities() -> VideoCapabilities {
         start_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
             .into_iter()
             .collect(),
-        clip_prices: [(DEMO_CLIP_SECONDS, Price::usd(0))].into_iter().collect(),
+        resolutions: [DEMO_CLIP_LINES].into_iter().collect(),
+        clip_prices: [(
+            VideoClip {
+                seconds: DEMO_CLIP_SECONDS,
+                lines: DEMO_CLIP_LINES,
+            },
+            Price::usd(0),
+        )]
+        .into_iter()
+        .collect(),
         ..VideoCapabilities::default()
     }
 }
@@ -277,7 +311,7 @@ impl VideoGenerator for LocalDemoVideos {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8) -> String {
+    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
         format!("duration={clip_seconds}")
     }
 
@@ -383,10 +417,10 @@ impl VideoProvider {
     #[must_use]
     pub fn info(&self) -> VideoProviderInfo {
         let capabilities = self.capabilities();
-        let (clip_seconds, price) = capabilities
-            .clip_prices
-            .first_key_value()
-            .map_or((0, 0), |(seconds, price)| (*seconds, price.amount_micros));
+        let clip_seconds = capabilities.nearest_clip_seconds(0.0).unwrap_or(0);
+        let price = capabilities
+            .clip_price(clip_seconds)
+            .map_or(0, |price| price.amount_micros);
         VideoProviderInfo {
             kind: self.kind(),
             ready: match self {
@@ -418,8 +452,7 @@ impl VideoProvider {
         Some(VideoEstimate {
             clip_seconds,
             cost_micros: capabilities
-                .clip_prices
-                .get(&clip_seconds)
+                .clip_price(clip_seconds)
                 .map(|price| price.amount_micros),
         })
     }
@@ -539,6 +572,16 @@ struct Receipt {
     clip_seconds: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parameters: Option<String>,
+    /// The keyframe the clip closes on and its shot, as `scene/shot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_frame: Option<ReceiptEndFrame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReceiptEndFrame {
+    artifact_id: String,
+    content_hash: String,
+    shot: String,
 }
 
 fn receipt_path(artifact_id: &ArtifactId) -> Result<ProjectRelativePath, VideoError> {
@@ -712,15 +755,19 @@ impl<G: VideoGenerator, H: VideoHooks> PaidJobAdapter for Submit<'_, G, H> {
     type Error = SubmitError<G::Error>;
 
     fn estimate_cost(&self, request: &VideoSubmission) -> Result<CostEstimate, Self::Error> {
-        let price = self
-            .generator
-            .capabilities()
-            .clip_prices
-            .get(&request.clip_seconds)
+        let capabilities = self.generator.capabilities();
+        let price = request
+            .lines
+            .and_then(|lines| {
+                capabilities.clip_prices.get(&VideoClip {
+                    seconds: request.clip_seconds,
+                    lines,
+                })
+            })
             .copied()
             .ok_or(SubmitError::Handle(VideoFailure {
                 class: ErrorClass::Terminal,
-                source: Box::new(VideoError::Receipt("the clip length has no price")),
+                source: Box::new(VideoError::Receipt("the clip has no price")),
             }))?;
         Ok(CostEstimate {
             call_count: 1,
@@ -970,6 +1017,7 @@ fn check_capabilities(
             requires_end_frame: false,
             requires_identity_reference: false,
             preferred_camera_control: CameraControl::None,
+            requires_resumable_jobs: true,
         },
         capabilities,
     );
@@ -997,12 +1045,22 @@ fn check_capabilities(
     }
 }
 
-/// The shot in play that continues from `key`, and whether its keyframe is
-/// locked.
+/// The shot in play that continues from `key`, with its locked keyframe and
+/// that keyframe's image, when it has them.
+#[allow(clippy::type_complexity)]
 fn successor(
     project: &CanonicalProject,
     key: &ShotKey,
-) -> Result<Option<(String, bool)>, GenerationError> {
+) -> Result<
+    Option<(
+        ShotKey,
+        Option<(
+            kineto_project::ArtifactDependency,
+            Option<ProjectRelativePath>,
+        )>,
+    )>,
+    GenerationError,
+> {
     let in_play = shots_in_play(project).map_err(|error| GenerationError::Provider {
         source: Box::new(error),
         class: ErrorClass::Terminal,
@@ -1017,10 +1075,7 @@ fn successor(
             .and_then(|intent| intent.continuity_from)
             .is_some_and(|from| from == key.shot())
         {
-            return Ok(Some((
-                other.shot().to_owned(),
-                next.first_frame()?.is_some(),
-            )));
+            return Ok(Some((other.clone(), next.first_frame()?)));
         }
     }
     Ok(None)
@@ -1112,6 +1167,53 @@ pub fn start_videos<G: VideoGenerator>(
     check_capabilities(&capabilities, frame.as_ref())?;
     let intent = shot.intent()?;
     let successor = successor(project, shot.key())?;
+    // The shot that continues from this one closes the clip on its locked
+    // keyframe, where the provider takes a last frame and that image.
+    let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
+    let end_frame_use = match &successor {
+        None => None,
+        Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
+        Some((_, None)) => Some(EndFrameUse::NotLocked),
+        Some((_, Some((_, None)))) => Some(EndFrameUse::NoImage),
+        Some((next, Some((keyframe, Some(path))))) => {
+            let bytes = project
+                .root()
+                .read(path)
+                .map_err(|error| video_error(VideoError::Fs(error)))?;
+            if ContentHash::of(&bytes) != keyframe.content_hash {
+                return Err(GenerationError::Shot(
+                    kineto_project::shot::ShotWorkflowError::MediaMismatch(
+                        path.as_path().to_string_lossy().into_owned(),
+                    ),
+                ));
+            }
+            let fits = |format: &ImageFormat| {
+                capabilities.end_frame_formats.contains(format)
+                    && capabilities
+                        .max_end_frame_bytes
+                        .is_none_or(|max| bytes.len() as u64 <= max)
+            };
+            match sniff(&bytes).filter(fits) {
+                Some(format) => {
+                    end_frame = Some((
+                        EndFrame {
+                            keyframe: kineto_project::ArtifactDependency {
+                                field: Some(END_FRAME_FIELD.to_owned()),
+                                ..keyframe.clone()
+                            },
+                            shot: next.clone(),
+                        },
+                        bytes,
+                        format,
+                    ));
+                    Some(EndFrameUse::Sent)
+                }
+                None => Some(EndFrameUse::Unfit(
+                    "its keyframe is not an image the provider takes as a last frame",
+                )),
+            }
+        }
+    };
     let notes = notes_for(shot, ask)?;
     let style = kineto_project::style::locked(project)
         .map_err(|error| GenerationError::Provider {
@@ -1135,9 +1237,10 @@ pub fn start_videos<G: VideoGenerator>(
             .and_then(|motion| generator.camera_command(motion)),
         successor: successor
             .as_ref()
-            .map(|(shot_id, keyframe_locked)| Successor {
-                shot_id,
-                keyframe_locked: *keyframe_locked,
+            .zip(end_frame_use)
+            .map(|((next, _), end_frame)| Successor {
+                shot_id: next.shot(),
+                end_frame,
             }),
         notes: &notes,
         style: style.as_deref(),
@@ -1150,7 +1253,8 @@ pub fn start_videos<G: VideoGenerator>(
         )?,
         preferences: preferences.as_deref(),
     })?;
-    let params = generator.canonical_params(prompt.duration_seconds);
+    let lines = capabilities.clip_lines(prompt.duration_seconds);
+    let params = generator.canonical_params(prompt.duration_seconds, lines);
     let plans = shot.plan_videos(
         project,
         VideoGenerationSpec {
@@ -1160,6 +1264,7 @@ pub fn start_videos<G: VideoGenerator>(
             compiler_version: VIDEO_COMPILER_VERSION,
             notes: &notes,
             branched_from: ask.branch_from.as_deref(),
+            end_frame: end_frame.as_ref().map(|(end, _, _)| &end.keyframe),
         },
         ask.count,
     )?;
@@ -1179,11 +1284,18 @@ pub fn start_videos<G: VideoGenerator>(
         branched_from: ask.branch_from.clone(),
         clip_seconds: Some(prompt.duration_seconds),
         parameters: Some(params.clone()),
+        end_frame: end_frame.as_ref().map(|(end, _, _)| ReceiptEndFrame {
+            artifact_id: end.keyframe.artifact_id.as_str().to_owned(),
+            content_hash: end.keyframe.content_hash.as_str().to_owned(),
+            shot: format!("{}/{}", end.shot.scene(), end.shot.shot()),
+        }),
     };
     let request = VideoSubmission {
         prompt: prompt.compiled.prompt().to_owned(),
         first_frame: frame,
         clip_seconds: prompt.duration_seconds,
+        lines,
+        last_frame: end_frame.map(|(_, bytes, format)| (bytes, format)),
     };
     let mut started = Started {
         jobs: Vec::with_capacity(plans.len()),
@@ -1483,6 +1595,23 @@ pub fn finish(
             branched_from: receipt.branched_from,
             clip_seconds: receipt.clip_seconds,
             parameters: receipt.parameters,
+            end_frame: receipt
+                .end_frame
+                .map(|end| {
+                    let invalid = || video_error(VideoError::Receipt("end frame is invalid"));
+                    let (scene, shot_id) = end.shot.split_once('/').ok_or_else(invalid)?;
+                    Ok::<_, GenerationError>(EndFrame {
+                        keyframe: kineto_project::ArtifactDependency {
+                            artifact_id: ArtifactId::new(end.artifact_id).map_err(|_| invalid())?,
+                            content_hash: ContentHash::new(end.content_hash)
+                                .map_err(|_| invalid())?,
+                            impact: DependencyImpact::Semantic,
+                            field: Some(END_FRAME_FIELD.to_owned()),
+                        },
+                        shot: ShotKey::new(scene, shot_id).map_err(|_| invalid())?,
+                    })
+                })
+                .transpose()?,
         },
     )?;
     let _ = runtime.acknowledge_result(&job_id)?;

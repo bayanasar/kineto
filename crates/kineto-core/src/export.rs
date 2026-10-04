@@ -22,13 +22,17 @@
 //! checked against its recorded hash. A shot that is not ready is reported
 //! and, unless the director asks for a partial package, refuses the export.
 //! The package is written beside its destination and renamed into place, so
-//! an interruption never leaves half a package under its name.
+//! an interruption never leaves half a package under its name. Replacing an
+//! earlier package exchanges the two in one step where the system can
+//! (Linux, macOS), so the name always holds a whole package; where it
+//! cannot (Windows), an interruption can leave the earlier package set
+//! aside, and the next export puts it back first.
 
 use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use kineto_project::{
@@ -259,6 +263,8 @@ pub fn export(
         return Err(ExportError::NothingToExport);
     }
     let target = request.destination.join(name);
+    let replaced = request.destination.join(format!(".{name}.replaced"));
+    restore_interrupted(&target, &replaced)?;
     if target.exists() && !request.replace {
         return Err(ExportError::Exists(target));
     }
@@ -275,24 +281,9 @@ pub fn export(
             return Err(error);
         }
     };
-    // Swap the finished package into place; an earlier one of the same name
-    // goes only once the new one is there.
-    let replaced = request.destination.join(format!(".{name}.replaced"));
-    if target.exists() {
-        if replaced.exists() {
-            std::fs::remove_dir_all(&replaced)?;
-        }
-        std::fs::rename(&target, &replaced)?;
-    }
-    if let Err(error) = std::fs::rename(&staging, &target) {
-        if replaced.exists() {
-            let _ = std::fs::rename(&replaced, &target);
-        }
+    if let Err(error) = put_in_place(&staging, &target, &replaced) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error.into());
-    }
-    if replaced.exists() {
-        let _ = std::fs::remove_dir_all(&replaced);
     }
     Ok(Exported {
         path: target,
@@ -302,6 +293,112 @@ pub fn export(
         bytes,
         lines,
     })
+}
+
+/// Put the finished package `staging` under the name `target`. A new name
+/// is one rename. An earlier package of the name is exchanged with the new
+/// one in a single step where the system can do that (Linux, macOS), so the
+/// name holds a whole package at every moment, and the earlier one is
+/// removed after. Elsewhere, or on a file system that cannot exchange, the
+/// earlier package is first set aside as `replaced`; an interruption
+/// between that and the rename that follows leaves it there, and the next
+/// export puts it back ([`restore_interrupted`]) before anything else.
+fn put_in_place(staging: &Path, target: &Path, replaced: &Path) -> std::io::Result<()> {
+    if !target.exists() {
+        return std::fs::rename(staging, target);
+    }
+    match exchange(staging, target) {
+        Ok(true) => {
+            // `staging` now holds the earlier package.
+            let _ = std::fs::remove_dir_all(staging);
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(error) => return Err(error),
+    }
+    if replaced.exists() {
+        std::fs::remove_dir_all(replaced)?;
+    }
+    std::fs::rename(target, replaced)?;
+    if let Err(error) = std::fs::rename(staging, target) {
+        let _ = std::fs::rename(replaced, target);
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(replaced);
+    Ok(())
+}
+
+/// Put back a package an interrupted replacement set aside: one the name
+/// lost, as [`put_in_place`] can leave it where directories cannot be
+/// exchanged. A package still under the name makes the set-aside one
+/// garbage, which is removed.
+fn restore_interrupted(target: &Path, replaced: &Path) -> std::io::Result<()> {
+    if !replaced.exists() {
+        return Ok(());
+    }
+    if target.exists() {
+        std::fs::remove_dir_all(replaced)
+    } else {
+        std::fs::rename(replaced, target)
+    }
+}
+
+/// Exchange two existing directories in one step. `Ok(false)` when this
+/// system or file system cannot, and nothing was changed.
+#[cfg(target_os = "linux")]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let path = |path: &Path| {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let (a, b) = (path(a)?, path(b)?);
+    // SAFETY: both are NUL-terminated paths that outlive the call.
+    let done = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if done == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP) => Ok(false),
+        _ => Err(error),
+    }
+}
+
+/// Exchange two existing directories in one step. `Ok(false)` when this
+/// system or file system cannot, and nothing was changed.
+#[cfg(target_os = "macos")]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let path = |path: &Path| {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let (a, b) = (path(a)?, path(b)?);
+    // SAFETY: both are NUL-terminated paths that outlive the call.
+    let done = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if done == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOTSUP) => Ok(false),
+        _ => Err(error),
+    }
+}
+
+/// Windows and other systems have no exchange of two directories.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn exchange(_a: &Path, _b: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// Write every file of the package into `folder`; the bytes written and
@@ -483,12 +580,19 @@ fn sidecar(
             "model": video.model,
             "clip_seconds": video.clip_seconds,
             "parameters": video.parameters,
+            "locked_at": video.locked_at,
         },
         "first_frame": {
             "artifact_id": video.first_frame.artifact_id.as_str(),
             "content_hash": video.first_frame.content_hash.as_str(),
             "file": first_frame_file,
         },
+        "end_frame": video.end_frame.as_ref().map(|end| json!({
+            "scene_id": end.shot.scene(),
+            "shot_id": end.shot.shot(),
+            "artifact_id": end.keyframe.artifact_id.as_str(),
+            "content_hash": end.keyframe.content_hash.as_str(),
+        })),
         "prompt": video.provenance.as_ref().map(|provenance| json!({
             "compiler_version": provenance.compiler_version,
             "compiled_prompt": provenance.compiled_prompt,
@@ -586,41 +690,12 @@ fn write_json(path: &Path, value: &Value) -> Result<u64, ExportError> {
     Ok(bytes.len() as u64)
 }
 
-/// `time` as an RFC 3339 UTC timestamp to the second.
-#[must_use]
-pub fn rfc3339(time: SystemTime) -> String {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
-    let rest = seconds % 86_400;
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
-    )
-}
+pub use kineto_project::time::rfc3339;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn a_shot_named_after_its_scene_is_not_named_twice() {
@@ -645,5 +720,77 @@ mod tests {
             rfc3339(UNIX_EPOCH + Duration::from_secs(1_791_015_045)),
             "2026-10-03T08:10:45Z"
         );
+    }
+
+    fn folder(root: &Path, name: &str, file: &str) -> PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(file), name).unwrap();
+        path
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "kineto-export-swap-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_replaced_package_is_never_missing_from_its_name() {
+        let root = temp("replace");
+        let target = folder(&root, "dailies", "old.json");
+        let staging = folder(&root, ".dailies.partial", "new.json");
+        let replaced = root.join(".dailies.replaced");
+        put_in_place(&staging, &target, &replaced).unwrap();
+        assert!(target.join("new.json").is_file());
+        assert!(!target.join("old.json").exists());
+        assert!(!staging.exists() && !replaced.exists());
+
+        // A new name is a plain rename.
+        let fresh = folder(&root, ".rushes.partial", "new.json");
+        put_in_place(&fresh, &root.join("rushes"), &root.join(".rushes.replaced")).unwrap();
+        assert!(root.join("rushes/new.json").is_file());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn two_directories_are_exchanged_in_one_step() {
+        let root = temp("exchange");
+        let a = folder(&root, "a", "a.json");
+        let b = folder(&root, "b", "b.json");
+        // A file system that cannot exchange changes nothing.
+        if exchange(&a, &b).unwrap() {
+            assert!(a.join("b.json").is_file() && b.join("a.json").is_file());
+        } else {
+            assert!(a.join("a.json").is_file() && b.join("b.json").is_file());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_package_set_aside_by_an_interrupted_replacement_is_put_back() {
+        let root = temp("restore");
+        // Interrupted after the earlier package was set aside, before the
+        // new one took its name.
+        let replaced = folder(&root, ".dailies.replaced", "old.json");
+        let target = root.join("dailies");
+        restore_interrupted(&target, &replaced).unwrap();
+        assert!(target.join("old.json").is_file());
+        assert!(!replaced.exists());
+        // Interrupted after the new one took the name: the earlier one is
+        // garbage.
+        let replaced = folder(&root, ".dailies.replaced", "older.json");
+        restore_interrupted(&target, &replaced).unwrap();
+        assert!(target.join("old.json").is_file());
+        assert!(!replaced.exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

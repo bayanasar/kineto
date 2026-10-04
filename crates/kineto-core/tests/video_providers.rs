@@ -119,6 +119,7 @@ impl VideoGenerator for TextOnly {
             min_duration_ms: Some(1_000),
             max_duration_ms: Some(8_000),
             async_jobs: true,
+            resumable_remote_handle: true,
             output_containers: [VideoContainer::Mp4].into_iter().collect(),
             ..VideoCapabilities::default()
         }
@@ -128,7 +129,7 @@ impl VideoGenerator for TextOnly {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8) -> String {
+    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
         format!("duration={clip_seconds}")
     }
 
@@ -258,7 +259,7 @@ fn a_video_says_what_its_provider_could_not_do_and_goes_stale_when_the_plan_move
         .iter()
         .find(|artifact| artifact["type"] == "shot_video")
         .unwrap();
-    assert_eq!(record["compiler_version"], "video-prompt/5");
+    assert_eq!(record["compiler_version"], "video-prompt/6");
     let dropped: Vec<(&str, &str)> = record["dropped_constraints"]
         .as_array()
         .unwrap()
