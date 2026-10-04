@@ -108,6 +108,8 @@ A character of the bible is cast with paid images in the locked style. Portrait 
 
 Which kinds and frames the pack holds follows the provider's declared capabilities: a full-length view wants 9:16 and is made at the nearest frame the provider takes, reported as a dropped constraint; with no identity reference there is no pack, since it would not show the same person. Prompts never truncate; what does not fit is dropped and reported (`cast-portrait/1`, `cast-reference/1`).
 
+A portrait can also be the director's own image: imported from a path they chose (the only read outside the project), copied in by its hash, free, and recorded with provider `import`, compiler `import/1` and the bible entry and locked style it was brought in for as dependencies. It must be a JPEG, PNG or WebP of at most 20 MB, and a format and size the session's image provider takes as an identity reference when it declares one. Importing the same image again records nothing new. From there it is selected, packed and locked like a generated portrait.
+
 `characters/<id>/casting.json` (`casting.schema.json`) records every image as `cast.<id>.NNNN` in order, with its kind, its status (portraits only), the portrait it was made from (references only), its hashes, provider, model, prompt provenance and dependencies. Locking writes `characters/<id>/character.json` (`character.schema.json`):
 - the canonical portrait and the newest reference of each kind made from it, by artifact ID, content hash and path;
 - the provider reference: provider, the request field it travels in, the role, and the image sent;

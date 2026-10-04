@@ -22,6 +22,7 @@ testing = ["kineto-llm/testing"]
 
 [dev-dependencies]
 base64 = "0.23"
+kineto-json-schema = { path = "../kineto-json-schema" }
 kineto-llm = { path = "../kineto-llm", features = ["testing"] }
 
 [lib]

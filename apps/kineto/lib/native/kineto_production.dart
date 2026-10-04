@@ -1,5 +1,17 @@
 part of 'kineto_engine.dart';
 
+@Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint8>, Uint64, Uint64)>(
+  symbol: 'kineto_project_import_portrait',
+)
+external int _kinetoProjectImportPortrait(
+  Pointer<Void> session,
+  Pointer<Uint8> character,
+  int characterLength,
+  Pointer<Uint8> path,
+  int pathLength,
+  int token,
+);
+
 @Native<Int32 Function(Pointer<Void>, Bool, Uint64)>(symbol: 'kineto_project_write_bible')
 external int _kinetoProjectWriteBible(Pointer<Void> session, bool resubmit, int token);
 
@@ -739,6 +751,27 @@ extension KinetoProjectProduction on KinetoProjectSession {
         try {
           final character = _encodeUtf8(arena, characterId);
           return _kinetoProjectLockCharacter(_handle, character.pointer, character.length, token);
+        } finally {
+          arena.releaseAll();
+        }
+      });
+
+  /// Import the image at [path], an absolute path the director chose, as a
+  /// portrait candidate of [characterId]. Free; it is then selected, packed
+  /// and locked like a generated portrait.
+  Future<void> importPortrait(String characterId, String path) => _submitDocument((token) {
+        final arena = Arena();
+        try {
+          final character = _encodeUtf8(arena, characterId);
+          final file = _encodeUtf8(arena, path);
+          return _kinetoProjectImportPortrait(
+            _handle,
+            character.pointer,
+            character.length,
+            file.pointer,
+            file.length,
+            token,
+          );
         } finally {
           arena.releaseAll();
         }

@@ -252,6 +252,12 @@ pub enum ProductionCommand {
     LockCharacter {
         character: String,
     },
+    /// Free: import the image at `path`, which the director chose, as a
+    /// portrait candidate of `character`. The only read outside the project.
+    ImportPortrait {
+        character: String,
+        path: PathBuf,
+    },
     /// Free: ask the speech provider which voices it offers.
     LoadVoices,
     /// Paid: have each voice of `choices` say `line` as `character`, or
@@ -2135,6 +2141,29 @@ impl Worker {
                 cast::lock(project, provider, character)
                     .map(|_| ())
                     .map_err(generation_error)
+            }
+            ProductionCommand::ImportPortrait { character, path } => {
+                let unreadable = |error: std::io::Error| {
+                    cast_error(cast_document::CastError::Fs(
+                        kineto_project::fs::ProjectFsError::Io(error),
+                    ))
+                };
+                std::fs::metadata(path)
+                    .map_err(unreadable)
+                    .and_then(|metadata| {
+                        if metadata.len() > cast::MAX_IMPORT_BYTES {
+                            Err(generation_error(GenerationError::Prerequisite(
+                                crate::generation::Prerequisite::IdentityReference,
+                            )))
+                        } else {
+                            std::fs::read(path).map_err(unreadable)
+                        }
+                    })
+                    .and_then(|bytes| {
+                        cast::import_portrait(project, &provider.capabilities(), character, &bytes)
+                            .map(|_| ())
+                            .map_err(generation_error)
+                    })
             }
             ProductionCommand::LoadVoices => {
                 let listed = match &self.speech {

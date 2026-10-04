@@ -49,6 +49,15 @@ pub const PORTRAIT_COMPILER_VERSION: &str = "cast-portrait/1";
 /// Version of the reference prompt.
 pub const REFERENCE_COMPILER_VERSION: &str = "cast-reference/1";
 
+/// The provider an imported portrait records: the director brought it.
+pub const IMPORT_PROVIDER: &str = "import";
+
+/// What an imported portrait's provenance names in place of a compiler.
+pub const IMPORT_VERSION: &str = "import/1";
+
+/// The largest image the director may import, in bytes.
+pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
 const INTENT_DOMAIN: &[u8] = b"kineto.cast-intent.v1";
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -858,6 +867,93 @@ pub fn lock(
         },
     )
     .map_err(document_error)
+}
+
+/// Import `bytes`, an image the director chose, as a portrait candidate of
+/// `character_id`: copied into the project, recorded by its hash with the
+/// bible entry and locked style it was brought in for, and selected,
+/// packed and locked like a generated portrait. Free. The image must be a
+/// format and size `capabilities` takes as an identity reference, when it
+/// declares one; importing the same image again records nothing new.
+pub fn import_portrait(
+    project: &CanonicalProject,
+    capabilities: &ImageCapabilities,
+    character_id: &str,
+    bytes: &[u8],
+) -> Result<CastImage, GenerationError> {
+    let material = Material::gather(project, character_id)?;
+    let format = kineto_provider_minimax::sniff(bytes);
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let takes_identity = capabilities.reference_limit(ReferenceRole::Identity) > 0;
+    let fits = format
+        .is_some_and(|format| !takes_identity || capabilities.reference_formats.contains(&format))
+        && size <= MAX_IMPORT_BYTES
+        && (!takes_identity
+            || capabilities
+                .max_reference_bytes
+                .is_none_or(|max| size <= max));
+    if !fits {
+        return Err(GenerationError::Prerequisite(
+            Prerequisite::IdentityReference,
+        ));
+    }
+    let content_hash = kineto_project::ContentHash::of(bytes);
+    let recorded = document::images(project, character_id).map_err(document_error)?;
+    if let Some(image) = recorded.iter().find(|image| {
+        image.provider == IMPORT_PROVIDER && image.content_hash == content_hash.as_str()
+    }) {
+        return Ok(image.clone());
+    }
+    if project.is_read_only() {
+        return Err(document_error(document::CastError::Manifest(
+            kineto_project::manifest::ProjectManifestError::ReadOnlyFormatVersion(
+                project.manifest().format_version,
+            ),
+        )));
+    }
+    let artifact_id = document::next_artifact_id(project, character_id).map_err(document_error)?;
+    let extension = match format {
+        Some(kineto_providers::ImageFormat::Png) => "png",
+        Some(kineto_providers::ImageFormat::Webp) => "webp",
+        _ => "jpg",
+    };
+    let media = document::media_path(
+        character_id,
+        &artifact_id,
+        CastImageKind::Portrait,
+        extension,
+    )
+    .map_err(document_error)?;
+    project
+        .root()
+        .write_atomic(&media, bytes)
+        .map_err(|error| document_error(document::CastError::Fs(error)))?;
+    let image = CastImage {
+        artifact_id: artifact_id.as_str().to_owned(),
+        kind: CastImageKind::Portrait,
+        status: Some(PortraitStatus::Candidate),
+        identity_reference: None,
+        content_hash: content_hash.as_str().to_owned(),
+        input_hash: content_hash.as_str().to_owned(),
+        provider: IMPORT_PROVIDER.to_owned(),
+        model: IMPORT_PROVIDER.to_owned(),
+        media_path: media.as_path().to_string_lossy().into_owned(),
+        provenance: kineto_project::shot::PromptProvenance {
+            compiler_version: IMPORT_VERSION.to_owned(),
+            compiled_prompt: "Imported by the director.".to_owned(),
+            prompt_hash: content_hash.as_str().to_owned(),
+            applied_constraints: Vec::new(),
+            dropped_constraints: Vec::new(),
+        },
+        dependencies: material
+            .dependencies
+            .iter()
+            .map(DependencyRecord::from)
+            .collect(),
+        media_state: None,
+    };
+    document::attach(project, character_id, image.clone()).map_err(document_error)?;
+    Ok(image)
 }
 
 /// What makes the cast of `character_id` stale: each parent of its locked

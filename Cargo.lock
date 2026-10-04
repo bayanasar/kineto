@@ -146,6 +146,7 @@ dependencies = [
  "base64",
  "kineto-job-runtime",
  "kineto-jobs",
+ "kineto-json-schema",
  "kineto-llm",
  "kineto-project",
  "kineto-prompts",
