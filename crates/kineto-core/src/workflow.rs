@@ -2,15 +2,16 @@
 //!
 //! Every step's state is computed from the project's canonical files on
 //! each read: what the step made, whether the director approved it, and
-//! which of its parents changed since. Nothing is stored beside them, so
-//! deleting `.kineto/` changes no step.
+//! which of its parents changed since, or whether the step does not apply
+//! to this project. Nothing is stored beside them, so deleting `.kineto/`
+//! changes no step.
 
 use std::{error::Error, fmt};
 
 use kineto_project::{
     bible as bible_document, cast as cast_document,
     manifest::CanonicalProject,
-    recipe::{self, ArtifactKind, RecipeError},
+    recipe::{self, ArtifactKind, RecipeError, SkipCondition},
     revisions::{self, DocumentKind, RevisionStatus},
     shot::{ShotWorkflow, VideoState},
     shot_plan as shot_plan_document, source, style as style_document,
@@ -29,6 +30,10 @@ pub enum StepState {
     AwaitingApproval,
     /// Approved, or made where the recipe asks for no approval.
     Done,
+    /// Every step it follows is done and a condition the recipe names for
+    /// it holds: it does not apply, and counts as done for the steps after
+    /// it.
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +49,8 @@ pub struct StepStatus {
     /// as `<owner>: <parent>` where one step's work has several owners
     /// (characters, shots); empty when it is fresh.
     pub stale: Vec<String>,
+    /// The conditions that hold when it is skipped.
+    pub skipped_when: Vec<SkipCondition>,
 }
 
 #[derive(Debug)]
@@ -90,7 +97,6 @@ pub fn status(project: &CanonicalProject) -> Result<Vec<StepStatus>, WorkflowErr
     let recipe = recipe::of(project).map_err(WorkflowError::Recipe)?;
     let mut statuses: Vec<StepStatus> = Vec::with_capacity(recipe.steps.len());
     for step in &recipe.steps {
-        let progress = progress(project, step.produces)?;
         let waiting_on: Vec<String> = step
             .after
             .iter()
@@ -98,10 +104,32 @@ pub fn status(project: &CanonicalProject) -> Result<Vec<StepStatus>, WorkflowErr
                 statuses
                     .iter()
                     .find(|status| &status.id == *parent)
-                    .is_none_or(|status| status.state != StepState::Done)
+                    .is_none_or(|status| !status.state.is_done())
             })
             .cloned()
             .collect();
+        let mut skipped_when = Vec::new();
+        if waiting_on.is_empty() {
+            for condition in &step.skip_when {
+                if holds(project, *condition)? {
+                    skipped_when.push(*condition);
+                }
+            }
+        }
+        if !skipped_when.is_empty() {
+            statuses.push(StepStatus {
+                id: step.id.clone(),
+                produces: step.produces,
+                approval: step.approval,
+                description: step.description.clone(),
+                state: StepState::Skipped,
+                waiting_on,
+                stale: Vec::new(),
+                skipped_when,
+            });
+            continue;
+        }
+        let progress = progress(project, step.produces)?;
         let done = if step.approval {
             progress.approved
         } else {
@@ -124,9 +152,35 @@ pub fn status(project: &CanonicalProject) -> Result<Vec<StepStatus>, WorkflowErr
             state,
             waiting_on,
             stale: progress.stale,
+            skipped_when,
         });
     }
     Ok(statuses)
+}
+
+impl StepState {
+    /// Whether the steps after it may go on: done, or skipped.
+    #[must_use]
+    pub const fn is_done(self) -> bool {
+        matches!(self, Self::Done | Self::Skipped)
+    }
+}
+
+/// Whether `condition` holds. Each holds only once what it reads is
+/// locked: an unlocked bible may yet gain a main character.
+fn holds(project: &CanonicalProject, condition: SkipCondition) -> Result<bool, WorkflowError> {
+    match condition {
+        SkipCondition::NoMainCharacters => {
+            let locked = revisions::revisions(project, DocumentKind::Bible)
+                .map_err(unreadable)?
+                .iter()
+                .any(|record| record.status == RevisionStatus::Locked);
+            Ok(locked
+                && cast::main_characters(project)
+                    .map_err(unreadable)?
+                    .is_empty())
+        }
+    }
 }
 
 fn progress(project: &CanonicalProject, kind: ArtifactKind) -> Result<Progress, WorkflowError> {

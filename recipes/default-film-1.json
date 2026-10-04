@@ -44,7 +44,8 @@
       "produces": "cast",
       "after": ["bible", "style"],
       "approval": true,
-      "description": "Cast every main character from a portrait and its reference pack."
+      "description": "Cast every main character from a portrait and its reference pack.",
+      "skip_when": ["no_main_characters"]
     },
     {
       "id": "shot_plan",

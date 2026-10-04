@@ -659,8 +659,8 @@ fn generated_and_edited_shot_plans_and_their_revision_log_match_committed_schema
     let mut scene = plan.scenes[0].clone();
     scene.shots[0].continuity_from = None;
     scene.shots[1].dialogue = String::new();
-    let edited =
-        kineto_project::shot_plan::edit_scene(&project, 1, scene).expect("the edit is saved");
+    let edited = kineto_project::shot_plan::edit_scene(&project, 1, scene, &Default::default())
+        .expect("the edit is saved");
     kineto_project::shot_plan::lock(&project, 2).expect("the plan should lock");
     for record in [&written, &edited] {
         validate(

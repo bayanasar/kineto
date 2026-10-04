@@ -470,7 +470,7 @@ pub(crate) const IMAGE_COSTS: [(&str, u32); 3] = [("sample", 1), ("portrait", 2)
 
 /// What `kineto_project_plan_count` counts; `group` selects the scene (or
 /// the step), `item` the shot.
-pub(crate) const PLAN_COUNTS: [(&str, u32); 9] = [
+pub(crate) const PLAN_COUNTS: [(&str, u32); 10] = [
     ("plan_revisions", 1),
     ("plan_scenes", 2),
     ("plan_shots", 3),
@@ -480,6 +480,7 @@ pub(crate) const PLAN_COUNTS: [(&str, u32); 9] = [
     ("workflow_steps", 7),
     ("step_waiting", 8),
     ("step_stale", 9),
+    ("step_skipped", 10),
 ];
 
 /// Number fields `kineto_project_plan_value` reads.
@@ -498,7 +499,7 @@ pub(crate) const PLAN_VALUES: [(&str, u32); 11] = [
 ];
 
 /// Text fields `kineto_project_plan_text_copy` copies.
-pub(crate) const PLAN_TEXTS: [(&str, u32); 18] = [
+pub(crate) const PLAN_TEXTS: [(&str, u32); 19] = [
     ("plan_revision_provider", 1),
     ("plan_revision_model", 2),
     ("plan_stale_subject", 3),
@@ -517,6 +518,7 @@ pub(crate) const PLAN_TEXTS: [(&str, u32); 18] = [
     ("step_waiting", 16),
     ("step_stale", 17),
     ("workflow_problem", 18),
+    ("step_skipped", 19),
 ];
 
 pub(crate) const FRAMINGS: [(&str, u32); 10] = [
@@ -556,11 +558,12 @@ pub(crate) const PLAN_STALE_CAUSES: [(&str, u32); 5] = [
 ];
 
 /// Where a recipe step stands.
-pub(crate) const STEP_STATES: [(&str, u32); 4] = [
+pub(crate) const STEP_STATES: [(&str, u32); 5] = [
     ("waiting", 1),
     ("ready", 2),
     ("awaiting_approval", 3),
     ("done", 4),
+    ("skipped", 5),
 ];
 
 /// What `kineto_project_take_count` counts for a shot.

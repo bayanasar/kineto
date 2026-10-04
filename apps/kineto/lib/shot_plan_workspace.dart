@@ -26,6 +26,8 @@ class RecipeStrip extends StatelessWidget {
               step.description,
               if (step.waitingOn.isNotEmpty) 'Waiting on ${step.waitingOn.join(', ')}',
               if (step.stale.isNotEmpty) 'Changed since: ${step.stale.join(', ')}',
+              if (step.skippedWhen.isNotEmpty)
+                'Skipped: ${step.skippedWhen.map((condition) => condition.replaceAll('_', ' ')).join(', ')}',
             ].join('\n'),
             child: WabStatusBadge(
               '${step.id.replaceAll('_', ' ')} · ${step.state.label}${step.stale.isEmpty ? '' : ' · stale'}',
@@ -36,7 +38,7 @@ class RecipeStrip extends StatelessWidget {
                       KinetoStepState.done => WabBadgeKind.done,
                       KinetoStepState.awaitingApproval => WabBadgeKind.progress,
                       KinetoStepState.ready => WabBadgeKind.primary,
-                      KinetoStepState.waiting => WabBadgeKind.neutral,
+                      KinetoStepState.waiting || KinetoStepState.skipped => WabBadgeKind.neutral,
                     },
             ),
           ),
@@ -526,6 +528,7 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
           characters: draft.shot.characters,
           continuity: draft.shot.continuity,
           continuityFrom: draft.continuityFrom,
+          added: draft.shot.added,
         ),
       );
     }
@@ -573,15 +576,24 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
               emotion: '',
               durationTarget: like.durationTarget,
               characters: like.characters,
+              added: true,
             ),
           ),
         );
       });
 
-  /// The scene's ID and the first free two-digit number. Never `shot_NNN`,
-  /// which names the bootstrap scene's shots.
+  /// The scene's ID and the first number free of every shot the scene had
+  /// when editing began, so a shot removed in this edit keeps its number.
+  /// Never `shot_NNN`, which names the bootstrap scene's shots. The shot is
+  /// sent as added: if its number was a shot's before, even one removed in
+  /// an earlier revision, the engine gives it one no shot has had, so it
+  /// never inherits another shot's takes or video.
   String _newShotId() {
-    final taken = <String>{...widget.otherShots, for (final draft in _shots) draft.shot.id};
+    final taken = <String>{
+      ...widget.otherShots,
+      for (final shot in widget.scene.shots) shot.id,
+      for (final draft in _shots) draft.shot.id,
+    };
     final scene = widget.scene.sceneId;
     final prefix = scene.length > 60 ? scene.substring(0, 60) : scene;
     for (var number = _shots.length + 1;; number++) {

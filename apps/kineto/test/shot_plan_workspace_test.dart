@@ -36,6 +36,13 @@ const KinetoPlannedShot _close = KinetoPlannedShot(
 const List<KinetoWorkflowStep> _steps = <KinetoWorkflowStep>[
   KinetoWorkflowStep(id: 'screenplay', description: 'Lock the screenplay.', state: KinetoStepState.done, approval: true),
   KinetoWorkflowStep(
+    id: 'casting',
+    description: 'Cast every main character.',
+    state: KinetoStepState.skipped,
+    approval: true,
+    skippedWhen: <String>['no_main_characters'],
+  ),
+  KinetoWorkflowStep(
     id: 'shot_plan',
     description: 'Plan and lock the shots.',
     state: KinetoStepState.awaitingApproval,
@@ -126,6 +133,11 @@ void main() {
     expect(find.text('Keep: Rain on the window.'), findsOneWidget);
     expect(find.text('shot plan · Awaiting approval'), findsOneWidget);
     expect(find.text('keyframes · Waiting'), findsOneWidget);
+    expect(find.text('casting · Skipped'), findsOneWidget);
+    expect(
+      tester.widget<Tooltip>(find.ancestor(of: find.byKey(_key('step-casting')), matching: find.byType(Tooltip))).message,
+      'Cast every main character.\nSkipped: no main characters',
+    );
     expect(find.text('Kimi Code · cost unknown: billed by the Kimi Code subscription'), findsOneWidget);
 
     await _tap(tester, find.byKey(_key('lock-plan')));
@@ -221,6 +233,25 @@ void main() {
     expect(added.characters, <String>['filmmaker', 'interviewer']);
     expect(added.continuityFrom, 'office_night_01');
     expect(added.continuity, isEmpty);
+    expect(added.added, isTrue);
+    expect(saved.shots[0].added, isFalse);
+  });
+
+  testWidgets('a shot removed and another added in one edit never shares its number', (tester) async {
+    final calls = await _pump(tester, editing: 'office_night');
+    await _tap(tester, find.byKey(_key('shot-office_night_02-remove')));
+    await _tap(tester, find.byKey(_key('shot-office_night_01-add-after')));
+    // Not office_night_02, which the removed shot keeps with its takes.
+    expect(find.text('2. office_night_03'), findsOneWidget);
+    await tester.enterText(find.byKey(_key('shot-office_night_03-purpose')), 'Show the empty chair.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-action')), 'The chair is empty.');
+    await tester.enterText(find.byKey(_key('shot-office_night_03-emotion')), 'Absence.');
+    await _tap(tester, find.byKey(_key('save-scene-plan-office_night')));
+    final saved = calls.saved!;
+    expect(saved.shots.map((shot) => (shot.id, shot.added)), <(String, bool)>[
+      ('office_night_01', false),
+      ('office_night_03', true),
+    ]);
   });
 
   testWidgets('while something is planned every change waits', (tester) async {

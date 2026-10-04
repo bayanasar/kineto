@@ -32,7 +32,7 @@ use crate::{
     documents::document_error,
     generation::{
         CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate, GenerationError,
-        GenerationHooks, IdentityReference, ImageProvider, Prerequisite, require_synchronous,
+        GenerationHooks, ImageProvider, Prerequisite, ReferenceImage, require_synchronous,
     },
     keyframe_prompt::{KeyframePrompt, KeyframePromptError},
     minimax::MinimaxKeyframes,
@@ -497,7 +497,7 @@ struct Planned {
 fn plan_shot(
     material: &Material,
     shot: &Shot,
-    identity: Option<&IdentityReference>,
+    identity: Option<&ReferenceImage>,
     capabilities: &ImageCapabilities,
 ) -> Result<Planned, GenerationError> {
     let prompt = compile(
@@ -546,7 +546,7 @@ fn make<T: Transport + Sync>(
     jobs: &mut Jobs<'_, '_, Casting, T>,
     character_id: &str,
     shot: &Shot,
-    identity: Option<&IdentityReference>,
+    identity: Option<&ReferenceImage>,
     planned: Planned,
     index: usize,
     hooks: &mut dyn GenerationHooks,
@@ -574,6 +574,7 @@ fn make<T: Transport + Sync>(
         },
         aspect_ratio: shot.frame,
         identities: identity.cloned().into_iter().collect(),
+        composition: None,
         prompt: Some(Arc::new(planned.prompt)),
     };
     jobs.generate(&plan, &call, index, hooks)?;
@@ -766,7 +767,7 @@ pub fn remake_pack_with<T: Transport + Sync>(
             Prerequisite::IdentityReference,
         ));
     }
-    let identity = IdentityReference {
+    let identity = ReferenceImage {
         artifact_id: ArtifactId::new(portrait.artifact_id.clone())
             .map_err(|_| GenerationError::Unexpected("a portrait has an invalid ID"))?,
         bytes: Arc::from(bytes),

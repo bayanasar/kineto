@@ -178,6 +178,45 @@ void main() {
       expect(reopened.shotId(2), 'office_night_03');
       expect(reopened.takes(0), hasLength(6));
       expect(reopened.staleReasons(0).first, contains('intent.emotion'));
+
+      // In one edit the reaction shot goes and a new shot comes, numbered as
+      // the removed one by the client. Sent as added, it is a new shot: it
+      // gets a number no shot has had and none of the removed shot's takes.
+      final current = reopened.planning.scenes.single.shots;
+      await reopened.saveScenePlan(
+        3,
+        KinetoScenePlan(
+          sceneId: 'office_night',
+          shots: <KinetoPlannedShot>[
+            current[1],
+            current[2],
+            const KinetoPlannedShot(
+              id: 'office_night_02',
+              purpose: 'Hold on the door.',
+              direction: KinetoShotDirection.spatialClarity,
+              framing: KinetoFraming.wide,
+              lens: '28mm',
+              cameraMotion: KinetoCameraMotion.still,
+              action: 'The door stays shut.',
+              emotion: 'Waiting.',
+              durationTarget: 3,
+              added: true,
+            ),
+          ],
+        ),
+      );
+      expect(
+        reopened.planning.scenes.single.shots.map((shot) => shot.id),
+        <String>['office_night_01', 'office_night_03', 'office_night_04'],
+      );
+      await reopened.lockShotPlan(4);
+      expect(reopened.shotId(2), 'office_night_04');
+      expect(reopened.takes(2), isEmpty);
+      final removed = File(
+        [target.path, 'scenes', 'office_night', 'shots', 'office_night_02', 'artifacts.json']
+            .join(Platform.pathSeparator),
+      );
+      expect(removed.readAsStringSync(), contains('office_night_02_g0002'));
       reopened.close();
     } finally {
       sandbox.deleteSync(recursive: true);
