@@ -194,15 +194,20 @@
       "minimum": 0
     },
     "timeline": {
-      "description": "The package's timeline: the OpenTimelineIO file, its frame rate, and each line cut at the end of the shot that carries it.",
+      "description": "The package's timeline: the OpenTimelineIO file, the same timeline as a CMX 3600 edit decision list, its frame rate, and each line cut at the end of the shot that carries it.",
       "type": "object",
       "required": [
         "otio",
+        "edl",
         "frame_rate",
         "trimmed_lines"
       ],
       "properties": {
         "otio": {
+          "type": "string",
+          "minLength": 1
+        },
+        "edl": {
           "type": "string",
           "minLength": 1
         },

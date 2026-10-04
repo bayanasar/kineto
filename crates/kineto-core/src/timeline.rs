@@ -8,6 +8,9 @@
 //! lines follow one another from its start with [`BREATH_MS`] between them,
 //! as planning times them, and a line running past its shot's end is cut
 //! there and reported.
+//!
+//! The same placement is written as OpenTimelineIO ([`otio`]) and as a CMX
+//! 3600 edit decision list ([`edl`]), so the two never disagree.
 
 use serde_json::{Value, json};
 
@@ -234,6 +237,80 @@ pub fn otio(title: &str, placed: &Placed<'_>) -> Value {
     })
 }
 
+/// The most events a CMX 3600 list numbers.
+pub const MAX_EDL_EVENTS: usize = 999;
+
+/// The longest title a CMX 3600 list carries; a longer one is cut.
+const EDL_TITLE_CHARS: usize = 70;
+
+/// `frames` as non-drop timecode at [`FRAME_RATE`], `HH:MM:SS:FF`.
+#[must_use]
+pub fn timecode(frames: u64) -> String {
+    let rate = u64::from(FRAME_RATE);
+    let seconds = frames / rate;
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60,
+        frames % rate
+    )
+}
+
+/// The CMX 3600 edit decision list of `placed`, titled `title`: one video
+/// event a shot and one audio event a line, in record order, at non-drop
+/// [`FRAME_RATE`]. Each event's source runs from the start of its file, and
+/// a comment names the file relative to the package. Silence before the
+/// first line is a blank (`BL`) event, so a reader does not start the sound
+/// at the first line. Refused when there would be more than
+/// [`MAX_EDL_EVENTS`] events.
+pub fn edl(title: &str, placed: &Placed<'_>) -> Result<String, String> {
+    let mut events: Vec<(u64, &str, Option<&str>, u64)> = placed
+        .shots
+        .iter()
+        .map(|(shot, start, length)| (*start, "V", Some(shot.file.as_str()), *length))
+        .chain(
+            placed
+                .lines
+                .iter()
+                .map(|(_, line, start, length)| (*start, "A", Some(line.file.as_str()), *length)),
+        )
+        .collect();
+    if let Some((_, _, first, _)) = placed.lines.first()
+        && *first > 0
+    {
+        events.push((0, "A", None, *first));
+    }
+    if events.len() > MAX_EDL_EVENTS {
+        return Err(format!(
+            "an edit decision list holds at most {MAX_EDL_EVENTS} events; this one would hold {}",
+            events.len()
+        ));
+    }
+    // Record order, the picture before the sound that starts with it.
+    events.sort_by_key(|(start, track, _, _)| (*start, *track == "A"));
+    let title: String = title
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(EDL_TITLE_CHARS)
+        .collect();
+    let mut list = format!("TITLE: {title}\nFCM: NON-DROP FRAME\n");
+    for (number, (start, track, file, length)) in (1..).zip(events) {
+        list.push_str(&format!(
+            "\n{number:03}  {:<8} {track:<5} C        {} {} {} {}\n",
+            if file.is_some() { "AX" } else { "BL" },
+            timecode(0),
+            timecode(length),
+            timecode(start),
+            timecode(start + length),
+        ));
+        if let Some(file) = file {
+            list.push_str(&format!("* FROM CLIP NAME: {file}\n"));
+        }
+    }
+    Ok(list)
+}
+
 /// How long the MP4 `bytes` lasts, in milliseconds, from its movie header
 /// (`moov`/`mvhd`); `None` when it has none or it does not say.
 #[must_use]
@@ -401,6 +478,41 @@ mod tests {
                 cut_ms: 900,
             }]
         );
+    }
+
+    #[test]
+    fn the_edit_decision_list_is_the_same_timeline_in_cmx_3600() {
+        assert_eq!(timecode(0), "00:00:00:00");
+        assert_eq!(timecode(23), "00:00:00:23");
+        assert_eq!(timecode(24 * 3_661 + 5), "01:01:01:05");
+        let shots = [
+            shot("scene_01", 2_000, Vec::new()),
+            shot("scene_02", 4_000, vec![line(1, 1_000)]),
+        ];
+        let list = edl("The Letters", &place(&shots)).unwrap();
+        assert_eq!(
+            list,
+            "TITLE: The Letters\nFCM: NON-DROP FRAME\n\
+             \n001  AX       V     C        00:00:00:00 00:00:02:00 00:00:00:00 00:00:02:00\n\
+             * FROM CLIP NAME: scene_01.mp4\n\
+             \n002  BL       A     C        00:00:00:00 00:00:02:00 00:00:00:00 00:00:02:00\n\
+             \n003  AX       V     C        00:00:00:00 00:00:04:00 00:00:02:00 00:00:06:00\n\
+             * FROM CLIP NAME: scene_02.mp4\n\
+             \n004  AX       A     C        00:00:00:00 00:00:01:00 00:00:02:00 00:00:03:00\n\
+             * FROM CLIP NAME: shot_line01.mp3\n"
+        );
+        // Too many events is refused, not cut short.
+        let many: Vec<_> = (0..1_000)
+            .map(|index| shot(&format!("s{index}"), 1_000, Vec::new()))
+            .collect();
+        assert!(
+            edl("Many", &place(&many))
+                .unwrap_err()
+                .contains("at most 999 events")
+        );
+        // A long title is cut to what the format carries.
+        let long = edl(&"T".repeat(200), &place(&shots)).unwrap();
+        assert_eq!(long.lines().next().unwrap().len(), "TITLE: ".len() + 70);
     }
 
     #[test]

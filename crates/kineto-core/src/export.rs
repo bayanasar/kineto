@@ -8,6 +8,7 @@
 //! <destination>/<name>/
 //! ├── manifest.json
 //! ├── timeline.otio                      (the shots and lines as a rough cut)
+//! ├── timeline.edl                       (the same, as a CMX 3600 list)
 //! ├── <scene>_<shot>.mp4
 //! ├── <scene>_<shot>.json
 //! ├── <scene>_<shot>_first_frame.<ext>   (when the keyframe has an image)
@@ -59,6 +60,9 @@ pub const EXPORT_SCHEMA_VERSION: u32 = 3;
 /// The package's OpenTimelineIO timeline.
 pub const TIMELINE_FILE: &str = "timeline.otio";
 
+/// The package's timeline as a CMX 3600 edit decision list.
+pub const EDL_FILE: &str = "timeline.edl";
+
 /// A shot in play that is not in the package, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Missing {
@@ -101,6 +105,8 @@ pub enum ExportError {
     Mismatch(String),
     /// The lines and their takes could not be read.
     Lines(Box<GenerationError>),
+    /// The timeline cannot be written in a format the package holds.
+    Timeline(String),
     Io(std::io::Error),
 }
 
@@ -124,6 +130,7 @@ impl fmt::Display for ExportError {
             Self::Exists(path) => write!(formatter, "{} exists already", path.display()),
             Self::Mismatch(path) => write!(formatter, "{path} is not what its record says"),
             Self::Lines(error) => error.fmt(formatter),
+            Self::Timeline(reason) => formatter.write_str(reason),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -457,6 +464,9 @@ fn write_package(
         &folder.join(TIMELINE_FILE),
         &timeline::otio(&manifest.title, &placed),
     )?;
+    let list = timeline::edl(&manifest.title, &placed).map_err(ExportError::Timeline)?;
+    std::fs::write(folder.join(EDL_FILE), &list)?;
+    bytes += list.len() as u64;
     let scenes = scenes
         .into_iter()
         .map(|(scene_id, shots)| {
@@ -492,6 +502,7 @@ fn write_package(
         "total_runtime_seconds": runtime,
         "timeline": {
             "otio": TIMELINE_FILE,
+            "edl": EDL_FILE,
             "frame_rate": timeline::FRAME_RATE,
             "trimmed_lines": placed.trimmed.iter().map(|trimmed| json!({
                 "shot_id": trimmed.shot_id,

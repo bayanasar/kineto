@@ -1334,6 +1334,7 @@ fn export_error_code(error: &ExportError) -> i32 {
         ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
         ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
         ExportError::Lines(error) => generation_error_code(error),
+        ExportError::Timeline(_) => PROJECT_ERR_INVALID_DOCUMENT,
         ExportError::Io(_) => PROJECT_ERR_IO,
     }
 }

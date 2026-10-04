@@ -423,8 +423,16 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
     // The timeline: the shot as long as its file, its line at its start.
     assert_eq!(
         manifest["timeline"],
-        serde_json::json!({"otio": "timeline.otio", "frame_rate": 24, "trimmed_lines": []})
+        serde_json::json!({
+            "otio": "timeline.otio",
+            "edl": "timeline.edl",
+            "frame_rate": 24,
+            "trimmed_lines": []
+        })
     );
+    let list = fs::read_to_string(folder.join("timeline.edl")).unwrap();
+    assert!(list.contains("* FROM CLIP NAME: office_night_02.mp4"));
+    assert!(list.contains("* FROM CLIP NAME: office_night_02_line01.wav"));
     let timeline = json("timeline.otio");
     assert_eq!(timeline["OTIO_SCHEMA"], "Timeline.1");
     let tracks = &timeline["tracks"]["children"];
