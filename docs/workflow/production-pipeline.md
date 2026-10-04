@@ -302,8 +302,9 @@ The project manifest (`schemas/export-manifest.schema.json`) holds the project a
 
 Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Kineto does not stamp a lock time on its records, so a sidecar does not carry one; the manifest records when the package was made.
 
+The package also holds its timeline (`timeline.otio`, OpenTimelineIO): the shots end to end on a video track and each shot's locked lines on a dialogue track, at 24 frames a second. A shot lasts as long as its file does, read from the MP4's movie header without decoding. A shot's lines follow one another from its start with a 250 ms breath between them, as planning times them, and a line running past its shot's end is cut there and listed in the manifest (`timeline.trimmed_lines`). Each clip names its file relative to the package and carries its Kineto identity, so the package can move as a whole.
+
 Later ecosystem exports can add:
 
-- OTIO
 - EDL
 - NLE-specific metadata
