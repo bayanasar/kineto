@@ -189,6 +189,7 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "preferences.schema.json",
             "project.schema.json",
             "recipe.schema.json",
+            "references.schema.json",
             "revisions.schema.json",
             "scene.schema.json",
             "screenplay-scene.schema.json",
@@ -712,6 +713,50 @@ fn the_bible_schema_rejects_drift() {
         edit(&mut value);
         assert!(validate_value(&bible_schema, &value, "$").is_err());
     }
+}
+
+#[test]
+fn references_match_their_committed_schema() {
+    let references_schema = schema("references.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    let arguments = serde_json::from_str(r#"{"query":"the filmmaker"}"#).unwrap();
+    let add = |text: &str, attached_to: &[&str]| {
+        kineto_project::references::add(
+            &project,
+            kineto_project::references::NewReference {
+                server: "studio-archive".to_owned(),
+                tool: "search_wardrobe".to_owned(),
+                arguments: serde_json::Map::clone(&arguments),
+                text: text.to_owned(),
+                attached_to: attached_to
+                    .iter()
+                    .map(|target| (*target).to_owned())
+                    .collect(),
+            },
+        )
+        .expect("the reference should be kept")
+    };
+    add(
+        "A grey wool overcoat.",
+        &["bible_world", "bible_character.filmmaker"],
+    );
+    add("Rain on one window.", &[]);
+    kineto_project::references::remove(&project, "reference.0002").expect("remove");
+    let written = json_file(&temp.0.join("references/references.json"));
+    validate(&references_schema, &written, "references");
+    assert_eq!(written["next_number"], 3);
+
+    let mut drifted = written.clone();
+    drifted["references"][0]["attached_to"][0] = "the moon".into();
+    assert!(validate_value(&references_schema, &drifted, "$").is_err());
+    let mut drifted = written;
+    drifted["references"][0]["recorded_at"] = "2026-10-03T00:00:00Z".into();
+    assert!(
+        validate_value(&references_schema, &drifted, "$").is_err(),
+        "no time is recorded"
+    );
 }
 
 #[test]

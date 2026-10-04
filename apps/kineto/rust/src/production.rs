@@ -635,6 +635,7 @@ fn stale_cause(cause: &StaleCause) -> (&'static str, &str) {
         StaleCause::SceneChanged(id) => ("scene_changed", id),
         StaleCause::SceneRemoved(id) => ("scene_removed", id),
         StaleCause::SceneAdded(id) => ("scene_added", id),
+        StaleCause::Reference(id) => ("reference", id),
     }
 }
 
@@ -902,6 +903,7 @@ mod tests {
             StaleCause::SceneChanged("a".to_owned()),
             StaleCause::SceneRemoved("a".to_owned()),
             StaleCause::SceneAdded("a".to_owned()),
+            StaleCause::Reference("reference.0001".to_owned()),
         ] {
             assert!(name(&STALE_CAUSES, code(&STALE_CAUSES, stale_cause(&cause).0)).is_some());
         }

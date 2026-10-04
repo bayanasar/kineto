@@ -13,6 +13,7 @@ pub mod minimax;
 pub mod paid_image;
 pub mod plugin;
 pub mod preferences;
+pub mod references;
 pub mod screenplay;
 pub mod session;
 pub mod shot_plan;

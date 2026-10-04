@@ -21,6 +21,8 @@ my-film/
 │   ├── revisions.json
 │   ├── bible_r0001.json
 │   └── style.json
+├── references/
+│   └── references.json
 ├── shot_plan/
 │   ├── revisions.json
 │   └── shot_plan_r0001.json
@@ -85,6 +87,12 @@ The bible (`bible/bible_rNNNN.json`, `bible.schema.json`) is the production memo
 Character IDs are screenplay cast IDs; location IDs are story analysis location IDs, so a place that is seen without a scene being set in it can be described too; scene IDs are screenplay scene IDs. A model's bible is checked against all of that before it is kept, and asked for once more with the reason when it fails. Entry IDs are at most 112 characters, so an entry can later be depended on as `bible_character.<id>` and the like.
 
 A bible depends on the story analysis and source the locked screenplay was made from, on each of that screenplay's scenes (`screenplay_scene.<id>`, semantic), and on the screenplay revision itself as a cosmetic dependency that only records where the scenes were read. It is stale when the locked screenplay changes a scene it read, removes one, adds one, or is made from another analysis or source; formatting changes and locking a revision whose scenes say the same thing leave it fresh. Staleness names each cause. Edits and locks follow the screenplay's rules (a new revision, `based_on`, refused when not started from the latest; one locked revision), and both hold the bible to the locked screenplay and its analysis exactly as a model's bible is held, so no revision that names a character, location or scene they lack is saved or locked. A stale bible that names only what they define can still be locked, since the director decides whether it holds, and staleness keeps saying why it may not.
+
+## References
+
+A reference is text the director brought in from an outside source, an MCP tool (ADR-0007), as material for the bible. `references/references.json` (`references.schema.json`) keeps each one as `reference.NNNN` (an ID is never given again after a reference is removed; `next_number` says the next), with the registered server and tool it came from, the arguments it was asked with, its text and the text's hash, and what it is about: `bible_world` or bible entries by the IDs work depends on them by (`bible_character.<id>`, `bible_location.<id>`, `bible_prop.<id>`), which need not exist yet. No time is recorded. The director attaches, detaches, edits or removes references; a tool is called only when the director asks.
+
+When the bible is written, every reference attached to anything goes into its prompt after the screenplay, in a `<references>` block, each as a `<reference>` element naming its ID, source and what it is about, its text escaped so it cannot end its element, under the same rule as the source: material, not instructions. The bible depends on each one it read, semantically, by the hash of that element, so it is stale (cause `reference`, naming it) when the reference's text or what it is about changes, when it is removed, or when one it never read is attached. Without references the request is what it was before references existed.
 
 ## Style exploration
 

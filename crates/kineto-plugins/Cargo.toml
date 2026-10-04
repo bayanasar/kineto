@@ -16,3 +16,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "kineto-demo-plugin"
 path = "src/bin/kineto-demo-plugin.rs"
+
+[[bin]]
+name = "kineto-fake-mcp"
+path = "src/bin/kineto-fake-mcp.rs"

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ArtifactDependency, ArtifactId, ContentHash, DependencyImpact,
     manifest::CanonicalProject,
+    references::REFERENCE_PREFIX,
     revisions::{self, DocumentKind, RevisionError, RevisionRecord, RevisionStatus},
     screenplay::{SCENE_ARTIFACT_PREFIX, SceneFreshness, Screenplay},
     story::{StoryAnalysis, is_portable_id},
@@ -582,10 +583,13 @@ pub enum StaleCause {
     SceneRemoved(String),
     /// The locked screenplay has a scene the bible never read.
     SceneAdded(String),
+    /// A reference the bible read changed (its text or what it is about)
+    /// or was removed, or one it never read is now attached.
+    Reference(String),
 }
 
 /// What makes the bible revision `record` stale against the locked
-/// screenplay; empty when it is fresh.
+/// screenplay and the references attached now; empty when it is fresh.
 pub fn staleness(
     project: &CanonicalProject,
     record: &RevisionRecord,
@@ -594,14 +598,24 @@ pub fn staleness(
         return Ok(vec![StaleCause::NoLockedScreenplay]);
     };
     let material = dependencies(&locked, &screenplay)?;
+    let attached = reference_dependencies(project)?;
     let mut causes = Vec::new();
     let mut read = BTreeSet::new();
+    let mut referenced = BTreeSet::new();
     for dependency in record
         .dependencies
         .iter()
         .filter(|dependency| dependency.impact == DependencyImpact::Semantic)
     {
-        if let Some(scene) = dependency.artifact_id.strip_prefix(SCENE_ARTIFACT_PREFIX) {
+        if dependency.artifact_id.starts_with(REFERENCE_PREFIX) {
+            referenced.insert(dependency.artifact_id.as_str());
+            if !attached.iter().any(|current| {
+                current.artifact_id.as_str() == dependency.artifact_id
+                    && current.content_hash.as_str() == dependency.content_hash
+            }) {
+                causes.push(StaleCause::Reference(dependency.artifact_id.clone()));
+            }
+        } else if let Some(scene) = dependency.artifact_id.strip_prefix(SCENE_ARTIFACT_PREFIX) {
             read.insert(scene);
             match screenplay.freshness(&dependency.artifact_id, &dependency.content_hash) {
                 Some(SceneFreshness::Changed) => {
@@ -624,7 +638,29 @@ pub fn staleness(
             causes.push(StaleCause::SceneAdded(scene.id.clone()));
         }
     }
+    for current in &attached {
+        if !referenced.contains(current.artifact_id.as_str()) {
+            causes.push(StaleCause::Reference(
+                current.artifact_id.as_str().to_owned(),
+            ));
+        }
+    }
     Ok(causes)
+}
+
+/// What a bible written now depends on of the references: each one
+/// attached to anything, as its prompt reads it.
+pub fn reference_dependencies(
+    project: &CanonicalProject,
+) -> Result<Vec<ArtifactDependency>, RevisionError> {
+    let invalid = |error: crate::references::ReferenceError| {
+        RevisionError::InvalidDocument(error.to_string())
+    };
+    crate::references::attached(project)
+        .map_err(invalid)?
+        .iter()
+        .map(|reference| reference.dependency().map_err(invalid))
+        .collect()
 }
 
 /// Save the director's edit of revision `based_on` as the next revision.

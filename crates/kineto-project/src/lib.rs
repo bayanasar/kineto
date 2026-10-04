@@ -6,6 +6,7 @@ pub mod manifest;
 pub mod media;
 pub mod preferences;
 pub mod recipe;
+pub mod references;
 pub mod revisions;
 pub mod screenplay;
 pub mod shot;

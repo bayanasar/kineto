@@ -136,10 +136,10 @@ impl fmt::Display for HostError {
 impl std::error::Error for HostError {}
 
 /// The scratch directory of one call, removed when dropped.
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(pub(crate) PathBuf);
 
 impl Scratch {
-    fn new() -> std::io::Result<Self> {
+    pub(crate) fn new() -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -177,7 +177,7 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 /// The minimal search path a plugin is given.
-fn search_path() -> &'static str {
+pub(crate) fn search_path() -> &'static str {
     if cfg!(windows) {
         r"C:\Windows\System32;C:\Windows"
     } else {

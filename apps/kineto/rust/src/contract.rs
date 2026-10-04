@@ -448,12 +448,13 @@ pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 47] = [
 ];
 
 /// Why a bible may no longer describe the locked screenplay.
-pub(crate) const STALE_CAUSES: [(&str, u32); 5] = [
+pub(crate) const STALE_CAUSES: [(&str, u32); 6] = [
     ("no_locked_screenplay", 1),
     ("material", 2),
     ("scene_changed", 3),
     ("scene_removed", 4),
     ("scene_added", 5),
+    ("reference", 6),
 ];
 
 /// A style sample's or a portrait's standing; 0 is none, for an image that

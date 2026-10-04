@@ -293,7 +293,8 @@ enum KinetoBibleStaleCause {
   material('material'),
   sceneChanged('scene_changed'),
   sceneRemoved('scene_removed'),
-  sceneAdded('scene_added');
+  sceneAdded('scene_added'),
+  reference('reference');
 
   const KinetoBibleStaleCause(this.wireName);
 
@@ -314,6 +315,7 @@ final class KinetoBibleStaleness {
         KinetoBibleStaleCause.sceneChanged => 'scene $subject changed',
         KinetoBibleStaleCause.sceneRemoved => 'scene $subject was removed',
         KinetoBibleStaleCause.sceneAdded => 'scene $subject is new',
+        KinetoBibleStaleCause.reference => 'reference $subject changed, was removed or is newly attached',
       };
 }
 

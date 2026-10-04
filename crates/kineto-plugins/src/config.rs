@@ -24,7 +24,7 @@ use serde::Deserialize;
 pub const CONFIG_FILE: &str = "plugins.toml";
 
 /// The longest plugin ID, which also names its jobs (`plugin.<id>`).
-const MAX_ID: usize = 48;
+pub(crate) const MAX_ID: usize = 48;
 
 /// One registered plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -93,7 +93,7 @@ pub struct PluginConfig {
     entries: Vec<PluginEntry>,
 }
 
-fn portable(id: &str) -> bool {
+pub(crate) fn portable(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID
         && id.bytes().all(|byte| {
@@ -101,7 +101,7 @@ fn portable(id: &str) -> bool {
         })
 }
 
-fn secret_name(name: &str) -> bool {
+pub(crate) fn secret_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
