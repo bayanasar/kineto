@@ -30,7 +30,8 @@ use kineto_project::{
 };
 
 const CHILD: &str = "KINETO_GENERATION_CRASH";
-const WAIT: Duration = Duration::from_secs(10);
+/// How long an expected event may take. Only a hang reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 
 fn point_named(name: &str) -> GenerationPoint {
     match name {

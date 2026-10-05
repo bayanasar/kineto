@@ -44,7 +44,8 @@ use kineto_provider_minimax::{
 use kineto_providers::secret::SecretString;
 
 const CHILD: &str = "KINETO_VIDEO_CRASH";
-const WAIT: Duration = Duration::from_secs(10);
+/// How long an expected event may take. Only a hang reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isommp41-video";
 
 /// MiniMax offline: `image-01` keyframes, a Hailuo task `777` that has

@@ -39,7 +39,8 @@ use kineto_provider_minimax::{HttpResponse, MinimaxClient, Transport, TransportF
 use kineto_providers::secret::SecretString;
 
 const CHILD: &str = "KINETO_KEYFRAME_CRASH";
-const WAIT: Duration = Duration::from_secs(10);
+/// How long an expected event may take. Only a hang reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 
 /// MiniMax `image-01`, offline.
 #[derive(Default)]

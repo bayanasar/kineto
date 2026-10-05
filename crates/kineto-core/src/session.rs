@@ -3022,7 +3022,9 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    const WAIT: Duration = Duration::from_secs(10);
+    /// How long an expected event may take. Only a hang reaches it; a loaded
+    /// runner has taken more than 10 s to open a test project.
+    const WAIT: Duration = Duration::from_secs(60);
 
     struct TempDir(PathBuf);
 
