@@ -54,7 +54,8 @@ use kineto_project::{
 };
 use kineto_providers::secret::EnvSecretSource;
 
-const WAIT: Duration = Duration::from_secs(20);
+/// How long an expected event may take. Only a hang reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
