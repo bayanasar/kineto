@@ -69,6 +69,10 @@ pub struct StyleSample {
     pub media_path: String,
     pub provenance: PromptProvenance,
     pub dependencies: Vec<DependencyRecord>,
+    /// Whether its bytes are kept; `None` for a record made before eviction,
+    /// which keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_state: Option<crate::media::MediaState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +312,21 @@ fn change(
     Ok(())
 }
 
+/// Mark the samples `artifact_ids` as having let go of their bytes. Their
+/// records stay, and the caller removes the files after.
+pub fn evict(project: &CanonicalProject, artifact_ids: &[String]) -> Result<(), StyleError> {
+    project.validate_for_write().map_err(StyleError::Manifest)?;
+    let mut log = load(project)?;
+    for artifact_id in artifact_ids {
+        log.samples
+            .iter_mut()
+            .find(|sample| &sample.artifact_id == artifact_id)
+            .ok_or_else(|| StyleError::NoSuchSample(artifact_id.clone()))?
+            .media_state = Some(crate::media::MediaState::Evicted);
+    }
+    write_json(project, &path(SAMPLES_PATH), &log)
+}
+
 /// Select `artifact_id` as the director's pick; a previously selected
 /// sample becomes a candidate again.
 pub fn select(project: &CanonicalProject, artifact_id: &str) -> Result<(), StyleError> {
@@ -475,6 +494,7 @@ mod tests {
                 dropped_constraints: Vec::new(),
             },
             dependencies: Vec::new(),
+            media_state: None,
         };
         assert_eq!(
             attach(project, sample.clone()).unwrap(),

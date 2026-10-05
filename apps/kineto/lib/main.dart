@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'demo_workspace.dart';
+import 'handoff_workspace.dart';
 import 'native/kineto_engine.dart';
 import 'production_workspace.dart';
 import 'project_busy.dart';
@@ -16,7 +17,13 @@ Future<void> main() async {
   final engine = KinetoEngine.open();
   try {
     final project = await _openDemoProject();
-    runApp(KinetoApp(engine: engine, project: project));
+    runApp(
+      KinetoApp(
+        engine: engine,
+        project: project,
+        exportFolder: [Directory(_demoProjectPath()).parent.path, 'exports'].join(Platform.pathSeparator),
+      ),
+    );
   } on KinetoProjectException catch (error) {
     engine.close();
     // A project Kineto cannot hold as its only writer is never opened for
@@ -98,17 +105,26 @@ String _demoProjectPath() {
 }
 
 class KinetoApp extends StatefulWidget {
-  const KinetoApp({required this.engine, required this.project, super.key});
+  const KinetoApp({
+    required this.engine,
+    required this.project,
+    this.exportFolder = '',
+    super.key,
+  });
 
   final KinetoEngine engine;
   final KinetoProjectSession project;
+
+  /// Where production packages are made unless the director names another
+  /// folder.
+  final String exportFolder;
 
   @override
   State<KinetoApp> createState() => _KinetoAppState();
 }
 
 /// The workspaces the director moves between.
-enum KinetoWorkspace { screenplay, production, shotPlan, shots }
+enum KinetoWorkspace { screenplay, production, shotPlan, shots, handoff }
 
 class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
@@ -151,6 +167,7 @@ class _KinetoAppState extends State<KinetoApp> {
             (KinetoWorkspace.production, 'Bible, style & cast'),
             (KinetoWorkspace.shotPlan, 'Shot plan'),
             (KinetoWorkspace.shots, 'Shots'),
+            (KinetoWorkspace.handoff, 'Handoff'),
           ])
             WabButton(
               key: ValueKey<String>('workspace-${workspace.name}'),
@@ -188,6 +205,13 @@ class _KinetoAppState extends State<KinetoApp> {
         KinetoWorkspace.shots => DemoWorkspaceScreen(
             engine: widget.engine,
             project: widget.project,
+            navigation: _navigation(),
+            isDarkMode: _darkMode,
+            onThemeToggle: _toggleTheme,
+          ),
+        KinetoWorkspace.handoff => HandoffWorkspaceScreen(
+            project: widget.project,
+            exportFolder: widget.exportFolder,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,

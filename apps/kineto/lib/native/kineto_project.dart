@@ -267,6 +267,24 @@ external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
 )
 external int _kinetoProjectVideoCostMicros(Pointer<Void> session);
 
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_provider',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoProvider(Pointer<Void> session);
+
+@Native<Uint8 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_provider_ready',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoProviderReady(Pointer<Void> session);
+
+@Native<Uint32 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_video_clip_seconds',
+  isLeaf: true,
+)
+external int _kinetoProjectVideoClipSeconds(Pointer<Void> session);
+
 @Native<
     Int32 Function(
       Pointer<Void>,
@@ -341,6 +359,58 @@ enum KinetoImageProviderKind {
   }
 }
 
+enum KinetoVideoProviderKind {
+  localDemo(1, 'local_demo', 'Local demo'),
+  minimax(2, 'minimax', 'MiniMax Hailuo-02');
+
+  const KinetoVideoProviderKind(this.wireValue, this.wireName, this.label);
+
+  final int wireValue;
+  final String wireName;
+  final String label;
+
+  static KinetoVideoProviderKind fromWireValue(int value) {
+    for (final kind in values) {
+      if (kind.wireValue == value) return kind;
+    }
+    throw StateError('Unknown Kineto video provider code $value');
+  }
+}
+
+/// The session's video provider, as the director needs to know it before
+/// asking for a video.
+final class KinetoVideoProvider {
+  const KinetoVideoProvider({
+    required this.kind,
+    required this.ready,
+    required this.clipCostMicros,
+    required this.clipSeconds,
+  });
+
+  final KinetoVideoProviderKind kind;
+
+  /// False for a paid provider without credentials: asking would fail.
+  final bool ready;
+
+  /// Estimated cost of one clip of [clipSeconds], in USD micros.
+  final int clipCostMicros;
+
+  /// The length of the shortest clip the provider makes, in seconds.
+  final int clipSeconds;
+
+  bool get isPaid => kind != KinetoVideoProviderKind.localDemo;
+
+  /// Whether a video starts only from a keyframe's image. The demo starts
+  /// from its own keyframes, which have none.
+  bool get needsFrameImage => isPaid;
+
+  /// What one clip costs, for example `≈ $0.28`, or `free`.
+  String get costLabel => costFor(1);
+
+  /// What [count] clips cost, for example `≈ $0.56`, or `free`.
+  String costFor(int count) => isPaid ? '≈ ${_dollars(clipCostMicros * count)}' : 'free';
+}
+
 /// Who made a candidate: the provider and model recorded on its artifact.
 /// Not the session's provider, which may have changed since.
 final class KinetoCandidateOrigin {
@@ -372,7 +442,6 @@ final class KinetoImageProvider {
     required this.kind,
     required this.ready,
     required this.generationCostMicros,
-    this.videoCostMicros = 0,
   });
 
   final KinetoImageProviderKind kind;
@@ -383,31 +452,23 @@ final class KinetoImageProvider {
   /// Estimated cost of one generation (every candidate), in USD micros.
   final int generationCostMicros;
 
-  /// Estimated cost of one shot video, in USD micros; 0 when this provider
-  /// cannot generate video.
-  final int videoCostMicros;
-
   bool get isPaid => kind != KinetoImageProviderKind.localDemo;
-
-  /// Whether this session can generate a shot video at all.
-  bool get canGenerateVideo => ready && videoCostMicros > 0;
 
   /// The generation estimate in US dollars, for example `$0.0105`.
   String get generationCostLabel => _dollars(generationCostMicros);
 
-  /// The video estimate in US dollars, for example `$0.28`.
-  String get videoCostLabel => _dollars(videoCostMicros);
+}
 
-  static String _dollars(int amountMicros) {
-    final dollars = amountMicros ~/ 1000000;
-    final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
-    final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
-    return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
-  }
+/// [amountMicros] in US dollars, for example `$0.0105`.
+String _dollars(int amountMicros) {
+  final dollars = amountMicros ~/ 1000000;
+  final micros = (amountMicros % 1000000).toString().padLeft(6, '0');
+  final trimmed = micros.replaceFirst(RegExp(r'0+$'), '');
+  return trimmed.isEmpty ? '\$$dollars' : '\$$dollars.$trimmed';
 }
 
 final class KinetoProjectException implements Exception {
-  const KinetoProjectException(this.code, this.message);
+  const KinetoProjectException(this.code, this.message, {this.reason});
 
   /// An argument the engine cannot take, such as an empty note.
   static const int invalidArgument = 100;
@@ -504,11 +565,41 @@ final class KinetoProjectException implements Exception {
   /// A scene is planned again within a shot plan, which does not exist yet.
   static const int needsShotPlan = 155;
 
+  /// The provider cannot do what the generation needs, such as start a
+  /// video from the locked keyframe.
+  static const int providerIncapable = 156;
+
+  /// The project's media records could not be read.
+  static const int mediaUnreadable = 157;
+
+  /// Collecting was asked for before a dry run showed what it lets go.
+  static const int noCollectionPlan = 158;
+
+  /// Shots are not ready to export and a partial package was not asked for.
+  static const int exportIncomplete = 159;
+
+  /// A package of that name exists and replacing it was not asked for.
+  static const int exportExists = 160;
+
+  /// No shot has a locked video to export.
+  static const int nothingToExport = 161;
+
+  /// A file's bytes are not what its record says.
+  static const int mediaChanged = 162;
+
   final int code;
   final String message;
 
+  /// What a provider said when it refused or failed, in its own words, such
+  /// as `MiniMax refused the request (1008): insufficient balance`; null when
+  /// the status says it all.
+  final String? reason;
+
+  /// [message], then the provider's own words when there are any.
+  String get explanation => reason == null ? message : '$message. $reason';
+
   @override
-  String toString() => 'KinetoProjectException($code): $message';
+  String toString() => 'KinetoProjectException($code): $explanation';
 }
 
 /// Thin Dart owner for an opened canonical Kineto project.
@@ -802,7 +893,18 @@ final class KinetoProjectSession implements Finalizable {
       ),
       ready: _kinetoProjectImageProviderReady(_handle) != 0,
       generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
-      videoCostMicros: _kinetoProjectVideoCostMicros(_handle),
+    );
+  }
+
+  /// The video provider this session makes videos with. Fixed when it
+  /// opened.
+  KinetoVideoProvider get videoProvider {
+    _ensureOpen();
+    return KinetoVideoProvider(
+      kind: KinetoVideoProviderKind.fromWireValue(_kinetoProjectVideoProvider(_handle)),
+      ready: _kinetoProjectVideoProviderReady(_handle) != 0,
+      clipCostMicros: _kinetoProjectVideoCostMicros(_handle),
+      clipSeconds: _kinetoProjectVideoClipSeconds(_handle),
     );
   }
 
@@ -963,8 +1065,9 @@ final class KinetoProjectSession implements Finalizable {
   }
 }
 
-/// Receives one session's `[kind, token, status, shot]` messages from the
-/// native worker and completes the matching futures.
+/// Receives one session's `[kind, token, status, shot, reason]` messages
+/// from the native worker and completes the matching futures. `reason` is
+/// what a provider said when it refused or failed, or null.
 final class _SessionPort {
   _SessionPort() {
     _raw = RawReceivePort(_onMessage, 'kineto project session');
@@ -1027,15 +1130,17 @@ final class _SessionPort {
   }
 
   void _onMessage(Object? message) {
-    final values = message! as List<int>;
+    final list = message! as List<Object?>;
+    final values = list.take(4).cast<int>().toList(growable: false);
     final status = values[2];
+    final reason = list[4] as String?;
     switch (values[0]) {
       case _opened:
         if (_openCompleter.isCompleted) break;
         if (status == 0) {
           _openCompleter.complete();
         } else {
-          _openCompleter.completeError(_projectException(status));
+          _openCompleter.completeError(_projectException(status, reason));
         }
       case _recovered:
         // Posted before OPENED, so recoveries are complete when open returns.
@@ -1044,6 +1149,7 @@ final class _SessionPort {
             shotIndex: values[3] < 0 ? null : values[3],
             revisionOrCount: values[1],
             errorCode: status,
+            reason: reason,
             document: switch (values[3]) {
               -2 => KinetoDocumentKind.storyAnalysis,
               -3 => KinetoDocumentKind.screenplay,
@@ -1064,6 +1170,7 @@ final class _SessionPort {
             shotIndex: values[3],
             revision: values[1],
             errorCode: status,
+            reason: reason,
           ),
         );
       case _completed:
@@ -1072,7 +1179,7 @@ final class _SessionPort {
         if (status == 0) {
           completer.complete();
         } else {
-          completer.completeError(_projectException(status));
+          completer.completeError(_projectException(status, reason));
         }
     }
     _updateKeepAlive();
@@ -1093,6 +1200,7 @@ final class KinetoVideoEvent {
     required this.shotIndex,
     required this.revision,
     required this.errorCode,
+    this.reason,
   });
 
   final int shotIndex;
@@ -1101,8 +1209,11 @@ final class KinetoVideoEvent {
   /// 0 when the video was attached; otherwise why it was not.
   final int errorCode;
 
+  /// What the provider said, when it refused or failed.
+  final String? reason;
+
   KinetoProjectException? get error =>
-      errorCode == 0 ? null : _projectException(errorCode);
+      errorCode == 0 ? null : _projectException(errorCode, reason);
 }
 
 /// Unfinished work from an earlier session that an open dealt with.
@@ -1111,6 +1222,7 @@ final class KinetoRecovery {
     required this.shotIndex,
     required this.revisionOrCount,
     required this.errorCode,
+    this.reason,
     this.document,
     this.images,
   });
@@ -1133,6 +1245,9 @@ final class KinetoRecovery {
   /// 0 when the generation was completed; otherwise why it was not.
   final int errorCode;
 
+  /// What the provider said, when it refused or failed.
+  final String? reason;
+
   /// The interrupted generation was completed when the project opened.
   bool get completed =>
       (shotIndex != null || document != null || images != null) && errorCode == 0;
@@ -1142,7 +1257,7 @@ final class KinetoRecovery {
 
   /// Why the recovery did not complete, when it did not.
   KinetoProjectException? get error =>
-      errorCode == 0 ? null : _projectException(errorCode);
+      errorCode == 0 ? null : _projectException(errorCode, reason);
 }
 
 /// A queued operation was abandoned because its session was closed first.
@@ -1271,6 +1386,13 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'pack_incomplete': 153,
   'needs_locked_bible': 154,
   'needs_shot_plan': 155,
+  'provider_incapable': 156,
+  'media_unreadable': 157,
+  'no_collection_plan': 158,
+  'export_incomplete': 159,
+  'export_exists': 160,
+  'nothing_to_export': 161,
+  'media_changed': 162,
   'panic': 199,
 };
 
@@ -1308,7 +1430,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   128: 'Lock a keyframe before generating video',
   129: "This shot's video is locked",
   130: 'Generate a video before locking it',
-  131: 'The video was made from a keyframe that is no longer locked; regenerate it',
+  131: 'The video no longer follows the shot: its locked keyframe or its planned intent changed; regenerate it',
   132: 'The locked keyframe has no image to start a video from',
   133: 'Analyse the story before writing the screenplay',
   134: 'Write the screenplay before rewriting a scene',
@@ -1335,10 +1457,18 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   153: "The selected portrait's reference pack is not complete; make the pack first",
   154: 'Lock the bible before planning shots',
   155: 'Plan the shots before planning a scene again',
+  156: 'The provider cannot do what this needs, such as start a video from the locked keyframe',
+  157: 'The project\'s media records could not be read',
+  158: 'Work out what collecting would let go before collecting it',
+  159: 'Some shots are not ready to export; export the ready ones only if you mean to',
+  160: 'A package of that name exists already',
+  161: 'No shot has a locked video to export yet',
+  162: 'A file is not what its record says; check the project\'s media',
   199: 'Native project call failed unexpectedly',
 };
 
-KinetoProjectException _projectException(int code) => KinetoProjectException(
+KinetoProjectException _projectException(int code, [String? reason]) => KinetoProjectException(
       code,
       kinetoProjectStatusMessages[code] ?? 'Unknown native project error',
+      reason: reason,
     );

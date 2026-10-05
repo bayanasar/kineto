@@ -101,6 +101,10 @@ pub struct CastImage {
     pub media_path: String,
     pub provenance: PromptProvenance,
     pub dependencies: Vec<DependencyRecord>,
+    /// Whether its bytes are kept; `None` for a record made before eviction,
+    /// which keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_state: Option<crate::media::MediaState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +455,25 @@ fn change(
     Ok(())
 }
 
+/// Mark the images `artifact_ids` of `character_id` as having let go of
+/// their bytes. Their records stay, and the caller removes the files after.
+pub fn evict(
+    project: &CanonicalProject,
+    character_id: &str,
+    artifact_ids: &[String],
+) -> Result<(), CastError> {
+    project.validate_for_write().map_err(CastError::Manifest)?;
+    let mut log = load(project, character_id)?;
+    for artifact_id in artifact_ids {
+        log.images
+            .iter_mut()
+            .find(|image| &image.artifact_id == artifact_id)
+            .ok_or_else(|| CastError::NoSuchImage(artifact_id.clone()))?
+            .media_state = Some(crate::media::MediaState::Evicted);
+    }
+    write_json(project, &file(character_id, "casting.json")?, &log)
+}
+
 /// Select portrait `artifact_id`; a previously selected portrait becomes a
 /// candidate again.
 pub fn select(
@@ -713,6 +736,7 @@ mod tests {
                 dropped_constraints: Vec::new(),
             },
             dependencies: vec![parent("bible_character.filmmaker", "entry")],
+            media_state: None,
         };
         assert_eq!(
             attach(project, "filmmaker", image.clone()).unwrap(),

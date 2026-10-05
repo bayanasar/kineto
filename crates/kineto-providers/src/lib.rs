@@ -1,6 +1,6 @@
 pub mod secret;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum SeedSupport {
@@ -148,6 +148,18 @@ pub enum VideoContainer {
     Mov,
 }
 
+/// One clip a provider renders: how long, and how tall in lines, as in 768
+/// for 768P.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoClip {
+    pub seconds: u8,
+    pub lines: u16,
+}
+
+/// The shortest clip height a production asks for when a provider offers
+/// one at least this tall.
+pub const PRODUCTION_LINES: u16 = 720;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VideoCapabilities {
     pub modes: BTreeSet<VideoMode>,
@@ -161,6 +173,98 @@ pub struct VideoCapabilities {
     pub async_jobs: bool,
     pub resumable_remote_handle: bool,
     pub output_containers: BTreeSet<VideoContainer>,
+    /// Clip lengths the provider renders, in seconds; empty when it renders
+    /// any length between the minimum and maximum duration.
+    pub clip_seconds: BTreeSet<u8>,
+    /// Longest prompt the provider accepts, in characters; `None` when it
+    /// sets no limit.
+    pub max_prompt_chars: Option<usize>,
+    /// Formats a start frame may be sent in.
+    pub start_frame_formats: BTreeSet<ImageFormat>,
+    /// Largest start frame the provider accepts, in bytes.
+    pub max_start_frame_bytes: Option<u64>,
+    /// Formats an end frame may be sent in, when it takes one.
+    pub end_frame_formats: BTreeSet<ImageFormat>,
+    /// Largest end frame the provider accepts, in bytes.
+    pub max_end_frame_bytes: Option<u64>,
+    /// Clip heights it renders, in lines; empty when it does not say and
+    /// chooses itself.
+    pub resolutions: BTreeSet<u16>,
+    /// Each length and height it renders together; empty when it renders
+    /// every length it declares at every height it declares.
+    pub clips: BTreeSet<VideoClip>,
+    /// What one clip costs, by its length and height; a clip missing here
+    /// has no known price.
+    pub clip_prices: BTreeMap<VideoClip, Price>,
+}
+
+impl VideoCapabilities {
+    /// The clip length closest to `seconds` that the provider renders;
+    /// ties go to the shorter, cheaper clip. `None` when it declares no
+    /// lengths and no range.
+    #[must_use]
+    pub fn nearest_clip_seconds(&self, seconds: f64) -> Option<u8> {
+        if self.clip_seconds.is_empty() {
+            let min = self.min_duration_ms? as f64 / 1000.0;
+            let max = self.max_duration_ms? as f64 / 1000.0;
+            let clamped = seconds.clamp(min, max).round();
+            return u8::try_from(clamped as u64).ok();
+        }
+        self.clip_seconds.iter().copied().min_by(|a, b| {
+            (f64::from(*a) - seconds)
+                .abs()
+                .total_cmp(&(f64::from(*b) - seconds).abs())
+                .then(a.cmp(b))
+        })
+    }
+
+    /// Whether it renders a clip of `seconds` at `lines`.
+    #[must_use]
+    pub fn renders(&self, clip: VideoClip) -> bool {
+        if !self.clips.is_empty() {
+            return self.clips.contains(&clip);
+        }
+        let length = if self.clip_seconds.is_empty() {
+            let ms = u64::from(clip.seconds) * 1000;
+            self.min_duration_ms.is_none_or(|min| ms >= min)
+                && self.max_duration_ms.is_none_or(|max| ms <= max)
+        } else {
+            self.clip_seconds.contains(&clip.seconds)
+        };
+        length && (self.resolutions.is_empty() || self.resolutions.contains(&clip.lines))
+    }
+
+    /// The height a clip of `seconds` is made at: the lowest it renders at
+    /// that length that is at least [`PRODUCTION_LINES`] tall, or the
+    /// tallest it renders when none is. `None` when it declares no heights,
+    /// or renders none at that length.
+    #[must_use]
+    pub fn clip_lines(&self, seconds: u8) -> Option<u16> {
+        let heights: Vec<u16> = self
+            .resolutions
+            .iter()
+            .copied()
+            .filter(|lines| {
+                self.renders(VideoClip {
+                    seconds,
+                    lines: *lines,
+                })
+            })
+            .collect();
+        heights
+            .iter()
+            .copied()
+            .find(|lines| *lines >= PRODUCTION_LINES)
+            .or_else(|| heights.last().copied())
+    }
+
+    /// What a clip of `seconds` costs at the height it is made at; `None`
+    /// when that is not known.
+    #[must_use]
+    pub fn clip_price(&self, seconds: u8) -> Option<Price> {
+        let lines = self.clip_lines(seconds)?;
+        self.clip_prices.get(&VideoClip { seconds, lines }).copied()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -221,6 +325,9 @@ pub struct VideoRequirements {
     pub requires_end_frame: bool,
     pub requires_identity_reference: bool,
     pub preferred_camera_control: CameraControl,
+    /// The workflow follows a remote task that must survive a restart, so
+    /// a paid video is never lost or asked for twice.
+    pub requires_resumable_jobs: bool,
 }
 
 #[must_use]
@@ -258,6 +365,18 @@ pub fn evaluate_video(
         gaps.push(CapabilityGap {
             capability: "video.camera_control",
             severity: GapSeverity::Warning,
+        });
+    }
+    if requirements.requires_resumable_jobs && !capabilities.async_jobs {
+        gaps.push(CapabilityGap {
+            capability: "video.async_jobs",
+            severity: GapSeverity::Incompatible,
+        });
+    }
+    if requirements.requires_resumable_jobs && !capabilities.resumable_remote_handle {
+        gaps.push(CapabilityGap {
+            capability: "video.resumable_remote_handle",
+            severity: GapSeverity::Incompatible,
         });
     }
 
@@ -375,6 +494,26 @@ pub mod fake {
             async_jobs: true,
             resumable_remote_handle: true,
             output_containers: [VideoContainer::Mp4].into_iter().collect(),
+            clip_seconds: [5, 10].into_iter().collect(),
+            max_prompt_chars: Some(2_000),
+            start_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
+            max_start_frame_bytes: Some(20 * 1024 * 1024),
+            end_frame_formats: BTreeSet::new(),
+            max_end_frame_bytes: None,
+            resolutions: [480, 720, 1080].into_iter().collect(),
+            clips: [(5, 480), (5, 720), (10, 720), (5, 1080)]
+                .into_iter()
+                .map(|(seconds, lines)| VideoClip { seconds, lines })
+                .collect(),
+            clip_prices: [
+                ((5, 480), 100_000),
+                ((5, 720), 250_000),
+                ((10, 720), 500_000),
+                ((5, 1080), 450_000),
+            ]
+            .into_iter()
+            .map(|((seconds, lines), micros)| (VideoClip { seconds, lines }, Price::usd(micros)))
+            .collect(),
         }
     }
 
@@ -420,6 +559,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_clip_is_the_nearest_length_the_provider_renders() {
+        let listed = fake::video_i2v_resumable();
+        assert_eq!(listed.nearest_clip_seconds(4.0), Some(5));
+        assert_eq!(
+            listed.nearest_clip_seconds(7.5),
+            Some(5),
+            "a tie goes to the shorter clip"
+        );
+        assert_eq!(listed.nearest_clip_seconds(8.0), Some(10));
+        assert_eq!(listed.nearest_clip_seconds(30.0), Some(10));
+
+        let ranged = fake::video_t2v_only();
+        assert_eq!(ranged.nearest_clip_seconds(4.4), Some(4));
+        assert_eq!(ranged.nearest_clip_seconds(0.2), Some(1));
+        assert_eq!(ranged.nearest_clip_seconds(12.0), Some(8));
+        assert_eq!(VideoCapabilities::default().nearest_clip_seconds(5.0), None);
+    }
+
+    #[test]
     fn i2v_fallback_never_silently_becomes_t2v() {
         let requirements = VideoRequirements {
             mode: VideoMode::ImageToVideo,
@@ -427,6 +585,7 @@ mod tests {
             requires_end_frame: false,
             requires_identity_reference: false,
             preferred_camera_control: CameraControl::Textual,
+            requires_resumable_jobs: false,
         };
 
         let report = evaluate_video(requirements, &fake::video_t2v_only());
@@ -491,6 +650,7 @@ mod tests {
             requires_end_frame: false,
             requires_identity_reference: true,
             preferred_camera_control: CameraControl::Parametric,
+            requires_resumable_jobs: true,
         };
 
         let report = evaluate_video(requirements, &fake::video_i2v_resumable());
@@ -498,5 +658,65 @@ mod tests {
         assert!(report.is_compatible());
         assert!(!report.is_lossless());
         assert_eq!(report.gaps[0].severity, GapSeverity::Warning);
+    }
+
+    #[test]
+    fn a_paid_video_needs_a_task_that_outlives_a_restart() {
+        let requirements = VideoRequirements {
+            mode: VideoMode::ImageToVideo,
+            requires_start_frame: true,
+            requires_end_frame: false,
+            requires_identity_reference: false,
+            preferred_camera_control: CameraControl::None,
+            requires_resumable_jobs: true,
+        };
+        let forgetful = VideoCapabilities {
+            resumable_remote_handle: false,
+            ..fake::video_i2v_resumable()
+        };
+        let report = evaluate_video(requirements, &forgetful);
+        assert_eq!(
+            report.gaps,
+            [CapabilityGap {
+                capability: "video.resumable_remote_handle",
+                severity: GapSeverity::Incompatible,
+            }]
+        );
+        let at_once = VideoCapabilities {
+            async_jobs: false,
+            ..fake::video_i2v_resumable()
+        };
+        assert!(
+            evaluate_video(requirements, &at_once)
+                .gaps
+                .iter()
+                .any(|gap| gap.capability == "video.async_jobs")
+        );
+    }
+
+    #[test]
+    fn a_clip_is_made_at_the_lowest_production_height_it_renders_at_that_length() {
+        let capabilities = fake::video_i2v_resumable();
+        // 720 lines is the lowest production height at 5 s; 10 s renders
+        // only at 720.
+        assert_eq!(capabilities.clip_lines(5), Some(720));
+        assert_eq!(capabilities.clip_lines(10), Some(720));
+        assert_eq!(capabilities.clip_price(5), Some(Price::usd(250_000)));
+        assert!(!capabilities.renders(VideoClip {
+            seconds: 10,
+            lines: 1080
+        }));
+        // Below production height, the tallest it has.
+        let small = VideoCapabilities {
+            resolutions: [180, 360].into_iter().collect(),
+            clips: BTreeSet::new(),
+            ..fake::video_i2v_resumable()
+        };
+        assert_eq!(small.clip_lines(5), Some(360));
+        assert!(small.renders(VideoClip {
+            seconds: 10,
+            lines: 180
+        }));
+        assert_eq!(VideoCapabilities::default().clip_lines(5), None);
     }
 }

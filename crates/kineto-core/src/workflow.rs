@@ -382,10 +382,95 @@ fn shots(project: &CanonicalProject, kind: ArtifactKind) -> Result<Progress, Wor
         } else {
             progress.made |= snapshot.video != VideoState::None;
             progress.approved &= snapshot.video == VideoState::Locked;
-            if snapshot.video == VideoState::Stale {
-                progress.stale.push(format!("{shot_id}: keyframe"));
-            }
+            progress.stale.extend(
+                shot.video_staleness()
+                    .map_err(unreadable)?
+                    .into_iter()
+                    .map(|cause| format!("{shot_id}: {cause}")),
+            );
         }
     }
     Ok(progress)
+}
+
+/// How far one shot's keyframe or video has come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Nothing made yet.
+    Missing,
+    /// Made, and waiting for the director's choice.
+    Made,
+    /// Locked, and still following what it was made from.
+    Locked,
+    /// Locked or made, but what it was made from has changed since.
+    Stale,
+}
+
+/// Where one shot in play stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShotProgress {
+    pub shot_id: String,
+    pub keyframe: Stage,
+    pub video: Stage,
+}
+
+/// The shots in play of one scene, in plan order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneProgress {
+    pub scene_id: String,
+    pub shots: Vec<ShotProgress>,
+}
+
+impl SceneProgress {
+    /// A scene is complete when every shot in play has its video locked
+    /// and current.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        !self.shots.is_empty() && self.shots.iter().all(|shot| shot.video == Stage::Locked)
+    }
+}
+
+/// Every scene with shots in play and where each shot stands, in plan
+/// order: what is still missing before the scene is complete.
+pub fn scenes(project: &CanonicalProject) -> Result<Vec<SceneProgress>, WorkflowError> {
+    let mut scenes: Vec<SceneProgress> = Vec::new();
+    for key in shot_plan_document::shots_in_play(project).map_err(unreadable)? {
+        let shot = ShotWorkflow::load(project, &key).map_err(unreadable)?;
+        let snapshot = shot.snapshot().map_err(unreadable)?;
+        let keyframe = if snapshot.locked {
+            let selected = usize::from(snapshot.selected_index.unwrap_or_default());
+            let moved = generation::keyframe_staleness(project, &shot)
+                .map_err(unreadable)?
+                .get(selected)
+                .is_some_and(|causes| !causes.is_empty());
+            if snapshot.stale || moved {
+                Stage::Stale
+            } else {
+                Stage::Locked
+            }
+        } else if snapshot.generated {
+            Stage::Made
+        } else {
+            Stage::Missing
+        };
+        let video = match snapshot.video {
+            VideoState::None => Stage::Missing,
+            VideoState::Ready => Stage::Made,
+            VideoState::Locked => Stage::Locked,
+            VideoState::Stale => Stage::Stale,
+        };
+        let progress = ShotProgress {
+            shot_id: key.shot().to_owned(),
+            keyframe,
+            video,
+        };
+        match scenes.last_mut() {
+            Some(scene) if scene.scene_id == key.scene() => scene.shots.push(progress),
+            _ => scenes.push(SceneProgress {
+                scene_id: key.scene().to_owned(),
+                shots: vec![progress],
+            }),
+        }
+    }
+    Ok(scenes)
 }

@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/export-shot.schema.json",
+  "title": "Kineto Export Shot Sidecar",
+  "description": "Everything Kineto knows about one exported shot: which take was locked, what made it, the prompt the provider was given and what it could not carry, the first frame it starts from, and the shot's planned intent.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "scene_id",
+    "shot_id",
+    "order",
+    "video",
+    "first_frame",
+    "end_frame",
+    "prompt",
+    "intent",
+    "notes",
+    "branched_from"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "kineto.export.shot"
+    },
+    "scene_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+    },
+    "shot_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "video": {
+      "type": "object",
+      "required": [
+        "file",
+        "artifact_id",
+        "content_hash",
+        "provider",
+        "model",
+        "clip_seconds",
+        "parameters",
+        "locked_at"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clip_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "parameters": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locked_at": {
+          "description": "When the video was locked, RFC 3339 UTC; null for a video locked before Kineto recorded it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "first_frame": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "content_hash",
+        "file"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "end_frame": {
+      "description": "The locked keyframe of the shot that continues from this one, which the clip was made to close on; null when it closes on none.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "scene_id",
+        "shot_id",
+        "artifact_id",
+        "content_hash"
+      ],
+      "properties": {
+        "scene_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "shot_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "prompt": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "compiler_version",
+        "compiled_prompt",
+        "prompt_hash",
+        "applied_constraints",
+        "dropped_constraints"
+      ],
+      "properties": {
+        "compiler_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compiled_prompt": {
+          "type": "string"
+        },
+        "prompt_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "applied_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dropped_constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "constraint",
+              "reason",
+              "degradation"
+            ],
+            "properties": {
+              "constraint": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "degradation": {
+                "enum": [
+                  "cosmetic",
+                  "identity_affecting"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "intent": {
+      "type": "object",
+      "required": [
+        "action",
+        "framing",
+        "lens",
+        "camera_motion",
+        "emotion",
+        "dialogue",
+        "characters",
+        "duration_target",
+        "continuity",
+        "continuity_from"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "framing": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lens": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "camera_motion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "emotion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dialogue": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "characters": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "duration_target": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "continuity": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "continuity_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "branched_from": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

@@ -209,40 +209,32 @@ Kineto exports production-ready shot packages, not a finished edit.
 
 The minimum deliverable is not just bare numbered files. Every exported media asset has a metadata sidecar, and the package has a project-level manifest with shot order and scene grouping.
 
-Representative package:
+The package (`kineto_core::export`) is a folder the director names, made in a folder they choose:
 
 ```text
-export/
+dailies/
 ├── manifest.json
-├── S003_SH01.mp4
-├── S003_SH01.json
-├── S003_SH01.wav
-├── S003_SH02.mp4
-├── S003_SH02.json
-└── S003_SH02.wav
+├── scene_001_shot_001.mp4
+├── scene_001_shot_001.json
+├── scene_001_shot_001_first_frame.jpg
+├── scene_001_shot_002.mp4
+├── scene_001_shot_002.json
+└── scene_001_shot_002_first_frame.jpg
 ```
 
-A shot sidecar includes at least:
+Voice files join it when P5 brings voice.
 
-```json
-{
-  "shot_id": "S003_SH01",
-  "scene_id": "S003",
-  "artifact_id": "01J...",
-  "duration": 5.5,
-  "fps": 24,
-  "resolution": "1920x1080",
-  "provider": "...",
-  "model": "...",
-  "seed": 12345,
-  "compiled_prompt": "...",
-  "source_keyframe": "01J...",
-  "characters": ["alice"],
-  "locked_at": "..."
-}
-```
+Each shot's sidecar (`schemas/export-shot.schema.json`) says which take was locked and what made it:
 
-The project manifest includes scene grouping, shot order, selected artifact IDs, filenames, and total runtime. This makes the handoff useful without reopening Kineto.
+- the video's file, artifact ID, content hash, provider, model, clip length, the parameters it was asked with, and when it was locked;
+- the keyframe it starts from, by artifact ID and hash, and its image beside it when it has one, and the keyframe it closes on, by shot, artifact ID and hash, when it closes on one;
+- the prompt exactly as the provider got it, with its hash, compiler version, applied constraints and the dropped ones with why;
+- the shot's planned intent: action, framing, lens, camera motion, mood, dialogue, characters, target duration and continuity;
+- the director's notes and the take it branched from.
+
+The project manifest (`schemas/export-manifest.schema.json`) holds the project and recipe, the export time, the scenes in screenplay order with location and time, each shot's place among the shots in play and its files, what is missing from a partial package and why, and the total runtime.
+
+Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Replacing a package of the same name exchanges the two in one step where the system can (Linux, macOS), so the name always holds a whole package; where it cannot (Windows), an interruption can leave the earlier package set aside, and the next export puts it back first. A sidecar's lock time is the one the video's record kept when it was locked (`null` for a video locked before Kineto recorded it); the manifest records when the package was made.
 
 Later ecosystem exports can add:
 

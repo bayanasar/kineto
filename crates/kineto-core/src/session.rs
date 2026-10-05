@@ -32,11 +32,12 @@ use kineto_project::{
     cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
+    media::{self, MediaRecord},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
         self, AttachOutcome, CandidateOrigin, CandidateRecord, ShotApprovalSnapshot, ShotDirection,
-        ShotKey, ShotWorkflow, ShotWorkflowError,
+        ShotKey, ShotWorkflow, ShotWorkflowError, VideoRecord,
     },
     shot_plan::{self as shot_plan_document, ScenePlan, ShotPlan},
     source::{self, SourceError, SourceFormat},
@@ -48,6 +49,7 @@ use kineto_providers::Price;
 use crate::{
     bible, cast,
     documents::{self, DOCUMENT_PROVIDERS},
+    export,
     generation::{
         self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
     },
@@ -55,7 +57,10 @@ use crate::{
     paid_image::{ImageRecovery, Submission},
     screenplay, shot_plan, story,
     style::{self, SampleRequest},
-    video::{self, VideoClient, VideoDone, VideoJob},
+    video::{
+        self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
+        VideoProvider, VideoProviderInfo,
+    },
     workflow,
 };
 
@@ -94,14 +99,25 @@ pub enum ShotCommand {
         note: String,
         consent: Consent,
     },
-    /// Submit a video from the locked keyframe. Completes once MiniMax has
-    /// accepted the task; the video arrives later through
+    /// Submit a video from the locked keyframe. Completes once the provider
+    /// has accepted the task; the video arrives later through
     /// [`SessionSink::video_finished`].
     GenerateVideo,
-    /// Submit the video again although MiniMax may already have accepted,
-    /// and charged for, the last submission that left no record. The
-    /// director's explicit decision to risk paying twice.
+    /// Submit the video again although the provider may already have
+    /// accepted, and charged for, the last submission that left no record.
+    /// The director's explicit decision to risk paying twice.
     ResubmitVideo,
+    /// Submit a video generation as the director asks: several candidates,
+    /// a note, or a branch from an earlier take. Each candidate arrives
+    /// through [`SessionSink::video_finished`].
+    GenerateVideos(VideoAsk),
+    /// [`Self::GenerateVideos`] at the risk of paying twice for a candidate
+    /// whose last submission left no record.
+    ResubmitVideos(VideoAsk),
+    /// Choose one of the latest generation's videos, by its place among
+    /// them, to lock.
+    SelectVideo(usize),
+    /// Lock the chosen video, or the only one of the latest generation.
     LockVideo,
 }
 
@@ -271,6 +287,13 @@ pub enum SessionError {
     Document(DocumentError),
     /// A style or casting change was refused.
     Production(ProductionError),
+    /// The project's media could not be listed or collected.
+    Media(media::MediaError),
+    /// The production package could not be written.
+    Export(export::ExportError),
+    /// Collecting was asked for before a dry run showed what it would let
+    /// go.
+    NoCollectionPlan,
     /// A command arrived for a session whose open had failed.
     NotOpen,
     /// The shot already has a video being generated.
@@ -288,6 +311,11 @@ impl fmt::Display for SessionError {
             Self::Generation(error) => error.fmt(formatter),
             Self::Document(error) => error.fmt(formatter),
             Self::Production(error) => error.fmt(formatter),
+            Self::Media(error) => error.fmt(formatter),
+            Self::Export(error) => error.fmt(formatter),
+            Self::NoCollectionPlan => {
+                formatter.write_str("work out what collecting would let go before collecting it")
+            }
             Self::NotOpen => formatter.write_str("project session is not open"),
             Self::VideoInFlight => {
                 formatter.write_str("this shot's video is still being generated")
@@ -305,7 +333,9 @@ impl Error for SessionError {
             Self::Generation(error) => Some(error),
             Self::Document(error) => Some(error),
             Self::Production(error) => Some(error),
-            Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
+            Self::Media(error) => Some(error),
+            Self::Export(error) => Some(error),
+            Self::NoCollectionPlan | Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
 }
@@ -521,6 +551,12 @@ struct PublishedShot {
     /// Every candidate the shot has had, oldest first, with its media's
     /// absolute path.
     history: Vec<(CandidateRecord, Option<PathBuf>)>,
+    /// Every video the shot has had, oldest generation first, with its
+    /// media's absolute path.
+    videos: Vec<(VideoRecord, Option<PathBuf>)>,
+    /// What one take of the shot's next video costs with the session's
+    /// video provider.
+    video_estimate: Option<VideoEstimate>,
 }
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
@@ -534,6 +570,26 @@ struct View {
     documents: Mutex<Option<Arc<PublishedDocuments>>>,
     production: Mutex<Option<Arc<PublishedProduction>>>,
     workflow: Mutex<Option<Arc<PublishedWorkflow>>>,
+    media: Mutex<Option<Arc<PublishedMedia>>>,
+}
+
+/// The project's media as last checked. Reads never do I/O.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedMedia {
+    /// Records that say their bytes are kept, whose file is gone. Found at
+    /// open and after the session made media; reported, never rewritten.
+    pub missing: Vec<MediaRecord>,
+    /// Records whose file's bytes no longer hash as recorded, as the last
+    /// [`StorageCommand::Verify`] found them.
+    pub mismatched: Vec<MediaRecord>,
+    /// The disk the media takes, each file counted once.
+    pub usage: media::Usage,
+    /// How many of each owner's latest takes are kept.
+    pub recent: usize,
+    /// The last dry run, until the media changes or it is collected.
+    pub plan: Option<media::Collection>,
+    /// Why the media could not be listed, such as a damaged record.
+    pub problem: Option<String>,
 }
 
 /// Where the project stands in its recipe, as last published. Reads never
@@ -542,6 +598,12 @@ struct View {
 pub struct PublishedWorkflow {
     /// Every step, in recipe order.
     pub steps: Vec<workflow::StepStatus>,
+    /// Every scene with shots in play, and where each shot stands.
+    pub scenes: Vec<workflow::SceneProgress>,
+    /// Which shots can be exported, and why the others cannot.
+    pub export: export::Readiness,
+    /// The package the session last wrote.
+    pub last_export: Option<export::Exported>,
     /// Why the steps could not be worked out, such as a recipe this build
     /// does not ship.
     pub problem: Option<String>,
@@ -586,6 +648,20 @@ enum Work {
         command: ProductionCommand,
         submission: Submission,
     },
+    Storage(StorageCommand),
+    Export(export::ExportRequest),
+}
+
+/// Work on the project's stored media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageCommand {
+    /// Work out what collecting would let go, touching nothing: the dry
+    /// run the director looks at before collecting.
+    PlanCollection,
+    /// Let go of what the last dry run listed, and nothing else.
+    Collect,
+    /// Read every kept file and check its bytes against its record.
+    Verify,
 }
 
 struct Envelope {
@@ -600,6 +676,7 @@ struct Envelope {
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
+    video_provider: VideoProviderInfo,
     image_prices: ImagePrices,
     document_model: DocumentModelInfo,
     view: Arc<View>,
@@ -637,6 +714,11 @@ impl ProjectSession {
         options: SessionOptions,
     ) -> std::io::Result<Self> {
         let image_provider = provider.info();
+        let mut options = options;
+        let videos = options
+            .video_provider
+            .get_or_insert_with(|| video_provider_for(&provider));
+        let video_provider = videos.info();
         let image_prices = ImagePrices {
             sample: style::sample_cost(&provider),
             portrait: cast::audition_cost(&provider, 1),
@@ -661,6 +743,7 @@ impl ProjectSession {
         Ok(Self {
             commands: Some(commands),
             image_provider,
+            video_provider,
             image_prices,
             document_model,
             view,
@@ -738,6 +821,29 @@ impl ProjectSession {
         })
     }
 
+    /// Queue writing a production package. Its result arrives through
+    /// [`SessionSink::document_completed`]; what was written is published in
+    /// [`PublishedWorkflow::last_export`].
+    pub fn submit_export(
+        &self,
+        request: export::ExportRequest,
+        token: u64,
+    ) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Export(request),
+        })
+    }
+
+    /// Queue work on the project's stored media. Its result arrives through
+    /// [`SessionSink::document_completed`].
+    pub fn submit_storage(&self, command: StorageCommand, token: u64) -> Result<(), SubmitError> {
+        self.send(Envelope {
+            token,
+            work: Work::Storage(command),
+        })
+    }
+
     /// Queue a paid style or casting command although an image of its own
     /// may have been charged without its result being kept, so this one may
     /// pay twice. Only on the director's explicit decision.
@@ -768,6 +874,11 @@ impl ProjectSession {
         lock(&self.view.documents)
             .clone()
             .ok_or(SnapshotError::NotOpen)
+    }
+
+    /// The project's media as last checked. Never does I/O.
+    pub fn media(&self) -> Result<Arc<PublishedMedia>, SnapshotError> {
+        lock(&self.view.media).clone().ok_or(SnapshotError::NotOpen)
     }
 
     /// Where the project stands in its recipe, as last published. Never does
@@ -831,6 +942,21 @@ impl ProjectSession {
         shot_index: u32,
     ) -> Result<Vec<(CandidateRecord, Option<PathBuf>)>, SnapshotError> {
         self.published(shot_index, |published| published.history.clone())
+    }
+
+    /// What one take of the shot's next video costs, at the clip length its
+    /// plan asks for. Never does I/O.
+    pub fn video_estimate(&self, shot_index: u32) -> Result<Option<VideoEstimate>, SnapshotError> {
+        self.published(shot_index, |published| published.video_estimate)
+    }
+
+    /// Every video the shot has had, current or superseded, oldest
+    /// generation first, with its media's absolute path. Never does I/O.
+    pub fn video_history(
+        &self,
+        shot_index: u32,
+    ) -> Result<Vec<(VideoRecord, Option<PathBuf>)>, SnapshotError> {
+        self.published(shot_index, |published| published.videos.clone())
     }
 
     /// The shot's most recently published snapshot. Never does I/O.
@@ -914,6 +1040,12 @@ impl ProjectSession {
         self.image_provider
     }
 
+    /// The provider this session makes videos with.
+    #[must_use]
+    pub const fn video_provider(&self) -> VideoProviderInfo {
+        self.video_provider
+    }
+
     /// Project metadata, available once the open has succeeded.
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
@@ -984,6 +1116,8 @@ fn run(
             worker.publish_documents(view);
             worker.publish_production(view);
             worker.publish_workflow(view);
+            worker.reconcile_media();
+            worker.tend_media(view, false);
             for recovery in &recoveries {
                 gate.deliver(|sink| sink.recovered(recovery));
             }
@@ -1007,7 +1141,6 @@ fn run(
         if gate.is_closed() {
             break;
         }
-        let envelope_ran = envelope.is_some();
         match envelope {
             None => {}
             Some(Envelope {
@@ -1022,8 +1155,27 @@ fn run(
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
                         let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
+                        let makes_media = matches!(
+                            command,
+                            ShotCommand::Generate
+                                | ShotCommand::ResubmitKeyframes
+                                | ShotCommand::GenerateConsenting(_)
+                                | ShotCommand::Refine { .. }
+                        );
+                        // A keyframe locked or released may be the frame
+                        // another shot's video closes on.
+                        let keyframe_changed =
+                            matches!(command, ShotCommand::Lock | ShotCommand::Reset);
                         let result = worker.apply(index, command);
-                        worker.publish(view, index);
+                        if keyframe_changed {
+                            worker.publish_shots(view);
+                        } else {
+                            worker.publish(view, index);
+                        }
+                        worker.publish_workflow(view);
+                        if makes_media {
+                            worker.tend_media(view, true);
+                        }
                         result
                     }
                 };
@@ -1047,6 +1199,7 @@ fn run(
                         worker.publish_documents(view);
                         // The bible says who is cast.
                         worker.publish_production(view);
+                        worker.publish_workflow(view);
                         result
                     }
                 };
@@ -1063,16 +1216,57 @@ fn run(
                 let result = match worker.as_mut() {
                     None => Err(SessionError::NotOpen),
                     Some(worker) => {
+                        let makes_media = matches!(
+                            command,
+                            ProductionCommand::SampleStyle { .. }
+                                | ProductionCommand::RefineStyle { .. }
+                                | ProductionCommand::Audition { .. }
+                                | ProductionCommand::MakePack { .. }
+                        );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
+                        worker.publish_workflow(view);
+                        if makes_media {
+                            worker.tend_media(view, true);
+                        }
                         result
                     }
                 };
                 gate.deliver(|sink| sink.document_completed(token, &result));
             }
-        }
-        if envelope_ran && let Some(worker) = worker.as_ref() {
-            worker.publish_workflow(view);
+            Some(Envelope {
+                token,
+                work: Work::Export(request),
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.export(&request);
+                        worker.publish_workflow(view);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Some(Envelope {
+                token,
+                work: Work::Storage(command),
+            }) => {
+                let result = match worker.as_mut() {
+                    None => Err(SessionError::NotOpen),
+                    Some(worker) => {
+                        let result = worker.apply_storage(command);
+                        if command == StorageCommand::Collect {
+                            worker.shots.clear();
+                            worker.publish_shots(view);
+                            worker.publish_production(view);
+                        }
+                        worker.tend_media(view, false);
+                        result
+                    }
+                };
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
         }
         if let Some(worker) = worker.as_mut() {
             for (key, revision, result) in worker.finish_videos() {
@@ -1081,6 +1275,10 @@ fn run(
                     continue;
                 };
                 worker.publish(view, index);
+                worker.publish_workflow(view);
+                if result.is_ok() {
+                    worker.tend_media(view, true);
+                }
                 let shot_index = u32::try_from(index).expect("shot index fits in u32");
                 gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
             }
@@ -1093,17 +1291,21 @@ fn run(
     }
 }
 
-/// Timing a session runs with.
-#[derive(Debug, Clone, Copy)]
+/// Timing and video provider a session runs with.
+#[derive(Debug, Clone)]
 pub struct SessionOptions {
     /// How often a video's remote task is queried.
     pub video_poll_interval: std::time::Duration,
+    /// The provider videos are made with. `None` follows the image
+    /// provider: MiniMax with its key, otherwise the local demo.
+    pub video_provider: Option<VideoProvider>,
 }
 
 impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             video_poll_interval: video::POLL_INTERVAL,
+            video_provider: None,
         }
     }
 }
@@ -1113,9 +1315,11 @@ const VIDEO_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 /// Videos being generated for this session's shots.
 struct Videos {
-    client: Option<VideoClient>,
+    provider: VideoProvider,
     gate: Arc<Gate>,
-    in_flight: BTreeMap<ShotKey, VideoJob>,
+    /// Submitted videos being followed, by artifact ID: a shot may have
+    /// several candidates in flight.
+    in_flight: BTreeMap<String, VideoJob>,
     /// Shots whose last submission is unresolved; see [`ShotCommand::ResubmitVideo`].
     unresolved: BTreeSet<ShotKey>,
     finished: Arc<Mutex<Vec<VideoDone>>>,
@@ -1124,20 +1328,38 @@ struct Videos {
 }
 
 impl Videos {
-    /// Follow `job` on its own thread until its video is on disk or failed.
+    /// Follow `job` on its own thread, with the provider it was submitted
+    /// to, until its video is on disk or failed. A MiniMax job waits for a
+    /// session with the key.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let shot = job.shot.clone();
-        self.in_flight.insert(shot.clone(), job.clone());
+        if job.provider == video::DEMO_VIDEO_PROVIDER {
+            self.spawn_watcher(LocalDemoVideos, job, root);
+        } else if let VideoProvider::Minimax(Some(client)) = &self.provider {
+            let client = client.clone();
+            self.spawn_watcher(client, job, root);
+        }
+    }
+
+    /// Whether a video of `key` is being followed.
+    fn follows(&self, key: &ShotKey) -> bool {
+        self.in_flight.values().any(|job| &job.shot == key)
+    }
+
+    fn spawn_watcher<G: VideoGenerator + Send + 'static>(
+        &mut self,
+        generator: G,
+        job: VideoJob,
+        root: ProjectRoot,
+    ) {
+        let artifact = job.artifact_id.as_str().to_owned();
+        self.in_flight.insert(artifact.clone(), job.clone());
         let gate = Arc::clone(&self.gate);
         let finished = Arc::clone(&self.finished);
         let interval = self.poll_interval;
         let spawned = thread::Builder::new()
             .name("kineto-video-watch".to_owned())
             .spawn(move || {
-                if let Some(done) = video::watch(&client, &root, job, &gate.closed, interval) {
+                if let Some(done) = video::watch(&generator, &root, job, &gate.closed, interval) {
                     lock(&finished).push(done);
                 }
             });
@@ -1145,7 +1367,7 @@ impl Videos {
             Ok(handle) => self.watchers.push(handle),
             // Without a watcher the task is followed again on the next open.
             Err(_) => {
-                self.in_flight.remove(&shot);
+                self.in_flight.remove(&artifact);
             }
         }
     }
@@ -1179,6 +1401,13 @@ struct Worker {
     provider: ImageProvider,
     model: DocumentModel,
     videos: Videos,
+    /// The last dry run of a collection, which [`StorageCommand::Collect`]
+    /// carries out.
+    collection: Option<media::Collection>,
+    /// What the last verification found.
+    mismatched: Vec<MediaRecord>,
+    /// The package this session last wrote.
+    last_export: Option<export::Exported>,
     /// The shots in play, in order; a shot index names one of them.
     keys: Vec<ShotKey>,
     // Canonical JSON is loaded once per shot per session; reads then stay
@@ -1202,17 +1431,16 @@ impl Worker {
         gate: Arc<Gate>,
         options: SessionOptions,
     ) -> Self {
-        // Video uses the MiniMax key the image provider was given.
-        let client = match &provider {
-            ImageProvider::Minimax(client) => client.clone(),
-            ImageProvider::LocalDemo => None,
-        };
+        let video_provider = options
+            .video_provider
+            .clone()
+            .unwrap_or_else(|| video_provider_for(&provider));
         Self {
             project,
             provider,
             model,
             videos: Videos {
-                client,
+                provider: video_provider,
                 gate,
                 in_flight: BTreeMap::new(),
                 unresolved: BTreeSet::new(),
@@ -1225,6 +1453,9 @@ impl Worker {
             keyframes_unresolved: BTreeSet::new(),
             style_unresolved: false,
             cast_unresolved: BTreeSet::new(),
+            collection: None,
+            mismatched: Vec::new(),
+            last_export: None,
         }
     }
 
@@ -1234,7 +1465,7 @@ impl Worker {
         let mut outcomes = Vec::with_capacity(finished.len());
         for done in finished {
             let key = done.job.shot.clone();
-            self.videos.in_flight.remove(&key);
+            self.videos.in_flight.remove(done.job.artifact_id.as_str());
             let revision = done.job.revision;
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
                 self.with_shot(&key, |project, _, shot| video::finish(project, shot, done))
@@ -1242,8 +1473,15 @@ impl Worker {
             .unwrap_or(Err(GenerationError::Unexpected(
                 "attaching a video panicked",
             )));
-            if result.is_err() {
-                self.shots.remove(&key);
+            match &result {
+                // A video of the shot attached: a candidate of its generation
+                // left unresolved can no longer become the shot's.
+                Ok(_) => {
+                    self.videos.unresolved.remove(&key);
+                }
+                Err(_) => {
+                    self.shots.remove(&key);
+                }
             }
             outcomes.push((key, revision, result.map(|_| ()).map_err(generation_error)));
         }
@@ -1262,8 +1500,10 @@ impl Worker {
             ShotCommand::ResubmitKeyframes => self.generate(key, Consent::RISK_PAYING_TWICE),
             ShotCommand::GenerateConsenting(consent) => self.generate(key, consent),
             ShotCommand::Refine { note, consent } => self.refine(key, consent, &note),
-            ShotCommand::GenerateVideo => self.start_video(key, false),
-            ShotCommand::ResubmitVideo => self.start_video(key, true),
+            ShotCommand::GenerateVideo => self.start_video(key, &VideoAsk::default(), false),
+            ShotCommand::ResubmitVideo => self.start_video(key, &VideoAsk::default(), true),
+            ShotCommand::GenerateVideos(ask) => self.start_video(key, &ask, false),
+            ShotCommand::ResubmitVideos(ask) => self.start_video(key, &ask, true),
             // A keyframe of a style or cast since moved on from is not locked.
             ShotCommand::Lock => self
                 .with_shot(key, |project, _, shot| generation::lock(project, shot))
@@ -1276,6 +1516,7 @@ impl Worker {
                     ShotCommand::MigrateLegacyHashes => {
                         shot.migrate_legacy_hashes(project).map(|_report| ())
                     }
+                    ShotCommand::SelectVideo(video) => shot.select_video(project, video),
                     ShotCommand::LockVideo => shot.lock_video(project),
                     ShotCommand::Generate
                     | ShotCommand::Lock
@@ -1283,7 +1524,9 @@ impl Worker {
                     | ShotCommand::GenerateConsenting(_)
                     | ShotCommand::Refine { .. }
                     | ShotCommand::GenerateVideo
-                    | ShotCommand::ResubmitVideo => {
+                    | ShotCommand::ResubmitVideo
+                    | ShotCommand::GenerateVideos(_)
+                    | ShotCommand::ResubmitVideos(_) => {
                         unreachable!("handled above")
                     }
                 })
@@ -1300,52 +1543,80 @@ impl Worker {
         }
     }
 
-    fn start_video(&mut self, key: &ShotKey, risk_paying_twice: bool) -> Result<(), SessionError> {
-        if self.videos.in_flight.contains_key(key) {
+    fn start_video(
+        &mut self,
+        key: &ShotKey,
+        ask: &VideoAsk,
+        risk_paying_twice: bool,
+    ) -> Result<(), SessionError> {
+        if self.videos.follows(key) {
             return Err(SessionError::VideoInFlight);
         }
-        let Some(client) = self.videos.client.clone() else {
-            return Err(SessionError::Generation(GenerationError::NotConfigured));
-        };
-        let started = self.with_shot(key, |project, _, shot| {
-            if risk_paying_twice {
-                video::resubmit(project, shot, &client)
-            } else {
-                video::start(project, shot, &client)
+        let started = match self.videos.provider.clone() {
+            VideoProvider::LocalDemo => self.with_shot(key, |project, _, shot| {
+                video::start_videos(
+                    project,
+                    shot,
+                    &LocalDemoVideos,
+                    ask,
+                    &mut NoHooks,
+                    risk_paying_twice,
+                )
+            }),
+            VideoProvider::Minimax(Some(client)) => self.with_shot(key, |project, _, shot| {
+                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
+            }),
+            VideoProvider::Minimax(None) => {
+                return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
-        });
-        match &started {
-            Ok(_) => {
-                self.videos.unresolved.remove(key);
-            }
-            Err(GenerationError::UnresolvedSubmission) => {
-                self.videos.unresolved.insert(key.clone());
-            }
-            Err(_) => {}
         }
-        let job = started.map_err(generation_error)?;
+        .map_err(generation_error)?;
+        // Candidates submitted before one could not be are followed whatever
+        // happened to it.
         let root = self.project.root().clone();
-        self.videos.watch(job, root);
-        Ok(())
+        for job in started.jobs {
+            self.videos.watch(job, root.clone());
+        }
+        match started.error {
+            None => {
+                self.videos.unresolved.remove(key);
+                Ok(())
+            }
+            Some(error) => {
+                if matches!(error, GenerationError::UnresolvedSubmission) {
+                    self.videos.unresolved.insert(key.clone());
+                }
+                Err(generation_error(error))
+            }
+        }
     }
 
     /// Watch again the videos an earlier session submitted. Nothing is
-    /// submitted; without a key they wait for a session that has one.
+    /// submitted. The demo's are always followed; MiniMax's wait for a
+    /// session with the key.
     fn resume_videos(&mut self) -> usize {
-        if self.project.is_read_only() || self.videos.client.is_none() {
+        if self.project.is_read_only() {
             return 0;
         }
-        match video::in_flight(&self.project) {
-            Ok(found) => {
-                for job in found.jobs {
-                    let root = self.project.root().clone();
-                    self.videos.watch(job, root);
-                }
-                self.videos.unresolved.extend(found.unresolved);
-                found.needs_attention
+        let keyed = matches!(self.videos.provider, VideoProvider::Minimax(Some(_)));
+        let mut needs_attention = 0;
+        for provider in [video::DEMO_VIDEO_PROVIDER, video::VIDEO_PROVIDER] {
+            if provider == video::VIDEO_PROVIDER && !keyed {
+                continue;
             }
-            Err(_) => 1,
+            match video::in_flight(&self.project, provider) {
+                Ok(found) => {
+                    for job in found.jobs {
+                        let root = self.project.root().clone();
+                        self.videos.watch(job, root);
+                    }
+                    self.videos.unresolved.extend(found.unresolved);
+                    needs_attention += found.needs_attention;
+                }
+                Err(_) => needs_attention += 1,
+            }
         }
+        needs_attention
     }
 
     fn generate(&mut self, key: &ShotKey, consent: Consent) -> Result<(), SessionError> {
@@ -1891,22 +2162,121 @@ impl Worker {
         })
     }
 
+    /// List the project's media, link files whose bytes are the same when
+    /// `dedupe`, and publish which present files are gone. Storage upkeep:
+    /// it never fails a command.
+    fn tend_media(&mut self, view: &View, dedupe: bool) {
+        // New media may change what a collection would let go; the dry run
+        // is asked for again.
+        if dedupe {
+            self.collection = None;
+        }
+        let recent = media::recent_window(&self.project);
+        let tended = panic::catch_unwind(AssertUnwindSafe(|| {
+            let records = media::catalog(&self.project)?;
+            if dedupe && !self.project.is_read_only() {
+                media::dedupe(&self.project, &records)?;
+            }
+            Ok::<_, media::MediaError>((
+                media::check(&self.project, &records, false)?,
+                media::usage(&self.project, &records),
+            ))
+        }));
+        let (missing, usage, problem) = match tended {
+            Ok(Ok((report, usage))) => (report.missing, usage, None),
+            Ok(Err(error)) => (Vec::new(), media::Usage::default(), Some(error.to_string())),
+            Err(_) => (
+                Vec::new(),
+                media::Usage::default(),
+                Some("checking the media panicked".to_owned()),
+            ),
+        };
+        let published = PublishedMedia {
+            missing,
+            mismatched: self.mismatched.clone(),
+            usage,
+            recent,
+            plan: self.collection.clone(),
+            problem,
+        };
+        *lock(&view.media) = Some(Arc::new(published));
+    }
+
+    /// Finish a collection an earlier session left interrupted.
+    fn reconcile_media(&self) {
+        if self.project.is_read_only() {
+            return;
+        }
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            media::catalog(&self.project)
+                .and_then(|records| media::reconcile(&self.project, &records))
+        }));
+    }
+
+    fn export(&mut self, request: &export::ExportRequest) -> Result<(), SessionError> {
+        let written = panic::catch_unwind(AssertUnwindSafe(|| {
+            export::export(&self.project, request, std::time::SystemTime::now())
+        }))
+        .map_err(|_| SessionError::Panicked)?
+        .map_err(SessionError::Export)?;
+        self.last_export = Some(written);
+        Ok(())
+    }
+
+    fn apply_storage(&mut self, command: StorageCommand) -> Result<(), SessionError> {
+        let recent = media::recent_window(&self.project);
+        let applied = panic::catch_unwind(AssertUnwindSafe(|| match command {
+            StorageCommand::PlanCollection => {
+                let records = media::catalog(&self.project).map_err(SessionError::Media)?;
+                self.collection = Some(media::plan(&self.project, &records, recent));
+                Ok(())
+            }
+            StorageCommand::Collect => {
+                let plan = self
+                    .collection
+                    .take()
+                    .ok_or(SessionError::NoCollectionPlan)?;
+                media::collect(&self.project, &plan, recent)
+                    .map(|_| ())
+                    .map_err(SessionError::Media)
+            }
+            StorageCommand::Verify => {
+                let records = media::catalog(&self.project).map_err(SessionError::Media)?;
+                self.mismatched = media::check(&self.project, &records, true)
+                    .map_err(SessionError::Media)?
+                    .mismatched;
+                Ok(())
+            }
+        }));
+        applied.unwrap_or(Err(SessionError::Panicked))
+    }
+
     fn publish_workflow(&self, view: &View) {
-        let published =
-            match panic::catch_unwind(AssertUnwindSafe(|| workflow::status(&self.project))) {
-                Ok(Ok(steps)) => PublishedWorkflow {
-                    steps,
-                    problem: None,
-                },
-                Ok(Err(error)) => PublishedWorkflow {
-                    steps: Vec::new(),
-                    problem: Some(error.to_string()),
-                },
-                Err(_) => PublishedWorkflow {
-                    steps: Vec::new(),
-                    problem: Some("working out the steps panicked".to_owned()),
-                },
-            };
+        let read = || -> Result<_, String> {
+            Ok((
+                workflow::status(&self.project).map_err(|error| error.to_string())?,
+                workflow::scenes(&self.project).map_err(|error| error.to_string())?,
+                export::readiness(&self.project).map_err(|error| error.to_string())?,
+            ))
+        };
+        let failed = |problem: String| PublishedWorkflow {
+            steps: Vec::new(),
+            scenes: Vec::new(),
+            export: export::Readiness::default(),
+            last_export: self.last_export.clone(),
+            problem: Some(problem),
+        };
+        let published = match panic::catch_unwind(AssertUnwindSafe(read)) {
+            Ok(Ok((steps, scenes, export))) => PublishedWorkflow {
+                steps,
+                scenes,
+                export,
+                last_export: self.last_export.clone(),
+                problem: None,
+            },
+            Ok(Err(problem)) => failed(problem),
+            Err(_) => failed("working out the steps panicked".to_owned()),
+        };
         *lock(&view.workflow) = Some(Arc::new(published));
     }
 
@@ -2010,8 +2380,10 @@ impl Worker {
         let Some(key) = self.keys.get(shot_index).cloned() else {
             return;
         };
+        let video_provider = self.videos.provider.clone();
         let published = panic::catch_unwind(AssertUnwindSafe(|| {
             self.with_shot(&key, |project, _, shot| {
+                shot.refresh_end_frame(project)?;
                 Ok(PublishedShot {
                     snapshot: shot.snapshot()?,
                     media: shot
@@ -2039,12 +2411,25 @@ impl Worker {
                             (record, media)
                         })
                         .collect(),
+                    videos: shot
+                        .video_history()?
+                        .into_iter()
+                        .map(|record| {
+                            let media = record
+                                .media_path
+                                .as_ref()
+                                .map(|path| project.root().resolve(path));
+                            (record, media)
+                        })
+                        .collect(),
+                    video_estimate: video_provider
+                        .estimate(shot.intent()?.and_then(|intent| intent.duration_target)),
                 })
             })
         }))
         .unwrap_or(Err(ShotWorkflowError::InvalidCanonicalState))
         .map(|mut published| {
-            published.video_in_flight = self.videos.in_flight.contains_key(&key);
+            published.video_in_flight = self.videos.follows(&key);
             published.video_unresolved = self.videos.unresolved.contains(&key);
             published.keyframes_unresolved = self.keyframes_unresolved.contains(&key);
             published
@@ -2066,6 +2451,15 @@ impl Worker {
     ) -> Result<R, E> {
         let shot = shot_mut(&self.project, &mut self.shots, key)?;
         operation(&self.project, &self.provider, shot)
+    }
+}
+
+/// The video provider a session follows its image provider with: MiniMax
+/// with the same key, otherwise the local demo.
+fn video_provider_for(images: &ImageProvider) -> VideoProvider {
+    match images {
+        ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
+        ImageProvider::LocalDemo => VideoProvider::LocalDemo,
     }
 }
 
@@ -2111,7 +2505,9 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    const WAIT: Duration = Duration::from_secs(10);
+    /// How long an expected event may take. Only a hang reaches it; a loaded
+    /// runner has taken more than 10 s to open a test project.
+    const WAIT: Duration = Duration::from_secs(60);
 
     struct TempDir(PathBuf);
 
@@ -2287,7 +2683,6 @@ mod tests {
                     kind: ImageProviderKind::LocalDemo,
                     ready: true,
                     generation_cost_micros: 0,
-                    video_cost_micros: 0,
                 }
             );
         }
@@ -2298,7 +2693,6 @@ mod tests {
                 kind: ImageProviderKind::Minimax,
                 ready: true,
                 generation_cost_micros: 10_500,
-                video_cost_micros: 280_000,
             }
         );
         assert!(!format!("{minimax:?}").contains("sk-test"));
@@ -2438,6 +2832,9 @@ mod tests {
         use kineto_providers::secret::SecretString;
         use std::sync::atomic::{AtomicBool, AtomicU32};
 
+        use crate::video::VideoProviderKind;
+        use kineto_project::ArtifactStatus;
+
         const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isommp41-video";
 
         /// MiniMax for images and Hailuo video, offline. A video task stays
@@ -2451,6 +2848,9 @@ mod tests {
             refuse: AtomicU32,
             /// Submissions to time out after sending before accepting.
             time_out: AtomicU32,
+            /// From this submission on (counting from 1), every one times out
+            /// after sending; 0 for never.
+            time_out_from: AtomicU32,
         }
 
         fn answer(body: impl Into<Vec<u8>>) -> Result<HttpResponse, TransportFailure> {
@@ -2468,7 +2868,11 @@ mod tests {
                 body: &[u8],
             ) -> Result<HttpResponse, TransportFailure> {
                 if url.ends_with("/v1/video_generation") {
-                    self.submits.fetch_add(1, Ordering::SeqCst);
+                    let submit = self.submits.fetch_add(1, Ordering::SeqCst) + 1;
+                    let from = self.time_out_from.load(Ordering::SeqCst);
+                    if from != 0 && submit >= from {
+                        return Err(TransportFailure::Timeout);
+                    }
                     let take = |count: &AtomicU32| {
                         count
                             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -2541,6 +2945,7 @@ mod tests {
         fn options() -> SessionOptions {
             SessionOptions {
                 video_poll_interval: Duration::from_millis(20),
+                ..SessionOptions::default()
             }
         }
 
@@ -2861,16 +3266,551 @@ mod tests {
             .unwrap()
         }
 
+        /// Wait for `count` videos to finish, whatever else arrives.
+        fn videos_finished(events: &Receiver<Event>, count: usize) -> Vec<Result<(), String>> {
+            let mut results = Vec::new();
+            while results.len() < count {
+                if let Event::VideoFinished { result, .. } = events.recv_timeout(WAIT).unwrap() {
+                    results.push(result);
+                }
+            }
+            results
+        }
+
+        fn ask(count: u8, note: Option<&str>, branch: Option<&str>) -> ShotCommand {
+            ShotCommand::GenerateVideos(VideoAsk {
+                count,
+                note: note.map(str::to_owned),
+                branch_from: branch.map(str::to_owned),
+            })
+        }
+
         #[test]
-        fn a_video_needs_a_real_locked_keyframe() {
+        fn candidates_already_submitted_are_followed_and_one_left_unresolved_is_not_paid_again() {
             let temp = TempDir::new();
-            let (session, events) = create(&temp.0.join("film"));
-            // The demo session has no video provider.
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = locked_keyframe(&target, &fake);
+            // The third candidate's submission times out after sending.
+            fake.time_out_from.store(3, Ordering::SeqCst);
+            assert!(
+                command(&session, &events, 4, ask(3, None, None))
+                    .unwrap_err()
+                    .contains("UnresolvedSubmission")
+            );
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+            assert!(session.video_in_flight(0).unwrap());
+            assert!(session.video_unresolved(0).unwrap());
+            // Asking again while two are being made is refused.
+            assert_eq!(
+                command(&session, &events, 5, ask(3, None, None)),
+                Err("VideoInFlight".to_owned())
+            );
+            drop(session);
+
+            // The app closed before they finished. Reopened, the two submitted
+            // candidates are followed to the end; nothing is submitted.
+            fake.finish.store(true, Ordering::SeqCst);
+            fake.time_out_from.store(0, Ordering::SeqCst);
+            let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(videos_finished(&events, 2), [Ok(()), Ok(())]);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+            let history = session.video_history(0).unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|(take, _)| take.artifact_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["shot_001_v0001_candidate_a", "shot_001_v0001_candidate_b"]
+            );
+            // The generation has its videos; the lost candidate is no longer
+            // the shot's to resubmit.
+            assert!(!session.video_unresolved(0).unwrap());
+            assert_eq!(
+                command(&session, &events, 6, ShotCommand::LockVideo),
+                Err("Shot(NoSelection)".to_owned())
+            );
+            command(&session, &events, 7, ShotCommand::SelectVideo(1)).unwrap();
+            command(&session, &events, 8, ShotCommand::LockVideo).unwrap();
+            let history = session.video_history(0).unwrap();
+            assert_eq!(history[1].0.status, ArtifactStatus::Locked);
+            assert_eq!(history[0].0.status, ArtifactStatus::Candidate);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 3);
+        }
+
+        #[test]
+        fn takes_are_compared_refined_branched_chosen_and_complete_their_scene() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            let mut token = 0;
+            let mut run = |shot: u32, command: ShotCommand| {
+                token += 1;
+                session.submit(shot, command, token).unwrap();
+                completion(&events, token)
+            };
+            for shot in [0, 1] {
+                for command in [
+                    ShotCommand::Generate,
+                    ShotCommand::Select(0),
+                    ShotCommand::Lock,
+                ] {
+                    run(shot, command).unwrap();
+                }
+            }
+
+            // Two takes, then one refined by a note, then a branch from it.
+            run(0, ask(2, None, None)).unwrap();
+            assert_eq!(videos_finished(&events, 2), [Ok(()), Ok(())]);
+            run(0, ask(1, Some("Slower."), None)).unwrap();
+            videos_finished(&events, 1);
+            run(
+                0,
+                ask(
+                    1,
+                    Some("Hold on his eyes"),
+                    Some("shot_001_v0002_candidate_a"),
+                ),
+            )
+            .unwrap();
+            videos_finished(&events, 1);
+            assert!(
+                run(0, ask(1, None, Some("shot_001_v0009_candidate_a")))
+                    .unwrap_err()
+                    .contains("InvalidCandidate")
+            );
+            let history = session.video_history(0).unwrap();
+            let takes: Vec<_> = history
+                .iter()
+                .map(|(take, media)| {
+                    (
+                        take.artifact_id.as_str(),
+                        take.generation,
+                        take.candidate,
+                        take.status,
+                        take.notes.clone(),
+                        take.branched_from.clone(),
+                        media.as_ref().is_some_and(|media| media.is_file()),
+                    )
+                })
+                .collect();
+            let superseded = ArtifactStatus::Superseded;
+            assert_eq!(
+                takes,
+                [
+                    (
+                        "shot_001_v0001_candidate_a",
+                        1,
+                        Some(0),
+                        superseded,
+                        vec![],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0001_candidate_b",
+                        1,
+                        Some(1),
+                        superseded,
+                        vec![],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0002_candidate_a",
+                        2,
+                        Some(0),
+                        superseded,
+                        vec!["Slower.".to_owned()],
+                        None,
+                        true
+                    ),
+                    (
+                        "shot_001_v0003_candidate_a",
+                        3,
+                        Some(0),
+                        ArtifactStatus::Candidate,
+                        vec!["Slower.".to_owned(), "Hold on his eyes".to_owned()],
+                        Some("shot_001_v0002_candidate_a".to_owned()),
+                        true
+                    ),
+                ]
+            );
+            let artifacts: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+            )
+            .unwrap();
+            let branch = artifacts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["artifact_id"] == "shot_001_v0003_candidate_a")
+                .unwrap();
+            assert!(
+                branch["compiled_prompt"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Director's note: Slower; Hold on his eyes.")
+            );
+
+            // The sole take of the latest generation is locked; the scene
+            // still needs the second shot's video.
+            run(0, ShotCommand::LockVideo).unwrap();
+            let scene = |session: &ProjectSession| session.workflow().unwrap().scenes[0].clone();
+            let progress = scene(&session);
+            assert_eq!(progress.scene_id, "scene_001");
+            assert!(!progress.complete());
+            assert_eq!(
+                progress
+                    .shots
+                    .iter()
+                    .map(|shot| (shot.shot_id.as_str(), shot.keyframe, shot.video))
+                    .collect::<Vec<_>>(),
+                [
+                    ("shot_001", workflow::Stage::Locked, workflow::Stage::Locked),
+                    (
+                        "shot_002",
+                        workflow::Stage::Locked,
+                        workflow::Stage::Missing
+                    ),
+                ]
+            );
+
+            // Of two takes the director chooses the second.
+            run(1, ask(2, None, None)).unwrap();
+            videos_finished(&events, 2);
+            assert!(
+                run(1, ShotCommand::LockVideo)
+                    .unwrap_err()
+                    .contains("NoSelection")
+            );
+            run(1, ShotCommand::SelectVideo(1)).unwrap();
+            run(1, ShotCommand::LockVideo).unwrap();
+            assert!(scene(&session).complete());
+            let video_step = |session: &ProjectSession| {
+                session
+                    .workflow()
+                    .unwrap()
+                    .steps
+                    .iter()
+                    .find(|step| step.id == "video")
+                    .unwrap()
+                    .state
+            };
+            assert_eq!(video_step(&session), workflow::StepState::Done);
+            drop(session);
+
+            // Every take and choice is in the project's files.
+            fs::remove_dir_all(target.join(".kineto")).unwrap();
+            let (sink, events) = sink();
+            let reopened = ProjectSession::spawn(
+                OpenRequest::Open { path: target },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(reopened.video_history(0).unwrap().len(), 4);
+            assert_eq!(
+                reopened.video_history(1).unwrap()[1].0.status,
+                ArtifactStatus::Locked
+            );
+            assert!(scene(&reopened).complete());
+            assert_eq!(video_step(&reopened), workflow::StepState::Done);
+        }
+
+        #[test]
+        fn identical_takes_share_their_bytes_and_a_lost_file_is_reported_at_open() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            for (token, command) in [
+                (1, ShotCommand::Generate),
+                (2, ShotCommand::Select(0)),
+                (3, ShotCommand::Lock),
+                (4, ask(2, None, None)),
+            ] {
+                command_ok(&session, &events, token, command);
+            }
+            videos_finished(&events, 2);
+            let takes = session.video_history(0).unwrap();
+            let paths: Vec<PathBuf> = takes
+                .iter()
+                .map(|(_, media)| media.clone().unwrap())
+                .collect();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let inode = |path: &PathBuf| fs::metadata(path).unwrap().ino();
+                assert_eq!(
+                    inode(&paths[0]),
+                    inode(&paths[1]),
+                    "the demo clip is stored once"
+                );
+            }
+            let media = session.media().unwrap();
+            assert!(media.missing.is_empty() && media.problem.is_none());
+            drop(session);
+
+            fs::remove_file(&paths[1]).unwrap();
+            assert_eq!(fs::read(&paths[0]).unwrap(), video::DEMO_CLIP);
+            let (sink, events) = sink();
+            let reopened = ProjectSession::spawn(
+                OpenRequest::Open { path: target },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            let missing = &reopened.media().unwrap().missing;
+            assert_eq!(missing.len(), 1);
+            assert_eq!(missing[0].artifact_id, "shot_001_v0001_candidate_b");
+            // Reported, not rewritten: the take still says its bytes are kept.
+            assert_eq!(reopened.video_history(0).unwrap().len(), 2);
+        }
+
+        fn storage(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            token: u64,
+            command: StorageCommand,
+        ) -> Result<(), String> {
+            session.submit_storage(command, token).unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::DocumentCompleted {
+                    token: actual,
+                    result,
+                } => {
+                    assert_eq!(actual, token);
+                    result
+                }
+                other => panic!("expected a storage result, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_director_sees_what_collecting_lets_go_before_it_does() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            for (token, command) in [
+                (1, ShotCommand::Generate),
+                (2, ShotCommand::Select(0)),
+                (3, ShotCommand::Lock),
+            ] {
+                command_ok(&session, &events, token, command);
+            }
+            for token in 4..7 {
+                command_ok(&session, &events, token, ask(1, None, None));
+                videos_finished(&events, 1);
+            }
+            command_ok(&session, &events, 7, ShotCommand::LockVideo);
+            assert_eq!(session.media().unwrap().recent, media::DEFAULT_RECENT);
+            drop(session);
+
+            // The project keeps only the latest take of each kind.
+            let manifest = target.join("project.toml");
+            let text = fs::read_to_string(&manifest).unwrap().replace(
+                "recipe_version = 1\n",
+                "recipe_version = 1\nrecent_takes = 1\n",
+            );
+            fs::write(&manifest, text).unwrap();
+            let (sink, events) = sink();
+            let session = ProjectSession::spawn(
+                OpenRequest::Open {
+                    path: target.clone(),
+                },
+                ImageProvider::LocalDemo,
+                sink,
+            )
+            .unwrap();
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            let media = session.media().unwrap();
+            assert_eq!(media.recent, 1);
+            assert!(media.plan.is_none());
+            assert!(media.usage.bytes > 0);
+            assert_eq!(
+                storage(&session, &events, 8, StorageCommand::Collect),
+                Err("NoCollectionPlan".to_owned())
+            );
+
+            storage(&session, &events, 9, StorageCommand::PlanCollection).unwrap();
+            let plan = session.media().unwrap().plan.clone().unwrap();
+            let planned: Vec<_> = plan
+                .items
+                .iter()
+                .map(|item| item.record.artifact_id.as_str())
+                .collect();
+            assert_eq!(
+                planned,
+                ["shot_001_v0001_candidate_a", "shot_001_v0002_candidate_a"]
+            );
+            // Nothing is touched by the dry run.
+            assert!(session.video_history(0).unwrap()[0].1.is_some());
+
+            storage(&session, &events, 10, StorageCommand::Collect).unwrap();
+            let media = session.media().unwrap();
+            assert!(media.plan.is_none() && media.missing.is_empty());
+            let history = session.video_history(0).unwrap();
+            assert!(history[0].1.is_none() && history[1].1.is_none());
+            let locked = history[2].1.clone().unwrap();
+            assert_eq!(fs::read(&locked).unwrap(), video::DEMO_CLIP);
+            assert_eq!(history.len(), 3, "the records stay");
+
+            // The locked take's bytes are changed behind Kineto's back.
+            fs::write(&locked, b"\0\0\0\x18ftypisom-changed").unwrap();
+            assert!(session.media().unwrap().mismatched.is_empty());
+            storage(&session, &events, 11, StorageCommand::Verify).unwrap();
+            let mismatched = &session.media().unwrap().mismatched;
+            assert_eq!(mismatched.len(), 1);
+            assert_eq!(mismatched[0].artifact_id, "shot_001_v0003_candidate_a");
+        }
+
+        #[test]
+        fn a_finished_scene_is_handed_off_as_a_package() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let out = temp.0.join("out");
+            fs::create_dir_all(&out).unwrap();
+            let (session, events) = create(&target);
+            let mut token = 0;
+            let mut run = |shot: u32, command: ShotCommand| {
+                token += 1;
+                session.submit(shot, command, token).unwrap();
+                completion(&events, token)
+            };
+            for shot in [0, 1] {
+                for command in [
+                    ShotCommand::Generate,
+                    ShotCommand::Select(0),
+                    ShotCommand::Lock,
+                    ShotCommand::GenerateVideo,
+                ] {
+                    run(shot, command).unwrap();
+                }
+                videos_finished(&events, 1);
+            }
+            run(0, ShotCommand::LockVideo).unwrap();
+            let workflow = session.workflow().unwrap();
+            assert_eq!(workflow.export.ready, [(ShotKey::bootstrap(1), 1)]);
+            assert_eq!(workflow.export.missing[0].reason, "its video is not locked");
+            let request = |partial| export::ExportRequest {
+                destination: out.clone(),
+                name: "dailies".to_owned(),
+                partial,
+                replace: false,
+            };
+            let export = |request: export::ExportRequest, token: u64| {
+                session.submit_export(request, token).unwrap();
+                match events.recv_timeout(WAIT).unwrap() {
+                    Event::DocumentCompleted { result, .. } => result,
+                    other => panic!("expected the export's result, got {other:?}"),
+                }
+            };
+            assert!(
+                export(request(false), 100)
+                    .unwrap_err()
+                    .starts_with("Export(Incomplete(")
+            );
+            assert!(session.workflow().unwrap().last_export.is_none());
+
+            run(1, ShotCommand::LockVideo).unwrap();
+            assert!(session.workflow().unwrap().export.complete());
+            export(request(false), 101).unwrap();
+            let exported = session.workflow().unwrap().last_export.clone().unwrap();
+            assert_eq!(exported.path, out.join("dailies"));
+            assert!(exported.complete && exported.shots == 2);
+            assert!(out.join("dailies/manifest.json").is_file());
+            assert_eq!(
+                fs::read(out.join("dailies/scene_001_shot_002.mp4")).unwrap(),
+                video::DEMO_CLIP
+            );
+        }
+
+        fn command_ok(
+            session: &ProjectSession,
+            events: &Receiver<Event>,
+            token: u64,
+            command: ShotCommand,
+        ) {
+            session.submit(0, command, token).unwrap();
+            assert_eq!(completion(events, token), Ok(()));
+        }
+
+        #[test]
+        fn the_demo_makes_a_free_video_from_its_own_keyframe_and_minimax_refuses_it() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let (session, events) = create(&target);
+            assert_eq!(session.video_provider().kind, VideoProviderKind::LocalDemo);
+            assert_eq!(session.video_provider().clip_cost_micros, 0);
             assert!(
                 command(&session, &events, 1, ShotCommand::GenerateVideo)
                     .unwrap_err()
-                    .contains("NotConfigured")
+                    .contains("KeyframeNotLocked")
             );
+            command(&session, &events, 2, ShotCommand::Generate).unwrap();
+            command(&session, &events, 3, ShotCommand::Select(0)).unwrap();
+            command(&session, &events, 4, ShotCommand::Lock).unwrap();
+            // The demo keyframe has no image; the demo video needs none, and
+            // runs through the same job as a paid one.
+            command(&session, &events, 5, ShotCommand::GenerateVideo).unwrap();
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::VideoFinished {
+                    shot_index: 0,
+                    revision: 1,
+                    result: Ok(())
+                }
+            );
+            let media = session.video_media(0).unwrap().unwrap();
+            assert_eq!(fs::read(&media).unwrap(), video::DEMO_CLIP);
+            command(&session, &events, 6, ShotCommand::LockVideo).unwrap();
+            assert_eq!(
+                session.snapshot(0).unwrap().video,
+                kineto_project::shot::VideoState::Locked
+            );
+            let artifacts: serde_json::Value = serde_json::from_slice(
+                &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+            )
+            .unwrap();
+            let video = artifacts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["artifact_id"] == "shot_001_v0001_candidate_a")
+                .unwrap();
+            assert_eq!(video["provider"], "local-demo-video");
+            assert_eq!(video["model"], "demo-clip");
+            for (token, command) in [
+                (7, ShotCommand::Generate),
+                (8, ShotCommand::Select(0)),
+                (9, ShotCommand::Lock),
+            ] {
+                session.submit(1, command, token).unwrap();
+                assert_eq!(completion(&events, token), Ok(()));
+            }
+            drop(session);
+
+            // MiniMax starts only from an image, which a demo keyframe has not.
+            let fake = Arc::new(FakeMinimax::default());
+            let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            assert_eq!(session.video_provider().kind, VideoProviderKind::Minimax);
+            session.submit(1, ShotCommand::GenerateVideo, 10).unwrap();
+            assert!(
+                completion(&events, 10)
+                    .unwrap_err()
+                    .contains("NoFirstFrame")
+            );
+            drop(session);
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn a_video_needs_a_real_locked_keyframe() {
+            let temp = TempDir::new();
             let fake = Arc::new(FakeMinimax::default());
             let (session, events) = spawn(
                 OpenRequest::CreateText {

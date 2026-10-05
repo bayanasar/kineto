@@ -3,18 +3,20 @@
 //! A session runs on its own worker thread (`kineto_core::session`). Every call
 //! that may touch the filesystem returns before doing so: open/create hand back
 //! a handle at once, and each shot command is queued with a caller token. The
-//! worker reports outcomes by posting `Int64List [kind, token, status, shot]`
-//! messages to the Dart port supplied at open, through Dart's
-//! `NativeApi.postCObject`. Posting to a closed port is defined behaviour, so a
-//! Dart isolate that goes away first cannot be called into.
+//! worker reports outcomes by posting `[kind, token, status, shot, reason]`
+//! lists to the Dart port supplied at open, through Dart's
+//! `NativeApi.postCObject`: four integers, then what a provider said when it
+//! refused or failed, or null. Posting to a closed port is defined behaviour,
+//! so a Dart isolate that goes away first cannot be called into.
 //!
 //! Snapshot and metadata reads return state the worker has already published;
 //! they never do I/O and never wait for a running command.
 
-use std::{collections::BTreeMap, path::PathBuf, ptr, slice, str};
+use std::{collections::BTreeMap, ffi::CString, path::PathBuf, ptr, slice, str};
 
 use crate::{contract::*, guarded};
 use kineto_core::{
+    export::ExportError,
     generation::{Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
     keyframe_prompt::KeyframePromptError,
     llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
@@ -22,6 +24,7 @@ use kineto_core::{
         DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Recovery,
         SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError, SubmitError,
     },
+    video::{VideoProvider, VideoProviderKind},
 };
 use kineto_jobs::ErrorClass;
 use kineto_project::{
@@ -64,10 +67,12 @@ const RECOVERED_CASTING_IMAGES: i64 = -6;
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
 
-// `Dart_CObject` from `dart_native_api.h`. Only the typed-data member is used;
+// `Dart_CObject` from `dart_native_api.h`, with the members a message uses;
 // the padding member gives the union the header's size (40 bytes on 64-bit).
-const DART_COBJECT_TYPED_DATA: i32 = 7;
-const DART_TYPED_DATA_INT64: i32 = 8;
+const DART_COBJECT_NULL: i32 = 0;
+const DART_COBJECT_INT64: i32 = 3;
+const DART_COBJECT_STRING: i32 = 5;
+const DART_COBJECT_ARRAY: i32 = 6;
 
 #[repr(C)]
 pub struct DartCObject {
@@ -77,18 +82,21 @@ pub struct DartCObject {
 
 #[repr(C)]
 union DartCObjectValue {
-    as_typed_data: DartTypedData,
+    as_int64: i64,
+    as_string: *const std::ffi::c_char,
+    as_array: DartArray,
     _size: [u64; 5],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct DartTypedData {
-    kind: i32,
-    /// In elements, not bytes.
+struct DartArray {
     length: isize,
-    values: *const u8,
+    values: *mut *mut DartCObject,
 }
+
+/// The most of a provider's words a message carries.
+const MAX_REASON_CHARS: usize = 400;
 
 struct DartPort {
     post: PostCObject,
@@ -96,104 +104,176 @@ struct DartPort {
 }
 
 impl DartPort {
-    fn post(&self, message: [i64; 4]) {
+    fn post(&self, message: [i64; 4], reason: Option<&SessionError>) {
+        let mut numbers = message.map(|number| DartCObject {
+            kind: DART_COBJECT_INT64,
+            value: DartCObjectValue { as_int64: number },
+        });
+        let reason = reason.and_then(provider_reason);
+        let mut reason = match &reason {
+            Some(text) => DartCObject {
+                kind: DART_COBJECT_STRING,
+                value: DartCObjectValue {
+                    as_string: text.as_ptr(),
+                },
+            },
+            None => DartCObject {
+                kind: DART_COBJECT_NULL,
+                value: DartCObjectValue { _size: [0; 5] },
+            },
+        };
+        let [first, second, third, fourth] = &mut numbers;
+        let mut elements: [*mut DartCObject; 5] = [
+            ptr::from_mut(first),
+            ptr::from_mut(second),
+            ptr::from_mut(third),
+            ptr::from_mut(fourth),
+            &raw mut reason,
+        ];
         let mut object = DartCObject {
-            kind: DART_COBJECT_TYPED_DATA,
+            kind: DART_COBJECT_ARRAY,
             value: DartCObjectValue {
-                as_typed_data: DartTypedData {
-                    kind: DART_TYPED_DATA_INT64,
-                    length: 4,
-                    values: message.as_ptr().cast(),
+                as_array: DartArray {
+                    length: 5,
+                    values: elements.as_mut_ptr(),
                 },
             },
         };
-        // SAFETY: `post` is Dart's `NativeApi.postCObject`, which copies typed
-        // data before returning, so `message` only needs to outlive the call.
-        // A closed port makes it return false, which needs no handling.
+        // SAFETY: `post` is Dart's `NativeApi.postCObject`, which copies the
+        // whole object graph before returning, so the elements and the text
+        // only need to outlive the call. A closed port makes it return false,
+        // which needs no handling.
         let _ = unsafe { (self.post)(self.port, &raw mut object) };
     }
 }
 
+/// What a provider said when it refused or failed. Its status cannot say
+/// whether to change the request, wait, or top up the account. Project
+/// records refused through a generation are named by their status already.
+fn provider_reason(error: &SessionError) -> Option<CString> {
+    let SessionError::Generation(GenerationError::Provider { source, .. }) = error else {
+        return None;
+    };
+    if source.is::<StyleError>() || source.is::<CastError>() || source.is::<RevisionError>() {
+        return None;
+    }
+    let text: String = source
+        .to_string()
+        .chars()
+        .filter(|character| *character != '\0')
+        .take(MAX_REASON_CHARS)
+        .collect();
+    CString::new(text).ok()
+}
+
 impl SessionSink for DartPort {
     fn recovered(&self, recovery: &Recovery) {
-        self.post(match recovery {
+        let (message, error) = match recovery {
             Recovery::Completed {
                 shot_index,
                 revision,
-            } => [
-                MESSAGE_RECOVERED,
-                i64::from(*revision),
-                i64::from(PROJECT_OK),
-                i64::from(*shot_index),
-            ],
+            } => (
+                [
+                    MESSAGE_RECOVERED,
+                    i64::from(*revision),
+                    i64::from(PROJECT_OK),
+                    i64::from(*shot_index),
+                ],
+                None,
+            ),
             Recovery::Failed {
                 shot_index,
                 revision,
                 error,
-            } => [
-                MESSAGE_RECOVERED,
-                i64::from(*revision),
-                i64::from(session_error_code(error)),
-                i64::from(*shot_index),
-            ],
-            Recovery::NeedsAttention { count } => [
-                MESSAGE_RECOVERED,
-                i64::try_from(*count).unwrap_or(i64::MAX),
-                i64::from(PROJECT_ERR_GENERATION_JOB),
-                NO_SHOT,
-            ],
-            Recovery::Document { kind, revision } => [
-                MESSAGE_RECOVERED,
-                i64::from(*revision),
-                i64::from(PROJECT_OK),
-                match kind {
-                    DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
-                    DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
-                    DocumentKind::Bible => RECOVERED_BIBLE,
-                    DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
-                },
-            ],
-            Recovery::Images { kind, count } => [
-                MESSAGE_RECOVERED,
-                i64::try_from(*count).unwrap_or(i64::MAX),
-                i64::from(PROJECT_OK),
-                match kind {
-                    ImageWork::StyleSample => RECOVERED_STYLE_SAMPLES,
-                    ImageWork::Casting => RECOVERED_CASTING_IMAGES,
-                },
-            ],
-        });
+            } => (
+                [
+                    MESSAGE_RECOVERED,
+                    i64::from(*revision),
+                    i64::from(session_error_code(error)),
+                    i64::from(*shot_index),
+                ],
+                Some(error),
+            ),
+            Recovery::NeedsAttention { count } => (
+                [
+                    MESSAGE_RECOVERED,
+                    i64::try_from(*count).unwrap_or(i64::MAX),
+                    i64::from(PROJECT_ERR_GENERATION_JOB),
+                    NO_SHOT,
+                ],
+                None,
+            ),
+            Recovery::Document { kind, revision } => (
+                [
+                    MESSAGE_RECOVERED,
+                    i64::from(*revision),
+                    i64::from(PROJECT_OK),
+                    match kind {
+                        DocumentKind::StoryAnalysis => RECOVERED_ANALYSIS,
+                        DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
+                        DocumentKind::Bible => RECOVERED_BIBLE,
+                        DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
+                    },
+                ],
+                None,
+            ),
+            Recovery::Images { kind, count } => (
+                [
+                    MESSAGE_RECOVERED,
+                    i64::try_from(*count).unwrap_or(i64::MAX),
+                    i64::from(PROJECT_OK),
+                    match kind {
+                        ImageWork::StyleSample => RECOVERED_STYLE_SAMPLES,
+                        ImageWork::Casting => RECOVERED_CASTING_IMAGES,
+                    },
+                ],
+                None,
+            ),
+        };
+        self.post(message, error);
     }
 
     fn opened(&self, result: &Result<(), SessionError>) {
-        self.post([MESSAGE_OPENED, 0, i64::from(session_status(result)), 0]);
+        self.post(
+            [MESSAGE_OPENED, 0, i64::from(session_status(result)), 0],
+            result.as_ref().err(),
+        );
     }
 
     fn completed(&self, token: u64, shot_index: u32, result: &Result<(), SessionError>) {
-        self.post([
-            MESSAGE_COMPLETED,
-            i64::from_ne_bytes(token.to_ne_bytes()),
-            i64::from(session_status(result)),
-            i64::from(shot_index),
-        ]);
+        self.post(
+            [
+                MESSAGE_COMPLETED,
+                i64::from_ne_bytes(token.to_ne_bytes()),
+                i64::from(session_status(result)),
+                i64::from(shot_index),
+            ],
+            result.as_ref().err(),
+        );
     }
 
     fn video_finished(&self, shot_index: u32, revision: u16, result: &Result<(), SessionError>) {
-        self.post([
-            MESSAGE_VIDEO,
-            i64::from(revision),
-            i64::from(session_status(result)),
-            i64::from(shot_index),
-        ]);
+        self.post(
+            [
+                MESSAGE_VIDEO,
+                i64::from(revision),
+                i64::from(session_status(result)),
+                i64::from(shot_index),
+            ],
+            result.as_ref().err(),
+        );
     }
 
     fn document_completed(&self, token: u64, result: &Result<(), SessionError>) {
-        self.post([
-            MESSAGE_COMPLETED,
-            i64::from_ne_bytes(token.to_ne_bytes()),
-            i64::from(session_status(result)),
-            NO_SHOT,
-        ]);
+        self.post(
+            [
+                MESSAGE_COMPLETED,
+                i64::from_ne_bytes(token.to_ne_bytes()),
+                i64::from(session_status(result)),
+                NO_SHOT,
+            ],
+            result.as_ref().err(),
+        );
     }
 }
 
@@ -214,6 +294,9 @@ unsafe fn spawn(
     let Ok(provider) = image_provider_from_environment() else {
         return PROJECT_ERR_PROVIDER_UNKNOWN;
     };
+    let Ok(video_provider) = video_provider_from_environment() else {
+        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    };
     let Ok(model) = document_model_from_environment() else {
         return PROJECT_ERR_MODEL_UNKNOWN;
     };
@@ -222,7 +305,10 @@ unsafe fn spawn(
         provider,
         model,
         Box::new(DartPort { post, port }),
-        SessionOptions::default(),
+        SessionOptions {
+            video_provider,
+            ..SessionOptions::default()
+        },
     ) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
@@ -247,6 +333,21 @@ fn image_provider_from_environment() -> Result<ImageProvider, ()> {
         Err(std::env::VarError::NotUnicode(_)) => return Err(()),
     };
     ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+}
+
+/// The environment variable that names the video provider a session uses:
+/// `local-demo` for the free demo clip, `minimax` for MiniMax Hailuo with the
+/// key in `KINETO_MINIMAX_API_KEY`. Unset or empty follows the image
+/// provider. As for images, a paid provider is used only when named.
+const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
+
+fn video_provider_from_environment() -> Result<Option<VideoProvider>, ()> {
+    let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+    };
+    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
 }
 
 /// The language model named by `KINETO_LLM_PROVIDER` (see
@@ -498,8 +599,9 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
     })
 }
 
-/// Estimated cost of one shot video with the session's provider, in USD
-/// micros; 0 when it cannot generate video, or for a null handle.
+/// Estimated cost of one shot video, of the shortest clip the session's
+/// video provider makes, in USD micros; 0 for a free provider or a null
+/// handle.
 ///
 /// # Safety
 /// `session` must be a live project-session handle.
@@ -512,7 +614,64 @@ pub unsafe extern "C" fn kineto_project_video_cost_micros(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        session.session.image_provider().video_cost_micros
+        session.session.video_provider().clip_cost_micros
+    })
+}
+
+/// The session's video provider as a contract `video_provider` code: 1 for
+/// the local demo, 2 for MiniMax; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_provider(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        match session.session.video_provider().kind {
+            VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
+            VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
+        }
+    })
+}
+
+/// 1 when the session's video provider can make a video, 0 when it cannot
+/// (a paid provider without credentials) or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_provider_ready(
+    session: *const KinetoProjectSession,
+) -> u8 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u8::from(session.session.video_provider().ready)
+    })
+}
+
+/// Length in seconds of the clip [`kineto_project_video_cost_micros`]
+/// prices; 0 for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_video_clip_seconds(
+    session: *const KinetoProjectSession,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        u32::from(session.session.video_provider().clip_seconds)
     })
 }
 
@@ -1132,9 +1291,25 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
         SessionError::Production(ProductionError::Style(error)) => style_error_code(error),
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
+        SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
+        SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
+        SessionError::Export(error) => export_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+    }
+}
+
+fn export_error_code(error: &ExportError) -> i32 {
+    match error {
+        ExportError::Shot(error) => shot_error_code(error),
+        ExportError::Plan(error) => revision_error_code(error),
+        ExportError::Incomplete(_) => PROJECT_ERR_EXPORT_INCOMPLETE,
+        ExportError::NothingToExport => PROJECT_ERR_NOTHING_TO_EXPORT,
+        ExportError::InvalidName(_) => PROJECT_ERR_INVALID_ARGUMENT,
+        ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
+        ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
+        ExportError::Io(_) => PROJECT_ERR_IO,
     }
 }
 
@@ -1143,6 +1318,7 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Shot(error) => shot_error_code(error),
         GenerationError::NotConfigured => PROJECT_ERR_PROVIDER_NOT_CONFIGURED,
         GenerationError::NoFirstFrame => PROJECT_ERR_NO_FIRST_FRAME,
+        GenerationError::Incapable(_) => PROJECT_ERR_PROVIDER_INCAPABLE,
         GenerationError::Prompt(KeyframePromptError::MissingIntent) => {
             PROJECT_ERR_SHOT_INTENT_MISSING
         }
@@ -1385,25 +1561,52 @@ mod tests {
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
-    /// Messages the fake `postCObject` received, per port.
-    static POSTED: Mutex<Vec<(i64, [i64; 4])>> = Mutex::new(Vec::new());
+    /// A message the fake `postCObject` received: its port, its numbers and
+    /// the reason it carried.
+    type Posted = (i64, [i64; 4], Option<String>);
+
+    /// Messages the fake `postCObject` received.
+    static POSTED: Mutex<Vec<Posted>> = Mutex::new(Vec::new());
     static POSTED_SIGNAL: Condvar = Condvar::new();
     static NEXT_PORT: AtomicI64 = AtomicI64::new(1);
 
-    /// Stands in for Dart's `NativeApi.postCObject`: decodes the typed-data
-    /// message exactly as the Dart VM would receive it.
+    /// Stands in for Dart's `NativeApi.postCObject`: decodes the message
+    /// exactly as the Dart VM would receive it.
     unsafe extern "C" fn record_post(port: i64, message: *mut DartCObject) -> bool {
-        // SAFETY: the session posts a live typed-data object for the call.
+        // SAFETY: the session posts a live array of live objects for the call.
         let object = unsafe { &*message };
-        assert_eq!(object.kind, DART_COBJECT_TYPED_DATA);
-        // SAFETY: the kind check selects the typed-data union member.
-        let data = unsafe { object.value.as_typed_data };
-        assert_eq!(data.kind, DART_TYPED_DATA_INT64);
-        assert_eq!(data.length, 4);
-        // SAFETY: four aligned i64 values live for the duration of the call.
-        let values = unsafe { slice::from_raw_parts(data.values.cast::<i64>(), 4) };
+        assert_eq!(object.kind, DART_COBJECT_ARRAY);
+        // SAFETY: the kind check selects the array union member.
+        let array = unsafe { object.value.as_array };
+        assert_eq!(array.length, 5);
+        // SAFETY: five element pointers live for the duration of the call.
+        let elements = unsafe { slice::from_raw_parts(array.values, 5) };
+        let numbers: Vec<i64> = elements[..4]
+            .iter()
+            .map(|element| {
+                // SAFETY: each element is a live object for the call.
+                let element = unsafe { &**element };
+                assert_eq!(element.kind, DART_COBJECT_INT64);
+                // SAFETY: the kind check selects the integer member.
+                unsafe { element.value.as_int64 }
+            })
+            .collect();
+        // SAFETY: as above.
+        let last = unsafe { &*elements[4] };
+        let reason = match last.kind {
+            DART_COBJECT_NULL => None,
+            DART_COBJECT_STRING => Some(
+                // SAFETY: the kind check selects the text member, a live
+                // NUL-terminated string for the call.
+                unsafe { std::ffi::CStr::from_ptr(last.value.as_string) }
+                    .to_str()
+                    .expect("a reason is UTF-8")
+                    .to_owned(),
+            ),
+            other => panic!("unexpected reason kind {other}"),
+        };
         let mut posted = POSTED.lock().unwrap();
-        posted.push((port, [values[0], values[1], values[2], values[3]]));
+        posted.push((port, numbers.try_into().unwrap(), reason));
         POSTED_SIGNAL.notify_all();
         true
     }
@@ -1416,11 +1619,16 @@ mod tests {
         }
 
         fn next(&self) -> [i64; 4] {
+            self.next_with_reason().0
+        }
+
+        fn next_with_reason(&self) -> ([i64; 4], Option<String>) {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut posted = POSTED.lock().unwrap();
             loop {
-                if let Some(index) = posted.iter().position(|(port, _)| *port == self.0) {
-                    return posted.remove(index).1;
+                if let Some(index) = posted.iter().position(|(port, ..)| *port == self.0) {
+                    let (_, message, reason) = posted.remove(index);
+                    return (message, reason);
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 assert!(!remaining.is_zero(), "no message on port {}", self.0);
@@ -1446,8 +1654,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(port, _)| *port == self.0)
-                .map(|(_, message)| *message)
+                .filter(|(port, ..)| *port == self.0)
+                .map(|(_, message, _)| *message)
                 .collect()
         }
     }
@@ -1813,8 +2021,61 @@ mod tests {
         assert_eq!(std::mem::size_of::<DartCObjectValue>(), 40);
         assert_eq!(std::mem::size_of::<DartCObject>(), 48);
         assert_eq!(std::mem::offset_of!(DartCObject, value), 8);
-        assert_eq!(std::mem::offset_of!(DartTypedData, length), 8);
-        assert_eq!(std::mem::offset_of!(DartTypedData, values), 16);
+        assert_eq!(std::mem::size_of::<DartArray>(), 16);
+        assert_eq!(std::mem::offset_of!(DartArray, values), 8);
+    }
+
+    #[test]
+    fn a_provider_refusal_reaches_dart_in_the_providers_words() {
+        let port = Port::new();
+        let sink = DartPort {
+            post: record_post,
+            port: port.0,
+        };
+        let refused = |source: Box<dyn std::error::Error + Send + Sync>| {
+            Err(SessionError::Generation(GenerationError::Provider {
+                source,
+                class: ErrorClass::Terminal,
+            }))
+        };
+        sink.completed(
+            7,
+            2,
+            &refused("MiniMax refused the request (1008): insufficient balance".into()),
+        );
+        let (message, reason) = port.next_with_reason();
+        assert_eq!(
+            message,
+            [
+                MESSAGE_COMPLETED,
+                7,
+                i64::from(PROJECT_ERR_PROVIDER_REFUSED),
+                2
+            ]
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("MiniMax refused the request (1008): insufficient balance")
+        );
+
+        // Long words are cut; a NUL cannot end them early.
+        sink.video_finished(2, 1, &refused(format!("a\0b{}", "c".repeat(1000)).into()));
+        let (_, reason) = port.next_with_reason();
+        let reason = reason.unwrap();
+        assert!(reason.starts_with("abccc"));
+        assert_eq!(reason.chars().count(), MAX_REASON_CHARS);
+
+        // A record refused through a generation, or anything not a
+        // provider's, is named by its status alone.
+        sink.completed(8, 2, &refused(Box::new(StyleError::InvalidLog)));
+        assert_eq!(port.next_with_reason().1, None);
+        sink.completed(9, 2, &Err(SessionError::NotOpen));
+        assert_eq!(port.next_with_reason().1, None);
+        sink.completed(10, 2, &Ok(()));
+        assert_eq!(
+            port.next_with_reason(),
+            ([MESSAGE_COMPLETED, 10, 0, 2], None)
+        );
     }
 
     #[test]

@@ -49,6 +49,26 @@ void main() {
     );
   });
 
+  test('handoff codes match the native tables name for name', () {
+    expect(<String>{for (final stage in KinetoStage.values) stage.wireName}, contract.stages.keys.toSet());
+    expect(
+      contract.storageCommands.keys.toSet(),
+      <String>{'plan_collection', 'collect', 'verify'},
+    );
+    expect(contract.mediaLists.keys.toSet(), <String>{'plan', 'missing', 'mismatched', 'owners'});
+    expect(contract.videoTakeCounts.keys.toSet(), <String>{'video_history', 'video_notes', 'video_stale'});
+    expect(contract.exportTexts.keys, containsAll(<String>['missing_reason', 'last_path']));
+  });
+
+  test('video provider codes match the native table', () {
+    expect(
+      <String, int>{
+        for (final kind in KinetoVideoProviderKind.values) kind.wireName: kind.wireValue,
+      },
+      contract.videoProviders,
+    );
+  });
+
   test('document codes match the native tables name for name', () {
     Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
         <String>{for (final value in values) wireName(value)};
@@ -122,6 +142,13 @@ void main() {
       KinetoProjectException.packIncomplete: 'pack_incomplete',
       KinetoProjectException.needsLockedBible: 'needs_locked_bible',
       KinetoProjectException.needsShotPlan: 'needs_shot_plan',
+      KinetoProjectException.providerIncapable: 'provider_incapable',
+      KinetoProjectException.mediaUnreadable: 'media_unreadable',
+      KinetoProjectException.noCollectionPlan: 'no_collection_plan',
+      KinetoProjectException.exportIncomplete: 'export_incomplete',
+      KinetoProjectException.exportExists: 'export_exists',
+      KinetoProjectException.nothingToExport: 'nothing_to_export',
+      KinetoProjectException.mediaChanged: 'media_changed',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);

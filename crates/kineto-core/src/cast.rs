@@ -432,6 +432,7 @@ fn image_of(plan: &CastPlan, generated: GeneratedCandidate) -> Result<CastImage,
         media_path: media_path.as_path().to_string_lossy().replace('\\', "/"),
         provenance,
         dependencies: plan.dependencies.clone(),
+        media_state: None,
     })
 }
 

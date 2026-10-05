@@ -354,23 +354,24 @@ void main() {
       expect(shotTwo.selectedIndex, 0);
       expect(shotTwo.locked, isTrue);
       expect(shotTwo.supersededCount, 3);
-      // A demo session has no video provider; nothing is submitted.
+      // A demo session makes its free placeholder clip from the locked demo
+      // keyframe, through the same background job as a paid video.
+      final videos = project.videoProvider;
+      expect(videos.kind, KinetoVideoProviderKind.localDemo);
+      expect((videos.ready, videos.clipCostMicros, videos.clipSeconds), (true, 0, 2));
       expect(shotOne.videoState, KinetoVideoState.none);
       expect(project.videoMediaPath(0), isNull);
-      await expectLater(
-        project.generateShotVideo(0),
-        throwsA(
-          isA<KinetoProjectException>().having(
-            (error) => error.code,
-            'code',
-            KinetoProjectException.providerNotConfigured,
-          ),
-        ),
-      );
       await expectLater(
         project.lockShotVideo(0),
         throwsA(isA<KinetoProjectException>().having((error) => error.code, 'code', 130)),
       );
+      final finished = project.videoEvents.first;
+      await project.generateShotVideo(0);
+      final event = await finished.timeout(const Duration(seconds: 10));
+      expect((event.shotIndex, event.revision, event.errorCode), (0, 1, 0));
+      expect(File(project.videoMediaPath(0)!).readAsBytesSync().sublist(4, 8), 'ftyp'.codeUnits);
+      await project.lockShotVideo(0);
+      expect(project.shotSnapshot(0).videoState, KinetoVideoState.locked);
       // Demo candidates have no media; a candidate past the last is refused.
       expect(project.candidateMediaPath(0, 0), isNull);
       expect(

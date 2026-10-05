@@ -21,6 +21,24 @@ void main() {
     expect(notes[2], contains('2 job record(s) could not be read'));
   });
 
+  test("a provider's own words follow the status", () {
+    const reason = 'MiniMax refused the request (1008): insufficient balance';
+    final notes = describeRecoveries(const <KinetoRecovery>[
+      KinetoRecovery(shotIndex: 0, revisionOrCount: 1, errorCode: 125, reason: reason),
+    ]);
+    expect(
+      notes.single,
+      contains('(The provider refused the request; it will not succeed unchanged. $reason)'),
+    );
+
+    const failed = KinetoVideoEvent(shotIndex: 0, revision: 1, errorCode: 125, reason: reason);
+    expect(failed.error!.explanation, endsWith('unchanged. $reason'));
+    expect(failed.error.toString(), 'KinetoProjectException(125): ${failed.error!.explanation}');
+    const plain = KinetoVideoEvent(shotIndex: 0, revision: 1, errorCode: 121);
+    expect(plain.error!.explanation, plain.error!.message);
+    expect(const KinetoVideoEvent(shotIndex: 0, revision: 1, errorCode: 0).error, isNull);
+  });
+
   testWidgets('the workspace shows recovered work until dismissed', (tester) async {
     tester.view.physicalSize = const Size(1280, 1400);
     tester.view.devicePixelRatio = 1.0;
