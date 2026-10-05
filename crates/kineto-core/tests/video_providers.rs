@@ -1,15 +1,20 @@
 //! Video providers are chosen by what they declare: one that would make a
 //! shot's video from words alone is refused before anything is written, and
 //! the free local demo runs through the same write-ahead job as a paid
-//! provider, so a restart between submission and attach finishes it.
+//! provider, so a restart between submission and attach finishes it. A
+//! submission past a provider's concurrency ceiling waits for a turn.
 
 use std::{
     collections::BTreeMap,
     convert::Infallible,
     env, fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use kineto_core::{
@@ -153,6 +158,113 @@ impl VideoGenerator for TextOnly {
     fn certainly_not_accepted(&self, error: &Infallible) -> bool {
         match *error {}
     }
+}
+
+/// A paid provider whose submissions hold until the gate opens, so a test
+/// can fill its concurrency ceiling.
+#[derive(Default)]
+struct Gated {
+    arrived: AtomicU32,
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Gated {
+    fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+}
+
+impl VideoGenerator for Gated {
+    type Error = Infallible;
+
+    fn provider(&self) -> &'static str {
+        "gated-video"
+    }
+
+    fn model(&self) -> &'static str {
+        "gated-1"
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        video::demo_video_capabilities()
+    }
+
+    fn needs_frame_image(&self) -> bool {
+        false
+    }
+
+    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
+        format!("duration={clip_seconds}")
+    }
+
+    fn submit(&self, _request: &VideoSubmission) -> Result<String, Infallible> {
+        let task = self.arrived.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+        Ok(format!("gated-{task}"))
+    }
+
+    fn query(&self, _task: &ProviderJobId) -> Result<TaskState, Infallible> {
+        Ok(TaskState::Pending)
+    }
+
+    fn fetch(&self, _file: &str) -> Result<Vec<u8>, Infallible> {
+        Ok(Vec::new())
+    }
+
+    fn class(&self, error: &Infallible) -> ErrorClass {
+        match *error {}
+    }
+
+    fn certainly_not_accepted(&self, error: &Infallible) -> bool {
+        match *error {}
+    }
+}
+
+#[test]
+fn a_submission_past_the_providers_ceiling_waits_for_a_turn_instead_of_failing() {
+    let temp = TempDir::new();
+    let films: Vec<_> = (0..3)
+        .map(|index| film(&temp.0.join(format!("film-{index}"))))
+        .collect();
+    let gated = Gated::default();
+
+    thread::scope(|scope| {
+        // Two submissions fill the paid provider's ceiling of two.
+        let holding: Vec<_> = films[..2]
+            .iter()
+            .map(|(project, shot)| scope.spawn(|| video::start(project, shot, &gated)))
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while gated.arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let (project, shot) = &films[2];
+        let third = scope.spawn(|| video::start(project, shot, &gated));
+        thread::sleep(Duration::from_secs(1));
+        let waited = !third.is_finished();
+        let arrived = gated.arrived.load(Ordering::SeqCst);
+
+        // Open before asserting, or a failure would leave the scope waiting.
+        gated.open();
+        let held: Vec<_> = holding
+            .into_iter()
+            .map(|submission| submission.join().unwrap())
+            .collect();
+        let third = third.join().unwrap();
+        assert_eq!(arrived, 2, "the first two submissions hold the ceiling");
+        assert!(waited, "a full ceiling is waited out: {third:?}");
+        for submission in held {
+            submission.unwrap();
+        }
+        third.unwrap();
+    });
+    assert_eq!(gated.arrived.load(Ordering::SeqCst), 3);
 }
 
 #[test]
