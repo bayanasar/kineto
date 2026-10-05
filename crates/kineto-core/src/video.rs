@@ -81,8 +81,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{
-        GenerationError, NoHooks, ProviderSelectionError, parse_job_key, provenance_of,
-        selected_plugin,
+        GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
+        provenance_of, selected_plugin,
     },
     plugin::{self, PluginProvider},
     video_prompt::{self, EndFrameUse, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
@@ -1438,7 +1438,7 @@ fn submit_one<G: VideoGenerator>(
         attempt: record.attempts().saturating_add(1),
         hooks,
     };
-    match runtime.invoke_prepared(&job_id, &mut submit, submission.request) {
+    match invoke_when_permitted(&runtime, &job_id, &mut submit, submission.request) {
         Ok(DispatchOutcome::Pending {
             provider_job_id, ..
         }) => Ok(VideoJob {
