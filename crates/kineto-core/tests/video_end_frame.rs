@@ -6,7 +6,10 @@
 //! anything is written.
 //!
 //! The `planned` fixture's `office_night_02` continues from
-//! `office_night_01` and has keyframe candidates with images.
+//! `office_night_01` and has keyframe candidates with images. As planned,
+//! it cuts from a static wide shot on 28mm to a medium close-up on 50mm;
+//! most tests first make `office_night_01` a dolly in on 50mm, which
+//! carries the framing on to it.
 
 use std::{
     convert::Infallible,
@@ -77,13 +80,28 @@ fn following() -> ShotKey {
     ShotKey::new("office_night", "office_night_02").unwrap()
 }
 
-/// The planned film with `office_night_01`'s keyframe locked (a demo one,
-/// without an image) and `office_night_02`'s locked at candidate `which`.
+/// The planned film with `office_night_01` a slow dolly in on 50mm that
+/// `office_night_02` carries on, its keyframe locked (a demo one, without
+/// an image), and `office_night_02`'s locked at candidate `which`.
 fn film(target: &Path, which: usize) -> CanonicalProject {
+    filmed(target, which, Some(("50mm", "slow_dolly_in")))
+}
+
+/// [`film`], with `office_night_01` on `setup`'s lens and camera motion,
+/// or as planned.
+fn filmed(target: &Path, which: usize, setup: Option<(&str, &str)>) -> CanonicalProject {
     copy_tree(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/planned"),
         target,
     );
+    if let Some((lens, motion)) = setup {
+        let path = target.join("scenes/office_night/shots/office_night_01/shot.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["lens"] = lens.into();
+        record["camera_motion"] = motion.into();
+        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    }
     let project = CanonicalProject::open(target).unwrap();
     let mut first = ShotWorkflow::load(&project, &opening()).unwrap();
     first.generate(&project).unwrap();
@@ -101,6 +119,8 @@ fn film(target: &Path, which: usize) -> CanonicalProject {
 struct Closing {
     formats: Vec<ImageFormat>,
     resumable: bool,
+    /// The clip lengths it closes on a last frame at; any when empty.
+    closes_at: Vec<u8>,
     sent: Arc<Mutex<Vec<VideoSubmission>>>,
 }
 
@@ -109,6 +129,7 @@ impl Closing {
         Self {
             formats: formats.to_vec(),
             resumable: true,
+            closes_at: Vec::new(),
             sent: Arc::default(),
         }
     }
@@ -141,6 +162,7 @@ impl VideoGenerator for Closing {
             .into_iter()
             .collect(),
             resumable_remote_handle: self.resumable,
+            end_frame_seconds: self.closes_at.iter().copied().collect(),
             ..video::demo_video_capabilities()
         }
     }
@@ -355,6 +377,64 @@ fn where_no_last_frame_can_be_sent_the_prompt_says_why() {
         ))
     );
     assert_eq!(shot.video_staleness().unwrap(), Vec::<String>::new());
+
+    // One that closes on a last frame only in 8 s clips, for a 2 s clip.
+    let temp = TempDir::new();
+    let project = film(&temp.0.join("film"), 0);
+    let long = Closing {
+        closes_at: vec![8],
+        ..Closing::new(&[ImageFormat::Jpeg])
+    };
+    make(&project, &long);
+    assert!(long.sent.lock().unwrap()[0].last_frame.is_none());
+    let (_, _, dropped) = compiled(&project);
+    assert!(dropped.contains(&(
+        "continuity.end_frame".to_owned(),
+        "office_night_02 continues from this shot, but the provider closes on a last frame only \
+         in a clip of 8 s, and this clip is 2 s"
+            .to_owned()
+    )));
+}
+
+#[test]
+fn a_next_shot_that_cuts_away_is_not_closed_on() {
+    let temp = TempDir::new();
+    // As planned: a static wide shot on 28mm, then a close one on 50mm.
+    let project = filmed(&temp.0.join("film"), 0, None);
+    let closing = Closing::new(&[ImageFormat::Jpeg]);
+    let shot = make(&project, &closing);
+    assert!(closing.sent.lock().unwrap()[0].last_frame.is_none());
+    let (prompt, applied, dropped) = compiled(&project);
+    assert!(!prompt.contains("End on the opening frame"), "{prompt}");
+    assert!(!applied.contains(&"continuity.end_frame".to_owned()));
+    assert!(
+        dropped.contains(&(
+            "continuity.end_frame".to_owned(),
+            "office_night_02 continues from this shot, but it is a cut, not a continuation: the \
+         lens changes from 28mm to 50mm"
+                .to_owned()
+        ))
+    );
+    // Nothing closes on the next shot, so nothing goes stale with it.
+    assert!(shot.locked_video().unwrap().is_none());
+    assert_eq!(shot.video_staleness().unwrap(), Vec::<String>::new());
+
+    // On one lens, a static camera still does not explain the change of
+    // framing.
+    let temp = TempDir::new();
+    let project = filmed(&temp.0.join("film"), 0, Some(("50mm", "static")));
+    let closing = Closing::new(&[ImageFormat::Jpeg]);
+    make(&project, &closing);
+    assert!(closing.sent.lock().unwrap()[0].last_frame.is_none());
+    let (_, _, dropped) = compiled(&project);
+    assert!(
+        dropped.contains(&(
+            "continuity.end_frame".to_owned(),
+            "office_night_02 continues from this shot, but it is a cut, not a continuation: the \
+         framing changes from wide to medium close up, which a static camera does not explain"
+                .to_owned()
+        ))
+    );
 }
 
 #[test]

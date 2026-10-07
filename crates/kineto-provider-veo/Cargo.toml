@@ -1,0 +1,16 @@
+[package]
+name = "kineto-provider-veo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.23"
+kineto-jobs = { path = "../kineto-jobs" }
+kineto-providers = { path = "../kineto-providers" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[lib]
+path = "src/lib.rs"

@@ -10,19 +10,27 @@
 //!   words, and reported as dropped where it takes neither.
 //! - Clip length as the declared length nearest the plan's, reported when
 //!   they differ.
-//! - Dialogue is reported as dropped: no provider here speaks; voice comes
-//!   with P5.
+//! - Dialogue is reported as dropped: lines are dubbed apart from the
+//!   clip. A provider that makes its own sound is asked for none of it to
+//!   be speech.
 //! - Mood, the shot's direction and its continuity notes while the prompt
 //!   has room, cut by rank and reported when it has not.
-//! - A last frame: when the next shot continues from this one, its locked
-//!   keyframe could close this clip. No provider here takes a last frame
-//!   yet, so the compiler reports why it was not used.
+//! - A last frame: when the next shot continues from this one in the same
+//!   setup, its locked keyframe closes this clip where the provider takes
+//!   it; otherwise the compiler reports why it was not used.
 //!
 //! The first frame alone does not hold a model to it: in the P4 live run,
 //! Hailuo started from a black-and-white noir keyframe and cut within a
 //! second to a colour scene the action's words described. Version 3 leads
 //! with the locked style, to be kept throughout the clip, and asks for one
 //! continuous shot.
+//!
+//! Continuing from a shot is not the same as staying in its setup. Given
+//! a wide first frame and an over-the-shoulder last one, Veo made seven
+//! seconds of action and dissolved into the close shot in the last: a
+//! transition, which is the editor's. Version 7 sends a last frame only when
+//! the next shot keeps the framing and lens, or this shot's dolly explains
+//! the change, and in a clip length the provider closes on one at.
 
 use kineto_project::shot::{ShotDirection, ShotIntent};
 use kineto_prompts::{
@@ -38,9 +46,9 @@ use crate::{
 };
 
 /// Version recorded with every video prompt compiled by this module.
-pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/6";
+pub const VIDEO_COMPILER_VERSION: &str = "video-prompt/7";
 
-const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v6";
+const INTENT_DOMAIN: &[u8] = b"kineto.video-intent.v7";
 
 /// Mood is cut last of what is optional, the shot's direction before it,
 /// its continuity notes first: the first frame already holds what carries
@@ -69,8 +77,11 @@ pub enum EndFrameUse<'a> {
     NotLocked,
     /// The next shot's keyframe has no image to send.
     NoImage,
-    /// Its image is not one the provider takes as a last frame; why.
+    /// Its image, or this clip's length, is not one the provider takes a
+    /// last frame in; why.
     Unfit(&'a str),
+    /// The next shot cuts away rather than carrying the setup on; why.
+    Cut(&'a str),
 }
 
 impl EndFrameUse<'_> {
@@ -81,6 +92,7 @@ impl EndFrameUse<'_> {
             Self::NotLocked => 3,
             Self::NoImage => 4,
             Self::Unfit(_) => 5,
+            Self::Cut(_) => 6,
         }
     }
 }
@@ -176,6 +188,13 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         "One continuous shot without cuts. Keep the subject, framing and light of the first \
          frame; natural, restrained motion",
     )?;
+    if capabilities.audio {
+        needed(
+            &mut required,
+            "audio.no_speech",
+            "No speech or dialogue; only the sound of the scene",
+        )?;
+    }
     // Carried by the first frame rather than restated.
     let mut carried: Vec<String> = Vec::new();
     if shot.framing.is_some() {
@@ -234,7 +253,11 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
     if shot.dialogue.is_some() {
         dropped.push(drop(
             "shot.dialogue",
-            "the video model generates no speech",
+            if capabilities.audio {
+                "the line is dubbed apart from the clip"
+            } else {
+                "the video model generates no speech"
+            },
         )?);
     }
     let duration_seconds = clip_seconds(capabilities, shot.duration_target, input.dialogue_ms)
@@ -284,6 +307,10 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             EndFrameUse::Unfit(why) => {
                 dropped.push(drop("continuity.end_frame", &unsent(why))?);
             }
+            EndFrameUse::Cut(why) => dropped.push(drop(
+                "continuity.end_frame",
+                &unsent(&format!("it is a cut, not a continuation: {why}")),
+            )?),
         }
     }
 
@@ -299,6 +326,52 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         compiled: prompt.compiled,
         prompt_hash: prompt.prompt_hash,
         duration_seconds,
+    })
+}
+
+/// The framings a dolly moves between, widest first.
+const SCALE: [&str; 8] = [
+    "extreme_wide",
+    "wide",
+    "full",
+    "medium_wide",
+    "medium",
+    "medium_close_up",
+    "close_up",
+    "extreme_close_up",
+];
+
+/// Why `next`, which continues from `shot`, cuts away rather than carrying
+/// its setup on, so that a clip closed on its keyframe would dissolve into
+/// it. `None` when the camera stays: the same framing and lens, or
+/// `shot`'s dolly carries the framing to `next`'s.
+#[must_use]
+pub fn cut_to(shot: &ShotIntent, next: &ShotIntent) -> Option<String> {
+    let (Some(from), Some(to)) = (shot.framing.as_deref(), next.framing.as_deref()) else {
+        return Some("the plan does not say how both shots are framed".to_owned());
+    };
+    if let (Some(from), Some(to)) = (shot.lens.as_deref(), next.lens.as_deref())
+        && from != to
+    {
+        return Some(format!("the lens changes from {from} to {to}"));
+    }
+    if from == to {
+        return None;
+    }
+    let place = |framing: &str| SCALE.iter().position(|step| *step == framing);
+    let motion = shot.camera_motion.as_deref().unwrap_or("static");
+    let carried = match (place(from), place(to), motion) {
+        (Some(from), Some(to), "dolly_in" | "slow_dolly_in") => to > from,
+        (Some(from), Some(to), "dolly_out" | "slow_dolly_out") => to < from,
+        _ => false,
+    };
+    (!carried).then(|| {
+        format!(
+            "the framing changes from {} to {}, which a {} camera does not explain",
+            from.replace('_', " "),
+            to.replace('_', " "),
+            motion.replace('_', " ")
+        )
     })
 }
 
@@ -456,7 +529,15 @@ fn canonical_intent(input: &VideoPromptInput<'_>, shot: &ShotIntent, duration: u
             .map_or(0, |successor| successor.end_frame.code()),
         input.capabilities.camera_control as u8,
         u8::from(input.capabilities.end_frame),
+        u8::from(input.capabilities.audio),
     ]);
+    if let Some(Successor {
+        end_frame: EndFrameUse::Cut(why) | EndFrameUse::Unfit(why),
+        ..
+    }) = input.successor
+    {
+        field(why.as_bytes());
+    }
     hasher.finalize().to_vec()
 }
 
@@ -511,6 +592,117 @@ mod tests {
             dialogue_ms: None,
             preferences: None,
         }
+    }
+
+    #[test]
+    fn a_next_shot_continues_the_setup_only_in_its_framing_and_lens_or_by_a_dolly() {
+        let framed = |framing: &str, lens: Option<&str>, motion: &str| ShotIntent {
+            framing: Some(framing.to_owned()),
+            lens: lens.map(str::to_owned),
+            camera_motion: Some(motion.to_owned()),
+            ..shot()
+        };
+        let wide = framed("wide", Some("28mm"), "static");
+        assert_eq!(
+            cut_to(&wide, &framed("wide", Some("28mm"), "pan_left")),
+            None
+        );
+        assert_eq!(cut_to(&wide, &framed("wide", None, "static")), None);
+        assert_eq!(
+            cut_to(&wide, &framed("wide", Some("50mm"), "static")).as_deref(),
+            Some("the lens changes from 28mm to 50mm")
+        );
+        // The trial's pair: wide to over the shoulder dissolved.
+        assert_eq!(
+            cut_to(&wide, &framed("over_the_shoulder", Some("28mm"), "static")).as_deref(),
+            Some(
+                "the framing changes from wide to over the shoulder, which a static camera \
+                 does not explain"
+            )
+        );
+        let pushing = framed("wide", Some("50mm"), "slow_dolly_in");
+        assert_eq!(
+            cut_to(&pushing, &framed("close_up", Some("50mm"), "static")),
+            None
+        );
+        assert!(cut_to(&pushing, &framed("extreme_wide", Some("50mm"), "static")).is_some());
+        let pulling = framed("close_up", None, "dolly_out");
+        assert_eq!(cut_to(&pulling, &framed("medium", None, "static")), None);
+        assert!(cut_to(&pulling, &framed("insert", None, "static")).is_some());
+        let unframed = ShotIntent {
+            framing: None,
+            ..wide.clone()
+        };
+        assert_eq!(
+            cut_to(&unframed, &wide).as_deref(),
+            Some("the plan does not say how both shots are framed")
+        );
+    }
+
+    #[test]
+    fn a_cut_or_a_clip_too_short_for_a_last_frame_is_reported_and_hashed() {
+        let shot = shot();
+        let mut capabilities = capabilities(CameraControl::Textual);
+        capabilities.end_frame = true;
+        let closing = |end_frame| {
+            compile(VideoPromptInput {
+                successor: Some(Successor {
+                    shot_id: "office_night_02",
+                    end_frame,
+                }),
+                ..input(&shot, &capabilities, None)
+            })
+            .unwrap()
+        };
+        let cut = closing(EndFrameUse::Cut("the lens changes from 28mm to 50mm"));
+        assert!(
+            dropped(&cut).contains(&(
+                "continuity.end_frame",
+                "office_night_02 continues from this shot, but it is a cut, not a continuation: \
+                 the lens changes from 28mm to 50mm"
+            )),
+            "{:?}",
+            dropped(&cut)
+        );
+        let short = closing(EndFrameUse::Unfit(
+            "the provider closes on a last frame only in a clip of 8 s, and this clip is 6 s",
+        ));
+        assert_ne!(cut.prompt_hash, short.prompt_hash);
+        assert_ne!(
+            short.prompt_hash,
+            closing(EndFrameUse::Unfit("its keyframe is too large")).prompt_hash
+        );
+    }
+
+    #[test]
+    fn a_provider_that_makes_its_own_sound_is_asked_for_no_speech() {
+        let mut talking = shot();
+        talking.dialogue = Some("Was it worth it?".to_owned());
+        let silent = capabilities(CameraControl::Textual);
+        let quiet = compile(input(&talking, &silent, None)).unwrap();
+        assert!(!applied(&quiet).contains(&"audio.no_speech"));
+        assert!(
+            dropped(&quiet).contains(&("shot.dialogue", "the video model generates no speech"))
+        );
+
+        let sounding = VideoCapabilities {
+            audio: true,
+            ..silent
+        };
+        let asked = compile(input(&talking, &sounding, None)).unwrap();
+        assert!(applied(&asked).contains(&"audio.no_speech"));
+        assert!(
+            asked
+                .compiled
+                .prompt()
+                .contains("No speech or dialogue; only the sound of the scene."),
+            "{}",
+            asked.compiled.prompt()
+        );
+        assert!(
+            dropped(&asked).contains(&("shot.dialogue", "the line is dubbed apart from the clip"))
+        );
+        assert_ne!(quiet.prompt_hash, asked.prompt_hash);
     }
 
     fn applied(prompt: &VideoPrompt) -> Vec<&str> {

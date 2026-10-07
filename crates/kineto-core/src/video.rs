@@ -30,9 +30,10 @@
 //! [`resubmit`], accepting that the video may be paid for twice.
 //!
 //! Providers are [`VideoGenerator`]s, chosen by what they declare they can
-//! do, never by name: MiniMax Hailuo, paid, and the local demo, free, which
-//! runs through the same jobs and receipts and returns a clip bundled with
-//! the build. Each records its jobs under its own provider key.
+//! do, never by name: MiniMax Hailuo and Google Veo, paid, and the local
+//! demo, free, which runs through the same jobs and receipts and returns a
+//! clip bundled with the build. Each records its jobs under its own
+//! provider key.
 
 use std::{
     convert::Infallible,
@@ -62,8 +63,8 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::{
         AttachOutcome, DEMO_PROVIDER, END_FRAME_FIELD, EndFrame, MAX_VIDEO_CANDIDATES,
-        PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan,
-        locate, video_media_path,
+        PromptProvenance, ShotIntent, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput,
+        VideoPlan, locate, video_media_path,
     },
     shot_plan::shots_in_play,
 };
@@ -71,6 +72,9 @@ use kineto_provider_minimax::{
     MinimaxClient, MinimaxError, PROVIDER as MINIMAX_PROVIDER, SharedTransport, Transport,
     VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask, VideoTaskState,
     camera_command, sniff, video_capabilities,
+};
+use kineto_provider_veo::{
+    OperationState, PROVIDER as VEO_PROVIDER, VeoClient, VeoError, VeoModel, VeoRequest,
 };
 use kineto_providers::{
     CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
@@ -93,6 +97,9 @@ pub const VIDEO_OPERATION: &str = "video.generate";
 /// Provider key MiniMax video jobs are recorded under. Separate from MiniMax
 /// image jobs, whose recovery must never see a video's remote task.
 pub const VIDEO_PROVIDER: &str = "minimax-video";
+/// Provider key Veo video jobs are recorded under, whichever Veo model
+/// made them.
+pub const VEO_VIDEO_PROVIDER: &str = "veo-video";
 /// Provider key the local demo's video jobs are recorded under.
 pub const DEMO_VIDEO_PROVIDER: &str = "local-demo-video";
 /// The model the local demo names: one bundled clip.
@@ -262,6 +269,67 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
     }
 }
 
+impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
+    type Error = VeoError;
+
+    fn provider(&self) -> &str {
+        VEO_VIDEO_PROVIDER
+    }
+
+    fn model(&self) -> &str {
+        VeoClient::model(self).id()
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        VeoClient::model(self).capabilities()
+    }
+
+    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
+        format!(
+            "duration={clip_seconds};resolution={}p;aspect=16:9",
+            lines.unwrap_or(0)
+        )
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, VeoError> {
+        let first_frame = request
+            .first_frame
+            .clone()
+            .ok_or(VeoError::InvalidRequest("Veo needs a first frame"))?;
+        VeoClient::submit(
+            self,
+            &VeoRequest {
+                prompt: request.prompt.clone(),
+                first_frame,
+                last_frame: request.last_frame.clone(),
+                seconds: request.clip_seconds,
+                lines: request
+                    .lines
+                    .ok_or(VeoError::InvalidRequest("Veo needs a clip height"))?,
+            },
+        )
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, VeoError> {
+        Ok(match self.operation(task.as_str())? {
+            OperationState::Running => TaskState::Pending,
+            OperationState::Succeeded { video } => TaskState::Succeeded { file: video },
+        })
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, VeoError> {
+        self.download(file)
+    }
+
+    fn class(&self, error: &VeoError) -> ErrorClass {
+        error.class()
+    }
+
+    fn certainly_not_accepted(&self, error: &VeoError) -> bool {
+        error.certainly_not_accepted()
+    }
+}
+
 /// The local demo: free, offline, and the same for every shot. Its task is
 /// done as soon as it is submitted, and its file is [`DEMO_CLIP`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -361,6 +429,12 @@ pub enum VideoProvider {
     /// MiniMax Hailuo. Paid. Without a client, videos an earlier session
     /// submitted are not followed and no new one is submitted.
     Minimax(Option<VideoClient>),
+    /// Google Veo, one model of it. Paid. Without a client, as for
+    /// MiniMax.
+    Veo {
+        model: VeoModel,
+        client: Option<VeoVideoClient>,
+    },
     /// A plugin the user registered (ADR-0006), as it described itself.
     /// One that declares no video makes none.
     Plugin(Arc<PluginProvider>),
@@ -371,6 +445,7 @@ pub enum VideoProvider {
 pub enum VideoProviderKind {
     LocalDemo,
     Minimax,
+    Veo,
     Plugin,
 }
 
@@ -389,10 +464,11 @@ pub struct VideoProviderInfo {
 
 impl VideoProvider {
     /// The provider named by `selection`: `local-demo` for the free demo,
-    /// `minimax` for MiniMax with the key `secrets` holds, `plugin:<id>` for
-    /// the plugin registered as `<id>`. `None` when nothing is named, so the
-    /// session follows its image provider. A paid provider is used only when
-    /// it is named.
+    /// `minimax` for MiniMax with the key `secrets` holds, `veo` for Veo's
+    /// Lite model with its key (`veo:fast` and `veo:standard` for the
+    /// others), `plugin:<id>` for the plugin registered as `<id>`. `None`
+    /// when nothing is named, so the session follows its image provider. A
+    /// paid provider is used only when it is named.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
@@ -406,6 +482,20 @@ impl VideoProvider {
                     .map_err(ProviderSelectionError::Secret)?
                     .map(MinimaxClient::shared),
             ))),
+            Some(veo) if veo == VEO_PROVIDER || veo.starts_with(&format!("{VEO_PROVIDER}:")) => {
+                let model = match veo.strip_prefix(&format!("{VEO_PROVIDER}:")) {
+                    None => VeoModel::default(),
+                    Some(name) => VeoModel::parse(name)
+                        .ok_or_else(|| ProviderSelectionError::Unknown(veo.to_owned()))?,
+                };
+                Ok(Some(Self::Veo {
+                    model,
+                    client: secrets
+                        .api_key(VEO_PROVIDER)
+                        .map_err(ProviderSelectionError::Secret)?
+                        .map(|key| VeoClient::shared(key, model)),
+                }))
+            }
             Some(other) => match selected_plugin(other) {
                 Some(selected) => selected.map(|plugin| Some(Self::Plugin(plugin))),
                 None => Err(ProviderSelectionError::Unknown(other.to_owned())),
@@ -418,6 +508,7 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => VideoProviderKind::LocalDemo,
             Self::Minimax(_) => VideoProviderKind::Minimax,
+            Self::Veo { .. } => VideoProviderKind::Veo,
             Self::Plugin(_) => VideoProviderKind::Plugin,
         }
     }
@@ -428,6 +519,7 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => DEMO_VIDEO_PROVIDER.to_owned(),
             Self::Minimax(_) => VIDEO_PROVIDER.to_owned(),
+            Self::Veo { .. } => VEO_VIDEO_PROVIDER.to_owned(),
             Self::Plugin(plugin) => plugin::video_key(plugin.key()),
         }
     }
@@ -437,6 +529,7 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => demo_video_capabilities(),
             Self::Minimax(_) => video_capabilities(),
+            Self::Veo { model, .. } => model.capabilities(),
             Self::Plugin(plugin) => plugin.video_capabilities().cloned().unwrap_or_default(),
         }
     }
@@ -453,6 +546,7 @@ impl VideoProvider {
             ready: match self {
                 Self::LocalDemo => true,
                 Self::Minimax(client) => client.is_some(),
+                Self::Veo { client, .. } => client.is_some(),
                 Self::Plugin(plugin) => plugin.video_capabilities().is_some(),
             },
             clip_cost_micros: price,
@@ -1073,8 +1167,8 @@ fn check_capabilities(
     }
 }
 
-/// The shot in play that continues from `key`, with its locked keyframe and
-/// that keyframe's image, when it has them.
+/// The shot in play that continues from `key`, with its intent, and its
+/// locked keyframe and that keyframe's image, when it has them.
 #[allow(clippy::type_complexity)]
 fn successor(
     project: &CanonicalProject,
@@ -1082,6 +1176,7 @@ fn successor(
 ) -> Result<
     Option<(
         ShotKey,
+        Option<ShotIntent>,
         Option<(
             kineto_project::ArtifactDependency,
             Option<ProjectRelativePath>,
@@ -1098,12 +1193,13 @@ fn successor(
             continue;
         }
         let next = ShotWorkflow::load(project, &other)?;
-        if next
-            .intent()?
-            .and_then(|intent| intent.continuity_from)
+        let intent = next.intent()?;
+        if intent
+            .as_ref()
+            .and_then(|intent| intent.continuity_from.as_deref())
             .is_some_and(|from| from == key.shot())
         {
-            return Ok(Some((other.clone(), next.first_frame()?)));
+            return Ok(Some((other.clone(), intent, next.first_frame()?)));
         }
     }
     Ok(None)
@@ -1194,16 +1290,54 @@ pub fn start_videos<G: VideoGenerator>(
     let capabilities = generator.capabilities();
     check_capabilities(&capabilities, frame.as_ref())?;
     let intent = shot.intent()?;
+    let dialogue_ms = crate::dialogue::shot_dialogue_ms(
+        project,
+        shot.key().scene(),
+        intent
+            .as_ref()
+            .and_then(|intent| intent.dialogue.as_deref()),
+    )?;
     let successor = successor(project, shot.key())?;
-    // The shot that continues from this one closes the clip on its locked
-    // keyframe, where the provider takes a last frame and that image.
+    // A shot that continues from this one in the same setup closes the clip
+    // on its locked keyframe, where the provider takes a last frame, in a
+    // clip of this length, and that image. A cut is left to the editor.
+    let cut = successor
+        .as_ref()
+        .and_then(|(_, next, _)| match (&intent, next) {
+            (Some(this), Some(next)) => video_prompt::cut_to(this, next),
+            _ => Some("the plan does not say how both shots are framed".to_owned()),
+        });
+    let clip = video_prompt::clip_seconds(
+        &capabilities,
+        intent.as_ref().and_then(|intent| intent.duration_target),
+        dialogue_ms,
+    );
+    let too_short = clip
+        .filter(|seconds| {
+            !capabilities.end_frame_seconds.is_empty()
+                && !capabilities.end_frame_seconds.contains(seconds)
+        })
+        .map(|seconds| {
+            let lengths: Vec<String> = capabilities
+                .end_frame_seconds
+                .iter()
+                .map(u8::to_string)
+                .collect();
+            format!(
+                "the provider closes on a last frame only in a clip of {} s, and this clip is \
+                 {seconds} s",
+                lengths.join(" or ")
+            )
+        });
     let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
     let end_frame_use = match &successor {
         None => None,
         Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
-        Some((_, None)) => Some(EndFrameUse::NotLocked),
-        Some((_, Some((_, None)))) => Some(EndFrameUse::NoImage),
-        Some((next, Some((keyframe, Some(path))))) => {
+        Some(_) if cut.is_some() => cut.as_deref().map(EndFrameUse::Cut),
+        Some(_) if too_short.is_some() => too_short.as_deref().map(EndFrameUse::Unfit),
+        Some((_, _, None)) => Some(EndFrameUse::NotLocked),
+        Some((_, _, Some((_, None)))) => Some(EndFrameUse::NoImage),
+        Some((next, _, Some((keyframe, Some(path))))) => {
             let bytes = project
                 .root()
                 .read(path)
@@ -1266,19 +1400,13 @@ pub fn start_videos<G: VideoGenerator>(
         successor: successor
             .as_ref()
             .zip(end_frame_use)
-            .map(|((next, _), end_frame)| Successor {
+            .map(|((next, _, _), end_frame)| Successor {
                 shot_id: next.shot(),
                 end_frame,
             }),
         notes: &notes,
         style: style.as_deref(),
-        dialogue_ms: crate::dialogue::shot_dialogue_ms(
-            project,
-            shot.key().scene(),
-            intent
-                .as_ref()
-                .and_then(|intent| intent.dialogue.as_deref()),
-        )?,
+        dialogue_ms,
         preferences: preferences.as_deref(),
     })?;
     let lines = capabilities.clip_lines(prompt.duration_seconds);
@@ -1721,6 +1849,9 @@ pub fn in_flight(project: &CanonicalProject, provider: &str) -> Result<InFlight,
 /// The client type the session uses.
 pub type VideoClient = MinimaxClient<SharedTransport>;
 
+/// The Veo client type the session uses.
+pub type VeoVideoClient = VeoClient<kineto_provider_veo::SharedTransport>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,7 +1911,41 @@ mod tests {
             VideoProvider::select(Some("minimax"), &without_key).unwrap(),
             Some(VideoProvider::Minimax(None))
         ));
+        assert!(matches!(
+            VideoProvider::select(Some("veo"), &with_key).unwrap(),
+            Some(VideoProvider::Veo {
+                model: VeoModel::Lite,
+                client: Some(_)
+            })
+        ));
+        assert!(matches!(
+            VideoProvider::select(Some("veo:standard"), &without_key).unwrap(),
+            Some(VideoProvider::Veo {
+                model: VeoModel::Standard,
+                client: None
+            })
+        ));
+        assert!(VideoProvider::select(Some("veo:ultra"), &with_key).is_err());
         assert!(VideoProvider::select(Some("sora"), &with_key).is_err());
+    }
+
+    #[test]
+    fn veo_is_priced_per_second_at_720p_and_ready_only_with_its_key() {
+        let lite = VideoProvider::Veo {
+            model: VeoModel::Lite,
+            client: None,
+        };
+        assert_eq!(lite.key(), VEO_VIDEO_PROVIDER);
+        let info = lite.info();
+        assert!(!info.ready);
+        assert_eq!((info.clip_seconds, info.clip_cost_micros), (4, 200_000));
+        assert_eq!(
+            lite.estimate(Some(8.0), None),
+            Some(VideoEstimate {
+                clip_seconds: 8,
+                cost_micros: Some(400_000)
+            })
+        );
     }
 
     #[test]

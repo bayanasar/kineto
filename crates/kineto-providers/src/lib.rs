@@ -187,6 +187,11 @@ pub struct VideoCapabilities {
     pub end_frame_formats: BTreeSet<ImageFormat>,
     /// Largest end frame the provider accepts, in bytes.
     pub max_end_frame_bytes: Option<u64>,
+    /// The clip lengths an end frame can be sent with, in seconds; empty
+    /// when any length it renders can take one.
+    pub end_frame_seconds: BTreeSet<u8>,
+    /// Whether its clips come with a sound track it makes itself.
+    pub audio: bool,
     /// Clip heights it renders, in lines; empty when it does not say and
     /// chooses itself.
     pub resolutions: BTreeSet<u16>,
@@ -714,6 +719,8 @@ pub mod fake {
             .into_iter()
             .map(|((seconds, lines), micros)| (VideoClip { seconds, lines }, Price::usd(micros)))
             .collect(),
+            end_frame_seconds: BTreeSet::new(),
+            audio: false,
         }
     }
 

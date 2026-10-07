@@ -363,7 +363,8 @@ enum KinetoImageProviderKind {
 enum KinetoVideoProviderKind {
   localDemo(1, 'local_demo', 'Local demo'),
   minimax(2, 'minimax', 'MiniMax Hailuo-02'),
-  plugin(3, 'plugin', 'Plugin');
+  plugin(3, 'plugin', 'Plugin'),
+  veo(4, 'veo', 'Google Veo 3.1');
 
   const KinetoVideoProviderKind(this.wireValue, this.wireName, this.label);
 

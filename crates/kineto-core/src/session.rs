@@ -1549,8 +1549,8 @@ struct Videos {
 
 impl Videos {
     /// Follow `job` on its own thread, with the provider it was submitted
-    /// to, until its video is on disk or failed. A MiniMax job waits for a
-    /// session with the key, a plugin's for a session that uses it.
+    /// to, until its video is on disk or failed. A MiniMax or Veo job waits
+    /// for a session with the key, a plugin's for a session that uses it.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
         if job.provider == video::DEMO_VIDEO_PROVIDER {
             self.spawn_watcher(LocalDemoVideos, job, root);
@@ -1560,11 +1560,20 @@ impl Videos {
                     let client = client.clone();
                     self.spawn_watcher(client, job, root);
                 }
+                VideoProvider::Veo {
+                    client: Some(client),
+                    ..
+                } => {
+                    let client = client.clone();
+                    self.spawn_watcher(client, job, root);
+                }
                 VideoProvider::Plugin(plugin) => {
                     let videos = PluginVideos::new(Arc::clone(plugin));
                     self.spawn_watcher(videos, job, root);
                 }
-                VideoProvider::LocalDemo | VideoProvider::Minimax(None) => {}
+                VideoProvider::LocalDemo
+                | VideoProvider::Minimax(None)
+                | VideoProvider::Veo { client: None, .. } => {}
             }
         }
     }
@@ -1814,7 +1823,13 @@ impl Worker {
             VideoProvider::Minimax(Some(client)) => self.with_shot(key, |project, _, shot| {
                 video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
             }),
-            VideoProvider::Minimax(None) => {
+            VideoProvider::Veo {
+                client: Some(client),
+                ..
+            } => self.with_shot(key, |project, _, shot| {
+                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
+            }),
+            VideoProvider::Minimax(None) | VideoProvider::Veo { client: None, .. } => {
                 return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
             VideoProvider::Plugin(plugin) => {
@@ -1853,8 +1868,8 @@ impl Worker {
     }
 
     /// Watch again the videos an earlier session submitted. Nothing is
-    /// submitted. The demo's are always followed; MiniMax's wait for a
-    /// session with the key, a plugin's for a session that uses it.
+    /// submitted. The demo's are always followed; MiniMax's and Veo's wait
+    /// for a session with the key, a plugin's for a session that uses it.
     fn resume_videos(&mut self) -> usize {
         if self.project.is_read_only() {
             return 0;
@@ -1862,7 +1877,12 @@ impl Worker {
         let mut providers = vec![video::DEMO_VIDEO_PROVIDER.to_owned()];
         if matches!(
             self.videos.provider,
-            VideoProvider::Minimax(Some(_)) | VideoProvider::Plugin(_)
+            VideoProvider::Minimax(Some(_))
+                | VideoProvider::Veo {
+                    client: Some(_),
+                    ..
+                }
+                | VideoProvider::Plugin(_)
         ) {
             providers.push(self.videos.provider.key());
         }
