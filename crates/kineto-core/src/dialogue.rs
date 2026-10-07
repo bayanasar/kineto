@@ -74,15 +74,15 @@ pub fn line_durations(
                 .filter(|block| block.kind == BlockKind::Dialogue),
         ) {
             let text = block.text.trim();
+            let text_hash = dubbing_document::line_text_hash(text);
             let measured = locks
                 .iter()
-                .find(|lock| lock.line == line)
+                .find(|lock| lock.line == line && lock.text_hash == text_hash)
                 .and_then(|lock| {
                     takes
                         .iter()
                         .find(|take| take.artifact_id == lock.artifact_id)
-                })
-                .filter(|take| take.text == text);
+                });
             let (duration_ms, source) = match measured {
                 Some(take) => (take.duration_ms, DurationSource::Measured),
                 None => {

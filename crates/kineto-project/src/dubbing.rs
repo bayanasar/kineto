@@ -2,11 +2,17 @@
 //! one locked for each.
 //!
 //! `scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every
-//! take of the scene's lines, as `line.<scene>.<NN>.<TTTT>` (line `NN` of
-//! the scene, take `TTTT` of that line), its audio beside it. A take is a
-//! `candidate`, the one `selected` for its line, or `rejected`; nothing is
-//! deleted. Locking a line names its selected take in `locks`. Every change
-//! is one atomic file write.
+//! take of the scene's lines, its audio beside it. A line is known by its
+//! place among the scene's lines and the hash of its words, so a line
+//! inserted, removed or reworded ahead of it never takes over its takes or
+//! its lock. A take is `line.<scene>.<NN>-<HHHHHHHHHHHH>.<TTTT>`: line `NN`
+//! of the scene, saying words whose hash starts `HHHHHHHHHHHH`, take `TTTT`
+//! of that line. Takes recorded before lines were known by their words
+//! (schema version 1) keep their `line.<scene>.<NN>.<TTTT>` IDs, and the
+//! words each records name its line. A take is a `candidate`, the one
+//! `selected` for its line, or `rejected`; nothing is deleted. Locking a
+//! line names its selected take in `locks`. Every change is one atomic file
+//! write.
 
 use std::{error::Error, fmt};
 
@@ -23,9 +29,14 @@ use crate::{
     voice::VoiceSpec,
 };
 
-const SCHEMA_VERSION: u32 = 1;
+/// Takes and locks record their line's text hash from version 2 on.
+const SCHEMA_VERSION: u32 = 2;
 
-/// The artifact ID prefix of a line take, as in `line.office.03.0002`.
+/// How many hex digits of its line's text hash a take ID carries.
+const TEXT_DIGITS: usize = 12;
+
+/// The artifact ID prefix of a line take, as in
+/// `line.office.03-5d41402abc4b.0002`.
 pub const LINE_PREFIX: &str = "line.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +66,9 @@ pub struct LineTake {
     pub character: String,
     /// What it says, as the screenplay had it.
     pub text: String,
+    /// The hash of `text`, which with `line` names the line.
+    #[serde(default)]
+    pub text_hash: String,
     /// The screenplay's direction for the line, as it had it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parenthetical: Option<String>,
@@ -83,6 +97,9 @@ pub struct LineTake {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedLine {
     pub line: u32,
+    /// The hash of the line's words.
+    #[serde(default)]
+    pub text_hash: String,
     pub artifact_id: String,
     pub content_hash: String,
     pub media_path: String,
@@ -187,24 +204,108 @@ pub fn media_dir(scene_id: &str) -> Result<String, DubbingError> {
     Ok(format!("scenes/{}/voice", checked(scene_id)?))
 }
 
-fn take_id(scene_id: &str, line: u32, take: usize) -> Result<ArtifactId, DubbingError> {
-    ArtifactId::new(format!("{LINE_PREFIX}{scene_id}.{line:02}.{take:04}"))
-        .map_err(|_| DubbingError::InvalidScene(scene_id.to_owned()))
+/// The hash a line's words `text` are known by.
+#[must_use]
+pub fn line_text_hash(text: &str) -> String {
+    ContentHash::of(text.as_bytes()).as_str().to_owned()
 }
 
-/// The scene and line a take ID belongs to, as in `("office", 3)` for
-/// `line.office.03.0002`.
-#[must_use]
-pub fn line_of(artifact_id: &str) -> Option<(&str, u32)> {
+/// The digits of `text_hash` a take ID carries, when it is a hash.
+fn text_digits(text_hash: &str) -> Option<&str> {
+    ContentHash::new(text_hash).ok()?;
+    text_hash.strip_prefix("sha256:")?.get(..TEXT_DIGITS)
+}
+
+/// What take IDs of a line start with: `line.<scene>.<NN>-<HHHHHHHHHHHH>`
+/// for the line saying words with hash `text_hash`, or `line.<scene>.<NN>`
+/// without one, as takes of schema version 1 were named.
+fn stem(scene_id: &str, line: u32, text_hash: Option<&str>) -> Result<String, DubbingError> {
+    let scene_id = checked(scene_id)?;
+    Ok(match text_hash {
+        Some(text_hash) => format!(
+            "{LINE_PREFIX}{scene_id}.{line:02}-{}",
+            text_digits(text_hash).ok_or(DubbingError::InvalidLog)?
+        ),
+        None => format!("{LINE_PREFIX}{scene_id}.{line:02}"),
+    })
+}
+
+/// The ID of the take after `made` takes of line `stem`.
+fn take_id(stem: &str, made: usize) -> Result<ArtifactId, DubbingError> {
+    ArtifactId::new(format!("{stem}.{:04}", made + 1)).map_err(|_| DubbingError::InvalidLog)
+}
+
+/// How many of `takes` are numbered under `stem`.
+fn made_under(takes: &[LineTake], stem: &str) -> usize {
+    takes
+        .iter()
+        .filter(|take| {
+            take.artifact_id
+                .rsplit_once('.')
+                .is_some_and(|(of, _)| of == stem)
+        })
+        .count()
+}
+
+/// What a take ID says of its take: the scene, the line's place in it, and
+/// the start of its words' hash, which IDs of schema version 1 lack.
+struct Address<'a> {
+    scene: &'a str,
+    line: u32,
+    text: Option<&'a str>,
+}
+
+fn address(artifact_id: &str) -> Option<Address<'_>> {
     let rest = artifact_id.strip_prefix(LINE_PREFIX)?;
     let (rest, take) = rest.rsplit_once('.')?;
     let (scene, line) = rest.rsplit_once('.')?;
+    let (line, text) = match line.split_once('-') {
+        Some((line, text)) => (line, Some(text)),
+        None => (line, None),
+    };
     let digits = |text: &str, width: usize| {
         text.len() >= width && text.bytes().all(|byte| byte.is_ascii_digit())
     };
-    (digits(take, 4) && digits(line, 2))
-        .then(|| line.parse().ok().map(|line| (scene, line)))
+    let hex = text.is_none_or(|text| {
+        text.len() == TEXT_DIGITS
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    (digits(take, 4) && digits(line, 2) && hex)
+        .then(|| line.parse().ok().map(|line| Address { scene, line, text }))
         .flatten()
+}
+
+/// Whether `artifact_id` names a take of line `line` of `scene_id` saying
+/// words whose hash is `text_hash`. An ID of schema version 1 does not say
+/// which words its take said, so it counts for any words in that place.
+#[must_use]
+pub fn is_take_of(artifact_id: &str, scene_id: &str, line: u32, text_hash: &str) -> bool {
+    address(artifact_id).is_some_and(|found| {
+        found.scene == scene_id
+            && found.line == line
+            && found
+                .text
+                .is_none_or(|digits| text_digits(text_hash) == Some(digits))
+    })
+}
+
+/// The ID `take` must have after the takes `earlier`: the next in its
+/// line's numbering, under the stem of schema version 1 if its ID has that
+/// form, otherwise under its words'.
+fn expected_id(
+    scene_id: &str,
+    earlier: &[LineTake],
+    take: &LineTake,
+) -> Result<ArtifactId, DubbingError> {
+    let unhashed = address(&take.artifact_id).is_some_and(|found| found.text.is_none());
+    let stem = stem(
+        scene_id,
+        take.line,
+        (!unhashed).then_some(take.text_hash.as_str()),
+    )?;
+    take_id(&stem, made_under(earlier, &stem))
 }
 
 fn load(project: &CanonicalProject, scene_id: &str) -> Result<LineLog, DubbingError> {
@@ -220,33 +321,58 @@ fn load(project: &CanonicalProject, scene_id: &str) -> Result<LineLog, DubbingEr
         }
         Err(error) => return Err(DubbingError::Fs(error)),
     };
-    let log: LineLog = serde_json::from_slice(&bytes).map_err(DubbingError::Json)?;
+    let mut log: LineLog = serde_json::from_slice(&bytes).map_err(DubbingError::Json)?;
+    if log.schema_version == 1 {
+        // Lines were known by their place alone; the words each take
+        // records now name its line, and its lock's.
+        for take in &mut log.takes {
+            take.text_hash = line_text_hash(&take.text);
+        }
+        for lock in &mut log.locks {
+            if let Some(take) = log
+                .takes
+                .iter()
+                .find(|take| take.artifact_id == lock.artifact_id)
+            {
+                lock.text_hash.clone_from(&take.text_hash);
+            }
+        }
+        log.schema_version = SCHEMA_VERSION;
+    }
+    let hashed = log
+        .takes
+        .iter()
+        .all(|take| take.text_hash == line_text_hash(&take.text));
     let mut numbered = true;
     for (index, take) in log.takes.iter().enumerate() {
-        let number = log.takes[..index]
-            .iter()
-            .filter(|earlier| earlier.line == take.line)
-            .count()
-            + 1;
-        numbered &=
-            take_id(scene_id, take.line, number).is_ok_and(|id| id.as_str() == take.artifact_id);
+        numbered &= expected_id(scene_id, &log.takes[..index], take)
+            .is_ok_and(|id| id.as_str() == take.artifact_id);
     }
+    let same_line = |one_line: u32, one_hash: &str, other: &LineTake| {
+        other.line == one_line && other.text_hash == one_hash
+    };
     let one_selection = log.takes.iter().all(|take| {
         take.status != TakeStatus::Selected
             || log
                 .takes
                 .iter()
-                .filter(|other| other.line == take.line && other.status == TakeStatus::Selected)
+                .filter(|other| {
+                    same_line(take.line, &take.text_hash, other)
+                        && other.status == TakeStatus::Selected
+                })
                 .count()
                 == 1
     });
-    let locks_named = log.locks.iter().all(|lock| {
-        log.takes
+    let locks_named = log.locks.iter().enumerate().all(|(index, lock)| {
+        log.takes.iter().any(|take| {
+            take.artifact_id == lock.artifact_id && same_line(lock.line, &lock.text_hash, take)
+        }) && !log.locks[..index]
             .iter()
-            .any(|take| take.artifact_id == lock.artifact_id && take.line == lock.line)
+            .any(|earlier| earlier.line == lock.line && earlier.text_hash == lock.text_hash)
     });
-    if log.schema_version == 0
+    if log.schema_version != SCHEMA_VERSION
         || log.scene_id != scene_id
+        || !hashed
         || !numbered
         || !one_selection
         || !locks_named
@@ -283,18 +409,16 @@ pub fn locks(project: &CanonicalProject, scene_id: &str) -> Result<Vec<LockedLin
     load(project, scene_id).map(|log| log.locks)
 }
 
-/// The artifact ID the next take of line `line` of `scene_id` gets.
+/// The artifact ID the next take of line `line` of `scene_id`, saying words
+/// whose hash is `text_hash`, gets.
 pub fn next_artifact_id(
     project: &CanonicalProject,
     scene_id: &str,
     line: u32,
+    text_hash: &str,
 ) -> Result<ArtifactId, DubbingError> {
-    let made = load(project, scene_id)?
-        .takes
-        .iter()
-        .filter(|take| take.line == line)
-        .count();
-    take_id(scene_id, line, made + 1)
+    let stem = stem(scene_id, line, Some(text_hash))?;
+    take_id(&stem, made_under(&load(project, scene_id)?.takes, &stem))
 }
 
 fn check_media(project: &CanonicalProject, take: &LineTake) -> Result<(), DubbingError> {
@@ -309,8 +433,9 @@ fn check_media(project: &CanonicalProject, take: &LineTake) -> Result<(), Dubbin
 
 /// Record `take` of `scene_id`. Idempotent: a take already recorded exactly
 /// as given changes nothing; one that differs is refused. It arrives as a
-/// candidate, numbered right after its line's earlier takes, and its file
-/// must already hold the bytes its record names.
+/// candidate, numbered right after its line's earlier takes, with the hash
+/// of the words it records, and its file must already hold the bytes its
+/// record names.
 pub fn attach(
     project: &CanonicalProject,
     scene_id: &str,
@@ -334,12 +459,8 @@ pub fn attach(
             Err(DubbingError::Conflict(take.artifact_id))
         };
     }
-    let made = log
-        .takes
-        .iter()
-        .filter(|earlier| earlier.line == take.line)
-        .count();
-    if take_id(scene_id, take.line, made + 1)?.as_str() != take.artifact_id
+    if take.text_hash != line_text_hash(&take.text)
+        || expected_id(scene_id, &log.takes, &take)?.as_str() != take.artifact_id
         || take.status != TakeStatus::Candidate
     {
         return Err(DubbingError::InvalidLog);
@@ -381,8 +502,12 @@ pub fn select(
         if log.takes[index].status == TakeStatus::Rejected {
             return Err(DubbingError::Rejected(artifact_id.to_owned()));
         }
-        let line = log.takes[index].line;
-        for take in log.takes.iter_mut().filter(|take| take.line == line) {
+        let (line, text_hash) = (log.takes[index].line, log.takes[index].text_hash.clone());
+        for take in log
+            .takes
+            .iter_mut()
+            .filter(|take| take.line == line && take.text_hash == text_hash)
+        {
             if take.status == TakeStatus::Selected {
                 take.status = TakeStatus::Candidate;
             }
@@ -407,41 +532,49 @@ pub fn reject(
     })
 }
 
-/// The selected take of line `line` of `scene_id`, if one is.
+/// The selected take of line `line` of `scene_id`, saying words whose hash
+/// is `text_hash`, if one is.
 pub fn selected(
     project: &CanonicalProject,
     scene_id: &str,
     line: u32,
+    text_hash: &str,
 ) -> Result<Option<LineTake>, DubbingError> {
-    Ok(takes(project, scene_id)?
-        .into_iter()
-        .find(|take| take.line == line && take.status == TakeStatus::Selected))
+    Ok(takes(project, scene_id)?.into_iter().find(|take| {
+        take.line == line && take.text_hash == text_hash && take.status == TakeStatus::Selected
+    }))
 }
 
-/// Lock line `line` of `scene_id` to its selected take, whose audio must
-/// still hold the bytes its record names. Whether the take still fits the
-/// line and the voice is for the caller to decide first.
+/// Lock line `line` of `scene_id`, saying words whose hash is `text_hash`,
+/// to its selected take, whose audio must still hold the bytes its record
+/// names. Whether the take still fits the line and the voice is for the
+/// caller to decide first.
 pub fn lock(
     project: &CanonicalProject,
     scene_id: &str,
     line: u32,
+    text_hash: &str,
 ) -> Result<LockedLine, DubbingError> {
     let mut log = load(project, scene_id)?;
     let take = log
         .takes
         .iter()
-        .find(|take| take.line == line && take.status == TakeStatus::Selected)
+        .find(|take| {
+            take.line == line && take.text_hash == text_hash && take.status == TakeStatus::Selected
+        })
         .cloned()
         .ok_or(DubbingError::NoSelection(line))?;
     check_media(project, &take)?;
     let locked = LockedLine {
         line,
+        text_hash: take.text_hash,
         artifact_id: take.artifact_id,
         content_hash: take.content_hash,
         media_path: take.media_path,
         duration_ms: take.duration_ms,
     };
-    log.locks.retain(|lock| lock.line != line);
+    log.locks
+        .retain(|lock| lock.line != line || lock.text_hash != text_hash);
     log.locks.push(locked.clone());
     log.locks.sort_by_key(|lock| lock.line);
     save(project, &log)?;

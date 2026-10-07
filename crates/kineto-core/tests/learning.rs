@@ -186,8 +186,8 @@ fn choice(voice_id: &str) -> VoiceChoice {
 }
 
 const SUGGESTED: &str = r#"{"suggestions":[
-  {"dimension":"performance","stance":"prefer","value":"raised voices","reason":"The chosen line take is angry where the passed-over ones are calm.","evidence":["line.office_night.01.0003"]},
-  {"dimension":"pacing","stance":"prefer","value":"quick delivery","reason":"The chosen take is faster.","evidence":["line.office_night.01.0003"]},
+  {"dimension":"performance","stance":"prefer","value":"raised voices","reason":"The chosen line take is angry where the passed-over ones are calm.","evidence":["line.office_night.01-2c40ae8c8fe4.0003"]},
+  {"dimension":"pacing","stance":"prefer","value":"quick delivery","reason":"The chosen take is faster.","evidence":["line.office_night.01-2c40ae8c8fe4.0003"]},
   {"dimension":"lighting","stance":"avoid","value":"flat light","reason":"Unsupported.","evidence":["voice.interviewer.0002"]}
 ]}"#;
 
@@ -236,7 +236,12 @@ fn choices_become_suggestions_the_director_accepts_rewords_or_turns_down() {
         speed_permille: Some(1300),
         note: Some("Harder.".to_owned()),
     });
-    kineto_project::dubbing::select(&project, "office_night", "line.office_night.01.0003").unwrap();
+    kineto_project::dubbing::select(
+        &project,
+        "office_night",
+        "line.office_night.01-2c40ae8c8fe4.0003",
+    )
+    .unwrap();
 
     let choices = learning::choices(&project).unwrap();
     let kinds: Vec<_> = choices.iter().map(|choice| choice.kind).collect();
@@ -246,7 +251,7 @@ fn choices_become_suggestions_the_director_accepts_rewords_or_turns_down() {
     );
     assert_eq!(
         choices[1].chosen[0].artifact_id,
-        "line.office_night.01.0003"
+        "line.office_night.01-2c40ae8c8fe4.0003"
     );
     assert!(
         choices[1].chosen[0]
@@ -268,13 +273,16 @@ fn choices_become_suggestions_the_director_accepts_rewords_or_turns_down() {
             .contains("voice.interviewer.0001 was passed over; cite only chosen work")
     );
     let input = &model.requests()[0].messages[1].content;
-    assert!(input.contains("chosen line.office_night.01.0003: delivery angry"));
+    assert!(input.contains("chosen line.office_night.01-2c40ae8c8fe4.0003: delivery angry"));
     assert!(input.contains("passed over voice.interviewer.0001: DEMO_LOW"));
     let batch: SuggestionBatch = revisions::read(&project, &record).unwrap();
     assert_eq!(batch.compared, Compared::Text);
     assert_eq!(
         batch.considered,
-        ["voice.interviewer.0002", "line.office_night.01.0003"]
+        [
+            "voice.interviewer.0002",
+            "line.office_night.01-2c40ae8c8fe4.0003"
+        ]
     );
     assert_eq!(learning::unconsidered(&project).unwrap(), 0);
 
@@ -302,7 +310,7 @@ fn choices_become_suggestions_the_director_accepts_rewords_or_turns_down() {
         profile.entries[0].source,
         Source::Suggestion {
             reason: "The chosen line take is angry where the passed-over ones are calm.".to_owned(),
-            evidence: vec!["line.office_night.01.0003".to_owned()],
+            evidence: vec!["line.office_night.01-2c40ae8c8fe4.0003".to_owned()],
         }
     );
     assert_eq!(profile.entries[1].value, "brisk, clipped delivery");

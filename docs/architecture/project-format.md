@@ -56,7 +56,7 @@ my-film/
 │       │       └── artifacts.json
 │       └── voice/
 │           ├── lines.json
-│           └── line.scene_001.01.0001.mp3
+│           └── line.scene_001.01-2d8bd7d9bb5f.0001.mp3
 ├── prompts/
 └── .kineto/
     ├── project.db
@@ -165,7 +165,11 @@ Work spoken in a character's voice records the lock as a dependency: the auditio
 
 ## Dubbing
 
-`scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every take of the scene's lines in the order made, as `line.<scene>.<NN>.<TTTT>`: line `NN` of the scene (its place among the scene's dialogue blocks), take `TTTT` of that line. The audio sits beside it.
+`scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every take of the scene's lines in the order made. The audio sits beside it.
+
+A line is known by its place among the scene's dialogue blocks and the hash of its words (`text_hash`, the content hash of the trimmed text). Inserting, removing or rewording a line ahead of it makes another line: the new line has no takes and no lock, and the old takes and lock stay recorded under the words they said. A take is `line.<scene>.<NN>-<HHHHHHHHHHHH>.<TTTT>`: line `NN` of the scene, saying words whose hash starts with those 12 hex digits, take `TTTT` of that line.
+
+Schema version 1 named takes `line.<scene>.<NN>.<TTTT>` and recorded no `text_hash`. Such a file is still read: the words each take records give its hash, and the lock takes its take's. Its takes keep their IDs; new takes of the same line are numbered under its words, beside them. The next write saves the file as version 2.
 
 A take records:
 
@@ -178,15 +182,15 @@ A take records:
 - its dependency on the speaker's voice lock;
 - its `media_state`.
 
-`locks` names, per line, the take it is locked to.
+`locks` names, per line (place and `text_hash`), the take it is locked to.
 
 A take goes stale when:
 
-- the current screenplay changes the line's words (`line.text`) or its direction (`line.parenthetical`);
-- the line is gone (`line.missing`);
+- the current screenplay no longer has its words in its place (`line.missing`);
+- someone else says them (`line.character`), or their direction changes (`line.parenthetical`);
 - the speaker's voice is locked again (`voice.<character>`).
 
-A stale selection is not locked. Takes are paid speech in their provider's `line` partition, numbered per line. Asking for `n` takes keeps the unrejected takes already made the same way and makes the rest. Takes are the scene's media (`MediaKind::Line`, owned by the scene): a locked take is pinned.
+A stale selection is not locked. Takes are paid speech in their provider's `line` partition, numbered per line and its words. Asking for `n` takes keeps the unrejected takes already made the same way and makes the rest. Takes are the scene's media (`MediaKind::Line`, owned by the scene): a locked take is pinned.
 
 A locked line's length is its take's measured length; any other line's length is an estimate.
 

@@ -31,13 +31,13 @@ use kineto_project::{
     ContentHash,
     bible::SAMPLE_BIBLE_JSON,
     cast as cast_document,
-    dubbing::{self as document, DubbingError},
+    dubbing::{self as document, DubbingError, TakeStatus},
     manifest::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
     revisions::{self, DocumentKind},
-    screenplay::{SAMPLE_SCREENPLAY_JSON, Screenplay},
+    screenplay::{Block, BlockKind, SAMPLE_SCREENPLAY_JSON, Screenplay},
     shot::{ShotKey, ShotWorkflow},
     shot_plan::SAMPLE_SHOT_PLAN_JSON,
     story::SAMPLE_ANALYSIS_JSON,
@@ -230,14 +230,64 @@ fn dub(
     project: &CanonicalProject,
     request: &DubRequest,
 ) -> Result<Vec<document::LineTake>, GenerationError> {
+    dub_line(project, 1, request)
+}
+
+fn dub_line(
+    project: &CanonicalProject,
+    line: u32,
+    request: &DubRequest,
+) -> Result<Vec<document::LineTake>, GenerationError> {
     dubbing::dub(
         project,
         &LocalDemoVoices,
         SCENE,
-        1,
+        line,
         request,
         Submission::Once,
         &mut NoHooks,
+    )
+}
+
+/// Change the scene's blocks in a new screenplay revision, and lock it.
+fn rewrite(project: &CanonicalProject, change: impl FnOnce(&mut Vec<Block>)) {
+    let record = revisions::current(project, DocumentKind::Screenplay)
+        .unwrap()
+        .unwrap();
+    let mut screenplay: Screenplay = revisions::read(project, &record).unwrap();
+    let scene = screenplay
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == SCENE)
+        .unwrap();
+    change(&mut scene.blocks);
+    kineto_project::screenplay::edit(project, record.revision, &screenplay).unwrap();
+    kineto_project::screenplay::lock(project, record.revision + 1).unwrap();
+}
+
+/// The interviewer saying `text`.
+fn interviewer(text: &str) -> Block {
+    Block {
+        kind: BlockKind::Dialogue,
+        character: Some("interviewer".to_owned()),
+        parenthetical: None,
+        text: text.to_owned(),
+    }
+}
+
+/// The digits of the hash of `text` that its takes' IDs carry.
+fn digits(text: &str) -> String {
+    document::line_text_hash(text)["sha256:".len()..][..12].to_owned()
+}
+
+fn no_selection(result: Result<document::LockedLine, GenerationError>, line: u32) -> bool {
+    matches!(
+        result,
+        Err(GenerationError::Provider { source, .. })
+            if matches!(
+                source.downcast_ref::<DubbingError>(),
+                Some(DubbingError::NoSelection(found)) if *found == line
+            )
     )
 }
 
@@ -274,7 +324,10 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
         made.iter()
             .map(|take| take.artifact_id.as_str())
             .collect::<Vec<_>>(),
-        ["line.office_night.01.0001", "line.office_night.01.0002"]
+        [
+            "line.office_night.01-2c40ae8c8fe4.0001",
+            "line.office_night.01-2c40ae8c8fe4.0002"
+        ]
     );
     let take = &made[0];
     // "quietly" is a calm delivery, which the demo takes.
@@ -288,7 +341,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
     assert_eq!(take.provenance.compiler_version, "speech-prompt/1");
     assert_eq!(
         take.media_path,
-        "scenes/office_night/voice/line.office_night.01.0001.wav"
+        "scenes/office_night/voice/line.office_night.01-2c40ae8c8fe4.0001.wav"
     );
     let audio = fs::read(target.join(&take.media_path)).unwrap();
     assert_eq!(ContentHash::of(&audio).as_str(), take.content_hash);
@@ -313,7 +366,10 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
         },
     )
     .unwrap();
-    assert_eq!(angry[0].artifact_id, "line.office_night.01.0003");
+    assert_eq!(
+        angry[0].artifact_id,
+        "line.office_night.01-2c40ae8c8fe4.0003"
+    );
     assert_eq!(angry[0].voice.emotion.as_deref(), Some("angry"));
     assert_eq!(angry[0].voice.speed_permille, 1250);
     assert_eq!(angry[0].note.as_deref(), Some("Harder."));
@@ -340,12 +396,12 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
         Err(GenerationError::Provider { source, .. })
             if matches!(source.downcast_ref::<DubbingError>(), Some(DubbingError::NoSelection(1)))
     ));
-    document::select(&project, SCENE, "line.office_night.01.0002").unwrap();
-    document::reject(&project, SCENE, "line.office_night.01.0003").unwrap();
+    document::select(&project, SCENE, "line.office_night.01-2c40ae8c8fe4.0002").unwrap();
+    document::reject(&project, SCENE, "line.office_night.01-2c40ae8c8fe4.0003").unwrap();
     let locked = dubbing::lock(&project, SCENE, 1).unwrap();
-    assert_eq!(locked.artifact_id, "line.office_night.01.0002");
+    assert_eq!(locked.artifact_id, "line.office_night.01-2c40ae8c8fe4.0002");
     assert!(matches!(
-        document::reject(&project, SCENE, "line.office_night.01.0002"),
+        document::reject(&project, SCENE, "line.office_night.01-2c40ae8c8fe4.0002"),
         Err(DubbingError::Locked(_))
     ));
     assert_eq!(state(&project, "dialogue"), StepState::Done);
@@ -362,11 +418,11 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
             .class
     };
     assert_eq!(
-        class("line.office_night.01.0002"),
+        class("line.office_night.01-2c40ae8c8fe4.0002"),
         kineto_project::media::RetentionClass::Pinned
     );
     assert_eq!(
-        class("line.office_night.01.0003"),
+        class("line.office_night.01-2c40ae8c8fe4.0003"),
         kineto_project::media::RetentionClass::Recent
     );
 
@@ -412,7 +468,10 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
     assert_eq!(line["character"], "interviewer");
     assert_eq!(line["text"], "Was it worth it?");
     assert_eq!(line["file"], "office_night_02_line01.wav");
-    assert_eq!(line["artifact_id"], "line.office_night.01.0002");
+    assert_eq!(
+        line["artifact_id"],
+        "line.office_night.01-2c40ae8c8fe4.0002"
+    );
     assert_eq!(line["voice_id"], "demo_low");
     assert_eq!(line["emotion"], "calm");
     let manifest = json("manifest.json");
@@ -454,7 +513,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
     );
     assert_eq!(
         spoken["metadata"]["kineto"]["artifact_id"],
-        "line.office_night.01.0002"
+        "line.office_night.01-2c40ae8c8fe4.0002"
     );
     drop(project);
 
@@ -469,7 +528,7 @@ fn a_take_goes_stale_with_its_line_or_its_voice_and_a_stale_choice_is_not_locked
     let temp = TempDir::new();
     let project = film(&temp.0.join("film"), true);
     dub(&project, &takes(1)).unwrap();
-    document::select(&project, SCENE, "line.office_night.01.0001").unwrap();
+    document::select(&project, SCENE, "line.office_night.01-2c40ae8c8fe4.0001").unwrap();
     dubbing::lock(&project, SCENE, 1).unwrap();
     let stale =
         |project: &CanonicalProject| dubbing::dubbed_lines(project).unwrap()[0].stale.clone();
@@ -492,6 +551,11 @@ fn a_take_goes_stale_with_its_line_or_its_voice_and_a_stale_choice_is_not_locked
     voice_document::select(&project, "interviewer", "voice.interviewer.0002").unwrap();
     voice::lock(&project, "interviewer").unwrap();
     assert_eq!(stale(&project), ["voice.interviewer"]);
+    assert!(matches!(
+        dubbing::lock(&project, SCENE, 1),
+        Err(GenerationError::Provider { source, .. })
+            if matches!(source.downcast_ref::<DubbingError>(), Some(DubbingError::StaleSelection(1)))
+    ));
     assert_eq!(
         state(&project, "dialogue"),
         StepState::Done,
@@ -507,35 +571,256 @@ fn a_take_goes_stale_with_its_line_or_its_voice_and_a_stale_choice_is_not_locked
             .contains(&"office_night line 1: voice.interviewer".to_owned())
     );
 
-    // The screenplay rewords the line.
-    let record = revisions::current(&project, DocumentKind::Screenplay)
-        .unwrap()
-        .unwrap();
-    let mut screenplay: Screenplay = revisions::read(&project, &record).unwrap();
-    let block = screenplay.scenes[0]
-        .blocks
-        .iter_mut()
-        .find(|block| block.text == "Was it worth it?")
-        .unwrap();
-    block.text = "Was it worth all of it?".to_owned();
-    kineto_project::screenplay::edit(&project, record.revision, &screenplay).unwrap();
-    kineto_project::screenplay::lock(&project, record.revision + 1).unwrap();
-    assert_eq!(stale(&project), ["line.text", "voice.interviewer"]);
+    // The screenplay directs the line otherwise: the same words, the same
+    // line, its take stale.
+    rewrite(&project, |blocks| {
+        let line = blocks
+            .iter_mut()
+            .find(|block| block.text == "Was it worth it?")
+            .unwrap();
+        line.parenthetical = Some("flatly".to_owned());
+    });
+    assert_eq!(stale(&project), ["line.parenthetical", "voice.interviewer"]);
 
-    // A new take of the new words in the new voice fits, and locks; the old
-    // selection does not.
+    // It rewords the line: that is another line, with no takes and no lock
+    // of its own. The old take and lock stay, under the old words.
+    let old_lock = document::locks(&project, SCENE).unwrap();
+    rewrite(&project, |blocks| {
+        let line = blocks
+            .iter_mut()
+            .find(|block| block.text == "Was it worth it?")
+            .unwrap();
+        line.text = "Was it worth all of it?".to_owned();
+    });
+    let reworded = dubbing::dubbed_lines(&project).unwrap().remove(0);
+    assert!(reworded.takes.is_empty());
+    assert_eq!(
+        (reworded.lock, reworded.stale),
+        (None, Vec::<String>::new())
+    );
+    assert_eq!(state(&project, "dialogue"), StepState::Ready);
+    assert_eq!(document::locks(&project, SCENE).unwrap(), old_lock);
+    assert_eq!(
+        old_lock[0].text_hash,
+        document::line_text_hash("Was it worth it?")
+    );
+
+    // A new take of the new words in the new voice fits, and locks; the
+    // old words' selection is not this line's.
     let fresh = dub(&project, &takes(1)).unwrap();
+    assert_eq!(
+        fresh[0].artifact_id,
+        format!(
+            "line.office_night.01-{}.0001",
+            digits("Was it worth all of it?")
+        )
+    );
     assert_eq!(fresh[0].text, "Was it worth all of it?");
     assert_eq!(fresh[0].voice.voice_id, "demo_high");
-    document::select(&project, SCENE, "line.office_night.01.0001").unwrap();
-    assert!(matches!(
-        dubbing::lock(&project, SCENE, 1),
-        Err(GenerationError::Provider { source, .. })
-            if matches!(source.downcast_ref::<DubbingError>(), Some(DubbingError::StaleSelection(1)))
-    ));
+    assert!(no_selection(dubbing::lock(&project, SCENE, 1), 1));
     document::select(&project, SCENE, &fresh[0].artifact_id).unwrap();
-    dubbing::lock(&project, SCENE, 1).unwrap();
+    let new_lock = dubbing::lock(&project, SCENE, 1).unwrap();
     assert!(stale(&project).is_empty());
+    assert_eq!(
+        document::locks(&project, SCENE).unwrap(),
+        [old_lock[0].clone(), new_lock]
+    );
+}
+
+#[test]
+fn a_line_put_ahead_of_a_dubbed_line_inherits_none_of_its_takes_or_its_lock() {
+    const B: &str = "Did anyone see you leave the building that night?";
+    const X: &str = "Sit.";
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+
+    // B is line 2, dubbed and locked.
+    rewrite(&project, |blocks| blocks.push(interviewer(B)));
+    let b = dub_line(&project, 2, &takes(1)).unwrap().remove(0);
+    assert_eq!(
+        b.artifact_id,
+        format!("line.office_night.02-{}.0001", digits(B))
+    );
+    document::select(&project, SCENE, &b.artifact_id).unwrap();
+    let b_lock = dubbing::lock(&project, SCENE, 2).unwrap();
+
+    // X goes in ahead of it: X is line 2 now, and B line 3.
+    rewrite(&project, |blocks| {
+        let at = blocks.iter().position(|block| block.text == B).unwrap();
+        blocks.insert(at, interviewer(X));
+    });
+    let lines = dubbing::dubbed_lines(&project).unwrap();
+    assert_eq!((lines[1].line.line, lines[1].line.text.as_str()), (2, X));
+    assert_eq!((lines[2].line.line, lines[2].line.text.as_str()), (3, B));
+    for line in &lines[1..] {
+        assert!(line.takes.is_empty(), "{:?} has takes", line.line.text);
+        assert_eq!((&line.lock, &line.stale), (&None, &Vec::new()));
+    }
+    // B's selected take does not lock X.
+    assert!(no_selection(dubbing::lock(&project, SCENE, 2), 2));
+
+    // X's takes are numbered under its own words, and locking X leaves B's
+    // lock as it was.
+    let x = dub_line(&project, 2, &takes(1)).unwrap().remove(0);
+    assert_eq!(
+        x.artifact_id,
+        format!("line.office_night.02-{}.0001", digits(X))
+    );
+    assert_eq!(x.text, X);
+    document::select(&project, SCENE, &x.artifact_id).unwrap();
+    let x_lock = dubbing::lock(&project, SCENE, 2).unwrap();
+    assert_eq!(
+        document::locks(&project, SCENE).unwrap(),
+        [b_lock.clone(), x_lock.clone()]
+    );
+    let lines = dubbing::dubbed_lines(&project).unwrap();
+    assert_eq!(
+        lines[1]
+            .takes
+            .iter()
+            .map(|take| take.artifact_id.as_str())
+            .collect::<Vec<_>>(),
+        [x.artifact_id.as_str()]
+    );
+    assert_eq!(lines[1].lock.as_ref(), Some(&x_lock));
+    assert!(lines[2].takes.is_empty() && lines[2].lock.is_none());
+
+    // B's take is still B's: its words, its hash, its selection.
+    let recorded = document::takes(&project, SCENE).unwrap();
+    let kept = recorded
+        .iter()
+        .find(|take| take.artifact_id == b.artifact_id)
+        .unwrap();
+    assert_eq!(
+        (kept.line, kept.text.as_str(), kept.status),
+        (2, B, TakeStatus::Selected)
+    );
+    assert_eq!(kept.text_hash, document::line_text_hash(B));
+    assert_eq!(b_lock.text_hash, kept.text_hash);
+
+    // Line 2 is as long as X's take says, and B, now line 3, is estimated.
+    assert_ne!(x.duration_ms, b.duration_ms);
+    let screenplay: Screenplay = revisions::read(
+        &project,
+        &revisions::current(&project, DocumentKind::Screenplay)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let durations = dialogue::line_durations(&project, &screenplay).unwrap();
+    assert_eq!(
+        (durations[1].duration_ms, durations[1].source),
+        (x.duration_ms, dialogue::DurationSource::Measured)
+    );
+    assert_eq!(durations[2].source, dialogue::DurationSource::Estimated);
+    drop(project);
+
+    // The files alone say the same.
+    fs::remove_dir_all(target.join(".kineto")).unwrap();
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(
+        document::locks(&project, SCENE).unwrap(),
+        [b_lock, x_lock.clone()]
+    );
+    assert_eq!(
+        dubbing::dubbed_lines(&project).unwrap()[1].lock.as_ref(),
+        Some(&x_lock)
+    );
+}
+
+#[test]
+fn a_version_1_record_is_read_by_the_words_its_takes_say_and_kept_when_written() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let made = dub(&project, &takes(2)).unwrap();
+    document::select(&project, SCENE, &made[0].artifact_id).unwrap();
+    dubbing::lock(&project, SCENE, 1).unwrap();
+    drop(project);
+
+    // As schema version 1 wrote it: takes named by their place alone, and
+    // no text hashes. The job records named the takes otherwise.
+    let path = target.join("scenes/office_night/voice/lines.json");
+    let mut log: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let unhashed = |id: &serde_json::Value| {
+        id.as_str()
+            .unwrap()
+            .replace(&format!("-{}", digits("Was it worth it?")), "")
+    };
+    for take in log["takes"].as_array_mut().unwrap() {
+        let media = unhashed(&take["media_path"]);
+        fs::rename(
+            target.join(take["media_path"].as_str().unwrap()),
+            target.join(&media),
+        )
+        .unwrap();
+        take["artifact_id"] = unhashed(&take["artifact_id"]).into();
+        take["media_path"] = media.into();
+        take.as_object_mut().unwrap().remove("text_hash").unwrap();
+    }
+    for lock in log["locks"].as_array_mut().unwrap() {
+        lock["artifact_id"] = unhashed(&lock["artifact_id"]).into();
+        lock["media_path"] = unhashed(&lock["media_path"]).into();
+        lock.as_object_mut().unwrap().remove("text_hash").unwrap();
+    }
+    log["schema_version"] = 1.into();
+    fs::write(&path, serde_json::to_vec_pretty(&log).unwrap()).unwrap();
+    fs::remove_dir_all(target.join(".kineto")).unwrap();
+
+    let project = CanonicalProject::open(&target).unwrap();
+    let line = dubbing::dubbed_lines(&project).unwrap().remove(0);
+    assert_eq!(
+        line.takes
+            .iter()
+            .map(|take| take.artifact_id.as_str())
+            .collect::<Vec<_>>(),
+        ["line.office_night.01.0001", "line.office_night.01.0002"]
+    );
+    assert_eq!(
+        line.lock.as_ref().map(|lock| lock.artifact_id.as_str()),
+        Some("line.office_night.01.0001")
+    );
+    assert!(line.stale.is_empty());
+    let screenplay: Screenplay = revisions::read(
+        &project,
+        &revisions::current(&project, DocumentKind::Screenplay)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        dialogue::line_durations(&project, &screenplay).unwrap()[0].source,
+        dialogue::DurationSource::Measured
+    );
+
+    // Asked for the same way again, the two old takes count; a third is
+    // numbered under the line's words, beside them.
+    assert_eq!(dub(&project, &takes(2)).unwrap().len(), 2);
+    let three = dub(&project, &takes(3)).unwrap();
+    assert_eq!(
+        three[2].artifact_id,
+        "line.office_night.01-2c40ae8c8fe4.0001"
+    );
+
+    // Written again, the record is version 2 and keeps the old IDs.
+    let log: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let hash = document::line_text_hash("Was it worth it?");
+    assert_eq!(log["schema_version"], 2);
+    assert_eq!(log["takes"][0]["artifact_id"], "line.office_night.01.0001");
+    assert_eq!(log["takes"][0]["text_hash"], hash.as_str());
+    assert_eq!(log["locks"][0]["text_hash"], hash.as_str());
+
+    // Reworded, the line inherits none of them.
+    rewrite(&project, |blocks| {
+        let line = blocks
+            .iter_mut()
+            .find(|block| block.text == "Was it worth it?")
+            .unwrap();
+        line.text = "Was it worth all of it?".to_owned();
+    });
+    let line = dubbing::dubbed_lines(&project).unwrap().remove(0);
+    assert!(line.takes.is_empty() && line.lock.is_none());
 }
 
 #[test]
