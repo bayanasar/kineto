@@ -196,6 +196,13 @@ pub trait VideoGenerator {
     fn query(&self, task: &ProviderJobId) -> Result<TaskState, Self::Error>;
     fn fetch(&self, file: &str) -> Result<Vec<u8>, Self::Error>;
     fn class(&self, error: &Self::Error) -> ErrorClass;
+    /// How a task that ended with `error` is reported once following it
+    /// has stopped: retryable where asking for the video again may well
+    /// succeed, though the task itself will not. [`Self::class`] decides
+    /// whether to keep following it.
+    fn ended_class(&self, error: &Self::Error) -> ErrorClass {
+        self.class(error)
+    }
     /// Whether `error` proves the provider did not accept the submission,
     /// so it cannot have been charged.
     fn certainly_not_accepted(&self, error: &Self::Error) -> bool;
@@ -323,6 +330,10 @@ impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
 
     fn class(&self, error: &VeoError) -> ErrorClass {
         error.class()
+    }
+
+    fn ended_class(&self, error: &VeoError) -> ErrorClass {
+        error.ended_class()
     }
 
     fn certainly_not_accepted(&self, error: &VeoError) -> bool {
@@ -1630,7 +1641,10 @@ pub fn watch<G: VideoGenerator>(
             Err(error) => {
                 return Some(VideoDone {
                     job,
-                    result: Err(failure(generator, error)),
+                    result: Err(VideoFailure {
+                        class: generator.ended_class(&error),
+                        source: Box::new(error),
+                    }),
                 });
             }
         };

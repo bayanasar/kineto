@@ -2,7 +2,8 @@
 //! submission with an operation, says it is running, then holds the video.
 //! The clip is followed across a restart by its operation, never submitted
 //! again, and attached. An operation Veo was too busy to finish, or a video
-//! no longer on Veo's server, is final, and asking again submits afresh.
+//! no longer on Veo's server, is final, and asking again submits afresh;
+//! the busy one is reported as worth asking again.
 //!
 //! The `planned` fixture's `office_night_02` has keyframe candidates with
 //! images, which Veo starts from.
@@ -336,8 +337,9 @@ fn a_busy_or_expired_operation_is_final_and_asking_again_submits_afresh() {
         video::start(&project, &shot, &veo).unwrap()
     };
 
+    // Over, but worth asking again: the director is told to try again.
     let (class, busy) = veo_error(follow(&project, &veo, start()).unwrap_err());
-    assert_eq!(class, ErrorClass::Terminal);
+    assert_eq!(class, ErrorClass::Retryable);
     assert!(matches!(busy, VeoError::Failed { code: 14, .. }));
     assert!(busy.to_string().contains("Nothing was charged; ask again"));
 

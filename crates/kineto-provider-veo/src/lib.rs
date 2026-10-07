@@ -382,6 +382,19 @@ impl VeoError {
         }
     }
 
+    /// How an operation that ended with this is to be read once it is
+    /// final: retryable where asking for the video again often works. Veo
+    /// charges only for a video it delivers, and an operation it was too
+    /// busy for, or whose picture or sound its filters withheld, often
+    /// succeeds the next time.
+    #[must_use]
+    pub fn ended_class(&self) -> ErrorClass {
+        match self {
+            Self::Failed { .. } | Self::Filtered(_) => ErrorClass::Retryable,
+            other => other.class(),
+        }
+    }
+
     /// Whether Veo certainly did not accept a submission: it was never
     /// sent, no connection was made, or the API refused it. Any other
     /// failure may have started an operation, and been charged for.
@@ -420,7 +433,10 @@ impl fmt::Display for VeoError {
                 formatter,
                 "Veo could not make the video ({code}): {message}. Nothing was charged"
             ),
-            Self::Filtered(reason) => write!(formatter, "Veo withheld the video: {reason}"),
+            Self::Filtered(reason) => write!(
+                formatter,
+                "Veo withheld the video: {reason}. No video was made, so nothing was charged"
+            ),
             Self::Download { status } => write!(
                 formatter,
                 "the video's file answered HTTP {status}; Veo keeps a video for 2 days"
@@ -1093,14 +1109,21 @@ mod tests {
         let veo = client(&recorded, VeoModel::Lite);
         let busy = veo.operation(OPERATION).unwrap_err();
         assert_eq!(busy.class(), ErrorClass::Terminal);
+        assert_eq!(busy.ended_class(), ErrorClass::Retryable);
         assert!(busy.to_string().contains("ask again"), "{busy}");
+        let withheld = veo.operation(OPERATION).unwrap_err();
         assert!(matches!(
-            veo.operation(OPERATION),
-            Err(VeoError::Filtered(reason)) if reason == "The video could not be made safely."
+            &withheld,
+            VeoError::Filtered(reason) if reason == "The video could not be made safely."
         ));
+        assert_eq!(
+            (withheld.class(), withheld.ended_class()),
+            (ErrorClass::Terminal, ErrorClass::Retryable)
+        );
         let expired = veo.download(VIDEO).unwrap_err();
         assert_eq!(expired, VeoError::Download { status: 404 });
         assert_eq!(expired.class(), ErrorClass::Terminal);
+        assert_eq!(expired.ended_class(), ErrorClass::Terminal);
         assert_eq!(
             veo.download(VIDEO).unwrap_err().class(),
             ErrorClass::Retryable
