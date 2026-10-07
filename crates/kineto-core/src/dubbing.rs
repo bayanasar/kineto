@@ -8,7 +8,10 @@
 //! takes says how many there should be, not how many to add: takes already
 //! made the same way, and not rejected, count.
 //!
-//! A take goes stale when its line's words or direction change in the
+//! A line is known by its place in its scene and the hash of its words:
+//! inserting, removing or rewording a line ahead of it makes another line,
+//! which never inherits its takes or its lock. A take goes stale when its
+//! line is gone, someone else says it or its direction changes in the
 //! screenplay, or its character's voice is locked again; a stale take is
 //! not locked. A locked line's length is measured, not estimated, from then
 //! on (see [`crate::dialogue`]).
@@ -53,6 +56,8 @@ pub struct ScreenplayLine {
     pub line: u32,
     pub character: Option<String>,
     pub text: String,
+    /// The hash of `text`, which with `line` names the line.
+    pub text_hash: String,
     pub parenthetical: Option<String>,
 }
 
@@ -75,6 +80,7 @@ pub fn screenplay_lines(screenplay: &Screenplay) -> Vec<ScreenplayLine> {
                     line,
                     character: block.character.clone(),
                     text: block.text.trim().to_owned(),
+                    text_hash: document::line_text_hash(block.text.trim()),
                     parenthetical: block
                         .parenthetical
                         .as_deref()
@@ -181,6 +187,7 @@ impl SpeechLedger for LineTakes {
                 line: plan.line,
                 character: plan.character.clone(),
                 text: plan.text.clone(),
+                text_hash: document::line_text_hash(&plan.text),
                 parenthetical: plan.parenthetical.clone(),
                 status: TakeStatus::Candidate,
                 voice: plan.voice.clone(),
@@ -216,8 +223,15 @@ impl SpeechLedger for LineTakes {
 }
 
 /// Takes are numbered per line.
-fn numbered<'a>(scene_id: &'a str, line: u32) -> impl Fn(&str) -> bool + 'a {
-    move |artifact_id| document::line_of(artifact_id) == Some((scene_id, line))
+fn numbered<'a>(spoken: &'a ScreenplayLine) -> impl Fn(&str) -> bool + 'a {
+    move |artifact_id| {
+        document::is_take_of(
+            artifact_id,
+            &spoken.scene_id,
+            spoken.line,
+            &spoken.text_hash,
+        )
+    }
 }
 
 /// Record takes an interrupted session left, as a project opens, for every
@@ -312,13 +326,14 @@ pub fn dub<G: SpeechGenerator>(
     });
     // Takes an interruption left are recorded first, so they count.
     let (mut jobs, _) =
-        SpeechJobs::<LineTakes, G>::open(project, generator, numbered(scene_id, line), submission)?;
+        SpeechJobs::<LineTakes, G>::open(project, generator, numbered(&spoken_line), submission)?;
     let made_this_way = |project: &CanonicalProject| -> Result<Vec<LineTake>, GenerationError> {
         Ok(document::takes(project, scene_id)
             .map_err(document_error)?
             .into_iter()
             .filter(|take| {
                 take.line == line
+                    && take.text_hash == spoken_line.text_hash
                     && take.input_hash == input_hash.as_str()
                     && take.status != TakeStatus::Rejected
             })
@@ -327,7 +342,8 @@ pub fn dub<G: SpeechGenerator>(
     let wanted = request.takes.max(1);
     for _ in made_this_way(project)?.len()..wanted {
         let artifact_id =
-            document::next_artifact_id(project, scene_id, line).map_err(document_error)?;
+            document::next_artifact_id(project, scene_id, line, &spoken_line.text_hash)
+                .map_err(document_error)?;
         let plan = TakePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             artifact_id: artifact_id.as_str().to_owned(),
@@ -357,10 +373,11 @@ pub fn dub_cost<G: SpeechGenerator>(generator: &G, takes: usize, text: &str) -> 
         .map(|cost| cost.saturating_mul(u64::try_from(takes).unwrap_or(u64::MAX)))
 }
 
-/// Why `take` no longer fits its line: `line.text` or `line.parenthetical`
-/// when the screenplay changed them, `line.missing` when the line is gone,
-/// and `voice.<character>` when the character's voice was locked again or
-/// went. Empty when it fits.
+/// Why `take` no longer fits its line: `line.missing` when the screenplay
+/// no longer has those words in that place, `line.character` when someone
+/// else says them, `line.parenthetical` when their direction changed, and
+/// `voice.<character>` when the character's voice was locked again or went.
+/// Empty when it fits.
 pub fn staleness(
     project: &CanonicalProject,
     scene_id: &str,
@@ -377,14 +394,13 @@ fn staleness_among(
     take: &LineTake,
 ) -> Result<Vec<String>, GenerationError> {
     let mut causes = Vec::new();
-    match lines
-        .iter()
-        .find(|line| line.scene_id == scene_id && line.line == take.line)
-    {
+    match lines.iter().find(|line| {
+        line.scene_id == scene_id && line.line == take.line && line.text_hash == take.text_hash
+    }) {
         None => causes.push("line.missing".to_owned()),
         Some(line) => {
-            if line.text != take.text || line.character.as_deref() != Some(&take.character) {
-                causes.push("line.text".to_owned());
+            if line.character.as_deref() != Some(&take.character) {
+                causes.push("line.character".to_owned());
             }
             if line.parenthetical != take.parenthetical {
                 causes.push("line.parenthetical".to_owned());
@@ -403,20 +419,21 @@ fn staleness_among(
     Ok(causes)
 }
 
-/// Lock line `line` of `scene_id` to its selected take. Refused while the
-/// take is stale.
+/// Lock line `line` of `scene_id`, as the screenplay now has it, to its
+/// selected take. Refused while the take is stale.
 pub fn lock(
     project: &CanonicalProject,
     scene_id: &str,
     line: u32,
 ) -> Result<LockedLine, GenerationError> {
-    let selected = document::selected(project, scene_id, line)
+    let spoken = line_in(project, scene_id, line)?;
+    let selected = document::selected(project, scene_id, line, &spoken.text_hash)
         .map_err(document_error)?
         .ok_or_else(|| document_error(DubbingError::NoSelection(line)))?;
     if !staleness(project, scene_id, &selected)?.is_empty() {
         return Err(document_error(DubbingError::StaleSelection(line)));
     }
-    document::lock(project, scene_id, line).map_err(document_error)
+    document::lock(project, scene_id, line, &spoken.text_hash).map_err(document_error)
 }
 
 /// A line and where its dubbing stands.
@@ -447,7 +464,10 @@ pub fn dubbed_lines(project: &CanonicalProject) -> Result<Vec<DubbedLine>, Gener
             .iter()
             .find(|(scene, ..)| *scene == line.scene_id)
             .expect("the scene was just read");
-        let lock = locks.iter().find(|lock| lock.line == line.line).cloned();
+        let lock = locks
+            .iter()
+            .find(|lock| lock.line == line.line && lock.text_hash == line.text_hash)
+            .cloned();
         let stale = match lock.as_ref().and_then(|lock| {
             takes
                 .iter()
@@ -460,7 +480,7 @@ pub fn dubbed_lines(project: &CanonicalProject) -> Result<Vec<DubbedLine>, Gener
             line: line.clone(),
             takes: takes
                 .iter()
-                .filter(|take| take.line == line.line)
+                .filter(|take| take.line == line.line && take.text_hash == line.text_hash)
                 .cloned()
                 .collect(),
             lock,

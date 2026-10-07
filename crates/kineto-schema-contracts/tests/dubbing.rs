@@ -218,8 +218,18 @@ fn dubbed_lines_and_the_package_that_carries_them_match_committed_schemas() {
         &mut NoHooks,
     )
     .unwrap();
-    document::select(&project, "office_night", "line.office_night.01.0001").unwrap();
-    document::reject(&project, "office_night", "line.office_night.01.0002").unwrap();
+    document::select(
+        &project,
+        "office_night",
+        "line.office_night.01-2c40ae8c8fe4.0001",
+    )
+    .unwrap();
+    document::reject(
+        &project,
+        "office_night",
+        "line.office_night.01-2c40ae8c8fe4.0002",
+    )
+    .unwrap();
     dubbing::lock(&project, "office_night", 1).unwrap();
 
     let mut shot = ShotWorkflow::load(
@@ -250,6 +260,14 @@ fn dubbed_lines_and_the_package_that_carries_them_match_committed_schemas() {
     assert!(validate_value(&lines_schema, &drifted, "$").is_err());
     let mut drifted = lines.clone();
     drifted["locks"][0]["line"] = 0.into();
+    assert!(validate_value(&lines_schema, &drifted, "$").is_err());
+    assert_eq!(lines["schema_version"], 2);
+    assert_eq!(
+        lines["locks"][0]["text_hash"],
+        lines["takes"][0]["text_hash"]
+    );
+    let mut drifted = lines.clone();
+    drifted["locks"][0]["text_hash"] = "Was it worth it?".into();
     assert!(validate_value(&lines_schema, &drifted, "$").is_err());
 
     let out = temp.0.join("out");

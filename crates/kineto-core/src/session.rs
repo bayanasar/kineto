@@ -1610,7 +1610,8 @@ struct Worker {
     voices: Option<Result<Vec<Voice>, String>>,
     /// Lines, by scene and number, a take of which may have been charged
     /// without its audio.
-    lines_unresolved: BTreeSet<(String, u32)>,
+    /// Takes that may have been charged without their audio being kept.
+    lines_unresolved: Vec<String>,
 }
 
 impl Worker {
@@ -1650,7 +1651,7 @@ impl Worker {
             speech,
             voice_unresolved: BTreeSet::new(),
             voices: None,
-            lines_unresolved: BTreeSet::new(),
+            lines_unresolved: Vec::new(),
             collection: None,
             mismatched: Vec::new(),
             last_export: None,
@@ -2299,7 +2300,7 @@ impl Worker {
                         count: recovery.attached.len(),
                     });
                 }
-                self.lines_unresolved = unresolved_lines(&recovery.unresolved);
+                self.lines_unresolved.clone_from(&recovery.unresolved);
             }
             Err(_) => attention += 1,
         }
@@ -2311,7 +2312,7 @@ impl Worker {
 
     fn note_unresolved_lines(&mut self) {
         if let Ok(recovery) = dubbing::recover(&self.project) {
-            self.lines_unresolved = unresolved_lines(&recovery.unresolved);
+            self.lines_unresolved.clone_from(&recovery.unresolved);
         }
     }
 
@@ -2340,7 +2341,7 @@ impl Worker {
                 self.voice_unresolved = unresolved_characters(&recovery.unresolved);
             }
             ImageWork::LineTake => {
-                self.lines_unresolved = unresolved_lines(&recovery.unresolved);
+                self.lines_unresolved.clone_from(&recovery.unresolved);
             }
             ImageWork::Casting => {
                 self.cast_unresolved = recovery
@@ -2792,9 +2793,10 @@ impl Worker {
                     .map(|take| at(&take.media_path))
                     .collect();
                 let take_cost_micros = self.speech.estimate(&dubbed.line.text);
-                let unresolved = self
-                    .lines_unresolved
-                    .contains(&(dubbed.line.scene_id.clone(), dubbed.line.line));
+                let said = &dubbed.line;
+                let unresolved = self.lines_unresolved.iter().any(|take| {
+                    dubbing_document::is_take_of(take, &said.scene_id, said.line, &said.text_hash)
+                });
                 PublishedLine {
                     dubbed,
                     media,
@@ -2960,15 +2962,6 @@ fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
         ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
         ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
     }
-}
-
-/// The lines `unresolved` takes belong to.
-fn unresolved_lines(unresolved: &[String]) -> BTreeSet<(String, u32)> {
-    unresolved
-        .iter()
-        .filter_map(|id| dubbing_document::line_of(id))
-        .map(|(scene, line)| (scene.to_owned(), line))
-        .collect()
 }
 
 /// The characters `unresolved` auditions belong to.
