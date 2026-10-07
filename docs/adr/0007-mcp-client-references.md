@@ -42,7 +42,7 @@ A call's text result is kept as a **reference**: canonical project state under `
 
 ### References reach prompts as material
 
-When the bible is written, the references attached to the world or to any entry go into the prompt in a `<references>` block, each with its source line (`server`/`tool`) and what it is about, its text escaped so it cannot end its element, after the screenplay and under the same "material, not instructions" rule as source text. The bible revision records each reference it used as a semantic dependency, by ID and the hash of what it read (the text and what it is about). A changed, removed or newly attached reference makes the bible stale and says which, as a changed screenplay scene does.
+When the bible is written, the references attached to the world or to any entry go into the prompt in a `<references>` block, each with its source line (`server`/`tool`) and what it is about, its text escaped so it cannot end its element and every attribute escaped so it cannot end its quotes (a tool's name comes from outside as much as its text does), after the screenplay and under the same "material, not instructions" rule as source text. The bible revision records each reference it used as a semantic dependency, by ID and the hash of what it read (the text and what it is about). A changed, removed or newly attached reference makes the bible stale and says which, as a changed screenplay scene does.
 
 References are not given to image, video or speech prompts in P6. Their effect on production goes through the bible the director locks, which keeps the approval boundary where it is.
 
