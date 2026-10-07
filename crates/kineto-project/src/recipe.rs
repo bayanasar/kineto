@@ -22,16 +22,23 @@ pub const RECIPE_SCHEMA: &str = include_str!("../../../schemas/recipe.schema.jso
 
 /// The recipe a new project follows.
 pub const DEFAULT_RECIPE_ID: &str = "default-film";
-pub const DEFAULT_RECIPE_VERSION: u32 = 1;
+pub const DEFAULT_RECIPE_VERSION: u32 = 2;
 
 const RECIPE_SCHEMA_VERSION: u32 = 1;
 
 /// The recipes this build ships, as `(id, version, json)`.
-const BUILTIN: [(&str, u32, &str); 1] = [(
-    DEFAULT_RECIPE_ID,
-    DEFAULT_RECIPE_VERSION,
-    include_str!("../../../recipes/default-film-1.json"),
-)];
+const BUILTIN: [(&str, u32, &str); 2] = [
+    (
+        DEFAULT_RECIPE_ID,
+        1,
+        include_str!("../../../recipes/default-film-1.json"),
+    ),
+    (
+        DEFAULT_RECIPE_ID,
+        2,
+        include_str!("../../../recipes/default-film-2.json"),
+    ),
+];
 
 /// What a step makes. The engine knows how to tell, from the project's
 /// files, whether each kind has been made, approved, or has gone stale.
@@ -47,6 +54,10 @@ pub enum ArtifactKind {
     ShotPlan,
     Keyframe,
     Video,
+    /// The voice of every character who speaks.
+    Voice,
+    /// A locked take of every line.
+    Line,
 }
 
 impl ArtifactKind {
@@ -62,6 +73,8 @@ impl ArtifactKind {
             Self::ShotPlan => "shot_plan",
             Self::Keyframe => "keyframe",
             Self::Video => "video",
+            Self::Voice => "voice",
+            Self::Line => "line",
         }
     }
 }
@@ -287,16 +300,33 @@ mod tests {
                 ("bible", true),
                 ("style", true),
                 ("casting", true),
+                ("voices", true),
                 ("shot_plan", true),
                 ("keyframes", true),
                 ("video", true),
+                ("dialogue", true),
             ]
         );
         assert_eq!(recipe.step("casting").unwrap().after, ["bible", "style"]);
+        assert_eq!(recipe.step("voices").unwrap().after, ["casting"]);
+        assert_eq!(
+            recipe.step("dialogue").unwrap().after,
+            ["voices", "screenplay"]
+        );
         assert_eq!(
             recipe.step("keyframes").unwrap().produces,
             ArtifactKind::Keyframe
         );
+        assert_eq!(
+            recipe.step("dialogue").unwrap().produces,
+            ArtifactKind::Line
+        );
+
+        // Version 1, which earlier projects follow, has neither.
+        let first = builtin(DEFAULT_RECIPE_ID, 1).unwrap();
+        assert!(first.step("voices").is_none() && first.step("dialogue").is_none());
+        assert_eq!(first.steps.len(), recipe.steps.len() - 2);
+
         let skippable: Vec<_> = recipe
             .steps
             .iter()
@@ -312,8 +342,8 @@ mod tests {
     #[test]
     fn a_recipe_this_build_does_not_ship_is_refused() {
         assert!(matches!(
-            builtin(DEFAULT_RECIPE_ID, 2),
-            Err(RecipeError::Unknown { version: 2, .. })
+            builtin(DEFAULT_RECIPE_ID, 3),
+            Err(RecipeError::Unknown { version: 3, .. })
         ));
         assert!(matches!(
             builtin("documentary", 1),

@@ -125,6 +125,65 @@ Support:
 
 Voice metadata belongs to character production memory.
 
+`SpeechCapabilities` (`kineto-providers`) is what workflow code reads. It declares:
+
+- where voices come from: a listed catalogue, cloning from reference audio, or design from a description;
+- the languages spoken, as ISO 639-1 codes;
+- the deliveries (emotions) a line can be asked for;
+- the range of speaking rates (in thousandths of the normal rate) and pitch shifts (in semitones);
+- how finely it times what it spoke: sentences, words, or only the whole;
+- whether speech arrives in the answer or as a remote job;
+- its output formats;
+- the longest text it takes;
+- its price per character.
+
+`evaluate_speech` holds a chosen voice to what was chosen. A provider that would change its language, delivery, rate or pitch, or would answer with a remote job where the workflow keeps the answer, is incompatible. Less timing than wanted is only a warning, because a line's length is known from its audio either way.
+
+Speech providers implement `kineto_core::speech::SpeechGenerator`, statically dispatched:
+
+- what they declare;
+- their voices, which are free to list;
+- synthesis, the paid call;
+- error classification, and whether an error proves the call was not accepted.
+
+Before anything is written, `check_speech` refuses a provider that cannot keep the voice or take the text (`GenerationError::Incapable`, naming each capability). It also picks the format to ask for, compressed when the provider offers it.
+
+Synthesis runs as a write-ahead job, like a paid image, in its own partition per provider and kind of work (`<provider>-<kind>`, such as `local-demo-speech-line`). The order is:
+
+1. The intent is prepared.
+2. A receipt holds the record's plan.
+3. The provider answers.
+4. The audio is written beside its record, and the receipt names its hash.
+5. Only then is the intent marked invoked.
+
+A restart records speech from a receipt whose audio matches, and never calls again. An attempt that left no audio is asked again only if its receipt proves the provider certainly did not accept that attempt (`refused_attempt`). Otherwise speech in its numbering is refused until the director chooses to risk paying twice. That choice retires only that numbering's calls.
+
+The local demo (`local-demo-speech`, model `demo-tone`) is free, offline and the same for the same line:
+
+- It declares a catalogue of three voices, every delivery, rates of 0.5–2×, pitch of ±12 semitones, sentence timing, WAV output and no cost.
+- It speaks each sentence as a triangle tone, made in integer arithmetic so the bytes are the same on every platform.
+- Each sentence lasts about as long as a person would take to say it (`estimate_duration_ms`): about 2.6 words a second, or 4 Chinese or Japanese characters a second, with a 250 ms breath between sentences, scaled by the voice's rate.
+- Delivery sets its loudness and pitch sets its frequency.
+
+The cloud provider is MiniMax `speech-2.8-hd` (`t2a_v2`), recorded under `minimax-speech`, apart from MiniMax images and videos.
+
+- **The call is synchronous.** The audio arrives hex encoded inside the authenticated answer (`output_format: hex`), and `extra_info.audio_length` is its measured length in milliseconds.
+- **Sentence timings come from a separate file.** The request turns on `subtitle_enable`, and MiniMax writes the timings to a file on its content host. That file is fetched over https only, without the key, and is at most 1 MB. The audio is already paid for, so if the file cannot be had, the speech is kept without timings.
+- **Declared capabilities**, as MiniMax documents them:
+  - its catalogue of system voices, listed free by `POST /v1/get_voice` (`voice_type: system`);
+  - 39 languages, sent as `language_boost` names for their ISO 639-1 codes;
+  - happy, sad, angry, fearful, disgusted, surprised and calm (MiniMax's `fluent` and `whisper` belong to its 2.6 models only);
+  - rates of 0.5–2× and pitch of ±12 semitones;
+  - MP3 (32 kHz, 128 kbps, mono), WAV or FLAC;
+  - fewer than 10,000 characters a call;
+  - $100 per million characters (100 USD micros a character).
+- **Refusals before sending.** The client refuses a request it cannot send before anything is sent, so a refused request was certainly not accepted. It also refuses an answer whose audio is not in the format asked for.
+- **Not supported.** MiniMax also clones voices ($1.5 a voice) and designs them ($3 a voice). This adapter does neither, so neither is declared.
+- **Error classes.** Rate limits (1002, 1039 tokens per minute) are retryable. Every refusal, including 2056 when the plan's quota is spent, is certainly not accepted, and its words reach the director.
+- **Manual smoke test.** `cargo run -p kineto-provider-minimax --example speech_smoke` lists the voices free. With an output file and a voice ID it speaks one paid line. No test suite calls it.
+
+A session's speech provider is `SessionOptions::speech_provider`. By default it follows the image provider: MiniMax with the same key, otherwise the local demo. `SpeechProvider::select` names one by `local-demo` or `minimax`, and a paid provider is used only when it is named.
+
 ## Model router and fallback policy
 
 Provider selection supports:
@@ -198,7 +257,7 @@ Input may include:
 
 This layer is a major piece of Kineto's model portability.
 
-The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
+The keyframe compiler is `keyframe-prompt/4` (`kineto-core/src/keyframe_prompt.rs`). It reads the scene and shot intent from `scene.json` and `shot.json`, and what production has locked, and compiles a still-image prompt for the provider's declared `ImageCapabilities`.
 
 - The locked style's directives and note lead the prompt; without a locked style it asks for a photorealistic film still.
 - A character whose cast is locked is shown from their canonical portrait, sent as an identity reference, up to as many references as the provider declares it takes in one image, in the shot's order.
@@ -210,7 +269,7 @@ The keyframe compiler is `keyframe-prompt/3` (`kineto-core/src/keyframe_prompt.r
 
 The compiler refuses a shot without a written `action`, and it refuses a prompt longer than the provider accepts rather than truncating it. Identity drift is reported on the candidates; a project can block it instead (`identity_policy = "block"` under `[workflow]`), and then a generation that would show a character without an identity reference waits for the director's explicit consent.
 
-The video compiler is `video-prompt/4` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
+The video compiler is `video-prompt/6` (`kineto-core/src/video_prompt.rs`). It reads the shot's planned intent and compiles the prompt of a clip that starts from the locked keyframe, for the provider's declared `VideoCapabilities`.
 
 - The locked style leads, to be kept throughout the clip, and the clip is asked for as one continuous shot without cuts. The first frame alone does not hold a model to its look: in the P4 live run, Hailuo started from black-and-white noir keyframes and cut within a second to colour scenes that followed the action's words.
 - The first frame carries framing, lens, setting, the characters' look and the shot it continues from; those are applied through it, not restated.

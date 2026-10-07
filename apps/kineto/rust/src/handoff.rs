@@ -674,6 +674,7 @@ pub unsafe extern "C" fn kineto_project_export_value(
             Some("last_shots") => last.map_or(0, |last| count(last.shots)),
             Some("last_complete") => u64::from(last.is_some_and(|last| last.complete)),
             Some("last_bytes") => last.map_or(0, |last| last.bytes),
+            Some("last_lines") => last.map_or(0, |last| count(last.lines)),
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         // SAFETY: checked non-null; the caller guarantees it is writable.
@@ -764,6 +765,7 @@ fn owner_label(owner: &MediaOwner) -> String {
         MediaOwner::Shot(key) => format!("shot {}/{}", key.scene(), key.shot()),
         MediaOwner::Character(id) => format!("character {id}"),
         MediaOwner::Style => "style".to_owned(),
+        MediaOwner::Scene(id) => format!("scene {id}"),
     }
 }
 

@@ -115,6 +115,30 @@ The user can choose:
 
 Dialogue duration may affect shot design, so voice planning happens before final shot rendering when applicable, even if audio files are generated lazily.
 
+How it works now (`kineto_core::voice`):
+
+1. Voice casting follows the character's locked cast.
+2. The director lists the speech provider's voices; listing is free.
+3. Chosen voices audition the character's first line, or a line the director writes. Each audition is paid speech, priced before it is asked for.
+4. The director selects one audition and locks it. The lock fixes the provider, the voice ID, the language, the delivery, the rate and the pitch.
+5. Lines are spoken with the locked voice from then on. When the character's bible entry or cast changes, the voice is stale until it is cast again.
+
+Dubbing (`kineto_core::dubbing`):
+
+- **What is spoken.** Each line of the screenplay is spoken in its character's locked voice, by that voice's provider; another provider cannot speak a voice it did not list.
+- **The parenthetical.** It becomes a delivery when a word of it names one the provider takes (`speech-prompt/1`: `quietly` is calm, `whispering` a whisper). Otherwise it is reported as dropped.
+- **Refining.** A take may be asked for with the director's delivery and rate, which replace the voice's, and a note. The note is kept with the take; the provider never hears it.
+- **Choosing.** The director selects a take per line and locks it.
+- **The recipe.** `default-film` v2, which new projects follow, adds a `voices` step (the voice of every character who speaks) and a `dialogue` step (a locked take of every line). Both are done at once when no one speaks; v1 projects keep v1.
+
+Dialogue duration (`kineto_core::dialogue`):
+
+- **Line length.** Every line of the screenplay has a length. Until it is voiced, it is estimated at the speaker's locked voice rate, or the normal rate while the speaker has no voice: about 2.6 words or 4 Chinese or Japanese characters a second. A locked voice also sets the pace: its locked audition is that voice saying a line, measured, so the estimate is scaled by the audition's measured length over its own estimate, at most twice either way. Such a length is marked as an estimate.
+- **Planning.** Shot planning (`shot-plan/2`, `shot-plan-scene/2`) is given each line's length between `<line_durations>` and `</line_durations>`, and asked to give a shot that carries dialogue at least as long. The plan's input label names the hash of those lengths.
+- **A shot's dialogue.** Its length is the sum of the screenplay lines it holds verbatim, with a 250 ms breath between them. Any other words are estimated, and a speaker's name before a colon is not said.
+- **Short shots.** A planned shot shorter than its dialogue is published as a short shot. It is reported, not refused.
+- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/6`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
+
 ## Stage 8 — Scene breakdown and shot planning
 
 For each scene, generate explicit shots with:
@@ -203,6 +227,40 @@ Candidate choices can update this profile after an LLM/vision comparison explain
 
 The profile informs future candidate generation.
 
+How it works now (`kineto_project::preferences`, `kineto_core::preferences`):
+
+**The profile.** It is a document the director writes and edits. Each change is a revision (`preferences/preferences_rNNNN.json`, `preferences.schema.json`), the latest is in force, and nothing is locked. Each entry has:
+
+- a dimension: camera motion, lighting, framing, lens, colour, composition, performance or pacing;
+- `prefer` or `avoid`;
+- a value in the director's words;
+- optionally a strength;
+- where it came from: the director, or an accepted suggestion with its reason and evidence.
+
+**What reads it.** Each kind of work reads the dimensions it can show, worded as one sentence ("The director's preferences, where the locked style allows: prefer …; avoid …"):
+
+- Shot planning (`shot-plan/3`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
+- Keyframes (`keyframe-prompt/4`) read lighting, framing, lens, colour, composition and performance, after the locked style.
+- Videos (`video-prompt/6`) read camera motion, lighting, colour, performance and pacing.
+
+In a prompt, the preferences are the lowest-ranked part, the first cut when the prompt runs out of room.
+
+**What it never does.** Changing preferences never makes work stale:
+
+- A plan and its keyframes record the revision they followed as a cosmetic dependency, which no staleness check counts.
+- Undecided keyframe candidates, and the plan in play, report that they were made with other preferences, for the director's information.
+- Videos keep the preferences they followed in their prompt provenance.
+
+**Learning from choices** (`kineto_core::learning`):
+
+1. **Evidence.** The director's choices are gathered: keyframe candidates and video takes of each shot, voice auditions of each character who speaks, and takes of each line. For each, what was chosen (selected or locked) and what was passed over, each by artifact ID with what it was asked for. That is the prompt, notes, delivery or rate: words only, for now.
+2. **Suggestions.** On the director's request (`preference-suggestions/2`), a language model compares the evidence, given the profile in force, and suggests at most eight preferences. Each has a reason and the artifact IDs of the chosen work that shows it. A suggestion citing work passed over, or anything it was not given, is asked for once more.
+3. **Storage.** Suggestions are kept as revisions (`preferences/suggestions/suggestions_rNNNN.json`, `preference-suggestions.schema.json`), with the chosen work they considered and `compared: text`.
+4. **Review.** Nothing takes effect until the director reviews each suggestion: accept it, accept it in their own words, or turn it down (`preferences/review.json`). An accepted one enters the profile as a new revision, sourced to its reason and evidence.
+5. **When to ask.** Once five choices no suggestions have considered have accumulated, the session says suggestions are worth asking for. The director decides when; nothing asks on every choice. With an agent on a subscription the cost shows as unknown.
+
+**Voice recommendations** (`kineto_core::voice::recommend`, `voice-recommendations/1`). For the characters who speak, a model recommends up to three voices each from the speech provider's list, with reasons, drawn from the bible's descriptions. An unlisted voice or a missing character is asked about once more. Recommendations are kept as revisions (`recommendations/voices/`, `voice-recommendations.schema.json`) and are advice: the director auditions and chooses.
+
 ## Stage 12 — Export
 
 Kineto exports production-ready shot packages, not a finished edit.
@@ -222,7 +280,15 @@ dailies/
 └── scene_001_shot_002_first_frame.jpg
 ```
 
-Voice files join it when P5 brings voice.
+A shot carries the screenplay lines its dialogue holds verbatim. Each line's locked take goes into the package as `<scene>_<shot>_line<NN>.<ext>`. The sidecar's `lines` names, for each line:
+
+- the line, its speaker and its words;
+- its file, take, hash and length;
+- the provider, model, voice ID, delivery and rate that spoke it.
+
+The manifest lists the shot's line files. Packages are schema version 2.
+
+Under a recipe with a dialogue step (`default-film` v2), a shot is not ready while a line it carries is not locked, or its locked take no longer fits.
 
 Each shot's sidecar (`schemas/export-shot.schema.json`) says which take was locked and what made it:
 

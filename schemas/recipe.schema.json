@@ -19,7 +19,7 @@
         "properties": {
           "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
           "produces": {
-            "enum": ["source", "story_analysis", "screenplay", "bible", "style", "cast", "shot_plan", "keyframe", "video"]
+            "enum": ["source", "story_analysis", "screenplay", "bible", "style", "cast", "shot_plan", "keyframe", "video", "voice", "line"]
           },
           "after": {
             "type": "array",

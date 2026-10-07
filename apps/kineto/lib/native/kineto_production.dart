@@ -514,10 +514,13 @@ final class KinetoImageCost {
   final int images;
 }
 
-/// Paid image work recovered when a project opened.
+/// Paid work recovered when a project opened: images, and the speech of
+/// voice auditions.
 enum KinetoImageWork {
   styleSamples('style sample(s)'),
-  casting('casting image(s)');
+  casting('casting image(s)'),
+  voiceAuditions('voice audition(s)'),
+  lineTakes('line take(s)');
 
   const KinetoImageWork(this.label);
 

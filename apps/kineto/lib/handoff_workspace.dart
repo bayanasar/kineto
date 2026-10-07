@@ -365,8 +365,9 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
               ),
               if (last != null) ...<Widget>[
                 Text(
-                  'Wrote ${last.path} · ${last.shots} shot${last.shots == 1 ? '' : 's'} · ${formatBytes(last.bytes)}'
-                  '${last.complete ? '' : ' · partial'}',
+                  'Wrote ${last.path} · ${last.shots} shot${last.shots == 1 ? '' : 's'}'
+                  '${last.lines == 0 ? '' : ' · ${last.lines} dubbed line${last.lines == 1 ? '' : 's'}'}'
+                  ' · ${formatBytes(last.bytes)}${last.complete ? '' : ' · partial'}',
                 ),
                 if (widget.onOpenFolder != null)
                   WabButton(

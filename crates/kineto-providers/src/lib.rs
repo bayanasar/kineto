@@ -274,16 +274,137 @@ pub enum AudioFormat {
     Flac,
 }
 
+impl AudioFormat {
+    /// The file extension audio of this format is stored with.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+        }
+    }
+}
+
+/// Where a provider's voices come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VoiceSource {
+    /// Voices the provider lists, chosen by ID.
+    Catalog,
+    /// A voice made from reference audio.
+    Cloned,
+    /// A voice made from a written description.
+    Designed,
+}
+
+/// How finely a provider says when each part of what it spoke was heard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum SpeechTiming {
+    /// Only the length of the whole.
+    #[default]
+    None,
+    /// When each sentence starts and ends.
+    Sentence,
+    /// When each word starts and ends.
+    Word,
+}
+
+/// A delivery a line can be asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Emotion {
+    Happy,
+    Sad,
+    Angry,
+    Fearful,
+    Disgusted,
+    Surprised,
+    Calm,
+    /// Even and natural, without colour.
+    Fluent,
+    Whisper,
+}
+
+impl Emotion {
+    pub const ALL: [Self; 9] = [
+        Self::Happy,
+        Self::Sad,
+        Self::Angry,
+        Self::Fearful,
+        Self::Disgusted,
+        Self::Surprised,
+        Self::Calm,
+        Self::Fluent,
+        Self::Whisper,
+    ];
+
+    /// Its name in project records.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Happy => "happy",
+            Self::Sad => "sad",
+            Self::Angry => "angry",
+            Self::Fearful => "fearful",
+            Self::Disgusted => "disgusted",
+            Self::Surprised => "surprised",
+            Self::Calm => "calm",
+            Self::Fluent => "fluent",
+            Self::Whisper => "whisper",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|emotion| emotion.name() == name)
+    }
+}
+
+/// What a text-to-speech provider declares it can do.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TtsCapabilities {
-    pub voice_reference: bool,
-    pub locales: BTreeSet<String>,
-    pub emotion_control: bool,
-    pub rate_control: bool,
-    pub timing_metadata: bool,
-    pub streaming: bool,
-    pub async_generation: bool,
+pub struct SpeechCapabilities {
+    pub voice_sources: BTreeSet<VoiceSource>,
+    /// Languages it speaks, as ISO 639-1 codes such as `en`.
+    pub languages: BTreeSet<String>,
+    /// Deliveries it can be asked for; empty when it takes none.
+    pub emotions: BTreeSet<Emotion>,
+    /// Slowest and fastest speaking rate, in thousandths of its normal rate;
+    /// `None` when the rate cannot be set.
+    pub speed_permille: Option<(u16, u16)>,
+    /// Lowest and highest pitch shift, in semitones; `None` when pitch
+    /// cannot be set.
+    pub pitch_semitones: Option<(i8, i8)>,
+    pub timing: SpeechTiming,
+    /// Whether speech arrives as a remote job to follow, rather than in the
+    /// provider's answer to the request.
+    pub async_jobs: bool,
     pub output_formats: BTreeSet<AudioFormat>,
+    /// Longest text one request may carry, in characters; `None` when it
+    /// sets no limit.
+    pub max_text_chars: Option<usize>,
+    /// What one character of text costs; `None` when it is not known.
+    pub price_per_character: Option<Price>,
+}
+
+impl SpeechCapabilities {
+    /// What speaking `characters` characters costs, in millionths of the
+    /// price's currency; `None` when the price is not known.
+    #[must_use]
+    pub fn cost_micros(&self, characters: usize) -> Option<u64> {
+        self.price_per_character.map(|price| {
+            price
+                .amount_micros
+                .saturating_mul(u64::try_from(characters).unwrap_or(u64::MAX))
+        })
+    }
+
+    /// The format speech is asked for in: compressed when the provider
+    /// offers it, which keeps a project's lines small.
+    #[must_use]
+    pub fn preferred_format(&self) -> Option<AudioFormat> {
+        [AudioFormat::Mp3, AudioFormat::Flac, AudioFormat::Wav]
+            .into_iter()
+            .find(|format| self.output_formats.contains(format))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +498,85 @@ pub fn evaluate_video(
         gaps.push(CapabilityGap {
             capability: "video.resumable_remote_handle",
             severity: GapSeverity::Incompatible,
+        });
+    }
+
+    CompatibilityReport { gaps }
+}
+
+/// What speaking a line with a chosen voice needs of a provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeechRequirements {
+    pub voice_source: VoiceSource,
+    /// ISO 639-1 code of the language spoken.
+    pub language: String,
+    /// The delivery the voice was chosen with.
+    pub emotion: Option<Emotion>,
+    pub speed_permille: u16,
+    pub pitch_semitones: i8,
+    /// The timing the workflow would like; less is reported, not refused,
+    /// because a line's length is known from its audio either way.
+    pub preferred_timing: SpeechTiming,
+    /// The workflow keeps the audio the provider answers with and follows
+    /// no remote job.
+    pub requires_synchronous: bool,
+}
+
+/// Whether a provider can speak as `requirements` ask. A voice the director
+/// chose is kept as chosen: a provider that would change its language,
+/// delivery, rate or pitch is incompatible, never quietly used.
+#[must_use]
+pub fn evaluate_speech(
+    requirements: &SpeechRequirements,
+    capabilities: &SpeechCapabilities,
+) -> CompatibilityReport {
+    let mut gaps = Vec::new();
+    let mut incompatible = |capability, missing: bool| {
+        if missing {
+            gaps.push(CapabilityGap {
+                capability,
+                severity: GapSeverity::Incompatible,
+            });
+        }
+    };
+    incompatible(
+        "speech.voice_source",
+        !capabilities
+            .voice_sources
+            .contains(&requirements.voice_source),
+    );
+    incompatible(
+        "speech.language",
+        !capabilities.languages.contains(&requirements.language),
+    );
+    incompatible(
+        "speech.emotion",
+        requirements
+            .emotion
+            .is_some_and(|emotion| !capabilities.emotions.contains(&emotion)),
+    );
+    incompatible(
+        "speech.speed",
+        match capabilities.speed_permille {
+            Some((slowest, fastest)) => !(slowest..=fastest).contains(&requirements.speed_permille),
+            None => requirements.speed_permille != 1000,
+        },
+    );
+    incompatible(
+        "speech.pitch",
+        match capabilities.pitch_semitones {
+            Some((lowest, highest)) => !(lowest..=highest).contains(&requirements.pitch_semitones),
+            None => requirements.pitch_semitones != 0,
+        },
+    );
+    incompatible(
+        "speech.async_jobs",
+        requirements.requires_synchronous && capabilities.async_jobs,
+    );
+    if capabilities.timing < requirements.preferred_timing {
+        gaps.push(CapabilityGap {
+            capability: "speech.timing",
+            severity: GapSeverity::Warning,
         });
     }
 
@@ -532,14 +732,33 @@ pub mod fake {
     }
 
     #[must_use]
-    pub fn tts_basic() -> TtsCapabilities {
-        TtsCapabilities {
-            locales: ["en-US".to_owned(), "zh-CN".to_owned()]
+    pub fn tts_basic() -> SpeechCapabilities {
+        SpeechCapabilities {
+            voice_sources: [VoiceSource::Catalog].into_iter().collect(),
+            languages: ["en".to_owned(), "zh".to_owned()].into_iter().collect(),
+            speed_permille: Some((500, 2000)),
+            output_formats: [AudioFormat::Wav].into_iter().collect(),
+            ..SpeechCapabilities::default()
+        }
+    }
+
+    #[must_use]
+    pub fn tts_full() -> SpeechCapabilities {
+        SpeechCapabilities {
+            voice_sources: [VoiceSource::Catalog, VoiceSource::Cloned]
                 .into_iter()
                 .collect(),
-            rate_control: true,
-            output_formats: [AudioFormat::Wav].into_iter().collect(),
-            ..TtsCapabilities::default()
+            languages: ["en".to_owned(), "ja".to_owned(), "zh".to_owned()]
+                .into_iter()
+                .collect(),
+            emotions: Emotion::ALL.into_iter().collect(),
+            speed_permille: Some((500, 2000)),
+            pitch_semitones: Some((-12, 12)),
+            timing: SpeechTiming::Word,
+            output_formats: [AudioFormat::Mp3, AudioFormat::Wav].into_iter().collect(),
+            max_text_chars: Some(9_999),
+            price_per_character: Some(Price::usd(100)),
+            ..SpeechCapabilities::default()
         }
     }
 
@@ -640,6 +859,85 @@ mod tests {
             Some(*b"USD")
         );
         assert!(Price::usd(0).is_free());
+    }
+
+    fn speaking(language: &str) -> SpeechRequirements {
+        SpeechRequirements {
+            voice_source: VoiceSource::Catalog,
+            language: language.to_owned(),
+            emotion: None,
+            speed_permille: 1000,
+            pitch_semitones: 0,
+            preferred_timing: SpeechTiming::Sentence,
+            requires_synchronous: true,
+        }
+    }
+
+    #[test]
+    fn a_chosen_voice_is_never_quietly_changed() {
+        let full = fake::tts_full();
+        assert!(evaluate_speech(&speaking("en"), &full).is_lossless());
+
+        let basic = fake::tts_basic();
+        let calm_and_low = SpeechRequirements {
+            emotion: Some(Emotion::Calm),
+            pitch_semitones: -3,
+            ..speaking("ja")
+        };
+        let report = evaluate_speech(&calm_and_low, &basic);
+        let missing: Vec<_> = report
+            .gaps
+            .iter()
+            .map(|gap| (gap.capability, gap.severity))
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                ("speech.language", GapSeverity::Incompatible),
+                ("speech.emotion", GapSeverity::Incompatible),
+                ("speech.pitch", GapSeverity::Incompatible),
+                ("speech.timing", GapSeverity::Warning),
+            ]
+        );
+
+        // Within the declared range a rate is kept; outside it, or where
+        // the rate cannot be set at all, it would change.
+        let fast = SpeechRequirements {
+            speed_permille: 1800,
+            ..speaking("en")
+        };
+        assert!(evaluate_speech(&fast, &basic).is_compatible());
+        let too_fast = SpeechRequirements {
+            speed_permille: 2500,
+            ..speaking("en")
+        };
+        assert!(!evaluate_speech(&too_fast, &basic).is_compatible());
+        let fixed_rate = SpeechCapabilities {
+            speed_permille: None,
+            ..basic.clone()
+        };
+        assert!(!evaluate_speech(&fast, &fixed_rate).is_compatible());
+        assert!(evaluate_speech(&speaking("en"), &fixed_rate).is_compatible());
+
+        let remote = SpeechCapabilities {
+            async_jobs: true,
+            ..full.clone()
+        };
+        assert!(!evaluate_speech(&speaking("en"), &remote).is_compatible());
+    }
+
+    #[test]
+    fn speech_is_priced_by_the_character_and_asked_for_compressed() {
+        let full = fake::tts_full();
+        assert_eq!(full.cost_micros(1_200), Some(120_000));
+        assert_eq!(full.preferred_format(), Some(AudioFormat::Mp3));
+        assert_eq!(fake::tts_basic().cost_micros(10), None);
+        assert_eq!(fake::tts_basic().preferred_format(), Some(AudioFormat::Wav));
+        assert_eq!(AudioFormat::Flac.extension(), "flac");
+        for emotion in Emotion::ALL {
+            assert_eq!(Emotion::parse(emotion.name()), Some(emotion));
+        }
+        assert_eq!(Emotion::parse("wistful"), None);
     }
 
     #[test]

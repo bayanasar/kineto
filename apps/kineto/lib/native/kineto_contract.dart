@@ -125,6 +125,15 @@ final class KinetoNativeContract {
   static const int _mediaTextKind = 49;
   static const int _exportValueKind = 50;
   static const int _exportTextKind = 51;
+  static const int _voiceCountKind = 52;
+  static const int _voiceValueKind = 53;
+  static const int _voiceTextKind = 54;
+  static const int _emotionKind = 55;
+  static const int _dimensionKind = 56;
+  static const int _stanceKind = 57;
+  static const int _durationSourceKind = 58;
+  static const int _speechProviderKind = 59;
+  static const int _suggestionDecisionKind = 60;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -193,6 +202,22 @@ final class KinetoNativeContract {
   Map<String, int> get mediaTexts => _table(_mediaTextKind);
   Map<String, int> get exportValues => _table(_exportValueKind);
   Map<String, int> get exportTexts => _table(_exportTextKind);
+
+  /// What `kineto_project_voice_count` counts, by name.
+  Map<String, int> get voiceCounts => _table(_voiceCountKind);
+
+  /// Number fields of the published voices, lines and preferences, by name.
+  Map<String, int> get voiceValues => _table(_voiceValueKind);
+
+  /// Text fields of the published voices, lines and preferences, by name.
+  Map<String, int> get voiceTexts => _table(_voiceTextKind);
+
+  Map<String, int> get emotions => _table(_emotionKind);
+  Map<String, int> get dimensions => _table(_dimensionKind);
+  Map<String, int> get stances => _table(_stanceKind);
+  Map<String, int> get durationSources => _table(_durationSourceKind);
+  Map<String, int> get speechProviders => _table(_speechProviderKind);
+  Map<String, int> get suggestionDecisions => _table(_suggestionDecisionKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

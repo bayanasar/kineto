@@ -587,6 +587,12 @@ final class KinetoProjectException implements Exception {
   /// A file's bytes are not what its record says.
   static const int mediaChanged = 162;
 
+  /// A character's voice is cast after its look is locked.
+  static const int needsLockedCast = 163;
+
+  /// A line is dubbed in its character's locked voice.
+  static const int needsLockedVoice = 164;
+
   final int code;
   final String message;
 
@@ -1155,11 +1161,15 @@ final class _SessionPort {
               -3 => KinetoDocumentKind.screenplay,
               -4 => KinetoDocumentKind.bible,
               -7 => KinetoDocumentKind.shotPlan,
+              -11 => KinetoDocumentKind.preferenceSuggestions,
+              -12 => KinetoDocumentKind.voiceRecommendations,
               _ => null,
             },
             images: switch (values[3]) {
               -5 => KinetoImageWork.styleSamples,
               -6 => KinetoImageWork.casting,
+              -8 => KinetoImageWork.voiceAuditions,
+              -9 => KinetoImageWork.lineTakes,
               _ => null,
             },
           ),
@@ -1393,6 +1403,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'export_exists': 160,
   'nothing_to_export': 161,
   'media_changed': 162,
+  'needs_locked_cast': 163,
+  'needs_locked_voice': 164,
   'panic': 199,
 };
 
@@ -1464,6 +1476,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   160: 'A package of that name exists already',
   161: 'No shot has a locked video to export yet',
   162: 'A file is not what its record says; check the project\'s media',
+  163: 'Lock the character\'s cast before casting its voice',
+  164: 'Lock the character\'s voice before dubbing its lines',
   199: 'Native project call failed unexpectedly',
 };
 

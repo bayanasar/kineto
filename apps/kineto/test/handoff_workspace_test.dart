@@ -105,12 +105,12 @@ void main() {
       tester,
       export: const KinetoExportState(
         ready: 3,
-        last: KinetoExported(path: '/films/exports/dailies', shots: 3, complete: true, bytes: 3100000),
+        last: KinetoExported(path: '/films/exports/dailies', shots: 3, complete: true, bytes: 3100000, lines: 2),
       ),
     );
     expect(find.text('Ready'), findsOneWidget);
     expect(find.byKey(_key('export-partial')), findsNothing);
-    expect(find.text('Wrote /films/exports/dailies · 3 shots · 3.1 MB'), findsOneWidget);
+    expect(find.text('Wrote /films/exports/dailies · 3 shots · 2 dubbed lines · 3.1 MB'), findsOneWidget);
     await _tap(tester, find.descendant(of: find.byKey(_key('export-replace')), matching: find.byType(Checkbox)));
     await _tap(tester, find.text('Export 3 shots'));
     await _tap(tester, find.byKey(_key('open-package')));

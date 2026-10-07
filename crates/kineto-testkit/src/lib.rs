@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, error::Error, fmt, thread, time::Duration};
 use kineto_job_runtime::{Invocation, PaidJobAdapter, Reconciliation};
 use kineto_jobs::{CostEstimate, CurrencyCode, ErrorClass, IdempotencyKey, ProviderJobId};
 use kineto_providers::{
-    ImageCapabilities, LlmCapabilities, TtsCapabilities, VideoCapabilities,
+    ImageCapabilities, LlmCapabilities, SpeechCapabilities, VideoCapabilities,
     fake as capability_fixtures,
 };
 
@@ -340,7 +340,7 @@ impl<C> PaidJobAdapter for FakePaidAdapter<C> {
 pub type FakeLlmAdapter = FakePaidAdapter<LlmCapabilities>;
 pub type FakeImageAdapter = FakePaidAdapter<ImageCapabilities>;
 pub type FakeVideoAdapter = FakePaidAdapter<VideoCapabilities>;
-pub type FakeTtsAdapter = FakePaidAdapter<TtsCapabilities>;
+pub type FakeTtsAdapter = FakePaidAdapter<SpeechCapabilities>;
 
 #[must_use]
 pub fn llm(behavior: FakeBehavior) -> FakeLlmAdapter {

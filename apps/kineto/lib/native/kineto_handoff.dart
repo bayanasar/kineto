@@ -298,12 +298,21 @@ final class KinetoExportMissing {
 
 /// The package this session last wrote.
 final class KinetoExported {
-  const KinetoExported({required this.path, required this.shots, required this.complete, required this.bytes});
+  const KinetoExported({
+    required this.path,
+    required this.shots,
+    required this.complete,
+    required this.bytes,
+    this.lines = 0,
+  });
 
   final String path;
   final int shots;
   final bool complete;
   final int bytes;
+
+  /// The dubbed lines it carries.
+  final int lines;
 }
 
 /// Which shots can be exported, and the last package.
@@ -663,6 +672,7 @@ final class _HandoffReader {
                 shots: _exportValue('last_shots'),
                 complete: _exportValue('last_complete') != 0,
                 bytes: _exportValue('last_bytes'),
+                lines: _exportValue('last_lines'),
               ),
       );
 }

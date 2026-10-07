@@ -29,15 +29,18 @@ use kineto_core::{
 use kineto_jobs::ErrorClass;
 use kineto_project::{
     cast::CastError,
+    dubbing::DubbingError,
     fs::ProjectFsError,
     manifest::{
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectManifestError,
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
+    recipe::{DEFAULT_RECIPE_ID, DEFAULT_RECIPE_VERSION},
     revisions::{DocumentKind, RevisionError},
     shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
     source::SourceError,
     style::StyleError,
+    voice::VoiceError,
 };
 use kineto_providers::secret::EnvSecretSource;
 
@@ -59,10 +62,24 @@ const RECOVERED_ANALYSIS: i64 = -2;
 const RECOVERED_SCREENPLAY: i64 = -3;
 const RECOVERED_BIBLE: i64 = -4;
 const RECOVERED_SHOT_PLAN: i64 = -7;
+/// The `shot` a `RECOVERED` message for a preferences revision would have.
+/// The director writes preferences and no model does, so a session never
+/// posts one; the code keeps the document kinds answerable.
+const RECOVERED_PREFERENCES: i64 = -10;
+/// The `shot` of a `RECOVERED` message for preference suggestions or voice
+/// recommendations a model answered before an interruption.
+const RECOVERED_PREFERENCE_SUGGESTIONS: i64 = -11;
+const RECOVERED_VOICE_RECOMMENDATIONS: i64 = -12;
 /// The `shot` of a `RECOVERED` message for style samples or casting images
 /// kept from an interrupted session; the count stands where a revision would.
 const RECOVERED_STYLE_SAMPLES: i64 = -5;
 const RECOVERED_CASTING_IMAGES: i64 = -6;
+/// The `shot` of a `RECOVERED` message for voice auditions kept from an
+/// interrupted session; the count stands where a revision would.
+const RECOVERED_VOICE_AUDITIONS: i64 = -8;
+/// The `shot` of a `RECOVERED` message for line takes kept from an
+/// interrupted session; the count stands where a revision would.
+const RECOVERED_LINE_TAKES: i64 = -9;
 
 /// Dart's `NativeApi.postCObject` (`Dart_PostCObject`).
 pub type PostCObject = unsafe extern "C" fn(port: i64, message: *mut DartCObject) -> bool;
@@ -213,6 +230,9 @@ impl SessionSink for DartPort {
                         DocumentKind::Screenplay => RECOVERED_SCREENPLAY,
                         DocumentKind::Bible => RECOVERED_BIBLE,
                         DocumentKind::ShotPlan => RECOVERED_SHOT_PLAN,
+                        DocumentKind::Preferences => RECOVERED_PREFERENCES,
+                        DocumentKind::PreferenceSuggestions => RECOVERED_PREFERENCE_SUGGESTIONS,
+                        DocumentKind::VoiceRecommendations => RECOVERED_VOICE_RECOMMENDATIONS,
                     },
                 ],
                 None,
@@ -225,6 +245,8 @@ impl SessionSink for DartPort {
                     match kind {
                         ImageWork::StyleSample => RECOVERED_STYLE_SAMPLES,
                         ImageWork::Casting => RECOVERED_CASTING_IMAGES,
+                        ImageWork::VoiceAudition => RECOVERED_VOICE_AUDITIONS,
+                        ImageWork::LineTake => RECOVERED_LINE_TAKES,
                     },
                 ],
                 None,
@@ -475,8 +497,8 @@ pub unsafe extern "C" fn kineto_project_create_text(
                 extra: BTreeMap::new(),
             },
             workflow: ProjectWorkflow {
-                recipe_id: "default-film".to_owned(),
-                recipe_version: 1,
+                recipe_id: DEFAULT_RECIPE_ID.to_owned(),
+                recipe_version: DEFAULT_RECIPE_VERSION,
                 extra: BTreeMap::new(),
             },
             extra: BTreeMap::new(),
@@ -1291,6 +1313,8 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Document(DocumentError::Revision(error)) => revision_error_code(error),
         SessionError::Production(ProductionError::Style(error)) => style_error_code(error),
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
+        SessionError::Production(ProductionError::Voice(error)) => voice_error_code(error),
+        SessionError::Production(ProductionError::Dubbing(error)) => dubbing_error_code(error),
         SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
         SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
         SessionError::Export(error) => export_error_code(error),
@@ -1309,6 +1333,7 @@ fn export_error_code(error: &ExportError) -> i32 {
         ExportError::InvalidName(_) => PROJECT_ERR_INVALID_ARGUMENT,
         ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
         ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
+        ExportError::Lines(error) => generation_error_code(error),
         ExportError::Io(_) => PROJECT_ERR_IO,
     }
 }
@@ -1336,6 +1361,10 @@ fn generation_error_code(error: &GenerationError) -> i32 {
                 cast_error_code(error)
             } else if let Some(error) = source.downcast_ref::<RevisionError>() {
                 revision_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<VoiceError>() {
+                voice_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<DubbingError>() {
+                dubbing_error_code(error)
             } else {
                 PROJECT_ERR_PROVIDER_REFUSED
             }
@@ -1362,6 +1391,10 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::Prerequisite(Prerequisite::LockedBible) => PROJECT_ERR_NEEDS_LOCKED_BIBLE,
         GenerationError::Prerequisite(Prerequisite::ShotPlan) => PROJECT_ERR_NEEDS_SHOT_PLAN,
+        GenerationError::Prerequisite(Prerequisite::LockedCast) => PROJECT_ERR_NEEDS_LOCKED_CAST,
+        GenerationError::Prerequisite(Prerequisite::LockedVoice) => PROJECT_ERR_NEEDS_LOCKED_VOICE,
+        GenerationError::Prerequisite(Prerequisite::Line) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        GenerationError::Prerequisite(Prerequisite::Choices) => PROJECT_ERR_NO_SELECTION,
         GenerationError::ModelNotConfigured => PROJECT_ERR_MODEL_NOT_CONFIGURED,
         GenerationError::Provider { .. }
         | GenerationError::NeedsProviderCall
@@ -1440,6 +1473,42 @@ fn cast_error_code(error: &CastError) -> i32 {
         | CastError::Conflict(_)
         | CastError::Path(_)
         | CastError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
+    }
+}
+
+fn dubbing_error_code(error: &DubbingError) -> i32 {
+    match error {
+        DubbingError::InvalidScene(_) | DubbingError::NoSuchTake(_) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        DubbingError::Rejected(_) => PROJECT_ERR_REJECTED,
+        DubbingError::Locked(_) => PROJECT_ERR_LOCKED,
+        DubbingError::NoSelection(_) => PROJECT_ERR_NO_SELECTION,
+        DubbingError::StaleSelection(_) => PROJECT_ERR_STALE_SELECTION,
+        DubbingError::Fs(_) => PROJECT_ERR_IO,
+        DubbingError::Manifest(error) => manifest_error_code(error),
+        DubbingError::InvalidLog
+        | DubbingError::Mismatch(_)
+        | DubbingError::Conflict(_)
+        | DubbingError::Path(_)
+        | DubbingError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
+    }
+}
+
+fn voice_error_code(error: &VoiceError) -> i32 {
+    match error {
+        VoiceError::InvalidCharacter(_) | VoiceError::NoSuchAudition(_) => {
+            PROJECT_ERR_NO_SUCH_ARTIFACT
+        }
+        VoiceError::Rejected(_) => PROJECT_ERR_REJECTED,
+        VoiceError::Locked(_) => PROJECT_ERR_LOCKED,
+        VoiceError::NoSelection => PROJECT_ERR_NO_SELECTION,
+        VoiceError::StaleSelection => PROJECT_ERR_STALE_SELECTION,
+        VoiceError::Fs(_) => PROJECT_ERR_IO,
+        VoiceError::Manifest(error) => manifest_error_code(error),
+        VoiceError::InvalidLog
+        | VoiceError::Mismatch(_)
+        | VoiceError::Conflict(_)
+        | VoiceError::Path(_)
+        | VoiceError::Json(_) => PROJECT_ERR_DOCUMENT_DAMAGED,
     }
 }
 

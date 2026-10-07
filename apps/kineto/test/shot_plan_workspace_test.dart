@@ -150,6 +150,41 @@ void main() {
     expect(calls.log, <String>['lock 1', 'edit office_night', 'plan', 'replan office_night One take only.']);
   });
 
+  testWidgets('a shot too short for its dialogue says so, and the editor says how long it takes', (tester) async {
+    const short = KinetoPlannedShot(
+      id: 'office_night_02',
+      purpose: 'Let the last question land on him.',
+      direction: KinetoShotDirection.reaction,
+      framing: KinetoFraming.mediumCloseUp,
+      lens: '50mm',
+      cameraMotion: KinetoCameraMotion.slowDollyIn,
+      action: 'He hears the question and does not answer.',
+      dialogue: 'Was it worth it?',
+      emotion: 'A quiet, withheld reaction.',
+      durationTarget: 1,
+      dialogueMillis: 1400,
+      tooShort: true,
+    );
+    const planning = KinetoPlanning(
+      revision: 1,
+      scenes: <KinetoScenePlan>[
+        KinetoScenePlan(sceneId: 'office_night', shots: <KinetoPlannedShot>[_wide, short]),
+      ],
+      revisions: <KinetoRevision>[
+        KinetoRevision(number: 1, status: KinetoRevisionStatus.candidate, origin: KinetoRevisionOrigin.generated),
+      ],
+      steps: _steps,
+    );
+    await _pump(tester, planning: planning);
+    expect(find.text('“Was it worth it?” · 1.4 s to say'), findsOneWidget);
+    expect(find.text('Too short for its dialogue: 1.4 s to say in 1.0 s'), findsOneWidget);
+    expect(find.byKey(_key('too-short-office_night_01')), findsNothing);
+
+    await _pump(tester, planning: planning, editing: 'office_night');
+    expect(find.byKey(_key('shot-office_night_02-dialogue-length')), findsOneWidget);
+    expect(find.byKey(_key('shot-office_night_01-dialogue-length')), findsNothing);
+  });
+
   testWidgets('without a locked screenplay and bible nothing is planned', (tester) async {
     final calls = await _pump(tester, planning: const KinetoPlanning(steps: _steps), ready: false);
     expect(find.text('Lock the screenplay and the bible first; shots are planned from both.'), findsOneWidget);

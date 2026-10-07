@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/voice-recommendations.schema.json",
+  "title": "Kineto Voice Recommendations",
+  "description": "Voices a model recommends, from the speech provider's list, for each character who speaks: at most three each, by voice ID, with why. A model answers with IDs and reasons; the stored revision adds each voice's listed name. A recommendation is advice: the director auditions and chooses.",
+  "type": "object",
+  "required": ["characters"],
+  "properties": {
+    "characters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["character_id", "voices"],
+        "properties": {
+          "character_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+          "voices": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "required": ["voice_id", "reason"],
+              "properties": {
+                "voice_id": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1},
+                "reason": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

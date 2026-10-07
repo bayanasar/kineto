@@ -37,6 +37,9 @@ my-film/
 │       │   └── cast.alice.0002.jpg
 │       ├── refs/
 │       │   └── cast.alice.0003.jpg
+│       ├── voice_auditions.json
+│       ├── voice/
+│       │   └── voice.alice.0001.mp3
 │       └── voice.json
 ├── locations/
 ├── props/
@@ -50,6 +53,8 @@ my-film/
 │       │       ├── videos/
 │       │       └── artifacts.json
 │       └── voice/
+│           ├── lines.json
+│           └── line.scene_001.01-2d8bd7d9bb5f.0001.mp3
 ├── prompts/
 └── .kineto/
     ├── project.db
@@ -111,7 +116,74 @@ Which kinds and frames the pack holds follows the provider's declared capabiliti
 
 A casting image depends on the character's bible entry (`bible_character.<id>`, the hash of the entry alone, so editing another character leaves it fresh) and on the locked style (the locked sample's ID and the hash of the lock); a reference also depends on its portrait. A locked cast is stale when either parent changed, went or came, and staleness names each. Images are paid write-ahead jobs in the `minimax-cast` partition with the rules of style samples: no new image of a character is paid for while one of that character's may have been charged without its result, until the director risks paying twice for that character. Images are numbered per character, so the decision retires only that character's unresolved images; another character's neither waits for it nor is retired by it. Asking for portraits or a pack says what should exist, not how much to add: an audition of `n` keeps the unrejected portraits already made from the same entry and style and makes only the rest, and a pack makes only the kinds the selected portrait's pack lacks for them. So a request cut short by a crash or a failure, asked again, pays only for what it had not made (and, on the director's decision, for a call whose answer was lost), while other takes of a kind are an explicit remake.
 
-## `project.toml`
+A character's voice is cast after its look. `characters/<id>/voice_auditions.json` (`voice-auditions.schema.json`) records every audition in order as `voice.<id>.NNNN`, with its audio under `voice/`. Each audition is a voice from the speech provider's list saying a line, and records:
+
+- the voice: provider voice ID, ISO 639-1 language, delivery, rate in thousandths and pitch in semitones;
+- the voice's listed name;
+- the line;
+- its status: candidate, selected (at most one) or rejected;
+- its hashes, provider, model and parameters;
+- its measured length;
+- its dependencies;
+- its `media_state`.
+
+Locking the selected audition writes `characters/<id>/voice.json` (`voice.schema.json`):
+
+- the audition's ID;
+- its provider, model, voice and voice name;
+- its audio as a sample, by content hash and path;
+- its dependencies.
+
+An audition depends on the character's bible entry and its locked cast (the canonical portrait's ID and the hash of `character.json`, `field: character.<id>`). A locked voice is stale when either changed, went or came. A selected audition made for the character as it was is not locked (`StaleSelection`).
+
+Rules for asking:
+
+- An audition says the director's line, or the character's first line in the current screenplay, or a neutral line in the voice's language.
+- A voice already heard saying that line, and not rejected, is not asked again.
+- Auditions are paid speech in their provider's `voice` partition (`<provider>-voice`), numbered per character, with the rules of casting images.
+- Auditions are the character's media (`MediaKind::Voice`). The locked one is pinned, and a rejected one outside the recent takes may be collected.
+
+Work spoken in a character's voice records the lock as a dependency: the audition's ID and the hash of `voice.json`, `field: voice.<id>`.
+
+## Director preferences
+
+`preferences/` holds the director's preference profile as document revisions (`preferences_rNNNN.json`, `preferences.schema.json`, kind `preferences` in `revisions.json`).
+
+- Every change is a revision, and the latest is in force; nothing is locked.
+- An entry names a dimension, `prefer` or `avoid`, a value in the director's words, an optional strength in thousandths, and its source: the director, or a suggestion with its reason and the candidates that showed it.
+- Work made with the profile records its revision as a cosmetic dependency (`field: preferences`). It is excluded from input hashes and from staleness. It shows only that the profile has changed since.
+
+## Dubbing
+
+`scenes/<scene>/voice/lines.json` (`lines.schema.json`) records every take of the scene's lines in the order made. The audio sits beside it.
+
+A line is known by its place among the scene's dialogue blocks and the hash of its words (`text_hash`, the content hash of the trimmed text). Inserting, removing or rewording a line ahead of it makes another line: the new line has no takes and no lock, and the old takes and lock stay recorded under the words they said. A take is `line.<scene>.<NN>-<HHHHHHHHHHHH>.<TTTT>`: line `NN` of the scene, saying words whose hash starts with those 12 hex digits, take `TTTT` of that line.
+
+Schema version 1 named takes `line.<scene>.<NN>.<TTTT>` and recorded no `text_hash`. Such a file is still read: the words each take records give its hash, and the lock takes its take's. Its takes keep their IDs; new takes of the same line are numbered under its words, beside them. The next write saves the file as version 2.
+
+A take records:
+
+- the line as the screenplay had it: its speaker, its words and its parenthetical;
+- its status: candidate, selected (one per line) or rejected;
+- the voice that spoke it, with the delivery and rate it was asked for;
+- the director's note;
+- its hashes, provider, model, parameters, measured length and sentence timings;
+- its provenance (`speech-prompt/1`: what was applied and what was dropped);
+- its dependency on the speaker's voice lock;
+- its `media_state`.
+
+`locks` names, per line (place and `text_hash`), the take it is locked to.
+
+A take goes stale when:
+
+- the current screenplay no longer has its words in its place (`line.missing`);
+- someone else says them (`line.character`), or their direction changes (`line.parenthetical`);
+- the speaker's voice is locked again (`voice.<character>`).
+
+A stale selection is not locked. Takes are paid speech in their provider's `line` partition, numbered per line and its words. Asking for `n` takes keeps the unrejected takes already made the same way and makes the rest. Takes are the scene's media (`MediaKind::Line`, owned by the scene): a locked take is pinned.
+
+A locked line's length is its take's measured length; any other line's length is an estimate.
+
 
 Minimum fields:
 
@@ -266,7 +338,7 @@ Representative record:
   "input_hash": "sha256:...",
   "provider": "example-video",
   "model": "model-x",
-  "compiler_version": "video-prompt/4",
+  "compiler_version": "video-prompt/6",
   "compiled_prompt": "verbatim provider input used for this generation",
   "prompt_hash": "sha256:...",
   "dropped_constraints": [],

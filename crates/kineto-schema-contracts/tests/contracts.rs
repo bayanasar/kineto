@@ -184,6 +184,9 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "export-manifest.schema.json",
             "export-shot.schema.json",
             "job.schema.json",
+            "lines.schema.json",
+            "preference-suggestions.schema.json",
+            "preferences.schema.json",
             "project.schema.json",
             "recipe.schema.json",
             "revisions.schema.json",
@@ -198,6 +201,9 @@ fn committed_schema_inventory_is_explicit_and_supported() {
             "story-analysis.schema.json",
             "style-samples.schema.json",
             "style.schema.json",
+            "voice-auditions.schema.json",
+            "voice-recommendations.schema.json",
+            "voice.schema.json",
         ]
     );
 
@@ -212,7 +218,7 @@ fn every_shipped_recipe_matches_the_committed_schema() {
     let root = repo_root().join("recipes");
     let mut files = Vec::new();
     collect_files(&root, &root, &mut files);
-    assert_eq!(files, ["default-film-1.json"]);
+    assert_eq!(files, ["default-film-1.json", "default-film-2.json"]);
     for file in files {
         validate(&recipe_schema, &json_file(&root.join(&file)), &file);
     }
@@ -853,6 +859,102 @@ fn casting_records_and_a_locked_character_match_committed_schemas() {
     let mut drifted = character.clone();
     drifted["provider_reference"]["role"] = "style".into();
     assert!(validate_value(&character_schema, &drifted, "$").is_err());
+
+    // The cast character's voice, auditioned with the demo and locked.
+    let auditions_schema = schema("voice-auditions.schema.json");
+    let voice_schema = schema("voice.schema.json");
+    let calm = kineto_core::speech::VoiceSettings {
+        emotion: Some(kineto_providers::Emotion::Calm),
+        ..kineto_core::speech::VoiceSettings::new("demo_low", "en")
+    };
+    kineto_core::voice::audition(
+        &project,
+        &kineto_core::speech::LocalDemoVoices,
+        "filmmaker",
+        &[
+            kineto_core::voice::VoiceChoice {
+                voice: calm,
+                name: "Low".to_owned(),
+            },
+            kineto_core::voice::VoiceChoice {
+                voice: kineto_core::speech::VoiceSettings::new("demo_high", "en"),
+                name: "High".to_owned(),
+            },
+        ],
+        None,
+        kineto_core::style::Submission::Once,
+        &mut NoHooks,
+    )
+    .expect("auditions should be recorded");
+    kineto_project::voice::select(&project, "filmmaker", "voice.filmmaker.0001").expect("select");
+    kineto_project::voice::reject(&project, "filmmaker", "voice.filmmaker.0002").expect("reject");
+    kineto_core::voice::lock(&project, "filmmaker").expect("the voice should lock");
+    let auditions = json_file(&temp.0.join("characters/filmmaker/voice_auditions.json"));
+    validate(&auditions_schema, &auditions, "voice auditions");
+    let voice = json_file(&temp.0.join("characters/filmmaker/voice.json"));
+    validate(&voice_schema, &voice, "locked voice");
+
+    let mut drifted = auditions.clone();
+    drifted["auditions"][0]["voice"]["emotion"] = "wistful".into();
+    assert!(validate_value(&auditions_schema, &drifted, "$").is_err());
+    let mut drifted = voice.clone();
+    drifted["artifact_id"] = "voice filmmaker".into();
+    assert!(validate_value(&voice_schema, &drifted, "$").is_err());
+}
+
+#[test]
+fn preference_revisions_match_committed_schemas() {
+    use kineto_project::preferences::{self, Dimension, Preference, Preferences, Source, Stance};
+    let preferences_schema = schema("preferences.schema.json");
+    let revisions_schema = schema("revisions.schema.json");
+    let temp = TempDir::new();
+    let project = CanonicalProject::create(&temp.0, manifest(), b"schema contract story\n")
+        .expect("test project should be creatable");
+    let first = preferences::save(
+        &project,
+        None,
+        &Preferences {
+            entries: vec![Preference {
+                dimension: Dimension::CameraMotion,
+                stance: Stance::Prefer,
+                value: "slow dolly".to_owned(),
+                strength_permille: Some(700),
+                source: Source::Director,
+            }],
+        },
+    )
+    .expect("the first profile is saved");
+    preferences::save(
+        &project,
+        Some(first.revision),
+        &Preferences {
+            entries: vec![Preference {
+                dimension: Dimension::Lighting,
+                stance: Stance::Avoid,
+                value: "flat".to_owned(),
+                strength_permille: None,
+                source: Source::Suggestion {
+                    reason: "Every chosen take is lit from one side.".to_owned(),
+                    evidence: vec!["office_night_02_g0001_candidate_b".to_owned()],
+                },
+            }],
+        },
+    )
+    .expect("the edit is saved");
+    for revision in ["preferences_r0001", "preferences_r0002"] {
+        let document = json_file(&temp.0.join(format!("preferences/{revision}.json")));
+        validate(&preferences_schema, &document, revision);
+    }
+    let log = json_file(&temp.0.join("preferences/revisions.json"));
+    validate(&revisions_schema, &log, "preference revisions");
+    assert_eq!(log["kind"], "preferences");
+
+    let mut drifted = json_file(&temp.0.join("preferences/preferences_r0002.json"));
+    drifted["entries"][0]["source"]["evidence"] = serde_json::json!([]);
+    assert!(validate_value(&preferences_schema, &drifted, "$").is_err());
+    let mut drifted = json_file(&temp.0.join("preferences/preferences_r0001.json"));
+    drifted["entries"][0]["stance"] = "tolerate".into();
+    assert!(validate_value(&preferences_schema, &drifted, "$").is_err());
 }
 
 #[test]

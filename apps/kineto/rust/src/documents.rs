@@ -702,6 +702,8 @@ pub unsafe extern "C" fn kineto_project_document_cost(
                 return PROJECT_ERR_NEEDS_LOCKED_BIBLE;
             }
             Some("shot_plan") => documents.shot_plan_cost,
+            Some("preference_suggestions") => documents.suggestions_cost,
+            Some("voice_recommendations") => documents.recommendations_cost,
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         if !model.ready {

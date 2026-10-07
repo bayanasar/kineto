@@ -34,7 +34,7 @@ use kineto_jobs::{
     IntentState, JobId, JobValueError, PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
 use kineto_project::{
-    ArtifactId, ContentHash, InputHash,
+    ArtifactId, ContentHash, DependencyImpact, InputHash,
     bible::Bible,
     cast::{self, CastError, CastImageKind, CharacterLock, LockedImage},
     fs::ProjectRelativePath,
@@ -683,6 +683,14 @@ pub enum Prerequisite {
     LockedBible,
     /// A scene is planned again within a shot plan.
     ShotPlan,
+    /// A character's voice is cast after its look is locked.
+    LockedCast,
+    /// A line is dubbed in its character's locked voice.
+    LockedVoice,
+    /// The scene has no line with the number asked for, or no one says it.
+    Line,
+    /// Suggestions are drawn from the director's choices; none is made yet.
+    Choices,
 }
 
 impl fmt::Display for Prerequisite {
@@ -707,6 +715,10 @@ impl fmt::Display for Prerequisite {
             }
             Self::LockedBible => "lock the bible first",
             Self::ShotPlan => "plan the shots before planning a scene again",
+            Self::LockedCast => "lock the character's cast before casting its voice",
+            Self::LockedVoice => "lock the character's voice before dubbing its lines",
+            Self::Line => "the scene has no line with that number spoken by a character",
+            Self::Choices => "choose among some takes before asking what they show",
         })
     }
 }
@@ -1031,6 +1043,7 @@ fn compile_prompt<G: CandidateGenerator>(
     let intent = shot.intent()?;
     let (style, characters) = locks_of(project, intent.as_ref())?;
     let bible = locked_bible(project)?;
+    let preferences = crate::preferences::in_force(project)?;
     let previous = previous_frame(project, intent.as_ref())?;
     Ok(Some(Arc::new(keyframe_prompt::compile(
         scene.as_ref(),
@@ -1041,6 +1054,7 @@ fn compile_prompt<G: CandidateGenerator>(
             characters: &characters,
             bible: bible.as_ref(),
             note,
+            preferences: preferences.as_ref(),
             previous: previous.as_ref(),
         },
         &generator.capabilities(),
@@ -1173,8 +1187,13 @@ pub fn keyframe_staleness(
         .map(|((recorded, origin), mut stale)| {
             // A demo candidate follows no lock, but it was made for an intent.
             if origin.provider != DEMO_PROVIDER {
-                let recorded: Vec<DependencyRecord> =
-                    recorded.iter().map(DependencyRecord::from).collect();
+                // Only what the keyframe was made from can make it stale;
+                // the preferences it was made with cannot.
+                let recorded: Vec<DependencyRecord> = recorded
+                    .iter()
+                    .filter(|dependency| dependency.impact == DependencyImpact::Semantic)
+                    .map(DependencyRecord::from)
+                    .collect();
                 // A candidate sent the previous shot's keyframe follows it
                 // like a lock; one made without it does not.
                 let sent = recorded
@@ -1187,6 +1206,28 @@ pub fn keyframe_staleness(
                 stale.extend(cast::stale_parents(&recorded, &current));
             }
             stale
+        })
+        .collect())
+}
+
+/// For each current keyframe candidate of `shot`, whether it was made with
+/// preferences other than those in force. Never a reason for staleness;
+/// it says what a candidate not yet chosen was asked for.
+pub fn preferences_changed(
+    project: &CanonicalProject,
+    shot: &ShotWorkflow,
+) -> Result<Vec<bool>, GenerationError> {
+    let in_force = crate::preferences::in_force(project)?;
+    Ok(shot
+        .candidate_dependencies()?
+        .iter()
+        .zip(shot.candidate_origins()?)
+        .map(|(recorded, origin)| {
+            origin.provider != DEMO_PROVIDER
+                && kineto_project::preferences::changed_since(
+                    recorded,
+                    in_force.as_ref().map(|in_force| &in_force.record),
+                )
         })
         .collect())
 }
@@ -2100,7 +2141,7 @@ mod tests {
                 assert_eq!(artifact["provider"], "minimax");
                 assert_eq!(artifact["model"], "image-01");
                 assert_eq!(artifact["media_state"], "present");
-                assert_eq!(artifact["compiler_version"], "keyframe-prompt/3");
+                assert_eq!(artifact["compiler_version"], "keyframe-prompt/4");
                 assert_eq!(artifact["degradation"], "identity_affecting");
                 assert!(artifact["media_path"].as_str().unwrap().starts_with(
                     "scenes/scene_001/shots/shot_001/keyframes/shot_001_g0001_candidate_"

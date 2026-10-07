@@ -1,8 +1,10 @@
 pub mod bible;
 pub mod cast;
+pub mod dubbing;
 pub mod fs;
 pub mod manifest;
 pub mod media;
+pub mod preferences;
 pub mod recipe;
 pub mod revisions;
 pub mod screenplay;
@@ -12,6 +14,7 @@ pub mod source;
 pub mod story;
 pub mod style;
 pub mod time;
+pub mod voice;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 

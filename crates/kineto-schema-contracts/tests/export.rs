@@ -190,7 +190,7 @@ fn a_package_holds_the_locked_shots_with_their_sidecars_and_a_manifest() {
         sidecar["video"]["locked_at"].is_string(),
         "when it was locked"
     );
-    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/4");
+    assert_eq!(sidecar["prompt"]["compiler_version"], "video-prompt/6");
     assert!(sidecar["intent"]["action"].as_str().unwrap().len() > 10);
     assert_eq!(
         sidecar["first_frame"]["artifact_id"],

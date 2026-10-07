@@ -30,9 +30,11 @@ use kineto_llm::LlmBackend;
 use kineto_project::{
     bible::{self as bible_document, Bible, EntryEdit, StaleCause},
     cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
+    dubbing::{self as dubbing_document, DubbingError},
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     media::{self, MediaRecord},
+    preferences::{self as preferences_document, Preferences},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
@@ -43,24 +45,30 @@ use kineto_project::{
     source::{self, SourceError, SourceFormat},
     story::StoryAnalysis,
     style::{self as style_document, StyleError, StyleLock, StyleSample},
+    voice::{self as voice_document, Audition, VoiceError, VoiceLock},
 };
 use kineto_providers::Price;
 
 use crate::{
-    bible, cast,
+    bible, cast, dialogue,
     documents::{self, DOCUMENT_PROVIDERS},
+    dubbing::{self, DubRequest, DubbedLine},
     export,
     generation::{
         self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
     },
+    learning,
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
-    screenplay, shot_plan, story,
+    screenplay, shot_plan,
+    speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
+    story,
     style::{self, SampleRequest},
     video::{
         self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
         VideoProvider, VideoProviderInfo,
     },
+    voice::{self, VoiceChoice},
     workflow,
 };
 
@@ -177,6 +185,28 @@ pub enum DocumentCommand {
     LockShotPlan {
         revision: u32,
     },
+    /// Save the director's preference profile as the next revision,
+    /// starting from `based_on`, the latest (`None` for the first).
+    SavePreferences {
+        based_on: Option<u32>,
+        preferences: Preferences,
+    },
+    /// Ask the model what the director's choices show.
+    SuggestPreferences,
+    /// Take a suggestion into the profile, as suggested or, with `value`,
+    /// in the director's words.
+    AcceptSuggestion {
+        batch: u32,
+        index: u32,
+        value: Option<String>,
+    },
+    RejectSuggestion {
+        batch: u32,
+        index: u32,
+    },
+    /// Ask the model which of the speech provider's voices fit the
+    /// characters who speak. Lists the voices first when they are not yet.
+    RecommendVoices,
 }
 
 /// A change to the style or the cast. Every command runs on the session
@@ -222,13 +252,54 @@ pub enum ProductionCommand {
     LockCharacter {
         character: String,
     },
+    /// Free: ask the speech provider which voices it offers.
+    LoadVoices,
+    /// Paid: have each voice of `choices` say `line` as `character`, or
+    /// its default line; a voice already heard saying it is not asked
+    /// again.
+    AuditionVoices {
+        character: String,
+        choices: Vec<VoiceChoice>,
+        line: Option<String>,
+    },
+    SelectVoice {
+        character: String,
+        audition: String,
+    },
+    RejectVoice {
+        character: String,
+        audition: String,
+    },
+    LockVoice {
+        character: String,
+    },
+    /// Paid: have takes of line `line` of `scene` as `request` says.
+    DubLine {
+        scene: String,
+        line: u32,
+        request: DubRequest,
+    },
+    SelectTake {
+        scene: String,
+        take: String,
+    },
+    RejectTake {
+        scene: String,
+        take: String,
+    },
+    LockLine {
+        scene: String,
+        line: u32,
+    },
 }
 
-/// Why a style or casting change was refused.
+/// Why a style, casting or voice change was refused.
 #[derive(Debug)]
 pub enum ProductionError {
     Style(StyleError),
     Cast(CastError),
+    Voice(VoiceError),
+    Dubbing(DubbingError),
 }
 
 impl fmt::Display for ProductionError {
@@ -236,6 +307,8 @@ impl fmt::Display for ProductionError {
         match self {
             Self::Style(error) => error.fmt(formatter),
             Self::Cast(error) => error.fmt(formatter),
+            Self::Voice(error) => error.fmt(formatter),
+            Self::Dubbing(error) => error.fmt(formatter),
         }
     }
 }
@@ -245,6 +318,8 @@ impl Error for ProductionError {
         match self {
             Self::Style(error) => Some(error),
             Self::Cast(error) => Some(error),
+            Self::Voice(error) => Some(error),
+            Self::Dubbing(error) => Some(error),
         }
     }
 }
@@ -363,11 +438,14 @@ pub enum Recovery {
     Images { kind: ImageWork, count: usize },
 }
 
-/// A kind of paid image work.
+/// A kind of paid work kept as the provider answers it: images, and the
+/// speech of voice auditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageWork {
     StyleSample,
     Casting,
+    VoiceAudition,
+    LineTake,
 }
 
 /// Receives a session's outcomes on the worker thread.
@@ -449,6 +527,29 @@ pub struct PublishedDocuments {
     pub shot_plan_stale: Vec<shot_plan_document::StaleCause>,
     /// Estimated cost of the next shot plan, likewise.
     pub shot_plan_cost: Option<u64>,
+    /// The director's preference profile in force, and its revision.
+    pub preferences: Option<(RevisionRecord, Preferences)>,
+    /// Every preference revision, oldest first.
+    pub preferences_revisions: Vec<RevisionRecord>,
+    /// The plan in play was made with other preferences than those in
+    /// force. Never a reason for staleness.
+    pub shot_plan_preferences_changed: bool,
+    /// Suggestions the director has not reviewed, oldest first.
+    pub open_suggestions: Vec<learning::OpenSuggestion>,
+    /// Choices no suggestions have considered yet, and whether they are
+    /// enough to ask.
+    pub unconsidered_choices: usize,
+    pub suggestions_ready: bool,
+    /// Estimated cost of asking for suggestions; `None` when not known.
+    pub suggestions_cost: Option<u64>,
+    /// Estimated cost of asking for voice recommendations, once the
+    /// provider's voices are listed; `None` when not known.
+    pub recommendations_cost: Option<u64>,
+    /// Every line of the screenplay work builds on, with how long it takes
+    /// to say.
+    pub line_durations: Vec<dialogue::LineDuration>,
+    /// Shots of the plan in play too short for the dialogue they carry.
+    pub short_shots: Vec<dialogue::ShortShot>,
     /// The documents could not be read; why.
     pub damaged: Option<String>,
 }
@@ -465,6 +566,38 @@ pub struct PublishedCharacter {
     pub stale: Vec<String>,
     /// An image of this character may have been charged without its result.
     pub unresolved: bool,
+    pub voice: PublishedVoice,
+}
+
+/// A line and where its dubbing stands.
+#[derive(Debug, Clone)]
+pub struct PublishedLine {
+    pub dubbed: DubbedLine,
+    /// Where each take's audio is, in take order.
+    pub media: Vec<PathBuf>,
+    /// A take of this line may have been charged without its audio.
+    pub unresolved: bool,
+    /// What one take of it costs with the session's speech provider, in
+    /// USD micros; `None` when the provider does not say.
+    pub take_cost_micros: Option<u64>,
+}
+
+/// Where casting a character's voice stands.
+#[derive(Debug, Clone, Default)]
+pub struct PublishedVoice {
+    /// Every audition, oldest first, with where its audio is.
+    pub auditions: Vec<(Audition, PathBuf)>,
+    pub lock: Option<VoiceLock>,
+    /// The parents of the locked voice that changed, went or came.
+    pub stale: Vec<String>,
+    /// An audition of this character may have been charged without its
+    /// audio.
+    pub unresolved: bool,
+    /// What an audition says unless the director writes a line, in the
+    /// project's language.
+    pub default_line: String,
+    /// The voices a model last recommended for the character, best first.
+    pub recommended: Vec<kineto_project::voice::RecommendedVoice>,
 }
 
 /// What the worker last published about the style and the cast. Reads
@@ -478,6 +611,12 @@ pub struct PublishedProduction {
     pub style_unresolved: bool,
     /// The characters worth casting, in bible order.
     pub characters: Vec<PublishedCharacter>,
+    /// Every line of the screenplay work builds on, with its takes.
+    pub lines: Vec<PublishedLine>,
+    /// The voices the speech provider offers, once asked for.
+    pub voices: Vec<Voice>,
+    /// Why the voices could not be listed, when they could not.
+    pub voices_problem: Option<String>,
     /// The style or the cast could not be read; why.
     pub damaged: Option<String>,
 }
@@ -498,6 +637,9 @@ pub struct ProjectMetadata {
     pub title: String,
     pub format_version: u32,
     pub read_only: bool,
+    /// ISO 639-1 code of the language the project is written in, which its
+    /// voices speak.
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +690,9 @@ struct PublishedShot {
     /// Why each current candidate is stale, in candidate order; see
     /// [`generation::keyframe_staleness`].
     staleness: Vec<Vec<String>>,
+    /// Whether each current candidate was made with other preferences than
+    /// those in force, in candidate order.
+    preferences_changed: Vec<bool>,
     /// Every candidate the shot has had, oldest first, with its media's
     /// absolute path.
     history: Vec<(CandidateRecord, Option<PathBuf>)>,
@@ -677,6 +822,7 @@ pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
     image_provider: ImageProviderInfo,
     video_provider: VideoProviderInfo,
+    speech_provider: SpeechProviderInfo,
     image_prices: ImagePrices,
     document_model: DocumentModelInfo,
     view: Arc<View>,
@@ -719,6 +865,10 @@ impl ProjectSession {
             .video_provider
             .get_or_insert_with(|| video_provider_for(&provider));
         let video_provider = videos.info();
+        let speech_provider = options
+            .speech_provider
+            .get_or_insert_with(|| speech_provider_for(&provider))
+            .info();
         let image_prices = ImagePrices {
             sample: style::sample_cost(&provider),
             portrait: cast::audition_cost(&provider, 1),
@@ -744,6 +894,7 @@ impl ProjectSession {
             commands: Some(commands),
             image_provider,
             video_provider,
+            speech_provider,
             image_prices,
             document_model,
             view,
@@ -935,6 +1086,17 @@ impl ProjectSession {
         self.published(shot_index, |published| published.staleness.clone())
     }
 
+    /// Whether each current keyframe candidate was made with other
+    /// preferences than those in force, in candidate order. Never does I/O.
+    pub fn candidate_preferences_changed(
+        &self,
+        shot_index: u32,
+    ) -> Result<Vec<bool>, SnapshotError> {
+        self.published(shot_index, |published| {
+            published.preferences_changed.clone()
+        })
+    }
+
     /// Every keyframe candidate the shot has had, current or superseded,
     /// oldest first, with its media's absolute path. Never does I/O.
     pub fn candidate_history(
@@ -1046,6 +1208,12 @@ impl ProjectSession {
         self.video_provider
     }
 
+    /// The provider this session speaks lines with.
+    #[must_use]
+    pub const fn speech_provider(&self) -> SpeechProviderInfo {
+        self.speech_provider
+    }
+
     /// Project metadata, available once the open has succeeded.
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
@@ -1111,6 +1279,7 @@ fn run(
                 title: project.manifest().title.clone(),
                 format_version: project.manifest().format_version,
                 read_only: project.is_read_only(),
+                language: project.manifest().defaults.language.clone(),
             });
             worker.publish_shots(view);
             worker.publish_documents(view);
@@ -1172,6 +1341,8 @@ fn run(
                         } else {
                             worker.publish(view, index);
                         }
+                        // A choice among takes counts toward suggestions.
+                        worker.publish_documents(view);
                         worker.publish_workflow(view);
                         if makes_media {
                             worker.tend_media(view, true);
@@ -1222,9 +1393,14 @@ fn run(
                                 | ProductionCommand::RefineStyle { .. }
                                 | ProductionCommand::Audition { .. }
                                 | ProductionCommand::MakePack { .. }
+                                | ProductionCommand::AuditionVoices { .. }
+                                | ProductionCommand::DubLine { .. }
                         );
                         let result = worker.apply_production(command, submission);
                         worker.publish_production(view);
+                        // Choices and listed voices bear on suggestions and
+                        // recommendations.
+                        worker.publish_documents(view);
                         worker.publish_workflow(view);
                         if makes_media {
                             worker.tend_media(view, true);
@@ -1299,6 +1475,9 @@ pub struct SessionOptions {
     /// The provider videos are made with. `None` follows the image
     /// provider: MiniMax with its key, otherwise the local demo.
     pub video_provider: Option<VideoProvider>,
+    /// The provider lines are spoken with. `None` follows the image
+    /// provider: MiniMax with its key, otherwise the local demo.
+    pub speech_provider: Option<SpeechProvider>,
 }
 
 impl Default for SessionOptions {
@@ -1306,6 +1485,7 @@ impl Default for SessionOptions {
         Self {
             video_poll_interval: video::POLL_INTERVAL,
             video_provider: None,
+            speech_provider: None,
         }
     }
 }
@@ -1421,6 +1601,17 @@ struct Worker {
     /// Characters an image of which may have been charged without its
     /// result.
     cast_unresolved: BTreeSet<String>,
+    speech: SpeechProvider,
+    /// Characters an audition of which may have been charged without its
+    /// audio.
+    voice_unresolved: BTreeSet<String>,
+    /// The voices the speech provider offers, or why they could not be
+    /// listed; `None` until asked for.
+    voices: Option<Result<Vec<Voice>, String>>,
+    /// Lines, by scene and number, a take of which may have been charged
+    /// without its audio.
+    /// Takes that may have been charged without their audio being kept.
+    lines_unresolved: Vec<String>,
 }
 
 impl Worker {
@@ -1435,6 +1626,10 @@ impl Worker {
             .video_provider
             .clone()
             .unwrap_or_else(|| video_provider_for(&provider));
+        let speech = options
+            .speech_provider
+            .clone()
+            .unwrap_or_else(|| speech_provider_for(&provider));
         Self {
             project,
             provider,
@@ -1453,6 +1648,10 @@ impl Worker {
             keyframes_unresolved: BTreeSet::new(),
             style_unresolved: false,
             cast_unresolved: BTreeSet::new(),
+            speech,
+            voice_unresolved: BTreeSet::new(),
+            voices: None,
+            lines_unresolved: Vec::new(),
             collection: None,
             mismatched: Vec::new(),
             last_export: None,
@@ -1736,6 +1935,19 @@ impl Worker {
         command: DocumentCommand,
         resubmit: bool,
     ) -> Result<(), SessionError> {
+        // Recommendations read the provider's voices, listed now if they
+        // have not been.
+        let catalog = match (&command, &self.voices) {
+            (DocumentCommand::RecommendVoices, Some(Ok(voices))) => voices.clone(),
+            (DocumentCommand::RecommendVoices, _) => {
+                self.apply_production(ProductionCommand::LoadVoices, Submission::Once)?;
+                match &self.voices {
+                    Some(Ok(voices)) => voices.clone(),
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
         let ready = self.model.describe().ready;
         let project = &self.project;
         let model = &self.model;
@@ -1837,6 +2049,30 @@ impl Worker {
             DocumentCommand::LockShotPlan { revision } => {
                 shot_plan_document::lock(project, revision).map_err(revision_error)
             }
+            DocumentCommand::SavePreferences {
+                based_on,
+                preferences,
+            } => preferences_document::save(project, based_on, &preferences)
+                .map(|_| ())
+                .map_err(revision_error),
+            DocumentCommand::SuggestPreferences => {
+                ask(DocumentKind::PreferenceSuggestions, &|| {
+                    learning::suggest(project, model)
+                })
+            }
+            DocumentCommand::AcceptSuggestion {
+                batch,
+                index,
+                value,
+            } => learning::accept(project, batch, index, value.as_deref())
+                .map(|_| ())
+                .map_err(generation_error),
+            DocumentCommand::RejectSuggestion { batch, index } => {
+                learning::reject(project, batch, index).map_err(generation_error)
+            }
+            DocumentCommand::RecommendVoices => ask(DocumentKind::VoiceRecommendations, &|| {
+                voice::recommend(project, model, &catalog)
+            }),
         }))
         .unwrap_or(Err(SessionError::Panicked))
     }
@@ -1850,6 +2086,8 @@ impl Worker {
         let provider = &self.provider;
         let style_error = |error| SessionError::Production(ProductionError::Style(error));
         let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
+        let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
+        let dubbing_error = |error| SessionError::Production(ProductionError::Dubbing(error));
         let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
         let mut hooks = NoHooks;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match &command {
@@ -1907,6 +2145,94 @@ impl Worker {
                     .map(|_| ())
                     .map_err(generation_error)
             }
+            ProductionCommand::LoadVoices => {
+                let listed = match &self.speech {
+                    SpeechProvider::LocalDemo => {
+                        LocalDemoVoices.voices().map_err(|error| match error {})
+                    }
+                    SpeechProvider::Minimax(Some(client)) => {
+                        client.voices().map_err(|error| GenerationError::Provider {
+                            class: error.class(),
+                            source: Box::new(error),
+                        })
+                    }
+                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                };
+                self.voices = Some(
+                    listed
+                        .as_ref()
+                        .map(Clone::clone)
+                        .map_err(ToString::to_string),
+                );
+                listed.map(|_| ()).map_err(generation_error)
+            }
+            ProductionCommand::AuditionVoices {
+                character,
+                choices,
+                line,
+            } => {
+                let line = line.as_deref();
+                paid(
+                    match &self.speech {
+                        SpeechProvider::LocalDemo => voice::audition(
+                            project,
+                            &LocalDemoVoices,
+                            character,
+                            choices,
+                            line,
+                            submission,
+                            &mut hooks,
+                        ),
+                        SpeechProvider::Minimax(Some(client)) => voice::audition(
+                            project, client, character, choices, line, submission, &mut hooks,
+                        ),
+                        SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    }
+                    .map(|_| ()),
+                )
+            }
+            ProductionCommand::SelectVoice {
+                character,
+                audition,
+            } => voice_document::select(project, character, audition).map_err(voice_error),
+            ProductionCommand::RejectVoice {
+                character,
+                audition,
+            } => voice_document::reject(project, character, audition).map_err(voice_error),
+            ProductionCommand::LockVoice { character } => voice::lock(project, character)
+                .map(|_| ())
+                .map_err(generation_error),
+            ProductionCommand::DubLine {
+                scene,
+                line,
+                request,
+            } => paid(
+                match &self.speech {
+                    SpeechProvider::LocalDemo => dubbing::dub(
+                        project,
+                        &LocalDemoVoices,
+                        scene,
+                        *line,
+                        request,
+                        submission,
+                        &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(Some(client)) => dubbing::dub(
+                        project, client, scene, *line, request, submission, &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                }
+                .map(|_| ()),
+            ),
+            ProductionCommand::SelectTake { scene, take } => {
+                dubbing_document::select(project, scene, take).map_err(dubbing_error)
+            }
+            ProductionCommand::RejectTake { scene, take } => {
+                dubbing_document::reject(project, scene, take).map_err(dubbing_error)
+            }
+            ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
+                .map(|_| ())
+                .map_err(generation_error),
         }))
         .unwrap_or(Err(SessionError::Panicked));
         // A paid call cut short may have been charged without its result;
@@ -1918,6 +2244,8 @@ impl Worker {
             ProductionCommand::Audition { .. } | ProductionCommand::MakePack { .. } => {
                 self.note_unresolved_casting();
             }
+            ProductionCommand::AuditionVoices { .. } => self.note_unresolved_voices(),
+            ProductionCommand::DubLine { .. } => self.note_unresolved_lines(),
             _ => {}
         }
         outcome
@@ -1950,10 +2278,48 @@ impl Worker {
                 Err(_) => attention += 1,
             }
         }
+        match voice::recover(&self.project) {
+            Ok(recovery) => {
+                attention += recovery.needs_attention;
+                if !recovery.attached.is_empty() {
+                    recoveries.push(Recovery::Images {
+                        kind: ImageWork::VoiceAudition,
+                        count: recovery.attached.len(),
+                    });
+                }
+                self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+            }
+            Err(_) => attention += 1,
+        }
+        match dubbing::recover(&self.project) {
+            Ok(recovery) => {
+                attention += recovery.needs_attention;
+                if !recovery.attached.is_empty() {
+                    recoveries.push(Recovery::Images {
+                        kind: ImageWork::LineTake,
+                        count: recovery.attached.len(),
+                    });
+                }
+                self.lines_unresolved.clone_from(&recovery.unresolved);
+            }
+            Err(_) => attention += 1,
+        }
         if attention > 0 {
             recoveries.push(Recovery::NeedsAttention { count: attention });
         }
         recoveries
+    }
+
+    fn note_unresolved_lines(&mut self) {
+        if let Ok(recovery) = dubbing::recover(&self.project) {
+            self.lines_unresolved.clone_from(&recovery.unresolved);
+        }
+    }
+
+    fn note_unresolved_voices(&mut self) {
+        if let Ok(recovery) = voice::recover(&self.project) {
+            self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+        }
     }
 
     fn note_unresolved_samples(&mut self) {
@@ -1971,6 +2337,12 @@ impl Worker {
     fn note_unresolved(&mut self, kind: ImageWork, recovery: &ImageRecovery) {
         match kind {
             ImageWork::StyleSample => self.style_unresolved = !recovery.unresolved.is_empty(),
+            ImageWork::VoiceAudition => {
+                self.voice_unresolved = unresolved_characters(&recovery.unresolved);
+            }
+            ImageWork::LineTake => {
+                self.lines_unresolved.clone_from(&recovery.unresolved);
+            }
             ImageWork::Casting => {
                 self.cast_unresolved = recovery
                     .unresolved
@@ -2120,10 +2492,53 @@ impl Worker {
             .iter()
             .find(|record| record.status == revisions::RevisionStatus::Locked)
             .map(|record| record.revision);
+        let preferences = preferences_document::current(project).map_err(revision_error)?;
+        let preferences_revisions =
+            revisions::revisions(project, DocumentKind::Preferences).map_err(revision_error)?;
+        let shot_plan_preferences_changed = shot_plan_latest.as_ref().is_some_and(|record| {
+            preferences_document::revision_changed_since(
+                &record.dependencies,
+                preferences.as_ref().map(|(record, _)| record),
+            )
+        });
+        let open_suggestions = learning::open_suggestions(project).map_err(generation_error)?;
+        let unconsidered_choices = learning::unconsidered(project).map_err(generation_error)?;
+        let suggestions_cost = learning::suggestion_cost(project, &self.model.info())
+            .ok()
+            .flatten();
+        let recommendations_cost = match &self.voices {
+            Some(Ok(catalog)) => voice::recommendation_cost(project, &self.model.info(), catalog)
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        let line_durations =
+            match revisions::current(project, DocumentKind::Screenplay).map_err(revision_error)? {
+                Some(record) => dialogue::line_durations(
+                    project,
+                    &revisions::read::<Screenplay>(project, &record).map_err(revision_error)?,
+                )
+                .map_err(generation_error)?,
+                None => Vec::new(),
+            };
+        let short_shots = shot_plan
+            .as_ref()
+            .map(|(_, plan)| dialogue::short_shots(plan, &line_durations))
+            .unwrap_or_default();
         let info = self.model.info();
         let ready = self.model.describe().ready;
         Ok(PublishedDocuments {
             source_revision: Some(source.revision),
+            line_durations,
+            short_shots,
+            preferences,
+            preferences_revisions,
+            shot_plan_preferences_changed,
+            open_suggestions,
+            unconsidered_choices,
+            suggestions_ready: unconsidered_choices >= learning::CHOICES_PER_SUGGESTION,
+            suggestions_cost,
+            recommendations_cost,
             shot_plan_cost: if ready && bible_locked.is_some() && locked.is_some() {
                 shot_plan::plan_cost(project, &info).ok().flatten()
             } else {
@@ -2313,6 +2728,7 @@ impl Worker {
             .map(|record| revisions::read::<Bible>(project, &record))
             .transpose()
             .map_err(|error| SessionError::Document(DocumentError::Revision(error)))?;
+        let recommendations = voice::recommendations(project).map_err(generation_error)?;
         let mut characters = Vec::new();
         for id in cast::main_characters(project).map_err(generation_error)? {
             let name = bible
@@ -2327,6 +2743,36 @@ impl Worker {
                     (image, media)
                 })
                 .collect();
+            let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
+            let voice = PublishedVoice {
+                auditions: voice_document::auditions(project, &id)
+                    .map_err(voice_error)?
+                    .into_iter()
+                    .map(|audition| {
+                        let media = at(&audition.media_path);
+                        (audition, media)
+                    })
+                    .collect(),
+                lock: voice_document::locked(project, &id).map_err(voice_error)?,
+                stale: voice::staleness(project, &id).map_err(generation_error)?,
+                unresolved: self.voice_unresolved.contains(&id),
+                default_line: voice::default_line(
+                    project,
+                    &id,
+                    &project.manifest().defaults.language,
+                )
+                .map_err(generation_error)?,
+                recommended: recommendations
+                    .as_ref()
+                    .and_then(|recommendations| {
+                        recommendations
+                            .characters
+                            .iter()
+                            .find(|character| character.character_id == id)
+                    })
+                    .map(|character| character.voices.clone())
+                    .unwrap_or_default(),
+            };
             characters.push(PublishedCharacter {
                 lock: cast_document::locked(project, &id).map_err(cast_error)?,
                 stale: cast::staleness(project, &id).map_err(generation_error)?,
@@ -2334,13 +2780,44 @@ impl Worker {
                 id,
                 name,
                 images,
+                voice,
             });
         }
+        let lines = dubbing::dubbed_lines(project)
+            .map_err(generation_error)?
+            .into_iter()
+            .map(|dubbed| {
+                let media = dubbed
+                    .takes
+                    .iter()
+                    .map(|take| at(&take.media_path))
+                    .collect();
+                let take_cost_micros = self.speech.estimate(&dubbed.line.text);
+                let said = &dubbed.line;
+                let unresolved = self.lines_unresolved.iter().any(|take| {
+                    dubbing_document::is_take_of(take, &said.scene_id, said.line, &said.text_hash)
+                });
+                PublishedLine {
+                    dubbed,
+                    media,
+                    unresolved,
+                    take_cost_micros,
+                }
+            })
+            .collect();
+        let (voices, voices_problem) = match &self.voices {
+            Some(Ok(voices)) => (voices.clone(), None),
+            Some(Err(problem)) => (Vec::new(), Some(problem.clone())),
+            None => (Vec::new(), None),
+        };
         Ok(PublishedProduction {
             samples,
             style: style_document::locked(project).map_err(style_error)?,
             style_unresolved: self.style_unresolved,
             characters,
+            lines,
+            voices,
+            voices_problem,
             damaged: None,
         })
     }
@@ -2400,6 +2877,8 @@ impl Worker {
                     keyframes_unresolved: false,
                     staleness: generation::keyframe_staleness(project, shot)
                         .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?,
+                    preferences_changed: generation::preferences_changed(project, shot)
+                        .map_err(|_| ShotWorkflowError::InvalidCanonicalState)?,
                     history: shot
                         .candidate_history()?
                         .into_iter()
@@ -2422,8 +2901,21 @@ impl Worker {
                             (record, media)
                         })
                         .collect(),
-                    video_estimate: video_provider
-                        .estimate(shot.intent()?.and_then(|intent| intent.duration_target)),
+                    video_estimate: {
+                        let intent = shot.intent()?;
+                        video_provider.estimate(
+                            intent.as_ref().and_then(|intent| intent.duration_target),
+                            dialogue::shot_dialogue_ms(
+                                project,
+                                key.scene(),
+                                intent
+                                    .as_ref()
+                                    .and_then(|intent| intent.dialogue.as_deref()),
+                            )
+                            .ok()
+                            .flatten(),
+                        )
+                    },
                 })
             })
         }))
@@ -2461,6 +2953,24 @@ fn video_provider_for(images: &ImageProvider) -> VideoProvider {
         ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
         ImageProvider::LocalDemo => VideoProvider::LocalDemo,
     }
+}
+
+/// The speech provider a session follows its image provider with: MiniMax
+/// with the same key, otherwise the local demo.
+fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
+    match images {
+        ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
+        ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
+    }
+}
+
+/// The characters `unresolved` auditions belong to.
+fn unresolved_characters(unresolved: &[String]) -> BTreeSet<String> {
+    unresolved
+        .iter()
+        .filter_map(|id| voice_document::character_of(id))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The shot's cached workflow, loaded from its canonical files on first use.
@@ -3745,6 +4255,14 @@ mod tests {
             let (session, events) = create(&target);
             assert_eq!(session.video_provider().kind, VideoProviderKind::LocalDemo);
             assert_eq!(session.video_provider().clip_cost_micros, 0);
+            assert_eq!(
+                session.speech_provider(),
+                crate::speech::SpeechProviderInfo {
+                    kind: crate::speech::SpeechProviderKind::LocalDemo,
+                    ready: true,
+                    character_cost_micros: Some(0),
+                }
+            );
             assert!(
                 command(&session, &events, 1, ShotCommand::GenerateVideo)
                     .unwrap_err()
@@ -3798,6 +4316,11 @@ mod tests {
             let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
             assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
             assert_eq!(session.video_provider().kind, VideoProviderKind::Minimax);
+            assert_eq!(
+                session.speech_provider().kind,
+                crate::speech::SpeechProviderKind::Minimax
+            );
+            assert_eq!(session.speech_provider().character_cost_micros, Some(100));
             session.submit(1, ShotCommand::GenerateVideo, 10).unwrap();
             assert!(
                 completion(&events, 10)
@@ -4375,7 +4898,11 @@ mod tests {
                 provider,
                 model,
                 sink,
-                SessionOptions::default(),
+                // Lines are spoken by the demo; the fake answers images only.
+                SessionOptions {
+                    speech_provider: Some(SpeechProvider::LocalDemo),
+                    ..SessionOptions::default()
+                },
             )
             .unwrap();
             (session, events)
@@ -4492,6 +5019,19 @@ mod tests {
             let (session, events) = written(&target, &fake);
 
             let documents = session.documents().unwrap();
+            // The screenplay's one line, estimated before anyone is voiced.
+            assert_eq!(
+                documents.line_durations,
+                [dialogue::LineDuration {
+                    scene_id: documents.line_durations[0].scene_id.clone(),
+                    line: 1,
+                    character: Some("interviewer".to_owned()),
+                    text: "Was it worth it?".to_owned(),
+                    duration_ms: 1520,
+                    source: dialogue::DurationSource::Estimated,
+                }]
+            );
+            assert!(documents.short_shots.is_empty());
             let (revision, bible) = documents.bible.as_ref().unwrap();
             assert_eq!(*revision, 1);
             assert_eq!(bible.characters[0].id, "filmmaker");
@@ -4663,6 +5203,88 @@ mod tests {
             assert_eq!(lock.references.len(), 7);
             assert!(filmmaker.stale.is_empty() && !filmmaker.unresolved);
 
+            // The cast character's voice: the provider's voices listed free,
+            // two auditions of its default line, one chosen and locked.
+            assert!(session.production().unwrap().voices.is_empty());
+            produce(&session, &events, ProductionCommand::LoadVoices).unwrap();
+            assert_eq!(session.production().unwrap().voices.len(), 3);
+            let choice = |voice_id: &str| VoiceChoice {
+                voice: crate::speech::VoiceSettings::new(voice_id, "en"),
+                name: voice_id.to_owned(),
+            };
+            produce(
+                &session,
+                &events,
+                ProductionCommand::AuditionVoices {
+                    character: "filmmaker".to_owned(),
+                    choices: vec![choice("demo_low"), choice("demo_high")],
+                    line: None,
+                },
+            )
+            .unwrap();
+            let production = session.production().unwrap();
+            let voice = &production.characters[0].voice;
+            assert_eq!(voice.default_line, "This is how I sound.");
+            assert_eq!(voice.auditions.len(), 2);
+            assert!(voice.auditions[1].1.is_file());
+            assert_eq!(voice.auditions[1].0.line, "This is how I sound.");
+            for command in [
+                ProductionCommand::SelectVoice {
+                    character: "filmmaker".to_owned(),
+                    audition: "voice.filmmaker.0002".to_owned(),
+                },
+                ProductionCommand::LockVoice {
+                    character: "filmmaker".to_owned(),
+                },
+            ] {
+                produce(&session, &events, command).unwrap();
+            }
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::RejectVoice {
+                        character: "filmmaker".to_owned(),
+                        audition: "voice.filmmaker.0002".to_owned(),
+                    }
+                ),
+                Err("Production(Voice(Locked(\"voice.filmmaker.0002\")))".to_owned())
+            );
+            let voice = session.production().unwrap().characters[0].voice.clone();
+            assert_eq!(
+                voice.lock.as_ref().map(|lock| lock.voice.voice_id.as_str()),
+                Some("demo_high")
+            );
+            assert!(voice.stale.is_empty() && !voice.unresolved);
+            assert_eq!(
+                fake.calls.load(Ordering::SeqCst),
+                11,
+                "speech is the demo's"
+            );
+
+            // The screenplay's one line is published for dubbing; its
+            // speaker has no voice yet.
+            let lines = session.production().unwrap().lines.clone();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].dubbed.line.text, "Was it worth it?");
+            assert!(lines[0].dubbed.takes.is_empty() && !lines[0].unresolved);
+            assert_eq!(lines[0].take_cost_micros, Some(0));
+            assert_eq!(
+                produce(
+                    &session,
+                    &events,
+                    ProductionCommand::DubLine {
+                        scene: lines[0].dubbed.line.scene_id.clone(),
+                        line: 1,
+                        request: DubRequest {
+                            takes: 1,
+                            ..DubRequest::default()
+                        },
+                    }
+                ),
+                Err("Generation(Prerequisite(LockedVoice))".to_owned())
+            );
+
             // Casting follows the locked bible: an edit of the entry the
             // cast was made from makes it stale once it is locked.
             document(
@@ -4683,6 +5305,10 @@ mod tests {
             .unwrap();
             assert_eq!(
                 session.production().unwrap().characters[0].stale,
+                ["bible_character.filmmaker"]
+            );
+            assert_eq!(
+                session.production().unwrap().characters[0].voice.stale,
                 ["bible_character.filmmaker"]
             );
 

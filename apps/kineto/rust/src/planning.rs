@@ -11,6 +11,7 @@
 use std::{collections::BTreeSet, slice, sync::Arc};
 
 use kineto_core::{
+    dialogue,
     generation::Consent,
     session::{DocumentCommand, PublishedDocuments, PublishedWorkflow, ShotCommand},
     workflow::StepState,
@@ -454,6 +455,7 @@ fn step_state(state: StepState) -> &'static str {
 fn value(published: &Published, field: &str, group: u32, item: u32) -> Option<u64> {
     let revision = || at(&published.documents.shot_plan_revisions, item);
     let shot = || planned(published, group, item);
+    let scene = || Some(at(&plan(published)?.scenes, group)?.scene_id.as_str());
     let step = || at(&published.workflow.steps, group);
     Some(match field {
         "plan_revision_number" => u64::from(revision()?.revision),
@@ -482,6 +484,21 @@ fn value(published: &Published, field: &str, group: u32, item: u32) -> Option<u6
         "shot_camera_motion" => u64::from(code(&CAMERA_MOTIONS, shot()?.camera_motion.as_str())),
         // Durations are 1–30 seconds, so milliseconds never overflow.
         "shot_duration_millis" => (shot()?.duration_target * 1000.0).round() as u64,
+        "shot_dialogue_millis" => u64::from(dialogue::dialogue_ms(
+            &published.documents.line_durations,
+            scene()?,
+            &shot()?.dialogue,
+        )),
+        "shot_too_short" => {
+            let (scene, shot) = (scene()?, shot()?);
+            u64::from(
+                published
+                    .documents
+                    .short_shots
+                    .iter()
+                    .any(|short| short.scene_id == scene && short.shot_id == shot.id),
+            )
+        }
         "step_state" => u64::from(code(&STEP_STATES, step_state(step()?.state))),
         "step_approval" => u64::from(step()?.approval),
         _ => return None,

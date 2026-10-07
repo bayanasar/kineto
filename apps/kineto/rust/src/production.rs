@@ -46,7 +46,7 @@ pub struct KinetoText {
 
 /// # Safety
 /// `session` must be null or a live project-session handle.
-unsafe fn submit_production(
+pub(crate) unsafe fn submit_production(
     session: *const KinetoProjectSession,
     command: ProductionCommand,
     resubmit: bool,

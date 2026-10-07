@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/preferences.schema.json",
+  "title": "Kineto Director Preferences",
+  "description": "One revision of the director's preference profile: what the director favours and avoids, dimension by dimension, in words. Each entry says where it came from: the director's own hand, or a suggestion drawn from the director's choices, with its reason and the candidates that showed it. The latest revision is in force; nothing is locked.",
+  "type": "object",
+  "required": ["entries"],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["dimension", "stance", "value", "source"],
+        "properties": {
+          "dimension": {"enum": ["camera_motion", "lighting", "framing", "lens", "color", "composition", "performance", "pacing"]},
+          "stance": {"enum": ["prefer", "avoid"]},
+          "value": {"type": "string", "minLength": 1},
+          "strength_permille": {"type": "integer", "minimum": 0, "maximum": 1000},
+          "source": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+              "kind": {"enum": ["director", "suggestion"]},
+              "reason": {"type": "string", "minLength": 1},
+              "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -236,6 +236,8 @@ final class KinetoPlannedShot {
     this.characters = const <String>[],
     this.continuity = const <String>[],
     this.continuityFrom,
+    this.dialogueMillis = 0,
+    this.tooShort = false,
     this.added = false,
   });
 
@@ -266,6 +268,13 @@ final class KinetoPlannedShot {
 
   /// The earlier shot this one continues from.
   final String? continuityFrom;
+
+  /// How long its dialogue takes to say, as the engine last worked it out
+  /// from the screenplay's lines; 0 when it carries none.
+  final int dialogueMillis;
+
+  /// Shorter than its dialogue, as the engine last found it.
+  final bool tooShort;
 
   /// Added by the director in the edit being saved: a new shot whatever ID
   /// it carries. The engine never gives it the identity or history of a
@@ -730,6 +739,8 @@ final class _PlanningReader {
       dialogue: text('shot_dialogue', group: group, item: item),
       emotion: text('shot_emotion', group: group, item: item),
       durationTarget: value('shot_duration_millis', group: group, item: item) / 1000,
+      dialogueMillis: value('shot_dialogue_millis', group: group, item: item),
+      tooShort: value('shot_too_short', group: group, item: item) != 0,
       characters: <String>[
         for (var sub = 0; sub < count('shot_characters', group: group, item: item); sub++)
           text('shot_character', group: group, item: item, sub: sub),

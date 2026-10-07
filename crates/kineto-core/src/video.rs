@@ -446,11 +446,12 @@ pub struct VideoEstimate {
 }
 
 impl VideoProvider {
-    /// What one take of a shot whose plan asks for `target` seconds costs.
+    /// What one take of a shot whose plan asks for `target` seconds, and
+    /// whose dialogue takes `dialogue_ms`, costs.
     #[must_use]
-    pub fn estimate(&self, target: Option<f64>) -> Option<VideoEstimate> {
+    pub fn estimate(&self, target: Option<f64>, dialogue_ms: Option<u32>) -> Option<VideoEstimate> {
         let capabilities = self.capabilities();
-        let clip_seconds = video_prompt::clip_seconds(&capabilities, target)?;
+        let clip_seconds = video_prompt::clip_seconds(&capabilities, target, dialogue_ms)?;
         Some(VideoEstimate {
             clip_seconds,
             cost_micros: capabilities
@@ -1226,6 +1227,8 @@ pub fn start_videos<G: VideoGenerator>(
             Some(note) => format!("{}. {note}", lock.directives.trim_end_matches(['.', ' '])),
             None => lock.directives,
         });
+    let preferences = crate::preferences::in_force(project)?
+        .and_then(|in_force| in_force.sentence(&crate::preferences::VIDEO_DIMENSIONS));
     let prompt = video_prompt::compile(VideoPromptInput {
         shot: intent.as_ref(),
         direction: shot.direction(),
@@ -1244,6 +1247,14 @@ pub fn start_videos<G: VideoGenerator>(
             }),
         notes: &notes,
         style: style.as_deref(),
+        dialogue_ms: crate::dialogue::shot_dialogue_ms(
+            project,
+            shot.key().scene(),
+            intent
+                .as_ref()
+                .and_then(|intent| intent.dialogue.as_deref()),
+        )?,
+        preferences: preferences.as_deref(),
     })?;
     let lines = capabilities.clip_lines(prompt.duration_seconds);
     let params = generator.canonical_params(prompt.duration_seconds, lines);
@@ -1753,7 +1764,7 @@ mod tests {
     #[test]
     fn a_take_is_priced_at_the_length_the_plan_asks_for() {
         let minimax = VideoProvider::Minimax(None);
-        let estimate = |target| minimax.estimate(target).unwrap();
+        let estimate = |target| minimax.estimate(target, None).unwrap();
         assert_eq!(
             estimate(Some(10.0)),
             VideoEstimate {
@@ -1766,7 +1777,7 @@ mod tests {
         assert_eq!(estimate(Some(7.0)).cost_micros, Some(280_000));
         assert_eq!(estimate(None).clip_seconds, 6);
         assert_eq!(
-            VideoProvider::LocalDemo.estimate(Some(10.0)),
+            VideoProvider::LocalDemo.estimate(Some(10.0), None),
             Some(VideoEstimate {
                 clip_seconds: 2,
                 cost_micros: Some(0)

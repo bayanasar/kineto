@@ -197,4 +197,25 @@ void main() {
       ]),
     );
   });
+
+  test('voice and preference codes match the native tables name for name', () {
+    Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
+        <String>{for (final value in values) wireName(value)};
+    expect(names(KinetoEmotion.values, (emotion) => emotion.wireName), contract.emotions.keys.toSet());
+    expect(names(KinetoDimension.values, (dimension) => dimension.wireName), contract.dimensions.keys.toSet());
+    expect(names(KinetoStance.values, (stance) => stance.wireName), contract.stances.keys.toSet());
+    expect(
+      names(KinetoDurationSource.values, (source) => source.wireName),
+      contract.durationSources.keys.toSet(),
+    );
+    expect(
+      names(KinetoSpeechProviderKind.values, (kind) => kind.wireName),
+      contract.speechProviders.keys.toSet(),
+    );
+    expect(contract.suggestionDecisions.keys.toSet(), <String>{'accept', 'reject'});
+    expect(contract.planValues.keys, containsAll(<String>['shot_dialogue_millis', 'shot_too_short']));
+    expect(contract.voiceCounts, isNotEmpty);
+    expect(contract.voiceValues, isNotEmpty);
+    expect(contract.voiceTexts, isNotEmpty);
+  });
 }
