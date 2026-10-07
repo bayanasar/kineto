@@ -256,6 +256,20 @@ fn a_transition_in_a_shots_action_is_asked_for_again() {
     let model = FakeLlm::answering([dimming.to_string()]);
     shot_plan::write(&project, &model).unwrap();
     assert_eq!(model.requests().len(), 1);
+
+    // Nor does what must stay name one, even as a thing.
+    let mut held = sample();
+    held["scenes"][0]["shots"][1]["continuity"] =
+        serde_json::json!(["The fade is the only change in the image."]);
+    let model = FakeLlm::answering([held.to_string(), SAMPLE_SHOT_PLAN_JSON.to_owned()]);
+    shot_plan::write(&project, &model).unwrap();
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    let again = format!("{:?}", requests[1]);
+    assert!(
+        again.contains("has a transition in what must stay (\\\"the fade\\\")"),
+        "{again}"
+    );
 }
 
 fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {

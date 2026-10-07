@@ -33,10 +33,12 @@
 //! the change, and in a clip length the provider closes on one at.
 //!
 //! A transition is the editor's too. Shot planning keeps them out of a
-//! shot's action, but a plan locked before it did can still name one; told
-//! to fade to black, Veo faded and laid a film leader's marks over the
-//! picture. The compiler leaves the clauses that name a transition out,
-//! reports it, and asks for the picture to hold to the last frame.
+//! shot's action and what must stay, but a plan locked before it did can
+//! still name one; told to fade to black, Veo faded and laid a film
+//! leader's marks over the picture, and did again when only a continuity
+//! note still spoke of the fade. The compiler leaves out the clauses that
+//! name a transition, in the action and in each note, reports it, and asks
+//! for the picture to hold to the last frame.
 
 use kineto_project::shot::{ShotDirection, ShotIntent};
 use kineto_prompts::{
@@ -151,9 +153,17 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             ),
         )?;
     }
-    // A plan written before transitions were kept out of actions can still
-    // name one; the clip leaves it to the edit.
-    let (action, transition) = without_transition(&shot.action);
+    // A plan written before transitions were kept out of the action and
+    // what must stay can still name one; the clip leaves it to the edit.
+    let (action, mut transition) = without_transition(&shot.action);
+    let mut continuity = Vec::new();
+    for note in &shot.continuity {
+        let (kept, named) = without_transition(note);
+        transition = transition.or(named);
+        if !kept.is_empty() {
+            continuity.push(kept);
+        }
+    }
     if action.is_empty() {
         dropped.push(drop(
             "shot.action",
@@ -162,11 +172,17 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
     } else {
         needed(&mut required, "shot.action", &sentence_case(&action))?;
     }
+    if continuity.is_empty() && !shot.continuity.is_empty() {
+        dropped.push(drop(
+            "shot.continuity",
+            "it names only a transition, which the edit makes",
+        )?);
+    }
     if let Some(transition) = transition {
         dropped.push(drop(
             "shot.transition",
             &format!(
-                "the action asks for {transition:?}, which the edit makes; the clip holds its \
+                "the plan asks for {transition:?}, which the edit makes; the clip holds its \
                  picture to the last frame"
             ),
         )?);
@@ -267,12 +283,12 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         emphasis(input.direction),
         RANK_DIRECTION,
     )?);
-    if !shot.continuity.is_empty() {
+    if !continuity.is_empty() {
         optional.push(part(
             "shot.continuity",
             &format!(
                 "Keep: {}",
-                shot.continuity
+                continuity
                     .iter()
                     .map(|note| note.trim().trim_end_matches(['.', ' ']))
                     .collect::<Vec<_>>()
@@ -510,12 +526,12 @@ fn emphasis(direction: ShotDirection) -> &'static str {
 /// Where a clause of an action ends.
 const CLAUSE_ENDS: [char; 8] = [',', ';', ':', '.', '!', '?', '—', '–'];
 
-/// `action` without its clauses that name a transition, and the first
-/// transition named; `action` itself when it names none.
-fn without_transition(action: &str) -> (String, Option<&'static str>) {
+/// `text` without its clauses that name a transition, and the first
+/// transition named; `text` itself when it names none.
+fn without_transition(text: &str) -> (String, Option<&'static str>) {
     let mut kept = String::new();
     let mut first = None;
-    for clause in action.split_inclusive(CLAUSE_ENDS) {
+    for clause in text.split_inclusive(CLAUSE_ENDS) {
         match crate::shot_plan::transition_in(clause) {
             Some(transition) => {
                 first.get_or_insert(transition);
@@ -524,7 +540,7 @@ fn without_transition(action: &str) -> (String, Option<&'static str>) {
         }
     }
     if first.is_none() {
-        return (action.to_owned(), None);
+        return (text.to_owned(), None);
     }
     let loose = |c: char| c.is_whitespace() || CLAUSE_ENDS.contains(&c);
     (
@@ -814,7 +830,7 @@ mod tests {
         assert!(
             dropped(&fading).contains(&(
                 "shot.transition",
-                "the action asks for \"fades to black\", which the edit makes; the clip holds \
+                "the plan asks for \"fades to black\", which the edit makes; the clip holds \
                  its picture to the last frame"
             )),
             "{:?}",
@@ -837,6 +853,49 @@ mod tests {
         assert!(!applied(&only).contains(&"shot.action"));
         assert!(dropped(&only).contains(&(
             "shot.action",
+            "it names only a transition, which the edit makes"
+        )));
+
+        // What must stay can name one too, as a thing.
+        let held = compile(input(
+            &ShotIntent {
+                continuity: vec![
+                    "Identical frame, light and posture until the fade begins; no movement \
+                     introduced"
+                        .to_owned(),
+                    "The fade is the only change in the image; the reaction remains through it"
+                        .to_owned(),
+                ],
+                ..shot()
+            },
+            &textual,
+            None,
+        ))
+        .unwrap();
+        assert!(
+            held.compiled.prompt().ends_with(
+                "Keep: Identical frame, no movement introduced; the reaction remains through it."
+            ),
+            "{}",
+            held.compiled.prompt()
+        );
+        assert!(applied(&held).contains(&"frame.no_transition"));
+        assert!(dropped(&held).contains(&(
+            "shot.transition",
+            "the plan asks for \"the fade\", which the edit makes; the clip holds its picture \
+             to the last frame"
+        )));
+        let faded = compile(input(
+            &ShotIntent {
+                continuity: vec!["FADE OUT".to_owned()],
+                ..shot()
+            },
+            &textual,
+            None,
+        ))
+        .unwrap();
+        assert!(dropped(&faded).contains(&(
+            "shot.continuity",
             "it names only a transition, which the edit makes"
         )));
 

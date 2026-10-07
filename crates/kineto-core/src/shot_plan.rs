@@ -40,7 +40,7 @@ direction such as FADE IN, FADE OUT, CUT TO or DISSOLVE TO, which the edit decid
 words meant to appear on screen; the dialogue spoken in it, verbatim from the screenplay, or nothing; \
 the emotion it carries; a target duration in seconds between 1 and 30; the cast ids of those \
 seen in it, only from the scene's cast; what must stay as it was, such as wardrobe, props and \
-light; and, when it continues directly from an earlier shot, that shot's id. Cover every block \
+light, and never a transition either; and, when it continues directly from an earlier shot, that shot's id. Cover every block \
 of the scene, in order, and keep shots short enough for one image to settle each. A shot that \
 carries dialogue lasts at least as long as its lines take to say; the time each line takes, \
 when anyone speaks, is given between <line_durations> and </line_durations>. Where the \
@@ -59,17 +59,23 @@ one scene's shots again. You are given the locked screenplay between <screenplay
 id; shot ids must not repeat any other scene's.";
 
 /// Screenplay transitions and editing directions, which belong to the
-/// edit: a video model given one in a shot's action fades, dissolves or
-/// writes the words on screen.
-const TRANSITIONS: [&str; 11] = [
+/// edit: a video model given one in a shot's action or what must stay
+/// fades, dissolves or writes the words on screen. A fade or dissolve is
+/// named as a thing too ("until the fade begins"), as a planned one was.
+const TRANSITIONS: [&str; 16] = [
     "fade in",
     "fade out",
     "fades out",
+    "fade up",
     "fade to black",
     "fades to black",
+    "the fade",
+    "a fade",
     "cut to",
     "dissolve to",
     "dissolves to",
+    "the dissolve",
+    "a dissolve",
     "smash cut",
     "match cut",
     "wipe to",
@@ -88,14 +94,21 @@ pub(crate) fn transition_in(text: &str) -> Option<&'static str> {
     })
 }
 
-/// Refuse a plan whose shot action names a transition, with the reason
-/// the model is asked again with.
+/// Refuse a plan whose shot action or what must stay names a transition,
+/// with the reason the model is asked again with.
 fn without_transitions(plan: &ShotPlan) -> Result<(), String> {
     for shot in plan.scenes.iter().flat_map(|scene| &scene.shots) {
         if let Some(transition) = transition_in(&shot.action) {
             return Err(format!(
                 "shot {:?} has a transition in its action ({transition:?}); the action is only \
                  what the camera sees, and the edit decides transitions",
+                shot.id
+            ));
+        }
+        if let Some(transition) = shot.continuity.iter().find_map(|note| transition_in(note)) {
+            return Err(format!(
+                "shot {:?} has a transition in what must stay ({transition:?}); what must stay \
+                 is only what the camera sees, and the edit decides transitions",
                 shot.id
             ));
         }
