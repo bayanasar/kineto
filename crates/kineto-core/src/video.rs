@@ -88,6 +88,7 @@ use crate::{
         GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
         provenance_of, selected_plugin,
     },
+    likeness,
     plugin::{self, PluginProvider},
     video_prompt::{self, EndFrameUse, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
 };
@@ -1340,15 +1341,9 @@ pub fn start_videos<G: VideoGenerator>(
                 lengths.join(" or ")
             )
         });
-    let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
-    let end_frame_use = match &successor {
-        None => None,
-        Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
-        Some(_) if cut.is_some() => cut.as_deref().map(EndFrameUse::Cut),
-        Some(_) if too_short.is_some() => too_short.as_deref().map(EndFrameUse::Unfit),
-        Some((_, _, None)) => Some(EndFrameUse::NotLocked),
-        Some((_, _, Some((_, None)))) => Some(EndFrameUse::NoImage),
-        Some((next, _, Some((keyframe, Some(path))))) => {
+    // The next keyframe's bytes, checked, when there is one to send.
+    let next_image = match &successor {
+        Some((_, _, Some((keyframe, Some(path))))) => {
             let bytes = project
                 .root()
                 .read(path)
@@ -1360,6 +1355,36 @@ pub fn start_videos<G: VideoGenerator>(
                     ),
                 ));
             }
+            Some(bytes)
+        }
+        _ => None,
+    };
+    // Planned as one setup, the two keyframes must also look it: a clip
+    // between unlike frames dissolves.
+    let unlike = next_image.as_ref().and_then(|next| match &frame {
+        None => Some("this shot's keyframe has no image to compare with it".to_owned()),
+        Some((this, _)) => match likeness::likeness(this, next) {
+            None => Some("the two keyframes cannot be compared as images".to_owned()),
+            Some(score) if score < likeness::SAME_SETUP => Some(format!(
+                "its keyframe is framed unlike this shot's (likeness {score:.2}, below {:.2})",
+                likeness::SAME_SETUP
+            )),
+            Some(_) => None,
+        },
+    });
+    let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
+    let end_frame_use = match &successor {
+        None => None,
+        Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
+        Some(_) if cut.is_some() => cut.as_deref().map(EndFrameUse::Cut),
+        Some(_) if too_short.is_some() => too_short.as_deref().map(EndFrameUse::Unfit),
+        Some((_, _, None)) => Some(EndFrameUse::NotLocked),
+        Some((_, _, Some((_, None)))) => Some(EndFrameUse::NoImage),
+        Some(_) if unlike.is_some() => unlike.as_deref().map(EndFrameUse::Cut),
+        Some((next, _, Some((keyframe, Some(_))))) => {
+            let bytes = next_image.clone().ok_or(GenerationError::Unexpected(
+                "the next keyframe was not read",
+            ))?;
             let fits = |format: &ImageFormat| {
                 capabilities.end_frame_formats.contains(format)
                     && capabilities

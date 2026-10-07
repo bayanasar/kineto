@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 kineto-job-runtime = { path = "../kineto-job-runtime" }
 kineto-jobs = { path = "../kineto-jobs" }
 kineto-llm = { path = "../kineto-llm" }

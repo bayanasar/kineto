@@ -188,6 +188,12 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         "One continuous shot without cuts. Keep the subject, framing and light of the first \
          frame; natural, restrained motion",
     )?;
+    // Words in a prompt can come back as words in the picture.
+    needed(
+        &mut required,
+        "frame.no_text",
+        "No on-screen text, titles or captions",
+    )?;
     if capabilities.audio {
         needed(
             &mut required,
@@ -732,8 +738,8 @@ mod tests {
             prompt.compiled.prompt(),
             "A filmmaker hears the final line across the table. Camera: slow dolly in \
              [Push in]. One continuous shot without cuts. Keep the subject, framing and light \
-             of the first frame; natural, restrained motion. Mood: a withheld reaction. Let the \
-             listener's reaction carry the moment."
+             of the first frame; natural, restrained motion. No on-screen text, titles or \
+             captions. Mood: a withheld reaction. Let the listener's reaction carry the moment."
         );
         assert_eq!(prompt.duration_seconds, 6);
         assert_eq!(

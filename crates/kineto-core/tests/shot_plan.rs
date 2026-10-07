@@ -228,6 +228,36 @@ fn shots_are_planned_from_the_locked_screenplay_and_bible() {
 }
 
 /// Every file under `dir`, by path, with its bytes.
+#[test]
+fn a_transition_in_a_shots_action_is_asked_for_again() {
+    let temp = TempDir::new();
+    let project = film(&temp);
+    bible::lock(&project, 1).unwrap();
+    // A video model draws the words, or fades: the edit decides that.
+    let mut fading = sample();
+    fading["scenes"][0]["shots"][1]["action"] =
+        "The filmmaker holds still as the image fades to black. FADE OUT.".into();
+    let model = FakeLlm::answering([fading.to_string(), SAMPLE_SHOT_PLAN_JSON.to_owned()]);
+    shot_plan::write(&project, &model).unwrap();
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    let again = format!("{:?}", requests[1]);
+    assert!(
+        again.contains("has a transition in its action (\\\"fade out\\\")"),
+        "{again}"
+    );
+    let (_, plan) = latest(&project);
+    assert!(!plan.scenes[0].shots[1].action.contains("FADE OUT"));
+
+    // Light that fades within the shot is not a transition.
+    let mut dimming = sample();
+    dimming["scenes"][0]["shots"][1]["action"] =
+        "The desk lamp fades and the filmmaker is left in shadow.".into();
+    let model = FakeLlm::answering([dimming.to_string()]);
+    shot_plan::write(&project, &model).unwrap();
+    assert_eq!(model.requests().len(), 1);
+}
+
 fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).unwrap() {

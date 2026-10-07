@@ -156,6 +156,8 @@ For each scene, generate explicit shots with:
 
 The intent remains expressive even if a target provider cannot preserve every field.
 
+A shot's action is only what the camera sees. Shot planning (`shot-plan/4`, `shot-plan-scene/4`) asks for no transition or editing direction in it (FADE IN, FADE OUT, CUT TO, DISSOLVE TO and the like), which the edit decides, and no words meant to appear on screen; an answer with one is asked for again, with the shot named. In the live run, a planned "FADE OUT" came back from Veo as words across the picture.
+
 ## Stage 9 — Keyframes first
 
 Do not immediately render multiple expensive videos.
@@ -239,7 +241,7 @@ How it works now (`kineto_project::preferences`, `kineto_core::preferences`):
 
 **What reads it.** Each kind of work reads the dimensions it can show, worded as one sentence ("The director's preferences, where the locked style allows: prefer …; avoid …"):
 
-- Shot planning (`shot-plan/3`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
+- Shot planning (`shot-plan/4`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
 - Keyframes (`keyframe-prompt/4`) read lighting, framing, lens, colour, composition and performance, after the locked style.
 - Videos (`video-prompt/7`) read camera motion, lighting, colour, performance and pacing.
 
