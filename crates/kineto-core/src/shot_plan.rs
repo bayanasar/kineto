@@ -75,19 +75,24 @@ const TRANSITIONS: [&str; 11] = [
     "wipe to",
 ];
 
+/// The first transition `text` names, in any case.
+pub(crate) fn transition_in(text: &str) -> Option<&'static str> {
+    let text = text.to_lowercase();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    TRANSITIONS.into_iter().find(|transition| {
+        let wanted: Vec<&str> = transition.split(' ').collect();
+        words.windows(wanted.len()).any(|window| window == wanted)
+    })
+}
+
 /// Refuse a plan whose shot action names a transition, with the reason
 /// the model is asked again with.
 fn without_transitions(plan: &ShotPlan) -> Result<(), String> {
     for shot in plan.scenes.iter().flat_map(|scene| &scene.shots) {
-        let action = shot.action.to_lowercase();
-        let words: Vec<&str> = action
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|word| !word.is_empty())
-            .collect();
-        if let Some(transition) = TRANSITIONS.iter().find(|transition| {
-            let wanted: Vec<&str> = transition.split(' ').collect();
-            words.windows(wanted.len()).any(|window| window == wanted)
-        }) {
+        if let Some(transition) = transition_in(&shot.action) {
             return Err(format!(
                 "shot {:?} has a transition in its action ({transition:?}); the action is only \
                  what the camera sees, and the edit decides transitions",

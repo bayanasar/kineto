@@ -156,7 +156,7 @@ For each scene, generate explicit shots with:
 
 The intent remains expressive even if a target provider cannot preserve every field.
 
-A shot's action is only what the camera sees. Shot planning (`shot-plan/4`, `shot-plan-scene/4`) asks for no transition or editing direction in it (FADE IN, FADE OUT, CUT TO, DISSOLVE TO and the like), which the edit decides, and no words meant to appear on screen; an answer with one is asked for again, with the shot named. In the live run, a planned "FADE OUT" came back from Veo as words across the picture.
+A shot's action is only what the camera sees. Shot planning (`shot-plan/4`, `shot-plan-scene/4`) asks for no transition or editing direction in it (FADE IN, FADE OUT, CUT TO, DISSOLVE TO and the like), which the edit decides, and no words meant to appear on screen; an answer with one is asked for again, with the shot named. In the live run, a planned "FADE OUT" came back from Veo as words across the picture. A plan locked before this rule can still name one; the video compiler leaves it out of the clip and reports it ([Providers and MCP](../architecture/providers-and-mcp.md)).
 
 ## Stage 9 — Keyframes first
 

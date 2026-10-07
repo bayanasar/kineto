@@ -31,6 +31,12 @@
 //! transition, which is the editor's. Version 7 sends a last frame only when
 //! the next shot keeps the framing and lens, or this shot's dolly explains
 //! the change, and in a clip length the provider closes on one at.
+//!
+//! A transition is the editor's too. Shot planning keeps them out of a
+//! shot's action, but a plan locked before it did can still name one; told
+//! to fade to black, Veo faded and laid a film leader's marks over the
+//! picture. The compiler leaves the clauses that name a transition out,
+//! reports it, and asks for the picture to hold to the last frame.
 
 use kineto_project::shot::{ShotDirection, ShotIntent};
 use kineto_prompts::{
@@ -145,7 +151,26 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
             ),
         )?;
     }
-    needed(&mut required, "shot.action", &sentence_case(&shot.action))?;
+    // A plan written before transitions were kept out of actions can still
+    // name one; the clip leaves it to the edit.
+    let (action, transition) = without_transition(&shot.action);
+    if action.is_empty() {
+        dropped.push(drop(
+            "shot.action",
+            "it names only a transition, which the edit makes",
+        )?);
+    } else {
+        needed(&mut required, "shot.action", &sentence_case(&action))?;
+    }
+    if let Some(transition) = transition {
+        dropped.push(drop(
+            "shot.transition",
+            &format!(
+                "the action asks for {transition:?}, which the edit makes; the clip holds its \
+                 picture to the last frame"
+            ),
+        )?);
+    }
     if let Some(motion) = &shot.camera_motion {
         let words = motion.replace('_', " ");
         match (capabilities.camera_control, input.camera_command) {
@@ -188,11 +213,20 @@ pub fn compile(input: VideoPromptInput<'_>) -> Result<VideoPrompt, KeyframePromp
         "One continuous shot without cuts. Keep the subject, framing and light of the first \
          frame; natural, restrained motion",
     )?;
+    if transition.is_some() {
+        // In the live run, Veo told to fade did, with a film leader's
+        // marks laid over the picture.
+        needed(
+            &mut required,
+            "frame.no_transition",
+            "The picture does not fade, dissolve or cut away; it holds to the last frame",
+        )?;
+    }
     // Words in a prompt can come back as words in the picture.
     needed(
         &mut required,
         "frame.no_text",
-        "No on-screen text, titles or captions",
+        "No on-screen text, titles, captions, graphics or overlays",
     )?;
     if capabilities.audio {
         needed(
@@ -473,6 +507,34 @@ fn emphasis(direction: ShotDirection) -> &'static str {
     }
 }
 
+/// Where a clause of an action ends.
+const CLAUSE_ENDS: [char; 8] = [',', ';', ':', '.', '!', '?', '—', '–'];
+
+/// `action` without its clauses that name a transition, and the first
+/// transition named; `action` itself when it names none.
+fn without_transition(action: &str) -> (String, Option<&'static str>) {
+    let mut kept = String::new();
+    let mut first = None;
+    for clause in action.split_inclusive(CLAUSE_ENDS) {
+        match crate::shot_plan::transition_in(clause) {
+            Some(transition) => {
+                first.get_or_insert(transition);
+            }
+            None => kept.push_str(clause),
+        }
+    }
+    if first.is_none() {
+        return (action.to_owned(), None);
+    }
+    let loose = |c: char| c.is_whitespace() || CLAUSE_ENDS.contains(&c);
+    (
+        kept.trim_start_matches(loose)
+            .trim_end_matches(loose)
+            .to_owned(),
+        first,
+    )
+}
+
 fn sentence_case(value: &str) -> String {
     let mut chars = value.chars();
     chars.next().map_or_else(String::new, |first| {
@@ -711,6 +773,84 @@ mod tests {
         assert_ne!(quiet.prompt_hash, asked.prompt_hash);
     }
 
+    #[test]
+    fn a_transition_in_the_action_is_left_to_the_edit() {
+        let textual = capabilities(CameraControl::Textual);
+        let acting = |action: &str| {
+            compile(input(
+                &ShotIntent {
+                    action: action.to_owned(),
+                    ..shot()
+                },
+                &textual,
+                None,
+            ))
+            .unwrap()
+        };
+        let fading = acting(
+            "The hold on his face continues, unbroken, as the image slowly fades to black — \
+             FADE OUT.",
+        );
+        let prompt = fading.compiled.prompt();
+        assert!(
+            prompt.starts_with(
+                "The hold on his face continues, unbroken. Camera: slow dolly in. One continuous \
+                 shot without cuts."
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "The picture does not fade, dissolve or cut away; it holds to the last frame."
+            ),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("fades to black"),
+            "{prompt}"
+        );
+        assert!(applied(&fading).contains(&"shot.action"));
+        assert!(applied(&fading).contains(&"frame.no_transition"));
+        assert!(
+            dropped(&fading).contains(&(
+                "shot.transition",
+                "the action asks for \"fades to black\", which the edit makes; the clip holds \
+                 its picture to the last frame"
+            )),
+            "{:?}",
+            dropped(&fading)
+        );
+
+        // A clause after the transition stays, in its own words.
+        let cutting = acting("CUT TO: she sets the cup down, slowly");
+        assert!(
+            cutting
+                .compiled
+                .prompt()
+                .starts_with("She sets the cup down, slowly. Camera:"),
+            "{}",
+            cutting.compiled.prompt()
+        );
+
+        // An action that is only a transition says nothing else.
+        let only = acting("FADE OUT.");
+        assert!(!applied(&only).contains(&"shot.action"));
+        assert!(dropped(&only).contains(&(
+            "shot.action",
+            "it names only a transition, which the edit makes"
+        )));
+
+        // Without a transition the action is said whole and nothing is added.
+        let plain = acting("A filmmaker hears the final line across the table");
+        assert!(!applied(&plain).contains(&"frame.no_transition"));
+        assert!(
+            !dropped(&plain)
+                .iter()
+                .any(|(constraint, _)| *constraint == "shot.transition")
+        );
+        assert_ne!(fading.prompt_hash, plain.prompt_hash);
+    }
+
     fn applied(prompt: &VideoPrompt) -> Vec<&str> {
         prompt
             .compiled
@@ -738,8 +878,9 @@ mod tests {
             prompt.compiled.prompt(),
             "A filmmaker hears the final line across the table. Camera: slow dolly in \
              [Push in]. One continuous shot without cuts. Keep the subject, framing and light \
-             of the first frame; natural, restrained motion. No on-screen text, titles or \
-             captions. Mood: a withheld reaction. Let the listener's reaction carry the moment."
+             of the first frame; natural, restrained motion. No on-screen text, titles, \
+             captions, graphics or overlays. Mood: a withheld reaction. Let the listener's \
+             reaction carry the moment."
         );
         assert_eq!(prompt.duration_seconds, 6);
         assert_eq!(
