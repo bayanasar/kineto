@@ -42,6 +42,11 @@ impl ProjectRelativePath {
             }) {
                 return Err(ProjectPathError::Invalid);
             }
+            // Windows drops a trailing dot or space, and opens a device for
+            // a reserved name whatever its extension.
+            if segment.ends_with(['.', ' ']) || is_windows_device(segment) {
+                return Err(ProjectPathError::Invalid);
+            }
             saw_segment = true;
         }
 
@@ -69,6 +74,29 @@ impl ProjectRelativePath {
     #[must_use]
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+}
+
+/// Whether Windows takes `segment` for a device: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM1`-`COM9` or `LPT1`-`LPT9` (with a superscript 1, 2 or 3 too),
+/// in any case, before any extension and trailing spaces.
+fn is_windows_device(segment: &str) -> bool {
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => ["COM", "LPT"].iter().any(|port| {
+            stem.strip_prefix(port).is_some_and(|number| {
+                matches!(
+                    number,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        }),
     }
 }
 
@@ -529,6 +557,46 @@ mod tests {
         assert!(ProjectRelativePath::new(r"..\secret").is_err());
         assert!(ProjectRelativePath::new("").is_err());
         assert!(ProjectRelativePath::new(std::env::temp_dir()).is_err());
+    }
+
+    /// Windows' reserved device names and its trailing dots and spaces are
+    /// refused on every host, so a project written anywhere opens on
+    /// Windows.
+    #[test]
+    fn project_relative_path_refuses_what_windows_cannot_name() {
+        for reserved in [
+            "CON",
+            "con",
+            "characters/Aux/selection.json",
+            "NUL.json",
+            "nul.tar.gz",
+            "COM1",
+            "lpt9.txt",
+            "com\u{b9}.json",
+            "CON .txt",
+            "shot.",
+            "shot ",
+            "scenes/office./shot.json",
+        ] {
+            assert!(
+                ProjectRelativePath::new(reserved).is_err(),
+                "{reserved:?} must be refused"
+            );
+        }
+        for portable in [
+            "CONSOLE/notes.md",
+            "scenes/aux_room/shot.json",
+            "com10.json",
+            "lpt0.txt",
+            "a.b c.json",
+            "my shot/take.png",
+            ".kineto/project.db",
+        ] {
+            assert!(
+                ProjectRelativePath::new(portable).is_ok(),
+                "{portable:?} must be accepted"
+            );
+        }
     }
 
     #[test]

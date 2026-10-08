@@ -1372,6 +1372,7 @@ fn export_error_code(error: &ExportError) -> i32 {
         ExportError::NothingToExport => PROJECT_ERR_NOTHING_TO_EXPORT,
         ExportError::InvalidName(_) => PROJECT_ERR_INVALID_ARGUMENT,
         ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
+        ExportError::OverlapsProject(_) => PROJECT_ERR_INVALID_ARGUMENT,
         ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
         ExportError::Lines(error) => generation_error_code(error),
         ExportError::Timeline(_) => PROJECT_ERR_INVALID_DOCUMENT,
@@ -1463,6 +1464,7 @@ fn source_error_code(error: &SourceError) -> i32 {
             PROJECT_ERR_INVALID_SOURCE
         }
         SourceError::Fs(_) => PROJECT_ERR_IO,
+        SourceError::Exhausted => PROJECT_ERR_GENERATION_OVERFLOW,
         SourceError::Manifest(error) => manifest_error_code(error),
         SourceError::InvalidManifest | SourceError::Path(_) | SourceError::Json(_) => {
             PROJECT_ERR_DOCUMENT_DAMAGED
@@ -1474,6 +1476,7 @@ fn revision_error_code(error: &RevisionError) -> i32 {
     match error {
         RevisionError::NotLatest { .. } => PROJECT_ERR_NOT_LATEST,
         RevisionError::InvalidDocument(_) => PROJECT_ERR_INVALID_DOCUMENT,
+        RevisionError::Exhausted => PROJECT_ERR_GENERATION_OVERFLOW,
         RevisionError::NoSuchRevision(_) | RevisionError::Superseded(_) => {
             PROJECT_ERR_INVALID_REVISION
         }

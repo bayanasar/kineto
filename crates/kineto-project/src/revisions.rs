@@ -170,6 +170,9 @@ pub enum RevisionError {
     },
     /// The document breaks its own rules.
     InvalidDocument(String),
+    /// The document has as many revisions as it can hold
+    /// ([`MAX_REVISION`]).
+    Exhausted,
     Path(ProjectPathError),
     Fs(ProjectFsError),
     Manifest(ProjectManifestError),
@@ -180,6 +183,10 @@ impl fmt::Display for RevisionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLog => formatter.write_str("revision log is invalid"),
+            Self::Exhausted => write!(
+                formatter,
+                "the document has {MAX_REVISION} revisions, as many as it can hold"
+            ),
             Self::Mismatch(path) => write!(formatter, "{path} does not match its recorded hash"),
             Self::Conflict(revision) => {
                 write!(
@@ -323,6 +330,11 @@ pub fn latest(
         .find(|record| record.status != RevisionStatus::Superseded))
 }
 
+/// The most revisions one document, or the source, holds: every reader
+/// carries a revision number up to it, the native summary's 14-bit fields
+/// among them. Asking for one more is refused.
+pub const MAX_REVISION: u32 = 16_383;
+
 /// The revision a new generation or edit of `kind` would create.
 pub fn next(project: &CanonicalProject, kind: DocumentKind) -> Result<NextRevision, RevisionError> {
     let revision = u32::try_from(revisions(project, kind)?.len() + 1)
@@ -330,8 +342,12 @@ pub fn next(project: &CanonicalProject, kind: DocumentKind) -> Result<NextRevisi
     revision_at(kind, revision)
 }
 
-/// The artifact ID and path revision `revision` of `kind` has.
+/// The artifact ID and path revision `revision` of `kind` has. A revision
+/// past [`MAX_REVISION`] is refused.
 pub fn revision_at(kind: DocumentKind, revision: u32) -> Result<NextRevision, RevisionError> {
+    if revision == 0 || revision > MAX_REVISION {
+        return Err(RevisionError::Exhausted);
+    }
     let artifact_id = ArtifactId::new(format!("{}_r{revision:04}", kind.id_prefix()))?;
     let path = ProjectRelativePath::new(format!(
         "{}/{}.json",
@@ -353,10 +369,9 @@ pub fn parse_revision(kind: DocumentKind, artifact_id: &ArtifactId) -> Option<u3
         .as_str()
         .strip_prefix(kind.id_prefix())?
         .strip_prefix("_r")
-        .filter(|digits| digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()))?
-        .parse()
-        .ok()
-        .filter(|revision| *revision != 0)
+        .and_then(crate::sequence_number)
+        .and_then(|revision| u32::try_from(revision).ok())
+        .filter(|revision| *revision <= MAX_REVISION)
 }
 
 /// The bytes a document revision is stored as: pretty JSON with a final
@@ -547,6 +562,52 @@ mod tests {
         PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource, ProjectWorkflow,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
+
+    /// Every revision number written is read back as written, past 9999
+    /// too; none is written past [`MAX_REVISION`], which every reader holds.
+    #[test]
+    fn a_revision_id_reads_back_as_written_up_to_the_last_one() {
+        for kind in [DocumentKind::Screenplay, DocumentKind::Bible] {
+            for revision in [1, 9_999, 10_000, MAX_REVISION] {
+                let written = revision_at(kind, revision).unwrap();
+                assert_eq!(
+                    parse_revision(kind, &written.artifact_id),
+                    Some(revision),
+                    "{}",
+                    written.artifact_id.as_str()
+                );
+            }
+            assert!(matches!(
+                revision_at(kind, MAX_REVISION + 1),
+                Err(RevisionError::Exhausted)
+            ));
+            assert!(matches!(
+                revision_at(kind, 0),
+                Err(RevisionError::Exhausted)
+            ));
+        }
+        assert_eq!(
+            revision_at(DocumentKind::Screenplay, 10_000)
+                .unwrap()
+                .artifact_id
+                .as_str(),
+            format!("{}_r10000", DocumentKind::Screenplay.id_prefix())
+        );
+        // Only the form written is read: no extra zero, nothing past the
+        // last revision, never 0.
+        for digits in ["00001", "016383", "16384", "0000", "999", "1e4", "+0001"] {
+            let id = ArtifactId::new(format!(
+                "{}_r{digits}",
+                DocumentKind::Screenplay.id_prefix()
+            ));
+            assert_eq!(
+                id.ok()
+                    .and_then(|id| parse_revision(DocumentKind::Screenplay, &id)),
+                None,
+                "{digits}"
+            );
+        }
+    }
 
     struct TempDir(PathBuf);
 

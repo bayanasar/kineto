@@ -1462,7 +1462,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   113: 'Select a candidate before locking',
   114: 'Selection is stale; regenerate before locking',
   115: 'Canonical shot approval state is invalid',
-  116: 'Shot generation revision overflow',
+  116: 'The revision or generation number has reached its limit',
   117: 'Project is already open for writing in another Kineto window',
   118: 'Legacy shot hashes need migration before this shot can change',
   119: 'Project cannot be locked for single-writer access on this filesystem',
