@@ -31,8 +31,9 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::{ShotKey, ShotWorkflow, VideoState},
 };
-use kineto_provider_veo::{
-    DEFAULT_BASE_URL, HttpResponse, Transport, TransportFailure, VeoClient, VeoError, VeoModel,
+use kineto_provider_gemini::{
+    DEFAULT_BASE_URL, HttpResponse, Transport, TransportFailure,
+    veo::{VeoClient, VeoError, VeoModel},
 };
 use kineto_providers::{AspectRatio, ImageFormat, ReferenceRole, secret::SecretString};
 
@@ -172,7 +173,12 @@ impl Transport for Api {
         )
     }
 
-    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+    fn get(
+        &self,
+        url: &str,
+        api_key: &SecretString,
+        _max_bytes: u64,
+    ) -> Result<HttpResponse, TransportFailure> {
         assert_eq!(api_key.expose(), "AQ.test");
         let name = url
             .strip_prefix(&format!("{DEFAULT_BASE_URL}/"))
@@ -383,7 +389,12 @@ impl Transport for Sent {
         )
     }
 
-    fn get(&self, _url: &str, _api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+    fn get(
+        &self,
+        _url: &str,
+        _api_key: &SecretString,
+        _max_bytes: u64,
+    ) -> Result<HttpResponse, TransportFailure> {
         unreachable!("only submissions are made")
     }
 

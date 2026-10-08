@@ -678,6 +678,7 @@ pub unsafe extern "C" fn kineto_project_video_provider(
             VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
             VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
             VideoProviderKind::Veo => VIDEO_PROVIDER_VEO,
+            VideoProviderKind::Omni => VIDEO_PROVIDER_OMNI,
             VideoProviderKind::Plugin => VIDEO_PROVIDER_PLUGIN,
         }
     })

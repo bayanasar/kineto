@@ -1,13 +1,14 @@
 //! Google Veo 3.1 video over the Gemini API.
 //!
+//! Google shuts the three preview models down on 2026-10-22
+//! ([`SHUTDOWN`]) and names Gemini Omni Flash ([`crate::omni`]) as their
+//! replacement; after that, every call answers with an error.
+//!
 //! A clip starts from an image and may close on another
 //! (`models/<model>:predictLongRunning`, the paid step). Veo answers with a
 //! long-running operation, which is asked about until it holds the video's
 //! URI or an error, and the video is then downloaded. Veo keeps a finished
 //! video for 2 days.
-//!
-//! The key goes in an `x-goog-api-key` header, and only to the API's own
-//! host. A download that is redirected elsewhere is fetched without it.
 //!
 //! What each model renders and costs is declared from Google's
 //! documentation and price list, and from a live trial on 2026-10-05: a
@@ -21,7 +22,7 @@
 //! only in an 8 s clip; Lite takes none. They are sent the way frames are,
 //! and have not been tried live.
 
-use std::{collections::BTreeSet, error::Error, fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kineto_jobs::ErrorClass;
@@ -31,9 +32,15 @@ use kineto_providers::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    DEFAULT_BASE_URL, HttpResponse, HttpsTransport, SharedTransport, Transport, TransportFailure,
+    clipped, same_host,
+};
+
 /// The provider name a session selects Veo by, and its key is read under.
 pub const PROVIDER: &str = "veo";
-pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+/// The day Google shuts the Veo 3.1 preview models down.
+pub const SHUTDOWN: &str = "2026-10-22";
 /// Largest video downloaded. An 8 s 4k clip is well under it.
 pub const MAX_VIDEO_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest first or last frame sent. A request carries both, base64
@@ -65,10 +72,6 @@ pub const ASPECT_RATIOS: [AspectRatio; 2] = [
 ];
 
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
-const MAX_MESSAGE_CHARS: usize = 200;
 const FPS: u16 = 24;
 
 /// A Veo 3.1 model.
@@ -174,216 +177,6 @@ impl VeoModel {
             end_frame_seconds: [END_FRAME_SECONDS].into(),
             audio: true,
         }
-    }
-}
-
-/// What a transport failed at. Library error text is deliberately not kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportFailure {
-    Connect,
-    Timeout,
-    Tls,
-    Io,
-    TooLarge,
-    Protocol,
-}
-
-/// An HTTP response as the client needs it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: Vec<u8>,
-}
-
-/// Talks to the Gemini API. Production uses [`HttpsTransport`]; tests
-/// replay recorded responses.
-pub trait Transport {
-    /// A POST of a JSON body to the API, with the key.
-    fn post_json(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        body: &[u8],
-    ) -> Result<HttpResponse, TransportFailure>;
-
-    /// A GET from the API, with the key.
-    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure>;
-
-    /// A GET of a video file on the API, with the key, at most `max_bytes`
-    /// long. A redirect to another host is followed without the key.
-    fn download(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        max_bytes: u64,
-    ) -> Result<HttpResponse, TransportFailure>;
-}
-
-/// A transport shared between clients and threads.
-pub type SharedTransport = Arc<dyn Transport + Send + Sync>;
-
-impl Transport for SharedTransport {
-    fn post_json(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        body: &[u8],
-    ) -> Result<HttpResponse, TransportFailure> {
-        self.as_ref().post_json(url, api_key, body)
-    }
-
-    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
-        self.as_ref().get(url, api_key)
-    }
-
-    fn download(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        max_bytes: u64,
-    ) -> Result<HttpResponse, TransportFailure> {
-        self.as_ref().download(url, api_key, max_bytes)
-    }
-}
-
-/// Blocking HTTPS with rustls and the bundled Mozilla roots.
-#[derive(Clone)]
-pub struct HttpsTransport {
-    agent: ureq::Agent,
-    files: ureq::Agent,
-    redirected: ureq::Agent,
-}
-
-impl HttpsTransport {
-    #[must_use]
-    pub fn new() -> Self {
-        let agent = |timeout, redirects| -> ureq::Agent {
-            ureq::Agent::config_builder()
-                .https_only(true)
-                .max_redirects(redirects)
-                .http_status_as_error(false)
-                .timeout_connect(Some(CONNECT_TIMEOUT))
-                .timeout_global(Some(timeout))
-                .user_agent(concat!("kineto/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .into()
-        };
-        Self {
-            // A redirect would carry the key to wherever it points.
-            agent: agent(REQUEST_TIMEOUT, 0),
-            files: agent(DOWNLOAD_TIMEOUT, 0),
-            // Where a file was redirected to carries no key.
-            redirected: agent(DOWNLOAD_TIMEOUT, 3),
-        }
-    }
-}
-
-impl Default for HttpsTransport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Debug for HttpsTransport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HttpsTransport")
-    }
-}
-
-impl Transport for HttpsTransport {
-    fn post_json(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        body: &[u8],
-    ) -> Result<HttpResponse, TransportFailure> {
-        let response = self
-            .agent
-            .post(url)
-            .header("x-goog-api-key", api_key.expose())
-            .header("Content-Type", "application/json")
-            .send(body)
-            .map_err(failure)?;
-        read(response, MAX_RESPONSE_BYTES)
-    }
-
-    fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
-        let response = self
-            .agent
-            .get(url)
-            .header("x-goog-api-key", api_key.expose())
-            .call()
-            .map_err(failure)?;
-        read(response, MAX_RESPONSE_BYTES)
-    }
-
-    fn download(
-        &self,
-        url: &str,
-        api_key: &SecretString,
-        max_bytes: u64,
-    ) -> Result<HttpResponse, TransportFailure> {
-        let response = self
-            .files
-            .get(url)
-            .header("x-goog-api-key", api_key.expose())
-            .call()
-            .map_err(failure)?;
-        if !response.status().is_redirection() {
-            return read(response, max_bytes);
-        }
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|value| value.to_str().ok())
-            .ok_or(TransportFailure::Protocol)?
-            .to_owned();
-        let response = if same_host(url, &location) {
-            self.files
-                .get(&location)
-                .header("x-goog-api-key", api_key.expose())
-                .call()
-        } else {
-            self.redirected.get(&location).call()
-        }
-        .map_err(failure)?;
-        read(response, max_bytes)
-    }
-}
-
-/// The scheme and host of `url`, as in `https://example.com`.
-fn origin(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("https://")?;
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    Some(&url[.."https://".len() + end])
-}
-
-fn same_host(one: &str, other: &str) -> bool {
-    origin(one).is_some_and(|origin| Some(origin) == self::origin(other))
-}
-
-fn read(
-    mut response: ureq::http::Response<ureq::Body>,
-    max_bytes: u64,
-) -> Result<HttpResponse, TransportFailure> {
-    let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(max_bytes)
-        .read_to_vec()
-        .map_err(failure)?;
-    Ok(HttpResponse { status, body })
-}
-
-fn failure(error: ureq::Error) -> TransportFailure {
-    match error {
-        ureq::Error::Timeout(_) => TransportFailure::Timeout,
-        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => TransportFailure::Connect,
-        ureq::Error::Io(_) => TransportFailure::Io,
-        ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::Pem(_) => TransportFailure::Tls,
-        ureq::Error::BodyExceedsLimit(_) => TransportFailure::TooLarge,
-        _ => TransportFailure::Protocol,
     }
 }
 
@@ -811,7 +604,7 @@ impl<T: Transport> VeoClient<T> {
         let url = format!("{}/{name}", self.base_url);
         let response = self
             .transport
-            .get(&url, &self.api_key)
+            .get(&url, &self.api_key, MAX_RESPONSE_BYTES)
             .map_err(VeoError::Transport)?;
         let operation: WireOperation = serde_json::from_slice(&answered(response)?)
             .map_err(|_| VeoError::Malformed("the operation is not JSON"))?;
@@ -910,14 +703,6 @@ fn answered(response: HttpResponse) -> Result<Vec<u8>, VeoError> {
     })
 }
 
-fn clipped(message: &str) -> String {
-    let message = message.trim();
-    match message.char_indices().nth(MAX_MESSAGE_CHARS) {
-        Some((end, _)) => format!("{}…", &message[..end]),
-        None => message.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -973,7 +758,12 @@ mod tests {
             self.next("POST", url, body)
         }
 
-        fn get(&self, url: &str, api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        fn get(
+            &self,
+            url: &str,
+            api_key: &SecretString,
+            _max_bytes: u64,
+        ) -> Result<HttpResponse, TransportFailure> {
             assert_eq!(api_key.expose(), "AQ.test");
             self.next("GET", url, &[])
         }
@@ -1334,19 +1124,5 @@ mod tests {
             ErrorClass::Retryable
         );
         assert!(matches!(veo.download(VIDEO), Err(VeoError::Malformed(_))));
-    }
-
-    #[test]
-    fn hosts_are_compared_by_scheme_and_host() {
-        assert!(same_host(VIDEO, DEFAULT_BASE_URL));
-        assert!(!same_host(
-            "https://generativelanguage.googleapis.com.example.com/x",
-            DEFAULT_BASE_URL
-        ));
-        assert!(!same_host(
-            "http://generativelanguage.googleapis.com/x",
-            DEFAULT_BASE_URL
-        ));
-        assert_eq!(origin("https://a.example/b?c"), Some("https://a.example"));
     }
 }

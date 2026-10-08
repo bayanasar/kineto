@@ -203,13 +203,15 @@ pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
 pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 pub(crate) const VIDEO_PROVIDER_VEO: u32 = 4;
+pub(crate) const VIDEO_PROVIDER_OMNI: u32 = 5;
 
 /// Video provider codes returned by `kineto_project_video_provider`.
-const VIDEO_PROVIDERS: [(&str, u32); 4] = [
+const VIDEO_PROVIDERS: [(&str, u32); 5] = [
     ("local_demo", VIDEO_PROVIDER_LOCAL_DEMO),
     ("minimax", VIDEO_PROVIDER_MINIMAX),
     ("plugin", VIDEO_PROVIDER_PLUGIN),
     ("veo", VIDEO_PROVIDER_VEO),
+    ("omni", VIDEO_PROVIDER_OMNI),
 ];
 
 /// What `kineto_project_video_take_count` counts.
