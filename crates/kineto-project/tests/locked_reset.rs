@@ -11,6 +11,7 @@ use kineto_project::{
         ProjectWorkflow,
     },
     shot::{ShotDirection, ShotKey, ShotWorkflow},
+    shot_plan,
 };
 
 struct TempDir(PathBuf);
@@ -104,4 +105,63 @@ fn reset_is_an_explicit_destructive_action_that_supersedes_a_lock() {
             .unwrap(),
         discarded
     );
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A planned shot's direction is the locked plan's. Reset keeps it, so
+/// what is made and locked after a reset is still current when the project
+/// opens again and the plan's intent is written back over `shot.json`.
+#[test]
+fn reset_keeps_the_planned_direction_and_what_follows_stays_current() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/planned"),
+        &target,
+    );
+    let project = CanonicalProject::open(&target).unwrap();
+    let key = ShotKey::new("office_night", "office_night_01").unwrap();
+    assert_eq!(
+        shot_plan::planned_direction(&project, &key).unwrap(),
+        Some(ShotDirection::SpatialClarity)
+    );
+    let mut shot = ShotWorkflow::load(&project, &key).unwrap();
+    shot.generate(&project).unwrap();
+    shot.select(&project, 0).unwrap();
+    shot.lock(&project).unwrap();
+
+    shot.reset(&project).unwrap();
+    assert_eq!(
+        shot.snapshot().unwrap().direction,
+        ShotDirection::SpatialClarity
+    );
+    shot.generate(&project).unwrap();
+    shot.select(&project, 1).unwrap();
+    shot.lock(&project).unwrap();
+    let locked = shot.snapshot().unwrap();
+    drop(project);
+
+    // Opening the project writes the plan's intent back, as a session does.
+    let reopened = CanonicalProject::open(&target).unwrap();
+    shot_plan::materialize(&reopened).unwrap();
+    let snapshot = ShotWorkflow::load(&reopened, &key)
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert!(snapshot.locked);
+    assert!(!snapshot.stale);
+    assert_eq!(snapshot.direction, ShotDirection::SpatialClarity);
+    assert_eq!(snapshot, locked);
 }
