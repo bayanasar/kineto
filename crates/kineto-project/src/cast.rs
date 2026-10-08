@@ -359,7 +359,7 @@ pub fn next_artifact_id(
 pub fn character_of(artifact_id: &str) -> Option<&str> {
     let rest = artifact_id.strip_prefix(CAST_PREFIX)?;
     let (character, number) = rest.rsplit_once('.')?;
-    (number.len() == 4 && number.bytes().all(|byte| byte.is_ascii_digit())).then_some(character)
+    crate::sequence_number(number).map(|_| character)
 }
 
 fn check_media(project: &CanonicalProject, image: &CastImage) -> Result<(), CastError> {

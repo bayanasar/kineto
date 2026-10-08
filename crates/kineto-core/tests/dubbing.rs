@@ -1,7 +1,8 @@
 //! Dubbing end to end, offline: a cast and voiced character's line spoken
 //! in takes with the local demo, refined, chosen and locked, its length
 //! measured, the workflow's voice and dialogue steps, staleness, and the
-//! production package carrying the line.
+//! production package carrying the line. A package is never made inside the
+//! project, or over it.
 
 use std::{
     collections::BTreeMap,
@@ -908,4 +909,85 @@ fn a_lines_estimate_follows_the_pace_of_its_speakers_locked_voice() {
     near(paced(3, 2), plain * 3 / 2);
     near(paced(10, 1), plain * 2);
     near(paced(1, 4), plain / 2);
+}
+
+/// Every file under `dir`, by its path there, with its bytes.
+fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.insert(
+                    path.strip_prefix(dir).unwrap().to_owned(),
+                    fs::read(&path).unwrap(),
+                );
+            }
+        }
+    }
+    files
+}
+
+/// Replacing a package can remove what holds its name, so a package that
+/// would land inside the project, or hold it, is refused before anything
+/// is written, however its folder is spelled.
+#[test]
+fn a_package_is_never_made_inside_the_project_or_over_it() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, false);
+    shoot(&project, "office_night_01");
+    let before = tree(&target);
+    let export = |destination: PathBuf, name: &str| {
+        export::export(
+            &project,
+            &ExportRequest {
+                destination,
+                name: name.to_owned(),
+                partial: true,
+                replace: true,
+                timeline: false,
+            },
+            UNIX_EPOCH,
+        )
+    };
+    let refused = |result: Result<export::Exported, export::ExportError>| {
+        matches!(result, Err(export::ExportError::OverlapsProject(_)))
+    };
+
+    // Over a canonical folder, in one, or over the project itself.
+    assert!(refused(export(target.clone(), "scenes")));
+    assert!(refused(export(target.join("scenes"), "dailies")));
+    assert!(refused(export(temp.0.clone(), "film")));
+    // Spelled with `..` through a folder that does not exist, or relative.
+    assert!(refused(export(target.join("nowhere/.."), "scenes")));
+    assert!(refused(export(
+        target.join("scenes/office_night/../../.."),
+        "film"
+    )));
+    #[cfg(unix)]
+    {
+        let alias = temp.0.join("alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert!(refused(export(alias.clone(), "scenes")));
+        assert!(refused(export(alias.join("scenes"), "dailies")));
+        let linked = temp.0.join("out");
+        fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&target, linked.join("dailies")).unwrap();
+        assert!(
+            refused(export(linked.clone(), "dailies")),
+            "a package name linked to the project"
+        );
+        fs::remove_file(linked.join("dailies")).unwrap();
+    }
+    assert_eq!(tree(&target), before, "the project is as it was");
+
+    // Outside it, a package is made and replaced as before.
+    let out = temp.0.join("out");
+    assert_eq!(export(out.clone(), "dailies").unwrap().shots, 1);
+    assert_eq!(export(out.clone(), "dailies").unwrap().shots, 1);
+    assert!(out.join("dailies/manifest.json").is_file());
 }

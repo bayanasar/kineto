@@ -21,6 +21,18 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use sha2::{Digest, Sha256};
 
+/// The number in a generated ID's sequence field, which is written at
+/// least four digits wide (`{:04}`), as in `0007` or `10000`. Only the form
+/// the writer produces is read: digits alone, no extra leading zero, never
+/// 0.
+pub(crate) fn sequence_number(digits: &str) -> Option<u64> {
+    if digits.len() < 4 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+    (number != 0 && format!("{number:04}") == digits).then_some(number)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArtifactId(String);
 

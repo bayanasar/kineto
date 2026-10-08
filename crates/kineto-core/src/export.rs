@@ -107,6 +107,9 @@ pub enum ExportError {
     InvalidName(String),
     /// A package of that name exists and replacing it was not asked for.
     Exists(PathBuf),
+    /// The package, or a folder it is made or set aside in, would be inside
+    /// the project or hold it.
+    OverlapsProject(PathBuf),
     /// A file's bytes are not what its record says.
     Mismatch(String),
     /// The lines and their takes could not be read.
@@ -134,6 +137,11 @@ impl fmt::Display for ExportError {
             Self::NothingToExport => formatter.write_str("no shot has a locked video to export"),
             Self::InvalidName(name) => write!(formatter, "{name:?} is not a folder name"),
             Self::Exists(path) => write!(formatter, "{} exists already", path.display()),
+            Self::OverlapsProject(path) => write!(
+                formatter,
+                "{} is inside the project or holds it; a package is made outside the project",
+                path.display()
+            ),
             Self::Mismatch(path) => write!(formatter, "{path} is not what its record says"),
             Self::Lines(error) => error.fmt(formatter),
             Self::Timeline(reason) => formatter.write_str(reason),
@@ -284,11 +292,16 @@ pub fn export(
     }
     let target = request.destination.join(name);
     let replaced = request.destination.join(format!(".{name}.replaced"));
+    let staging = request.destination.join(format!(".{name}.partial"));
+    // Each of these is written, renamed or removed below; none may reach
+    // into the project.
+    for path in [&target, &staging, &replaced] {
+        outside_project(project.root().root(), path)?;
+    }
     restore_interrupted(&target, &replaced)?;
     if target.exists() && !request.replace {
         return Err(ExportError::Exists(target));
     }
-    let staging = request.destination.join(format!(".{name}.partial"));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
@@ -313,6 +326,47 @@ pub fn export(
         bytes,
         lines,
     })
+}
+
+/// Refuse `path` when it is inside the project at `root`, or holds it, once
+/// both are resolved as the file system finds them: through symbolic links,
+/// `..` and relative forms.
+fn outside_project(root: &Path, path: &Path) -> Result<(), ExportError> {
+    let root = std::fs::canonicalize(root)?;
+    let resolved = resolved(path)?;
+    if resolved.starts_with(&root) || root.starts_with(&resolved) {
+        return Err(ExportError::OverlapsProject(path.to_owned()));
+    }
+    Ok(())
+}
+
+/// `path` as the file system would find it: its deepest existing ancestor
+/// resolved through links, and the rest, which does not exist and so holds
+/// no link, appended with `.` and `..` worked out by name.
+fn resolved(path: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = std::path::absolute(path)?;
+    let components: Vec<Component<'_>> = absolute.components().collect();
+    for split in (1..=components.len()).rev() {
+        let prefix: PathBuf = components[..split].iter().collect();
+        match std::fs::canonicalize(&prefix) {
+            Ok(mut base) => {
+                for component in &components[split..] {
+                    match component {
+                        Component::ParentDir => {
+                            base.pop();
+                        }
+                        Component::Normal(name) => base.push(name),
+                        Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+                    }
+                }
+                return Ok(base);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::ErrorKind::NotFound.into())
 }
 
 /// Put the finished package `staging` under the name `target`. A new name

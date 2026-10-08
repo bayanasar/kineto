@@ -75,6 +75,9 @@ pub enum SourceError {
     Empty,
     TooLarge,
     InvalidManifest,
+    /// The source has as many revisions as it can hold
+    /// ([`crate::revisions::MAX_REVISION`]).
+    Exhausted,
     Path(ProjectPathError),
     Fs(ProjectFsError),
     Manifest(ProjectManifestError),
@@ -92,6 +95,11 @@ impl fmt::Display for SourceError {
                 MAX_SOURCE_BYTES / 1024 / 1024
             ),
             Self::InvalidManifest => formatter.write_str("source/source.json is invalid"),
+            Self::Exhausted => write!(
+                formatter,
+                "the source has {} revisions, as many as it can hold",
+                crate::revisions::MAX_REVISION
+            ),
             Self::Path(error) => error.fmt(formatter),
             Self::Fs(error) => error.fmt(formatter),
             Self::Manifest(error) => error.fmt(formatter),
@@ -107,7 +115,11 @@ impl Error for SourceError {
             Self::Fs(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::NotText | Self::Empty | Self::TooLarge | Self::InvalidManifest => None,
+            Self::NotText
+            | Self::Empty
+            | Self::TooLarge
+            | Self::InvalidManifest
+            | Self::Exhausted => None,
         }
     }
 }
@@ -233,7 +245,11 @@ pub fn import(
     if latest.content_hash == hash.as_str() {
         return Ok(latest.clone());
     }
-    let revision = latest.revision + 1;
+    let revision = latest
+        .revision
+        .checked_add(1)
+        .filter(|revision| *revision <= crate::revisions::MAX_REVISION)
+        .ok_or(SourceError::Exhausted)?;
     let path = ProjectRelativePath::new(format!(
         "source/revisions/r{revision:04}.{}",
         format.extension()
