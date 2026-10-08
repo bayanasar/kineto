@@ -125,6 +125,25 @@ fn a_plugin_that_misbehaves_fails_the_call() {
             .contains("more than 8 bytes")
     );
 
+    // Files each within the size limit are still refused, before any is
+    // read, when there are too many or they are too large together.
+    let many = invoke(Some("--many"), Limits::QUICK).unwrap();
+    assert_eq!(many.files.len(), 3);
+    let size = many.files[0].declared.size;
+    let few = Limits {
+        max_outputs: 2,
+        ..Limits::QUICK
+    };
+    let error = invoke(Some("--many"), few).unwrap_err();
+    assert!(error.to_string().contains("names 3 files"), "{error}");
+    let small = Limits {
+        max_file: size,
+        max_total: 3 * size - 1,
+        ..Limits::QUICK
+    };
+    let error = invoke(Some("--many"), small).unwrap_err();
+    assert!(error.to_string().contains("together"), "{error}");
+
     // A plugin that never ran never saw the request; the rest may have.
     let missing = PluginEntry {
         executable: PathBuf::from("/nonexistent/kineto-plugin"),

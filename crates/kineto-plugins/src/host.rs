@@ -8,11 +8,14 @@
 //! request line and closes; Kineto reads at most [`Limits::max_answer`]
 //! bytes of its stdout and discards its stderr. Past the deadline it is
 //! killed. A file it answers with must lie under `outputs/`, and hold the
-//! size and SHA-256 it declared, within [`Limits::max_file`]. The directory
-//! is removed when the call ends.
+//! size and SHA-256 it declared, within [`Limits::max_file`]; an answer
+//! names at most [`Limits::max_outputs`] files, of at most
+//! [`Limits::max_total`] bytes together, checked before any is read. The
+//! directory is removed when the call ends.
 
 use std::{
-    fmt, fs,
+    fmt,
+    fs::{self, File},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -37,6 +40,10 @@ pub struct Limits {
     pub max_answer: usize,
     /// The largest file an answer may name.
     pub max_file: u64,
+    /// The most files an answer may name.
+    pub max_outputs: usize,
+    /// The most bytes the files an answer names may hold together.
+    pub max_total: u64,
 }
 
 impl Limits {
@@ -45,6 +52,8 @@ impl Limits {
         deadline: Duration::from_secs(30),
         max_answer: 1024 * 1024,
         max_file: 64 * 1024 * 1024,
+        max_outputs: 16,
+        max_total: 128 * 1024 * 1024,
     };
 
     /// For `invoke`.
@@ -52,6 +61,8 @@ impl Limits {
         deadline: Duration::from_secs(15 * 60),
         max_answer: 1024 * 1024,
         max_file: 64 * 1024 * 1024,
+        max_outputs: 16,
+        max_total: 128 * 1024 * 1024,
     };
 }
 
@@ -282,13 +293,39 @@ pub fn run(
     };
     let answer = protocol::answer(first).map_err(HostError::Unreadable)?;
     let files = match &answer {
-        Answer::Completed { outputs, .. } => outputs
-            .iter()
-            .map(|declared| read_output(&scratch.0, declared, limits.max_file))
-            .collect::<Result<Vec<_>, _>>()?,
+        Answer::Completed { outputs, .. } => {
+            within_totals(outputs, limits)?;
+            outputs
+                .iter()
+                .map(|declared| read_output(&scratch.0, declared, limits.max_file))
+                .collect::<Result<Vec<_>, _>>()?
+        }
         _ => Vec::new(),
     };
     Ok(Done { answer, files })
+}
+
+/// Refuse an answer that names more files than [`Limits::max_outputs`], or
+/// declares more bytes together than [`Limits::max_total`], before any is
+/// read. Each file is then read only to the size it declared.
+fn within_totals(outputs: &[DeclaredFile], limits: Limits) -> Result<(), HostError> {
+    if outputs.len() > limits.max_outputs {
+        return Err(HostError::Output(format!(
+            "the answer names {} files; at most {} are taken",
+            outputs.len(),
+            limits.max_outputs
+        )));
+    }
+    let total = outputs
+        .iter()
+        .try_fold(0_u64, |total, declared| total.checked_add(declared.size));
+    match total {
+        Some(total) if total <= limits.max_total => Ok(()),
+        _ => Err(HostError::Output(format!(
+            "the answer's files declare more than {} bytes together",
+            limits.max_total
+        ))),
+    }
 }
 
 /// The file `declared` names, checked against what it declares.
@@ -327,8 +364,18 @@ fn read_output(scratch: &Path, declared: &DeclaredFile, max: u64) -> Result<Outp
             declared.size
         )));
     }
-    let bytes = fs::read(&path)
+    // Read one byte past the declared size: a file that grew since its
+    // size was checked is refused, not read whole.
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .and_then(|file| file.take(declared.size + 1).read_to_end(&mut bytes))
         .map_err(|_| HostError::Output(format!("{} is unreadable", declared.path)))?;
+    if bytes.len() as u64 != declared.size {
+        return Err(HostError::Output(format!(
+            "{} changed while it was read",
+            declared.path
+        )));
+    }
     if sha256(&bytes) != declared.sha256.trim_start_matches("sha256:") {
         return Err(HostError::Output(format!(
             "{} is not the file declared",
