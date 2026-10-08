@@ -783,6 +783,19 @@ pub fn shots_in_play(project: &CanonicalProject) -> Result<Vec<ShotKey>, Revisio
         .collect()
 }
 
+/// The direction the locked plan gives `key`'s shot, or `None` when no plan
+/// is locked or it does not hold that shot.
+pub fn planned_direction(
+    project: &CanonicalProject,
+    key: &ShotKey,
+) -> Result<Option<ShotDirection>, RevisionError> {
+    Ok(locked_plan(project)?.and_then(|(_, plan)| {
+        plan.shots()
+            .find(|(scene, shot)| *scene == key.scene() && shot.id == key.shot())
+            .map(|(_, shot)| shot.direction)
+    }))
+}
+
 /// The locked plan and its revision, or `None` when none is locked.
 pub fn locked_plan(
     project: &CanonicalProject,
