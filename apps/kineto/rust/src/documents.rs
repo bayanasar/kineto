@@ -323,9 +323,11 @@ pub(crate) unsafe fn published(
     session.documents().map_err(|_| PROJECT_ERR_NOT_OPEN)
 }
 
+/// A revision as its field carries it: 0 for none. Every revision a
+/// project holds fits ([`kineto_project::revisions::MAX_REVISION`]); [`pack`]
+/// fails on one that does not.
 pub(crate) fn revision_bits(revision: Option<u32>) -> u64 {
-    let mask = (1_u64 << SOURCE_REVISION.width) - 1;
-    revision.map_or(0, |revision| u64::from(revision).min(mask))
+    revision.map_or(0, u64::from)
 }
 
 fn encode_documents(documents: &PublishedDocuments) -> u64 {
@@ -724,11 +726,14 @@ pub unsafe extern "C" fn kineto_project_document_cost(
 mod tests {
     use super::*;
 
+    /// The last revision a project holds is carried as it is; none is cut
+    /// to fit.
     #[test]
-    fn revisions_beyond_their_field_are_clamped() {
+    fn every_revision_a_project_holds_is_carried_exactly() {
+        let last = kineto_project::revisions::MAX_REVISION;
         let documents = PublishedDocuments {
             source_revision: Some(1),
-            locked: Some(u32::MAX),
+            locked: Some(last),
             analysis_stale: true,
             ..PublishedDocuments::default()
         };
@@ -736,8 +741,19 @@ mod tests {
         let read = |field: Field| (bits >> field.shift) & ((1 << field.width) - 1);
         assert_eq!(read(SOURCE_REVISION), 1);
         assert_eq!(read(ANALYSIS_REVISION), 0);
-        assert_eq!(read(LOCKED_REVISION), (1 << 14) - 1);
+        assert_eq!(read(LOCKED_REVISION), u64::from(last));
         assert_eq!(read(ANALYSIS_STALE), 1);
         assert_eq!(read(SCREENPLAY_STALE), 0);
+    }
+
+    /// A revision past the last one breaks the project's own limit: the
+    /// summary fails instead of handing Dart another number.
+    #[test]
+    #[should_panic(expected = "locked_revision does not fit its field")]
+    fn a_revision_past_the_last_fails_the_summary() {
+        encode_documents(&PublishedDocuments {
+            locked: Some(kineto_project::revisions::MAX_REVISION + 1),
+            ..PublishedDocuments::default()
+        });
     }
 }

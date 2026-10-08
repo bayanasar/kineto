@@ -9,7 +9,8 @@
 //! to `invoke`: `--sleep` never answers, `--crash` exits without answering,
 //! `--wrong-hash` declares a file it did not write, `--refuse` fails without
 //! the provider taking the request, `--fail` fails after it may have, and
-//! `--env` reports the names of the environment variables it was given; it
+//! `--env` reports the names of the environment variables it was given,
+//! `--many` answers with 3 images of the same bytes; it
 //! describes itself as usual, but for `--sleep` with a one-second deadline.
 //! `--garbage` answers every request with something that is not the
 //! protocol.
@@ -256,7 +257,16 @@ pub fn serve(args: &[String]) {
             if mode == "--wrong-hash" {
                 declared["sha256"] = json!(format!("sha256:{}", "0".repeat(64)));
             }
-            json!({"protocol": PROTOCOL, "status": "completed", "outputs": [declared],
+            let declared = if mode == "--many" {
+                json!([
+                    declared,
+                    file("image-2.jpg", &bytes),
+                    file("image-3.jpg", &bytes)
+                ])
+            } else {
+                json!([declared])
+            };
+            json!({"protocol": PROTOCOL, "status": "completed", "outputs": declared,
                 "metadata": {"model": "demo-image", "request_id": hex(&Sha256::digest(line.as_bytes()))[..16]}})
         }
         ("invoke", _) if capability == "video.generate" => {

@@ -2745,12 +2745,9 @@ fn stored_branch(artifact: &StoredArtifactRecord) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// A four-digit revision from 0001 on.
+/// A revision from 0001 on, as `{:04}` writes it.
 fn parse_revision(value: &str) -> Option<u16> {
-    if value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    value.parse::<u16>().ok().filter(|revision| *revision != 0)
+    crate::sequence_number(value).and_then(|revision| u16::try_from(revision).ok())
 }
 
 /// Parse `<shot_id>_vRRRR_candidate_x`, or a video made before a
