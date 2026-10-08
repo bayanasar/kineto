@@ -91,6 +91,9 @@ fn value(plugins: &KinetoPlugins, listing: &PluginListing, field: &str) -> Optio
         "composition_reference" => u64::from(
             images.is_some_and(|images| images.reference_limit(ReferenceRole::Composition) > 0),
         ),
+        "style_reference" => {
+            u64::from(images.is_some_and(|images| images.reference_limit(ReferenceRole::Style) > 0))
+        }
         "image_price_known" => {
             u64::from(images.is_some_and(|images| images.price_per_image.is_some()))
         }

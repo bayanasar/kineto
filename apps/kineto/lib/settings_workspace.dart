@@ -346,6 +346,7 @@ class SettingsWorkspaceView extends StatelessWidget {
                 'Images · ${description.imageModel} · ${description.aspectRatios.join(', ')}'
                 '${description.identityReferences == 0 ? '' : ' · up to ${description.identityReferences} identity references'}'
                 '${description.compositionReference ? ' · composition reference' : ''}'
+                '${description.styleReference ? ' · style reference' : ''}'
                 ' · ${_price(description.imagePriceMicros, 'an image')}',
               ),
             if (description.makesVideos)

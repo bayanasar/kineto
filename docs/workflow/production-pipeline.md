@@ -84,6 +84,8 @@ User actions:
 
 A locked style becomes part of the production context for later visual generations.
 
+The director can also import an image they already have as a style sample, with their own description of its look. Locked, the description is what prompts follow, and the image goes with each keyframe as a style reference to a provider that takes one ([Project format](../architecture/project-format.md)).
+
 ## Stage 6 — Character casting
 
 Generate candidate appearances per important character.

@@ -912,7 +912,8 @@ fn references(request: &CandidateRequest) -> (Vec<Input>, Vec<Value>) {
                 .composition
                 .iter()
                 .map(|image| ("composition", image)),
-        );
+        )
+        .chain(request.style.iter().map(|image| ("style", image)));
     for (index, (role, image)) in roles.enumerate() {
         let format = kineto_provider_minimax::sniff(&image.bytes).unwrap_or(ImageFormat::Jpeg);
         let name = format!("{role}-{index}.{}", extension(format));
@@ -979,6 +980,7 @@ impl PaidJobAdapter for PluginImages<'_> {
         if inputs.len() > usize::from(capabilities.max_reference_images)
             || (!request.identities.is_empty() && !takes(ReferenceRole::Identity))
             || (request.composition.is_some() && !takes(ReferenceRole::Composition))
+            || (request.style.is_some() && !takes(ReferenceRole::Style))
         {
             return refuse("the plugin does not take these references");
         }

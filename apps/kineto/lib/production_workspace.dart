@@ -169,6 +169,29 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
     });
   }
 
+  /// Ask for an image, then for the director's description of its style,
+  /// which prompts follow; the image goes to a provider that takes it.
+  Future<void> _importStyle() async {
+    if (_working) return;
+    final path = await widget.pickImage();
+    if (path == null || !mounted) return;
+    final description = await showDialog<String>(
+      context: context,
+      builder: (context) => const TextPromptDialog(
+        title: 'Describe this style',
+        width: 520,
+        fieldKey: 'import-style-description',
+        minLines: 2,
+        maxLines: 5,
+        hint: 'What every image should follow, such as "teal shadows, amber practicals, heavy grain"',
+        confirmKey: 'import-style-confirm',
+        confirmLabel: 'Import · free',
+      ),
+    );
+    if (description == null || description.trim().isEmpty || !mounted) return;
+    await _run(() => widget.project.importStyle(path, description.trim()), 'Importing the style');
+  }
+
   Future<void> _importPortrait(String character) async {
     if (_working) return;
     final path = await widget.pickImage();
@@ -194,6 +217,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
           _run(() => project.attachReference(reference, target, attach: attach), 'Saving'),
       onRemoveReference: (reference) => _run(() => project.removeReference(reference), 'Removing'),
       onImportPortrait: _importPortrait,
+      onImportStyle: _importStyle,
       production: _production,
       model: _model,
       prices: _prices,
@@ -283,6 +307,7 @@ class ProductionWorkspaceView extends StatelessWidget {
     this.onAttachReference,
     this.onRemoveReference,
     this.onImportPortrait,
+    this.onImportStyle,
     this.prices = const ProductionPrices(),
     this.screenplayLocked = false,
     this.bibleCostMicros,
@@ -353,6 +378,10 @@ class ProductionWorkspaceView extends StatelessWidget {
 
   /// Import an image the director chooses as a portrait of the character.
   final ValueChanged<String>? onImportPortrait;
+
+  /// Import an image the director chooses, with their description of its
+  /// look, as a style sample.
+  final VoidCallback? onImportStyle;
 
   bool get _idle => !working && editingEntry == null;
 
@@ -591,6 +620,24 @@ class ProductionWorkspaceView extends StatelessWidget {
             const SizedBox(height: 8),
             const Text('Style samples need MiniMax: set KINETO_IMAGE_PROVIDER=minimax and its key, then reopen Kineto.'),
           ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              WabButton(
+                key: const ValueKey<String>('import-style'),
+                kind: WabMaterialKind.paper,
+                onPressed: _idle ? onImportStyle : null,
+                child: const Text('Import an image as a style'),
+              ),
+              const Text(
+                'Free. Prompts follow your description of it; a provider that takes a style reference is '
+                'sent the image too.',
+              ),
+            ],
+          ),
           if (production.samples.isNotEmpty) ...<Widget>[
             const SizedBox(height: 16),
             Wrap(
@@ -618,9 +665,11 @@ class ProductionWorkspaceView extends StatelessWidget {
           Opacity(opacity: rejected ? .45 : 1, child: MediaFrame(path: sample.mediaPath, aspectRatio: 16 / 9)),
           const SizedBox(height: 8),
           Text(
-            '${sample.id} · ${sample.preset}${locked ? ' · locked' : selected ? ' · selected' : rejected ? ' · rejected' : ''}',
+            '${sample.id} · ${sample.imported ? 'imported' : sample.preset}'
+            '${locked ? ' · locked' : selected ? ' · selected' : rejected ? ' · rejected' : ''}',
             style: Theme.of(context).textTheme.titleSmall,
           ),
+          if (sample.imported) Text(sample.directives, key: ValueKey<String>('style-description-${sample.id}')),
           if (sample.note != null) Text(sample.note!),
           if (sample.refines != null) Text('Refines ${sample.refines}'),
           const SizedBox(height: 8),
@@ -649,12 +698,14 @@ class ProductionWorkspaceView extends StatelessWidget {
                   onPressed: _idle ? () => onRejectStyle(sample.id) : null,
                   child: const Text('Reject'),
                 ),
-              WabButton(
-                key: ValueKey<String>('refine-${sample.id}'),
-                kind: WabMaterialKind.paper,
-                onPressed: _idle && prices.sample != null ? () => _refineDialog(context, sample) : null,
-                child: const Text('Refine'),
-              ),
+              // An imported image has no preset to sample again from.
+              if (!sample.imported)
+                WabButton(
+                  key: ValueKey<String>('refine-${sample.id}'),
+                  kind: WabMaterialKind.paper,
+                  onPressed: _idle && prices.sample != null ? () => _refineDialog(context, sample) : null,
+                  child: const Text('Refine'),
+                ),
             ],
           ),
         ],

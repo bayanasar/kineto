@@ -481,6 +481,43 @@ pub unsafe extern "C" fn kineto_project_import_portrait(
     })
 }
 
+/// Queue importing the image at `path`, which the director chose, as a style
+/// sample described by `description`, which prompts follow once it is
+/// locked. Free; the image must be one the session's image provider takes
+/// as a style reference when it takes one.
+///
+/// # Safety
+/// `session` must be a live project-session handle. Each non-empty input must
+/// be readable for its length and hold UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_import_style(
+    session: *const KinetoProjectSession,
+    path_ptr: *const u8,
+    path_len: u64,
+    description_ptr: *const u8,
+    description_len: u64,
+    token: u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        let (path, description) = match unsafe {
+            (
+                required(path_ptr, path_len),
+                required(description_ptr, description_len),
+            )
+        } {
+            (Ok(path), Ok(description)) => (std::path::PathBuf::from(path), description),
+            (Err(code), _) | (_, Err(code)) => return code,
+        };
+        if !path.is_absolute() || description.trim().is_empty() {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        }
+        let command = ProductionCommand::ImportStyle { path, description };
+        // SAFETY: forwarded caller contract.
+        unsafe { submit_production(session, command, false, token) }
+    })
+}
+
 fn cast_image_kind(name: &str) -> Option<CastImageKind> {
     std::iter::once(CastImageKind::Portrait)
         .chain(CastImageKind::PACK)
@@ -780,6 +817,7 @@ fn text(published: &Published, field: &str, group: u32, item: u32) -> Option<Str
         "sample_media" => Some(sample()?.1.to_string_lossy().into_owned()),
         "sample_provider" => owned(&sample()?.0.provider),
         "sample_model" => owned(&sample()?.0.model),
+        "sample_directives" => owned(&sample()?.0.directives),
         "style_lock_sample" => owned(style().map_or("", |style| &style.artifact_id)),
         "style_lock_preset" => owned(style().map_or("", |style| &style.preset)),
         "style_lock_note" => owned(

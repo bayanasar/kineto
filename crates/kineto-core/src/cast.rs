@@ -602,6 +602,7 @@ fn make<G: CandidateGenerator>(
         aspect_ratio: shot.frame,
         identities: identity.cloned().into_iter().collect(),
         composition: None,
+        style: None,
         prompt: Some(Arc::new(planned.prompt)),
     };
     jobs.generate(&plan, &call, index, hooks)?;

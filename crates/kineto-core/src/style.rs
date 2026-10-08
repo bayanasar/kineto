@@ -4,6 +4,12 @@
 //! provider's style partition (`minimax-style` for MiniMax), recorded in
 //! `style/samples.json` with what its plan kept: preset, note, scene and
 //! dependencies.
+//!
+//! The director can also import an image they already have, a mood board or
+//! a still, as a sample ([`import_sample`]), with their own description of
+//! its style. Selected and locked like any sample, its description is what
+//! prompts follow, and the image itself goes with keyframe requests as a
+//! style reference to a provider that takes one.
 
 use std::sync::Arc;
 
@@ -14,7 +20,7 @@ use kineto_project::{
     revisions::{self, DependencyRecord, DocumentKind},
     style::{self as document, SampleStatus, StyleSample},
 };
-use kineto_providers::Price;
+use kineto_providers::{ImageCapabilities, ImageFormat, Price, ReferenceRole};
 use serde::{Deserialize, Serialize};
 
 pub use crate::paid_image::{ImageRecovery as StyleRecovery, Submission};
@@ -33,6 +39,22 @@ use crate::{
 
 /// The job partition MiniMax's style samples are recorded under.
 pub const STYLE_PROVIDER: &str = "minimax-style";
+
+/// The provider an imported sample records: the director brought it.
+pub const IMPORT_PROVIDER: &str = "import";
+
+/// The preset an imported sample records: none, its look is its image and
+/// the director's description.
+pub const IMPORT_PRESET: &str = "imported";
+
+/// What an imported sample's provenance names in place of a compiler.
+pub const IMPORT_VERSION: &str = "import/1";
+
+/// The largest image the director may import as a style, in bytes.
+pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The longest description of an imported style, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 2_000;
 
 /// The aspect ratio samples are generated at, as keyframes are.
 const SAMPLE_PARAMS: &str = "aspect_ratio=16:9";
@@ -364,6 +386,7 @@ fn ask<G: CandidateGenerator>(
         aspect_ratio: KEYFRAME_ASPECT,
         identities: Vec::new(),
         composition: None,
+        style: None,
         prompt: Some(Arc::new(prompt)),
     };
     jobs.generate(&plan, &call, 0, hooks)?;
@@ -372,4 +395,94 @@ fn ask<G: CandidateGenerator>(
         .into_iter()
         .find(|sample| sample.artifact_id == artifact_id.as_str())
         .ok_or(GenerationError::Unexpected("a recorded sample is missing"))
+}
+
+/// Import `bytes`, an image the director chose, as a style sample described
+/// by `description`: copied into the project by its hash and recorded as a
+/// candidate, to be selected and locked like any sample. Free, and needing
+/// nothing locked first. The image must be a JPEG, PNG or WebP of at most
+/// 20 MB, and a format and size `capabilities` takes as a style reference
+/// when it takes one; the description must say something. Importing the
+/// same image with the same description again records nothing new.
+pub fn import_sample(
+    project: &CanonicalProject,
+    capabilities: &ImageCapabilities,
+    bytes: &[u8],
+    description: &str,
+) -> Result<StyleSample, GenerationError> {
+    let description = description.trim();
+    if description.is_empty() || description.chars().count() > MAX_DESCRIPTION_CHARS {
+        return Err(GenerationError::Prerequisite(
+            Prerequisite::StyleDescription,
+        ));
+    }
+    let format = kineto_provider_minimax::sniff(bytes);
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let takes_style = capabilities.reference_limit(ReferenceRole::Style) > 0;
+    let fits = format
+        .is_some_and(|format| !takes_style || capabilities.reference_formats.contains(&format))
+        && size <= MAX_IMPORT_BYTES
+        && (!takes_style
+            || capabilities
+                .max_reference_bytes
+                .is_none_or(|max| size <= max));
+    if !fits {
+        return Err(GenerationError::Prerequisite(Prerequisite::StyleReference));
+    }
+    let content_hash = kineto_project::ContentHash::of(bytes);
+    if let Some(sample) = document::samples(project)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|sample| {
+            sample.provider == IMPORT_PROVIDER
+                && sample.content_hash == content_hash.as_str()
+                && sample.directives == description
+        })
+    {
+        return Ok(sample);
+    }
+    if project.is_read_only() {
+        return Err(document_error(document::StyleError::Manifest(
+            kineto_project::manifest::ProjectManifestError::ReadOnlyFormatVersion(
+                project.manifest().format_version,
+            ),
+        )));
+    }
+    let artifact_id = document::next_artifact_id(project).map_err(document_error)?;
+    let extension = match format {
+        Some(ImageFormat::Png) => "png",
+        Some(ImageFormat::Webp) => "webp",
+        _ => "jpg",
+    };
+    let media = document::sample_media_path(&artifact_id, extension).map_err(document_error)?;
+    project
+        .root()
+        .write_atomic(&media, bytes)
+        .map_err(|error| document_error(document::StyleError::Fs(error)))?;
+    let sample = StyleSample {
+        artifact_id: artifact_id.as_str().to_owned(),
+        preset: IMPORT_PRESET.to_owned(),
+        preset_version: 1,
+        directives: description.to_owned(),
+        note: None,
+        refines: None,
+        scene_id: String::new(),
+        status: SampleStatus::Candidate,
+        content_hash: content_hash.as_str().to_owned(),
+        input_hash: content_hash.as_str().to_owned(),
+        provider: IMPORT_PROVIDER.to_owned(),
+        model: IMPORT_PROVIDER.to_owned(),
+        media_path: media.as_path().to_string_lossy().replace('\\', "/"),
+        provenance: kineto_project::shot::PromptProvenance {
+            compiler_version: IMPORT_VERSION.to_owned(),
+            compiled_prompt: "Imported by the director.".to_owned(),
+            prompt_hash: content_hash.as_str().to_owned(),
+            applied_constraints: Vec::new(),
+            dropped_constraints: Vec::new(),
+        },
+        dependencies: Vec::new(),
+        media_state: None,
+    };
+    document::attach(project, sample.clone()).map_err(document_error)?;
+    Ok(sample)
 }

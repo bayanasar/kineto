@@ -27,6 +27,12 @@
 //! reference image is left after the cast's identities, and the keyframe
 //! then depends on it. Otherwise the shot follows it in words only, a
 //! cosmetic drop that says why.
+//!
+//! A locked style the director imported goes in as their description, and
+//! its image is sent as a style reference to a provider that takes one,
+//! when a reference image is left after the identities and the composition
+//! reference; the keyframe then depends on it. Otherwise the style is in
+//! words only, a cosmetic drop that says why.
 
 use std::{error::Error, fmt};
 
@@ -71,6 +77,34 @@ pub struct Locks<'a> {
     /// The locked keyframe of the shot this one continues from, if it has
     /// one.
     pub previous: Option<&'a PreviousFrame>,
+    /// The locked style's image, when the director imported it.
+    pub style_image: Option<&'a StyleImage>,
+}
+
+/// The dependency field a keyframe records on the imported style image it
+/// was sent as a style reference.
+pub const STYLE_IMAGE_FIELD: &str = "style.reference";
+
+/// The image of a locked style the director imported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleImage {
+    pub artifact_id: ArtifactId,
+    pub content_hash: ContentHash,
+    /// Its image, relative to the project.
+    pub media_path: String,
+}
+
+impl StyleImage {
+    /// What a keyframe sent it as a reference records.
+    #[must_use]
+    pub fn dependency(&self) -> ArtifactDependency {
+        ArtifactDependency {
+            artifact_id: self.artifact_id.clone(),
+            content_hash: self.content_hash.clone(),
+            impact: DependencyImpact::Semantic,
+            field: Some(STYLE_IMAGE_FIELD.to_owned()),
+        }
+    }
 }
 
 /// The dependency field a keyframe records on the locked keyframe it was
@@ -153,6 +187,8 @@ pub struct KeyframePrompt {
     /// The previous shot's locked keyframe, to send as a composition
     /// reference.
     pub composition: Option<PreviousFrame>,
+    /// The imported style's image, to send as a style reference.
+    pub style_image: Option<StyleImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +440,46 @@ pub fn compile(
             });
         }
     }
+    let mut style_image = None;
+    if let Some(image) = locks.style_image {
+        let used = identities.len() + usize::from(composition.is_some());
+        let room = usize::from(capabilities.max_reference_images).saturating_sub(used);
+        let reason = if capabilities.reference_limit(ReferenceRole::Style) == 0 {
+            Some(
+                "the provider takes no style reference; the imported style goes in as the \
+                 director's description only"
+                    .to_owned(),
+            )
+        } else if room == 0 {
+            Some(format!(
+                "the provider takes {} reference image{} per image, all given to identities and \
+                 continuity; the imported style goes in as the director's description only",
+                capabilities.max_reference_images,
+                if capabilities.max_reference_images == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ))
+        } else {
+            needed(
+                &mut required,
+                STYLE_IMAGE_FIELD,
+                "The style reference image shows the look to follow: its palette, light and \
+                 texture, not its content",
+            )?;
+            dependencies.push(image.dependency());
+            style_image = Some(image.clone());
+            None
+        };
+        if let Some(reason) = reason {
+            dropped.push(DroppedConstraint {
+                constraint: constraint(STYLE_IMAGE_FIELD)?,
+                reason,
+                degradation: DegradationLevel::Cosmetic,
+            });
+        }
+    }
     if let Some(bible) = locks.bible {
         let scene_id = scene.map(|scene| scene.id.as_str()).unwrap_or_default();
         for character in &shot.characters {
@@ -510,12 +586,20 @@ pub fn compile(
         dropped,
         capabilities.max_prompt_chars,
         KEYFRAME_COMPILER_VERSION,
-        &canonical_intent(scene, shot, direction, locks, composition.as_ref()),
+        &canonical_intent(
+            scene,
+            shot,
+            direction,
+            locks,
+            composition.as_ref(),
+            style_image.as_ref(),
+        ),
     )?;
     Ok(KeyframePrompt {
         dependencies,
         identities,
         composition,
+        style_image,
         ..prompt
     })
 }
@@ -592,6 +676,7 @@ fn canonical_intent(
     direction: ShotDirection,
     locks: Locks<'_>,
     composition: Option<&PreviousFrame>,
+    style_image: Option<&StyleImage>,
 ) -> Vec<u8> {
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
@@ -662,6 +747,11 @@ fn canonical_intent(
     // sent, so every prompt without one hashes as it always has.
     if let Some(frame) = composition {
         field(frame.content_hash.as_str().as_bytes());
+    }
+    // Likewise the style image sent with it.
+    if let Some(image) = style_image {
+        field(b"style.reference");
+        field(image.content_hash.as_str().as_bytes());
     }
     // The prompt hash frames this again; a digest keeps it fixed-size.
     hasher.finalize().to_vec()
@@ -1258,6 +1348,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &minimax(),
         )
@@ -1293,6 +1384,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &minimax(),
         )
@@ -1333,6 +1425,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &minimax(),
         )
@@ -1358,6 +1451,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &minimax(),
         )
@@ -1406,6 +1500,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &text_only,
         )
@@ -1445,6 +1540,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &two,
         )
@@ -1489,6 +1585,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &three,
         )
@@ -1522,6 +1619,7 @@ mod tests {
                 note: None,
                 preferences: None,
                 previous: None,
+                style_image: None,
             },
             &minimax(),
         )
@@ -1655,5 +1753,107 @@ mod tests {
             );
             assert_ne!(prompt.prompt_hash, sent.prompt_hash, "{why}");
         }
+    }
+
+    fn imported() -> StyleImage {
+        StyleImage {
+            artifact_id: ArtifactId::new("style_s0002").unwrap(),
+            content_hash: ContentHash::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+            media_path: "style/samples/style_s0002.jpg".to_owned(),
+        }
+    }
+
+    /// A provider that takes `max` references, of identity, composition and
+    /// style.
+    fn styling(max: u16) -> ImageCapabilities {
+        ImageCapabilities {
+            max_reference_images: max,
+            reference_roles: [
+                ReferenceRole::Identity,
+                ReferenceRole::Composition,
+                ReferenceRole::Style,
+            ]
+            .into_iter()
+            .collect(),
+            ..minimax()
+        }
+    }
+
+    #[test]
+    fn an_imported_style_is_sent_where_there_is_room_and_said_in_words_everywhere() {
+        let image = imported();
+        let style = style();
+        let locks = [cast("filmmaker", "The Filmmaker")];
+        let with = |style_image: Option<&StyleImage>, capabilities: &ImageCapabilities| {
+            compile(
+                Some(&scene()),
+                Some(&shot()),
+                ShotDirection::Reaction,
+                Locks {
+                    style: Some(&style),
+                    characters: &locks,
+                    style_image,
+                    ..Locks::default()
+                },
+                capabilities,
+            )
+            .unwrap()
+        };
+        let style_drop = |prompt: &KeyframePrompt| {
+            prompt
+                .compiled
+                .dropped_constraints()
+                .iter()
+                .find(|dropped| dropped.constraint.as_str() == STYLE_IMAGE_FIELD)
+                .map(|dropped| {
+                    assert_eq!(dropped.degradation, DegradationLevel::Cosmetic);
+                    dropped.reason.clone()
+                })
+        };
+
+        // Room after the cast's identity: the image goes as the style
+        // reference, and the keyframe depends on it.
+        let sent = with(Some(&image), &styling(2));
+        assert_eq!(sent.style_image.as_ref(), Some(&image));
+        assert_eq!(sent.identities, [locks[0].portrait.clone()]);
+        assert!(style_drop(&sent).is_none());
+        assert!(
+            sent.compiled
+                .prompt()
+                .contains("The style reference image shows the look to follow")
+        );
+        assert!(sent.dependencies.contains(&image.dependency()));
+        // The image's bytes are part of what the prompt is for.
+        let other = StyleImage {
+            content_hash: ContentHash::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+            ..image.clone()
+        };
+        assert_ne!(
+            with(Some(&other), &styling(2)).prompt_hash,
+            sent.prompt_hash
+        );
+
+        // Otherwise it is not sent, nothing depends on it, the drop says
+        // why, and the style is still said in words.
+        for (capabilities, why) in [
+            (minimax(), "the provider takes no style reference"),
+            (styling(1), "all given to identities and continuity"),
+        ] {
+            let prompt = with(Some(&image), &capabilities);
+            assert!(prompt.style_image.is_none(), "{why}");
+            assert!(!prompt.dependencies.contains(&image.dependency()), "{why}");
+            assert!(style_drop(&prompt).unwrap().contains(why), "{why}");
+            assert!(
+                prompt
+                    .compiled
+                    .prompt()
+                    .contains(style.directives.trim_end_matches('.')),
+                "{why}"
+            );
+        }
+
+        // A generated style sends no image and reports nothing.
+        let plain = with(None, &styling(2));
+        assert!(plain.style_image.is_none() && style_drop(&plain).is_none());
     }
 }

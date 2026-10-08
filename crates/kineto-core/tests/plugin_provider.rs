@@ -64,7 +64,7 @@ fn main() {
         return;
     }
     let filter = args.iter().find(|arg| !arg.starts_with('-')).cloned();
-    let tests: [(&str, fn()); 11] = [
+    let tests: [(&str, fn()); 12] = [
         (
             "only_a_registered_enabled_plugin_is_selected",
             only_a_registered_enabled_plugin_is_selected,
@@ -108,6 +108,10 @@ fn main() {
         (
             "a_plugin_declares_each_clip_by_its_length_and_height",
             a_plugin_declares_each_clip_by_its_length_and_height,
+        ),
+        (
+            "an_imported_style_is_described_locked_and_sent_as_a_style_reference",
+            an_imported_style_is_described_locked_and_sent_as_a_style_reference,
         ),
     ];
     let mut failed = 0;
@@ -922,4 +926,143 @@ fn a_plugin_declares_each_clip_by_its_length_and_height() {
     ] {
         assert_eq!(declared(clips).unwrap_err(), error);
     }
+}
+
+/// A small JPEG the director chose: only its first bytes are read for its
+/// format.
+fn mood_board(tag: u8) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    bytes.extend(std::iter::repeat_n(tag, 64));
+    bytes
+}
+
+fn an_imported_style_is_described_locked_and_sent_as_a_style_reference() {
+    let temp = TempDir::new();
+    let state = temp.0.join("state");
+    let target = temp.0.join("film");
+    let project = created(&target);
+    let plugin = keeping(&state, &[]);
+    let capabilities = plugin.image_capabilities().unwrap().clone();
+    let description = "Teal shadows and amber practicals, heavy grain, low-key light";
+
+    // Imported with the director's words, which prompts will follow.
+    let sample =
+        style::import_sample(&project, &capabilities, &mood_board(1), description).unwrap();
+    assert_eq!(sample.artifact_id, "style_s0001");
+    assert_eq!(
+        (sample.provider.as_str(), sample.preset.as_str()),
+        (style::IMPORT_PROVIDER, style::IMPORT_PRESET)
+    );
+    assert_eq!(sample.directives, description);
+    assert!(sample.scene_id.is_empty());
+    assert_eq!(
+        fs::read(target.join(&sample.media_path)).unwrap(),
+        mood_board(1)
+    );
+    let log = fs::read_to_string(target.join(style_document::SAMPLES_PATH)).unwrap();
+    assert!(
+        !log.contains("scene_id"),
+        "an imported sample shows no scene"
+    );
+
+    // The same image and words again record nothing; other words are
+    // another sample. Words are needed, and an image the plugin can take.
+    assert_eq!(
+        style::import_sample(&project, &capabilities, &mood_board(1), description).unwrap(),
+        sample
+    );
+    let other =
+        style::import_sample(&project, &capabilities, &mood_board(1), "Bleached daylight").unwrap();
+    assert_eq!(other.artifact_id, "style_s0002");
+    for (bytes, words, refused) in [
+        (
+            mood_board(2),
+            "  ",
+            generation::Prerequisite::StyleDescription,
+        ),
+        (
+            b"not an image".to_vec(),
+            description,
+            generation::Prerequisite::StyleReference,
+        ),
+        (
+            [b"RIFF\0\0\0\0WEBPVP8 ".as_slice(), &[0; 32]].concat(),
+            description,
+            generation::Prerequisite::StyleReference,
+        ),
+    ] {
+        assert!(matches!(
+            style::import_sample(&project, &capabilities, &bytes, words),
+            Err(GenerationError::Prerequisite(prerequisite)) if prerequisite == refused
+        ));
+    }
+    assert_eq!(style_document::samples(&project).unwrap().len(), 2);
+
+    // Selected and locked like any sample: prompts say its description,
+    // and the plugin, which takes a style reference, is sent the image.
+    style_document::select(&project, "style_s0001").unwrap();
+    let lock = style_document::lock(&project, "style_s0001").unwrap();
+    assert_eq!(lock.directives, description);
+    let mut shot = shot(&project);
+    generation::generate(
+        &project,
+        &mut shot,
+        &ImageProvider::Plugin(Arc::clone(&plugin)),
+        &mut NoHooks,
+    )
+    .unwrap();
+    let invoked: Vec<serde_json::Value> = requests(&state)
+        .into_iter()
+        .filter(|request| request["operation"] == "invoke")
+        .collect();
+    assert_eq!(invoked.len(), 3);
+    for request in &invoked {
+        let references = request["request"]["references"].as_array().unwrap();
+        assert!(
+            references
+                .iter()
+                .any(|reference| reference["role"] == "style"),
+            "{request}"
+        );
+        let prompt = request["request"]["prompt"].as_str().unwrap();
+        assert!(
+            prompt.contains("Teal shadows and amber practicals"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The style reference image shows the look to follow"),
+            "{prompt}"
+        );
+    }
+    let artifacts: serde_json::Value = serde_json::from_slice(
+        &fs::read(target.join("scenes/scene_001/shots/shot_001/artifacts.json")).unwrap(),
+    )
+    .unwrap();
+    let candidates: Vec<&serde_json::Value> = artifacts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| artifact["status"] == "candidate")
+        .collect();
+    assert_eq!(candidates.len(), 3);
+    for candidate in candidates {
+        assert!(
+            candidate["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|dependency| {
+                    dependency["artifact_id"] == "style_s0001"
+                        && dependency["field"] == "style.reference"
+                }),
+            "{candidate}"
+        );
+    }
+
+    // Deleting .kineto/ loses none of it.
+    drop(project);
+    fs::remove_dir_all(target.join(".kineto")).unwrap();
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(style_document::locked(&project).unwrap(), Some(lock));
+    assert_eq!(style_document::samples(&project).unwrap().len(), 2);
 }

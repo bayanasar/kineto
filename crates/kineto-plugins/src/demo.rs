@@ -73,7 +73,7 @@ fn describe(mode: &str) -> Value {
             "image.generate": {
                 "model": "demo-image",
                 "aspect_ratios": ratios,
-                "reference_roles": ["identity", "composition"],
+                "reference_roles": ["identity", "composition", "style"],
                 "max_reference_images": 2,
                 "reference_formats": ["jpeg", "png"],
                 "max_reference_bytes": 10_485_760,

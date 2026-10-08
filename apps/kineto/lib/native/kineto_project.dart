@@ -622,6 +622,10 @@ final class KinetoProjectException implements Exception {
   /// The secure storage refused or failed, as when it is locked.
   static const int keychainFailed = 171;
 
+  /// The image cannot be imported as a style: not a JPEG, PNG or WebP of at
+  /// most 20 MB, or not one the image provider takes as a style reference.
+  static const int styleReferenceUnusable = 172;
+
   final int code;
   final String message;
 
@@ -1441,6 +1445,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'planned_direction': 169,
   'keychain_unavailable': 170,
   'keychain_failed': 171,
+  'style_reference_unusable': 172,
   'panic': 199,
 };
 
@@ -1521,6 +1526,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   169: 'The shot\'s direction comes from the locked shot plan; plan the scene again to change it',
   170: 'This system offers no secure storage for keys; set them in the environment instead',
   171: 'The system\'s secure storage refused or failed; it may be locked',
+  172: 'This image cannot be a style: use a JPEG, PNG or WebP of at most 20 MB that the image provider takes as a style reference',
   199: 'Native project call failed unexpectedly',
 };
 

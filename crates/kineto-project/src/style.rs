@@ -59,7 +59,9 @@ pub struct StyleSample {
     /// The sample this one reworks with the note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refines: Option<String>,
-    /// The screenplay scene the sample shows.
+    /// The screenplay scene the sample shows; empty for an image the
+    /// director imported, which shows none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scene_id: String,
     pub status: SampleStatus,
     pub content_hash: String,

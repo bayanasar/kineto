@@ -174,6 +174,7 @@ Future<_Calls> _pump(
             : null,
         onRemoveReference: withReferences ? (reference) => calls.log.add('remove $reference') : null,
         onImportPortrait: withReferences ? (character) => calls.log.add('import $character') : null,
+        onImportStyle: () => calls.log.add('import style'),
       ),
     ),
   );
@@ -404,6 +405,38 @@ void main() {
     expect(find.text('Ask again · may pay twice'), findsOneWidget);
     await _tap(tester, find.byKey(_key('resubmit-paid')));
     expect(calls.log, <String>['resubmit']);
+  });
+
+  testWidgets("an imported style shows the director's description and cannot be refined", (tester) async {
+    final imported = KinetoProduction(
+      bible: _casting.bible,
+      bibleLocked: _casting.bibleLocked,
+      presets: _casting.presets,
+      samples: <KinetoStyleSample>[
+        ..._casting.samples,
+        const KinetoStyleSample(
+          id: 'style_s0003',
+          preset: 'imported',
+          sceneId: '',
+          status: KinetoChoiceStatus.candidate,
+          mediaPath: '/nonexistent/style_s0003.jpg',
+          provider: 'import',
+          model: 'import',
+          directives: 'Teal shadows, amber practicals, heavy grain',
+        ),
+      ],
+      style: _casting.style,
+      characters: _casting.characters,
+    );
+    final calls = await _pump(tester, production: imported);
+    expect(find.text('style_s0003 · imported'), findsOneWidget);
+    expect(find.byKey(_key('style-description-style_s0003')), findsOneWidget);
+    expect(find.text('Teal shadows, amber practicals, heavy grain'), findsOneWidget);
+    expect(find.byKey(_key('refine-style_s0003')), findsNothing, reason: 'no preset to sample again');
+    expect(find.byKey(_key('refine-style_s0002')), findsOneWidget);
+    await _tap(tester, find.byKey(_key('select-style_s0003')));
+    await _tap(tester, find.byKey(_key('import-style')));
+    expect(calls.log, <String>['select style_s0003', 'import style']);
   });
 
   testWidgets('a portrait is imported, free, from the image the director picks', (tester) async {

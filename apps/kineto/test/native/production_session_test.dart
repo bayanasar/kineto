@@ -100,6 +100,23 @@ void main() {
       final imported = session.production.characters.last.portraits.last;
       expect(imported.status, KinetoChoiceStatus.candidate);
       expect(File(imported.mediaPath).readAsBytesSync(), photo.readAsBytesSync());
+      // A mood board comes in as a free style sample, with the director's
+      // description, which prompts follow once it is locked.
+      final samples = session.production.samples.length;
+      await session.importStyle(photo.path, 'Teal shadows, amber practicals, heavy grain');
+      final board = session.production.samples.last;
+      expect(session.production.samples, hasLength(samples + 1));
+      expect(board.imported, isTrue);
+      expect(board.directives, 'Teal shadows, amber practicals, heavy grain');
+      expect(board.sceneId, isEmpty);
+      expect(board.status, KinetoChoiceStatus.candidate);
+      expect(File(board.mediaPath).readAsBytesSync(), photo.readAsBytesSync());
+      await expectLater(session.importStyle(photo.path, ' '), _refusedWith(KinetoProjectException.invalidArgument));
+      await expectLater(
+        session.importStyle(note.path, 'A note'),
+        _refusedWith(KinetoProjectException.styleReferenceUnusable),
+      );
+      expect(session.production.samples, hasLength(samples + 1));
       // A cast is locked for the provider that keeps its identity, which
       // the local demo cannot.
       await expectLater(session.lockCharacter('interviewer'), _refusedWith(KinetoProjectException.noIdentityReference));
@@ -109,7 +126,10 @@ void main() {
         _refusedWith(KinetoProjectException.locked),
       );
       production = session.production;
-      expect(production.samples.last.status, KinetoChoiceStatus.rejected);
+      expect(
+        production.samples.firstWhere((sample) => sample.id == 'style_s0002').status,
+        KinetoChoiceStatus.rejected,
+      );
       filmmaker = production.characters.first;
       expect(filmmaker.portraits.first.status, KinetoChoiceStatus.rejected);
       expect(production.characters.last.selectedPortrait!.id, 'cast.interviewer.0001');

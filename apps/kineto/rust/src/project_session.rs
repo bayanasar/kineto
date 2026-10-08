@@ -1433,6 +1433,12 @@ fn generation_error_code(error: &GenerationError) -> i32 {
         GenerationError::Prerequisite(Prerequisite::IdentityReference) => {
             PROJECT_ERR_NO_IDENTITY_REFERENCE
         }
+        GenerationError::Prerequisite(Prerequisite::StyleReference) => {
+            PROJECT_ERR_STYLE_REFERENCE_UNUSABLE
+        }
+        GenerationError::Prerequisite(Prerequisite::StyleDescription) => {
+            PROJECT_ERR_INVALID_ARGUMENT
+        }
         GenerationError::Prerequisite(Prerequisite::Scene) => PROJECT_ERR_NO_SUCH_SCENE,
         GenerationError::Prerequisite(Prerequisite::LockedBible) => PROJECT_ERR_NEEDS_LOCKED_BIBLE,
         GenerationError::Prerequisite(Prerequisite::ShotPlan) => PROJECT_ERR_NEEDS_SHOT_PLAN,

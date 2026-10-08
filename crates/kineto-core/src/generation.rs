@@ -59,6 +59,7 @@ use crate::{
     documents::document_error,
     keyframe_prompt::{
         self, KeyframePrompt, KeyframePromptError, Locks, PREVIOUS_FRAME_FIELD, PreviousFrame,
+        StyleImage,
     },
     minimax::MinimaxKeyframes,
     plugin::{self, PluginImages, PluginProvider},
@@ -117,6 +118,9 @@ pub struct CandidateRequest {
     /// The locked keyframe of the shot this one continues from, for a
     /// provider that takes a composition reference and has room for it.
     pub composition: Option<ReferenceImage>,
+    /// The image of a locked style the director imported, for a provider
+    /// that takes a style reference and has room for it.
+    pub style: Option<ReferenceImage>,
     /// The compiled prompt, for generators that take one. Every candidate of
     /// a generation shares it.
     pub prompt: Option<Arc<KeyframePrompt>>,
@@ -748,6 +752,13 @@ pub enum Prerequisite {
     Line,
     /// Suggestions are drawn from the director's choices; none is made yet.
     Choices,
+    /// An imported style is a JPEG, PNG or WebP of at most 20 MB, in a
+    /// format and size the image provider takes as a style reference when
+    /// it takes one.
+    StyleReference,
+    /// An imported style needs the director's description of it, which is
+    /// what its prompt follows.
+    StyleDescription,
 }
 
 impl fmt::Display for Prerequisite {
@@ -776,6 +787,11 @@ impl fmt::Display for Prerequisite {
             Self::LockedVoice => "lock the character's voice before dubbing its lines",
             Self::Line => "the scene has no line with that number spoken by a character",
             Self::Choices => "choose among some takes before asking what they show",
+            Self::StyleReference => {
+                "a style is imported from a JPEG, PNG or WebP of at most 20 MB, in a format and \
+                 size the image provider takes as a style reference"
+            }
+            Self::StyleDescription => "describe the imported style; prompts follow the description",
         })
     }
 }
@@ -1064,6 +1080,7 @@ pub fn generate_noted<G: CandidateGenerator>(
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
                 composition: None,
+                style: None,
                 prompt: None,
             })
         {
@@ -1132,6 +1149,7 @@ fn compile_prompt<G: CandidateGenerator>(
     let scene = load_scene_intent(project, shot.key().scene())?;
     let intent = shot.intent()?;
     let (style, characters) = locks_of(project, intent.as_ref())?;
+    let style_image = style_image(project, style.as_ref())?;
     let bible = locked_bible(project)?;
     let preferences = crate::preferences::in_force(project)?;
     let previous = previous_frame(project, intent.as_ref())?;
@@ -1146,6 +1164,7 @@ fn compile_prompt<G: CandidateGenerator>(
             note,
             preferences: preferences.as_ref(),
             previous: previous.as_ref(),
+            style_image: style_image.as_ref(),
         },
         &generator.capabilities(),
     )?)))
@@ -1187,6 +1206,49 @@ fn previous_frame(
         content_hash: keyframe.content_hash,
         media_path: media.as_path().to_string_lossy().into_owned(),
     }))
+}
+
+/// The locked style's image, when the director imported the sample it
+/// locked; a generated sample's look is its directives alone.
+fn style_image(
+    project: &CanonicalProject,
+    style: Option<&StyleLock>,
+) -> Result<Option<StyleImage>, GenerationError> {
+    let Some(style) = style else {
+        return Ok(None);
+    };
+    let Some(sample) = kineto_project::style::samples(project)
+        .map_err(document_error)?
+        .into_iter()
+        .find(|sample| {
+            sample.artifact_id == style.artifact_id
+                && sample.provider == crate::style::IMPORT_PROVIDER
+        })
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StyleImage {
+        artifact_id: ArtifactId::new(sample.artifact_id).map_err(document_error)?,
+        content_hash: ContentHash::new(sample.content_hash).map_err(document_error)?,
+        media_path: sample.media_path,
+    }))
+}
+
+/// The imported style's image, read and checked against its hash, to send
+/// as the style reference.
+fn style_reference(
+    project: &CanonicalProject,
+    image: &StyleImage,
+) -> Result<ReferenceImage, GenerationError> {
+    let path = ProjectRelativePath::new(&image.media_path).map_err(document_error)?;
+    let bytes = project.root().read(&path).map_err(document_error)?;
+    if ContentHash::of(&bytes) != image.content_hash {
+        return Err(ShotWorkflowError::MediaMismatch(image.media_path.clone()).into());
+    }
+    Ok(ReferenceImage {
+        artifact_id: image.artifact_id.clone(),
+        bytes: Arc::from(bytes),
+    })
 }
 
 /// The previous shot's locked keyframe, read and checked against its hash,
@@ -1384,6 +1446,7 @@ fn complete_inner<G: CandidateGenerator>(
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
                 composition: None,
+                style: None,
                 prompt: None,
             },
         ));
@@ -1444,10 +1507,19 @@ fn complete_inner<G: CandidateGenerator>(
             .transpose()?,
         _ => None,
     };
+    let style = match &prompt {
+        Some(prompt) if to_invoke > 0 => prompt
+            .style_image
+            .as_ref()
+            .map(|image| style_reference(project, image))
+            .transpose()?,
+        _ => None,
+    };
     for (_, request) in &mut requests {
         request.prompt.clone_from(&prompt);
         request.identities.clone_from(&identities);
         request.composition.clone_from(&composition);
+        request.style.clone_from(&style);
     }
 
     // Every provider call runs on its own thread; recovering a finished call
@@ -1651,6 +1723,7 @@ pub fn unfinished_with<G: CandidateGenerator>(
                 aspect_ratio: KEYFRAME_ASPECT,
                 identities: Vec::new(),
                 composition: None,
+                style: None,
                 prompt: None,
             })
             && !unfinished.unresolved.contains(&key)
@@ -1952,6 +2025,7 @@ mod tests {
             aspect_ratio: KEYFRAME_ASPECT,
             identities: Vec::new(),
             composition: None,
+            style: None,
             prompt: None,
         };
 

@@ -12,6 +12,18 @@ external int _kinetoProjectImportPortrait(
   int token,
 );
 
+@Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint8>, Uint64, Uint64)>(
+  symbol: 'kineto_project_import_style',
+)
+external int _kinetoProjectImportStyle(
+  Pointer<Void> session,
+  Pointer<Uint8> path,
+  int pathLength,
+  Pointer<Uint8> description,
+  int descriptionLength,
+  int token,
+);
+
 @Native<Int32 Function(Pointer<Void>, Bool, Uint64)>(symbol: 'kineto_project_write_bible')
 external int _kinetoProjectWriteBible(Pointer<Void> session, bool resubmit, int token);
 
@@ -349,10 +361,13 @@ final class KinetoStyleSample {
     this.refines,
     this.provider = '',
     this.model = '',
+    this.directives = '',
   });
 
   final String id;
   final String preset;
+
+  /// The screenplay scene it shows; empty for an imported image.
   final String sceneId;
   final KinetoChoiceStatus status;
 
@@ -364,6 +379,13 @@ final class KinetoStyleSample {
   final String? refines;
   final String provider;
   final String model;
+
+  /// What prompts follow once it is locked: the preset's directives, or the
+  /// director's description of an imported image.
+  final String directives;
+
+  /// Whether the director imported it rather than generating it.
+  bool get imported => provider == 'import';
 }
 
 /// The style every image follows.
@@ -759,6 +781,21 @@ extension KinetoProjectProduction on KinetoProjectSession {
       });
 
   /// Import the image at [path], an absolute path the director chose, as a
+  /// style sample that [description] describes; prompts follow the
+  /// description once it is locked, and a provider that takes a style
+  /// reference is sent the image too. Free.
+  Future<void> importStyle(String path, String description) => _submitDocument((token) {
+        final arena = Arena();
+        try {
+          final file = _encodeUtf8(arena, path);
+          final words = _encodeUtf8(arena, description);
+          return _kinetoProjectImportStyle(_handle, file.pointer, file.length, words.pointer, words.length, token);
+        } finally {
+          arena.releaseAll();
+        }
+      });
+
+  /// Import the image at [path], an absolute path the director chose, as a
   /// portrait candidate of [characterId]. Free; it is then selected, packed
   /// and locked like a generated portrait.
   Future<void> importPortrait(String characterId, String path) => _submitDocument((token) {
@@ -1021,6 +1058,7 @@ final class _ProductionReader {
         refines: optional('sample_refines', item: item),
         provider: text('sample_provider', item: item),
         model: text('sample_model', item: item),
+        directives: text('sample_directives', item: item),
       );
 
   KinetoCastCharacter _character(int group) => KinetoCastCharacter(

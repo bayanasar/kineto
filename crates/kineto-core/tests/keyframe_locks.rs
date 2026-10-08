@@ -507,6 +507,7 @@ fn minimax_is_never_sent_more_identity_references_than_it_takes() {
         aspect_ratio: KEYFRAME_ASPECT,
         identities: vec![reference.clone(), reference],
         composition: None,
+        style: None,
         prompt: Some(Arc::new(
             kineto_core::keyframe_prompt::compile(
                 None,

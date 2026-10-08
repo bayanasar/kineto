@@ -345,6 +345,7 @@ pub(crate) fn fit(
         dependencies: Vec::new(),
         identities: Vec::new(),
         composition: None,
+        style_image: None,
     })
 }
 

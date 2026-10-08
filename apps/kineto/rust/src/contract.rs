@@ -85,10 +85,11 @@ pub(crate) const PROJECT_ERR_INVALID_REFERENCE: i32 = 168;
 pub(crate) const PROJECT_ERR_PLANNED_DIRECTION: i32 = 169;
 pub(crate) const PROJECT_ERR_KEYCHAIN_UNAVAILABLE: i32 = 170;
 pub(crate) const PROJECT_ERR_KEYCHAIN_FAILED: i32 = 171;
+pub(crate) const PROJECT_ERR_STYLE_REFERENCE_UNUSABLE: i32 = 172;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 74] = [
+const STATUSES: [(&str, i32); 75] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -174,6 +175,10 @@ const STATUSES: [(&str, i32); 74] = [
     ("planned_direction", PROJECT_ERR_PLANNED_DIRECTION),
     ("keychain_unavailable", PROJECT_ERR_KEYCHAIN_UNAVAILABLE),
     ("keychain_failed", PROJECT_ERR_KEYCHAIN_FAILED),
+    (
+        "style_reference_unusable",
+        PROJECT_ERR_STYLE_REFERENCE_UNUSABLE,
+    ),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -425,7 +430,7 @@ pub(crate) const PRODUCTION_VALUES: [(&str, u32); 10] = [
 ];
 
 /// Text fields `kineto_project_production_text_copy` copies.
-pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 47] = [
+pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 48] = [
     ("world_setting", 1),
     ("world_period", 2),
     ("world_visual_rule", 3),
@@ -473,6 +478,7 @@ pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 47] = [
     ("cast_lock_portrait", 45),
     ("cast_lock_reference", 46),
     ("cast_stale", 47),
+    ("sample_directives", 48),
 ];
 
 /// Why a bible may no longer describe the locked screenplay.
@@ -970,7 +976,7 @@ pub(crate) const MCP_TEXTS: [(&str, u32); 9] = [
 ];
 
 /// Number fields `kineto_plugins_value` reads of a registered plugin.
-pub(crate) const PLUGIN_VALUES: [(&str, u32); 12] = [
+pub(crate) const PLUGIN_VALUES: [(&str, u32); 13] = [
     ("enabled", 1),
     ("described", 2),
     ("selected", 3),
@@ -983,6 +989,7 @@ pub(crate) const PLUGIN_VALUES: [(&str, u32); 12] = [
     ("speech_price_known", 10),
     ("speech_character_price_micros", 11),
     ("makes_videos", 12),
+    ("style_reference", 13),
 ];
 
 /// Text fields `kineto_plugins_text_copy` copies of a registered plugin.

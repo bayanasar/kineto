@@ -166,6 +166,7 @@ void main() {
       KinetoProjectException.plannedDirection: 'planned_direction',
       KinetoProjectException.keychainUnavailable: 'keychain_unavailable',
       KinetoProjectException.keychainFailed: 'keychain_failed',
+      KinetoProjectException.styleReferenceUnusable: 'style_reference_unusable',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);

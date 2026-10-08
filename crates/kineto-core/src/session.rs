@@ -261,6 +261,13 @@ pub enum ProductionCommand {
         character: String,
         path: PathBuf,
     },
+    /// Free: import the image at `path`, which the director chose, as a
+    /// style sample described by `description`. The only read outside the
+    /// project.
+    ImportStyle {
+        path: PathBuf,
+        description: String,
+    },
     /// Call `tool` of the registered MCP server `server` with `arguments`,
     /// as the director asks, and keep its text as a reference about
     /// `attached_to` (ADR-0007). Kineto pays nothing; the server is the
@@ -2242,6 +2249,29 @@ impl Worker {
                 cast::lock(project, provider, character)
                     .map(|_| ())
                     .map_err(generation_error)
+            }
+            ProductionCommand::ImportStyle { path, description } => {
+                let unreadable = |error: std::io::Error| {
+                    style_error(StyleError::Fs(kineto_project::fs::ProjectFsError::Io(
+                        error,
+                    )))
+                };
+                std::fs::metadata(path)
+                    .map_err(unreadable)
+                    .and_then(|metadata| {
+                        if metadata.len() > style::MAX_IMPORT_BYTES {
+                            Err(generation_error(GenerationError::Prerequisite(
+                                crate::generation::Prerequisite::StyleReference,
+                            )))
+                        } else {
+                            std::fs::read(path).map_err(unreadable)
+                        }
+                    })
+                    .and_then(|bytes| {
+                        style::import_sample(project, &provider.capabilities(), &bytes, description)
+                            .map(|_| ())
+                            .map_err(generation_error)
+                    })
             }
             ProductionCommand::ImportPortrait { character, path } => {
                 let unreadable = |error: std::io::Error| {

@@ -37,6 +37,7 @@ const Set<String> kinetoPluginValueFields = <String>{
   'speaks',
   'identity_references',
   'composition_reference',
+  'style_reference',
   'image_price_known',
   'image_price_micros',
   'speech_price_known',
@@ -69,6 +70,7 @@ final class KinetoPluginDescription {
     this.aspectRatios = const <String>[],
     this.identityReferences = 0,
     this.compositionReference = false,
+    this.styleReference = false,
     this.imagePriceMicros,
     this.speechModel,
     this.languages = const <String>[],
@@ -92,6 +94,9 @@ final class KinetoPluginDescription {
   /// Whether it takes the previous shot's keyframe as a composition
   /// reference.
   final bool compositionReference;
+
+  /// Whether it takes a style reference, as an imported style sends.
+  final bool styleReference;
 
   /// What one image costs, in USD micros; null when it does not say.
   final int? imagePriceMicros;
@@ -203,6 +208,7 @@ List<KinetoPlugin> loadKinetoPlugins() {
                     aspectRatios: lines(index, 'aspect_ratios'),
                     identityReferences: number(index, 'identity_references'),
                     compositionReference: number(index, 'composition_reference') != 0,
+                    styleReference: number(index, 'style_reference') != 0,
                     imagePriceMicros:
                         number(index, 'image_price_known') == 0 ? null : number(index, 'image_price_micros'),
                     speechModel: number(index, 'speaks') == 0 ? null : text(index, 'speech_model'),
