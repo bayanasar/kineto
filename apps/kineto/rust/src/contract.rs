@@ -754,12 +754,14 @@ const PRODUCTION_FIELDS: [Field; 6] = [
     PRODUCTION_DAMAGED,
 ];
 
-/// Pack `(field, value)` pairs; values wider than their field are cut.
+/// Pack `(field, value)` pairs. A value wider than its field is a broken
+/// invariant, never cut to fit: the call fails, in every build, rather than
+/// hand Dart another value.
 pub(crate) fn pack(values: &[(Field, u64)]) -> u64 {
     values.iter().fold(0, |bits, (field, value)| {
         let mask = (1_u64 << field.width) - 1;
-        debug_assert!(*value <= mask, "{} does not fit its field", field.name);
-        bits | ((value & mask) << field.shift)
+        assert!(*value <= mask, "{} does not fit its field", field.name);
+        bits | (value << field.shift)
     })
 }
 
@@ -1276,6 +1278,39 @@ mod tests {
                 used |= mask << field.shift;
             }
         }
+    }
+
+    /// Every revision a project can hold fits the fields that carry one.
+    #[test]
+    fn revision_fields_hold_every_revision() {
+        for field in [
+            SOURCE_REVISION,
+            ANALYSIS_REVISION,
+            SCREENPLAY_REVISION,
+            LOCKED_REVISION,
+            BIBLE_REVISION,
+            BIBLE_LOCKED_REVISION,
+            PLAN_REVISION,
+            PLAN_LOCKED_REVISION,
+        ] {
+            assert_eq!(
+                (1_u64 << field.width) - 1,
+                u64::from(kineto_project::revisions::MAX_REVISION),
+                "{}",
+                field.name
+            );
+        }
+        let last = u64::from(kineto_project::revisions::MAX_REVISION);
+        assert_eq!(
+            pack(&[(SOURCE_REVISION, last), (ANALYSIS_REVISION, 1)]),
+            last | (1 << 14)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "source_revision does not fit its field")]
+    fn a_value_wider_than_its_field_fails_rather_than_wrapping() {
+        pack(&[(SOURCE_REVISION, 16_384)]);
     }
 
     #[test]
