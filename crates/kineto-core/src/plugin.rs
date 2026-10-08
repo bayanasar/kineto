@@ -1341,10 +1341,10 @@ impl VideoGenerator for PluginVideos {
             .unwrap_or_default()
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
-        match lines {
-            Some(lines) => format!("duration={clip_seconds};lines={lines}"),
-            None => format!("duration={clip_seconds}"),
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        match request.lines {
+            Some(lines) => format!("duration={};lines={lines}", request.clip_seconds),
+            None => format!("duration={}", request.clip_seconds),
         }
     }
 
@@ -1357,6 +1357,11 @@ impl VideoGenerator for PluginVideos {
                 "a plugin's video starts from an image",
             ));
         };
+        if !request.references.is_empty() {
+            return Err(PluginError::Unsupported(
+                "a plugin's video takes no reference images",
+            ));
+        }
         let name = format!("first-frame.{}", extension(*format));
         let mut fields = json!({
             "capability": "video.generate",

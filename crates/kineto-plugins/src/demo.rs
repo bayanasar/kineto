@@ -1,6 +1,7 @@
 //! A free, deterministic `kineto-plugin/1` plugin for tests and for trying
-//! the protocol: `image.generate` answers a small JPEG made from the
-//! request, `tts.speak` a silent WAV as long as the text takes to say, and
+//! the protocol: `image.generate` answers the same small JPEG for every
+//! request, its bytes made distinct by a comment holding the request's
+//! hash, `tts.speak` a silent WAV as long as the text takes to say, and
 //! `video.generate` a job that is finished the first time it is asked
 //! about, with the bundled demo clip.
 //!
@@ -104,14 +105,22 @@ fn describe(mode: &str) -> Value {
 /// The clip every demo video job finishes with.
 const DEMO_CLIP: &[u8] = include_bytes!("../../kineto-core/assets/demo-clip.mp4");
 
-/// A JPEG-shaped file that differs with every request.
+/// The picture every demo image shows: a figure in a dark room, 320x180,
+/// drawn once with Pillow.
+const DEMO_FRAME: &[u8] = include_bytes!("../assets/demo-frame.jpg");
+
+/// [`DEMO_FRAME`] with a comment segment holding the request's hash right
+/// after its start marker: a JPEG that decodes to the same picture and
+/// differs with every request.
 fn image(request: &Value) -> Vec<u8> {
     let digest = Sha256::digest(request.to_string().as_bytes());
-    let mut bytes = vec![
-        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00,
-    ];
+    let (start, rest) = DEMO_FRAME.split_at(2);
+    let length = u16::try_from(digest.len() + 2).expect("a hash fits a segment");
+    let mut bytes = start.to_vec();
+    bytes.extend_from_slice(&[0xff, 0xfe]);
+    bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(&digest);
-    bytes.extend_from_slice(&[0xff, 0xd9]);
+    bytes.extend_from_slice(rest);
     bytes
 }
 

@@ -30,9 +30,10 @@
 //! [`resubmit`], accepting that the video may be paid for twice.
 //!
 //! Providers are [`VideoGenerator`]s, chosen by what they declare they can
-//! do, never by name: MiniMax Hailuo, paid, and the local demo, free, which
-//! runs through the same jobs and receipts and returns a clip bundled with
-//! the build. Each records its jobs under its own provider key.
+//! do, never by name: MiniMax Hailuo and Google Veo, paid, and the local
+//! demo, free, which runs through the same jobs and receipts and returns a
+//! clip bundled with the build. Each records its jobs under its own
+//! provider key.
 
 use std::{
     convert::Infallible,
@@ -62,10 +63,14 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::{
         AttachOutcome, DEMO_PROVIDER, END_FRAME_FIELD, EndFrame, MAX_VIDEO_CANDIDATES,
-        PromptProvenance, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput, VideoPlan,
-        locate, video_media_path,
+        PromptProvenance, ShotIntent, ShotKey, ShotWorkflow, VideoGenerationSpec, VideoOutput,
+        VideoPlan, locate, video_media_path,
     },
     shot_plan::shots_in_play,
+};
+use kineto_provider_gemini::{
+    omni::{self, InteractionState, OmniClient, OmniError, OmniRequest},
+    veo::{OperationState, PROVIDER as VEO_PROVIDER, VeoClient, VeoError, VeoModel, VeoRequest},
 };
 use kineto_provider_minimax::{
     MinimaxClient, MinimaxError, PROVIDER as MINIMAX_PROVIDER, SharedTransport, Transport,
@@ -73,17 +78,18 @@ use kineto_provider_minimax::{
     camera_command, sniff, video_capabilities,
 };
 use kineto_providers::{
-    CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
-    VideoRequirements, evaluate_video, secret::SecretSource,
+    AspectRatio, CameraControl, ImageFormat, Price, ReferenceRole, VideoCapabilities, VideoClip,
+    VideoContainer, VideoMode, VideoRequirements, evaluate_video, secret::SecretSource,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{
-        GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
-        provenance_of, selected_plugin,
+        GenerationError, KEYFRAME_ASPECT, NoHooks, ProviderSelectionError, invoke_when_permitted,
+        parse_job_key, provenance_of, selected_plugin,
     },
+    likeness,
     plugin::{self, PluginProvider},
     video_prompt::{self, EndFrameUse, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
 };
@@ -93,6 +99,14 @@ pub const VIDEO_OPERATION: &str = "video.generate";
 /// Provider key MiniMax video jobs are recorded under. Separate from MiniMax
 /// image jobs, whose recovery must never see a video's remote task.
 pub const VIDEO_PROVIDER: &str = "minimax-video";
+/// Provider key Veo video jobs are recorded under, whichever Veo model
+/// made them.
+pub const VEO_VIDEO_PROVIDER: &str = "veo-video";
+/// The name a session selects Gemini Omni by, as in
+/// `KINETO_VIDEO_PROVIDER=omni`.
+pub const OMNI_PROVIDER: &str = "omni";
+/// Provider key Gemini Omni video jobs are recorded under.
+pub const OMNI_VIDEO_PROVIDER: &str = "gemini-omni-video";
 /// Provider key the local demo's video jobs are recorded under.
 pub const DEMO_VIDEO_PROVIDER: &str = "local-demo-video";
 /// The model the local demo names: one bundled clip.
@@ -134,6 +148,20 @@ pub struct VideoSubmission {
     /// The locked keyframe of the shot that continues from this one, for
     /// the clip to close on, and its format.
     pub last_frame: Option<(Vec<u8>, ImageFormat)>,
+    /// The clip's frame shape: its first frame's, one the provider renders.
+    pub aspect_ratio: AspectRatio,
+    /// Images the clip keeps a subject as, within the provider's reference
+    /// limits. A shot's video sends none yet: its locked keyframe already
+    /// carries who is in it.
+    pub references: Vec<VideoReference>,
+}
+
+/// An image a clip keeps something as it looks, and what it is kept for.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VideoReference {
+    pub role: ReferenceRole,
+    pub image: Vec<u8>,
+    pub format: ImageFormat,
 }
 
 impl fmt::Debug for VideoSubmission {
@@ -156,6 +184,15 @@ impl fmt::Debug for VideoSubmission {
                     .last_frame
                     .as_ref()
                     .map(|(bytes, format)| (bytes.len(), *format)),
+            )
+            .field("aspect_ratio", &self.aspect_ratio)
+            .field(
+                "references",
+                &self
+                    .references
+                    .iter()
+                    .map(|reference| (reference.role, reference.image.len(), reference.format))
+                    .collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -181,14 +218,22 @@ pub trait VideoGenerator {
     fn camera_command(&self, _motion: &str) -> Option<&'static str> {
         None
     }
-    /// The parameters a submission of `clip_seconds` at `lines` is made
-    /// with, as they enter the input hash.
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String;
+    /// The parameters `request` is made with, as they enter the input
+    /// hash: everything it sends besides its prompt and frames, which enter
+    /// it on their own.
+    fn canonical_params(&self, request: &VideoSubmission) -> String;
     /// Submit the video: the paid call. Returns the task to follow.
     fn submit(&self, request: &VideoSubmission) -> Result<String, Self::Error>;
     fn query(&self, task: &ProviderJobId) -> Result<TaskState, Self::Error>;
     fn fetch(&self, file: &str) -> Result<Vec<u8>, Self::Error>;
     fn class(&self, error: &Self::Error) -> ErrorClass;
+    /// How a task that ended with `error` is reported once following it
+    /// has stopped: retryable where asking for the video again may well
+    /// succeed, though the task itself will not. [`Self::class`] decides
+    /// whether to keep following it.
+    fn ended_class(&self, error: &Self::Error) -> ErrorClass {
+        self.class(error)
+    }
     /// Whether `error` proves the provider did not accept the submission,
     /// so it cannot have been charged.
     fn certainly_not_accepted(&self, error: &Self::Error) -> bool;
@@ -213,10 +258,11 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
         camera_command(motion)
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
         format!(
-            "duration={clip_seconds};resolution={}P",
-            lines.unwrap_or(VideoResolution::P768.lines())
+            "duration={};resolution={}P",
+            request.clip_seconds,
+            request.lines.unwrap_or(VideoResolution::P768.lines())
         )
     }
 
@@ -224,6 +270,11 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
         let Some((frame, format)) = &request.first_frame else {
             return Err(MinimaxError::InvalidRequest("Hailuo needs a first frame"));
         };
+        if !request.references.is_empty() {
+            return Err(MinimaxError::InvalidRequest(
+                "Hailuo takes no reference images with a first frame",
+            ));
+        }
         let resolution =
             VideoResolution::from_lines(request.lines.unwrap_or(VideoResolution::P768.lines()))
                 .ok_or(MinimaxError::InvalidRequest(
@@ -258,6 +309,171 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
     }
 
     fn certainly_not_accepted(&self, error: &MinimaxError) -> bool {
+        error.certainly_not_accepted()
+    }
+}
+
+impl<T: kineto_provider_gemini::Transport> VideoGenerator for VeoClient<T> {
+    type Error = VeoError;
+
+    fn provider(&self) -> &str {
+        VEO_VIDEO_PROVIDER
+    }
+
+    fn model(&self) -> &str {
+        VeoClient::model(self).id()
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        VeoClient::model(self).capabilities()
+    }
+
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        let mut params = format!(
+            "duration={};resolution={}p;aspect={}:{}",
+            request.clip_seconds,
+            request.lines.unwrap_or(0),
+            request.aspect_ratio.width,
+            request.aspect_ratio.height
+        );
+        for reference in &request.references {
+            params.push_str(";reference=");
+            params.push_str(ContentHash::of(&reference.image).as_str());
+        }
+        params
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, VeoError> {
+        let first_frame = request
+            .first_frame
+            .clone()
+            .ok_or(VeoError::InvalidRequest("Veo needs a first frame"))?;
+        // An `asset` keeps a subject as it looks: who someone is.
+        let references = request
+            .references
+            .iter()
+            .map(|reference| match reference.role {
+                ReferenceRole::Identity => Ok((reference.image.clone(), reference.format)),
+                ReferenceRole::Style | ReferenceRole::Composition => Err(VeoError::InvalidRequest(
+                    "Veo keeps a subject from a reference, not a style or a composition",
+                )),
+            })
+            .collect::<Result<_, _>>()?;
+        VeoClient::submit(
+            self,
+            &VeoRequest {
+                prompt: request.prompt.clone(),
+                first_frame,
+                last_frame: request.last_frame.clone(),
+                seconds: request.clip_seconds,
+                lines: request
+                    .lines
+                    .ok_or(VeoError::InvalidRequest("Veo needs a clip height"))?,
+                aspect_ratio: request.aspect_ratio,
+                references,
+            },
+        )
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, VeoError> {
+        Ok(match self.operation(task.as_str())? {
+            OperationState::Running => TaskState::Pending,
+            OperationState::Succeeded { video } => TaskState::Succeeded { file: video },
+        })
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, VeoError> {
+        self.download(file)
+    }
+
+    fn class(&self, error: &VeoError) -> ErrorClass {
+        error.class()
+    }
+
+    fn ended_class(&self, error: &VeoError) -> ErrorClass {
+        error.ended_class()
+    }
+
+    fn certainly_not_accepted(&self, error: &VeoError) -> bool {
+        error.certainly_not_accepted()
+    }
+}
+
+impl<T: kineto_provider_gemini::Transport> VideoGenerator for OmniClient<T> {
+    type Error = OmniError;
+
+    fn provider(&self) -> &str {
+        OMNI_VIDEO_PROVIDER
+    }
+
+    fn model(&self) -> &str {
+        omni::MODEL
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        omni::capabilities()
+    }
+
+    /// Its length and frame shape, and the version of the words the
+    /// adapter adds to the prompt to bind the frames and say the length
+    /// ([`omni::text`]), which follow from them.
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!(
+            "duration={};resolution={}p;aspect={}:{};wording=1",
+            request.clip_seconds,
+            request.lines.unwrap_or(0),
+            request.aspect_ratio.width,
+            request.aspect_ratio.height
+        )
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, OmniError> {
+        let first_frame = request
+            .first_frame
+            .clone()
+            .ok_or(OmniError::InvalidRequest("Omni needs a first frame"))?;
+        if !request.references.is_empty() {
+            return Err(OmniError::InvalidRequest(
+                "kineto sends Omni no reference images",
+            ));
+        }
+        if request.lines != Some(omni::LINES) {
+            return Err(OmniError::InvalidRequest("Omni is asked for 720p"));
+        }
+        OmniClient::submit(
+            self,
+            &OmniRequest {
+                prompt: request.prompt.clone(),
+                first_frame,
+                last_frame: request.last_frame.clone(),
+                seconds: request.clip_seconds,
+                aspect_ratio: request.aspect_ratio,
+            },
+        )
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, OmniError> {
+        Ok(match self.interaction(task.as_str())? {
+            InteractionState::Running => TaskState::Pending,
+            InteractionState::Completed => TaskState::Succeeded {
+                file: task.as_str().to_owned(),
+            },
+        })
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, OmniError> {
+        self.video(file)
+    }
+
+    fn class(&self, error: &OmniError) -> ErrorClass {
+        error.class()
+    }
+
+    fn ended_class(&self, error: &OmniError) -> ErrorClass {
+        error.ended_class()
+    }
+
+    fn certainly_not_accepted(&self, error: &OmniError) -> bool {
         error.certainly_not_accepted()
     }
 }
@@ -318,8 +534,8 @@ impl VideoGenerator for LocalDemoVideos {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, Infallible> {
@@ -361,6 +577,16 @@ pub enum VideoProvider {
     /// MiniMax Hailuo. Paid. Without a client, videos an earlier session
     /// submitted are not followed and no new one is submitted.
     Minimax(Option<VideoClient>),
+    /// Google Veo, one model of it. Paid. Without a client, as for
+    /// MiniMax. Google shuts its models down on 2026-10-22
+    /// ([`kineto_provider_gemini::veo::SHUTDOWN`]); [`Self::Omni`] replaces
+    /// it.
+    Veo {
+        model: VeoModel,
+        client: Option<VeoVideoClient>,
+    },
+    /// Google Gemini Omni Flash. Paid. Without a client, as for MiniMax.
+    Omni(Option<OmniVideoClient>),
     /// A plugin the user registered (ADR-0006), as it described itself.
     /// One that declares no video makes none.
     Plugin(Arc<PluginProvider>),
@@ -371,6 +597,8 @@ pub enum VideoProvider {
 pub enum VideoProviderKind {
     LocalDemo,
     Minimax,
+    Veo,
+    Omni,
     Plugin,
 }
 
@@ -389,10 +617,11 @@ pub struct VideoProviderInfo {
 
 impl VideoProvider {
     /// The provider named by `selection`: `local-demo` for the free demo,
-    /// `minimax` for MiniMax with the key `secrets` holds, `plugin:<id>` for
-    /// the plugin registered as `<id>`. `None` when nothing is named, so the
-    /// session follows its image provider. A paid provider is used only when
-    /// it is named.
+    /// `minimax` for MiniMax with the key `secrets` holds, `veo` for Veo's
+    /// Lite model with its key (`veo:fast` and `veo:standard` for the
+    /// others), `plugin:<id>` for the plugin registered as `<id>`. `None`
+    /// when nothing is named, so the session follows its image provider. A
+    /// paid provider is used only when it is named.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
@@ -406,6 +635,26 @@ impl VideoProvider {
                     .map_err(ProviderSelectionError::Secret)?
                     .map(MinimaxClient::shared),
             ))),
+            Some(veo) if veo == VEO_PROVIDER || veo.starts_with(&format!("{VEO_PROVIDER}:")) => {
+                let model = match veo.strip_prefix(&format!("{VEO_PROVIDER}:")) {
+                    None => VeoModel::default(),
+                    Some(name) => VeoModel::parse(name)
+                        .ok_or_else(|| ProviderSelectionError::Unknown(veo.to_owned()))?,
+                };
+                Ok(Some(Self::Veo {
+                    model,
+                    client: secrets
+                        .api_key(VEO_PROVIDER)
+                        .map_err(ProviderSelectionError::Secret)?
+                        .map(|key| VeoClient::shared(key, model)),
+                }))
+            }
+            Some(name) if name == OMNI_PROVIDER => Ok(Some(Self::Omni(
+                secrets
+                    .api_key(omni::PROVIDER)
+                    .map_err(ProviderSelectionError::Secret)?
+                    .map(OmniClient::shared),
+            ))),
             Some(other) => match selected_plugin(other) {
                 Some(selected) => selected.map(|plugin| Some(Self::Plugin(plugin))),
                 None => Err(ProviderSelectionError::Unknown(other.to_owned())),
@@ -418,6 +667,8 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => VideoProviderKind::LocalDemo,
             Self::Minimax(_) => VideoProviderKind::Minimax,
+            Self::Veo { .. } => VideoProviderKind::Veo,
+            Self::Omni(_) => VideoProviderKind::Omni,
             Self::Plugin(_) => VideoProviderKind::Plugin,
         }
     }
@@ -428,6 +679,8 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => DEMO_VIDEO_PROVIDER.to_owned(),
             Self::Minimax(_) => VIDEO_PROVIDER.to_owned(),
+            Self::Veo { .. } => VEO_VIDEO_PROVIDER.to_owned(),
+            Self::Omni(_) => OMNI_VIDEO_PROVIDER.to_owned(),
             Self::Plugin(plugin) => plugin::video_key(plugin.key()),
         }
     }
@@ -437,6 +690,8 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => demo_video_capabilities(),
             Self::Minimax(_) => video_capabilities(),
+            Self::Veo { model, .. } => model.capabilities(),
+            Self::Omni(_) => omni::capabilities(),
             Self::Plugin(plugin) => plugin.video_capabilities().cloned().unwrap_or_default(),
         }
     }
@@ -453,6 +708,8 @@ impl VideoProvider {
             ready: match self {
                 Self::LocalDemo => true,
                 Self::Minimax(client) => client.is_some(),
+                Self::Veo { client, .. } => client.is_some(),
+                Self::Omni(client) => client.is_some(),
                 Self::Plugin(plugin) => plugin.video_capabilities().is_some(),
             },
             clip_cost_micros: price,
@@ -1032,8 +1289,9 @@ fn single(started: Started) -> Result<VideoJob, GenerationError> {
 }
 
 /// What a shot's video needs of a provider: a clip made from the locked
-/// keyframe. A provider that would make it from words alone, or cannot take
-/// that keyframe, is refused rather than quietly used.
+/// keyframe, framed as it is. A provider that would make it from words
+/// alone, or cannot take or frame that keyframe, is refused rather than
+/// quietly used.
 fn check_capabilities(
     capabilities: &VideoCapabilities,
     frame: Option<&(Vec<u8>, ImageFormat)>,
@@ -1055,6 +1313,9 @@ fn check_capabilities(
         .filter(|gap| gap.severity == kineto_providers::GapSeverity::Incompatible)
         .map(|gap| gap.capability)
         .collect();
+    if !capabilities.frames(KEYFRAME_ASPECT) {
+        missing.push("video.aspect_ratio");
+    }
     if let Some((bytes, format)) = frame {
         if !capabilities.start_frame_formats.contains(format) {
             missing.push("video.start_frame_format");
@@ -1073,8 +1334,8 @@ fn check_capabilities(
     }
 }
 
-/// The shot in play that continues from `key`, with its locked keyframe and
-/// that keyframe's image, when it has them.
+/// The shot in play that continues from `key`, with its intent, and its
+/// locked keyframe and that keyframe's image, when it has them.
 #[allow(clippy::type_complexity)]
 fn successor(
     project: &CanonicalProject,
@@ -1082,6 +1343,7 @@ fn successor(
 ) -> Result<
     Option<(
         ShotKey,
+        Option<ShotIntent>,
         Option<(
             kineto_project::ArtifactDependency,
             Option<ProjectRelativePath>,
@@ -1098,12 +1360,13 @@ fn successor(
             continue;
         }
         let next = ShotWorkflow::load(project, &other)?;
-        if next
-            .intent()?
-            .and_then(|intent| intent.continuity_from)
+        let intent = next.intent()?;
+        if intent
+            .as_ref()
+            .and_then(|intent| intent.continuity_from.as_deref())
             .is_some_and(|from| from == key.shot())
         {
-            return Ok(Some((other.clone(), next.first_frame()?)));
+            return Ok(Some((other.clone(), intent, next.first_frame()?)));
         }
     }
     Ok(None)
@@ -1194,16 +1457,48 @@ pub fn start_videos<G: VideoGenerator>(
     let capabilities = generator.capabilities();
     check_capabilities(&capabilities, frame.as_ref())?;
     let intent = shot.intent()?;
+    let dialogue_ms = crate::dialogue::shot_dialogue_ms(
+        project,
+        shot.key().scene(),
+        intent
+            .as_ref()
+            .and_then(|intent| intent.dialogue.as_deref()),
+    )?;
     let successor = successor(project, shot.key())?;
-    // The shot that continues from this one closes the clip on its locked
-    // keyframe, where the provider takes a last frame and that image.
-    let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
-    let end_frame_use = match &successor {
-        None => None,
-        Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
-        Some((_, None)) => Some(EndFrameUse::NotLocked),
-        Some((_, Some((_, None)))) => Some(EndFrameUse::NoImage),
-        Some((next, Some((keyframe, Some(path))))) => {
+    // A shot that continues from this one in the same setup closes the clip
+    // on its locked keyframe, where the provider takes a last frame, in a
+    // clip of this length, and that image. A cut is left to the editor.
+    let cut = successor
+        .as_ref()
+        .and_then(|(_, next, _)| match (&intent, next) {
+            (Some(this), Some(next)) => video_prompt::cut_to(this, next),
+            _ => Some("the plan does not say how both shots are framed".to_owned()),
+        });
+    let clip = video_prompt::clip_seconds(
+        &capabilities,
+        intent.as_ref().and_then(|intent| intent.duration_target),
+        dialogue_ms,
+    );
+    let too_short = clip
+        .filter(|seconds| {
+            !capabilities.end_frame_seconds.is_empty()
+                && !capabilities.end_frame_seconds.contains(seconds)
+        })
+        .map(|seconds| {
+            let lengths: Vec<String> = capabilities
+                .end_frame_seconds
+                .iter()
+                .map(u8::to_string)
+                .collect();
+            format!(
+                "the provider closes on a last frame only in a clip of {} s, and this clip is \
+                 {seconds} s",
+                lengths.join(" or ")
+            )
+        });
+    // The next keyframe's bytes, checked, when there is one to send.
+    let next_image = match &successor {
+        Some((_, _, Some((keyframe, Some(path))))) => {
             let bytes = project
                 .root()
                 .read(path)
@@ -1215,6 +1510,36 @@ pub fn start_videos<G: VideoGenerator>(
                     ),
                 ));
             }
+            Some(bytes)
+        }
+        _ => None,
+    };
+    // Planned as one setup, the two keyframes must also look it: a clip
+    // between unlike frames dissolves.
+    let unlike = next_image.as_ref().and_then(|next| match &frame {
+        None => Some("this shot's keyframe has no image to compare with it".to_owned()),
+        Some((this, _)) => match likeness::likeness(this, next) {
+            None => Some("the two keyframes cannot be compared as images".to_owned()),
+            Some(score) if score < likeness::SAME_SETUP => Some(format!(
+                "its keyframe is framed unlike this shot's (likeness {score:.2}, below {:.2})",
+                likeness::SAME_SETUP
+            )),
+            Some(_) => None,
+        },
+    });
+    let mut end_frame: Option<(EndFrame, Vec<u8>, ImageFormat)> = None;
+    let end_frame_use = match &successor {
+        None => None,
+        Some(_) if !capabilities.end_frame => Some(EndFrameUse::NotTaken),
+        Some(_) if cut.is_some() => cut.as_deref().map(EndFrameUse::Cut),
+        Some(_) if too_short.is_some() => too_short.as_deref().map(EndFrameUse::Unfit),
+        Some((_, _, None)) => Some(EndFrameUse::NotLocked),
+        Some((_, _, Some((_, None)))) => Some(EndFrameUse::NoImage),
+        Some(_) if unlike.is_some() => unlike.as_deref().map(EndFrameUse::Cut),
+        Some((next, _, Some((keyframe, Some(_))))) => {
+            let bytes = next_image.clone().ok_or(GenerationError::Unexpected(
+                "the next keyframe was not read",
+            ))?;
             let fits = |format: &ImageFormat| {
                 capabilities.end_frame_formats.contains(format)
                     && capabilities
@@ -1266,23 +1591,29 @@ pub fn start_videos<G: VideoGenerator>(
         successor: successor
             .as_ref()
             .zip(end_frame_use)
-            .map(|((next, _), end_frame)| Successor {
+            .map(|((next, _, _), end_frame)| Successor {
                 shot_id: next.shot(),
                 end_frame,
             }),
         notes: &notes,
         style: style.as_deref(),
-        dialogue_ms: crate::dialogue::shot_dialogue_ms(
-            project,
-            shot.key().scene(),
-            intent
-                .as_ref()
-                .and_then(|intent| intent.dialogue.as_deref()),
-        )?,
+        dialogue_ms,
         preferences: preferences.as_deref(),
     })?;
-    let lines = capabilities.clip_lines(prompt.duration_seconds);
-    let params = generator.canonical_params(prompt.duration_seconds, lines);
+    let request = VideoSubmission {
+        prompt: prompt.compiled.prompt().to_owned(),
+        first_frame: frame,
+        clip_seconds: prompt.duration_seconds,
+        lines: capabilities.clip_lines(prompt.duration_seconds),
+        last_frame: end_frame
+            .as_ref()
+            .map(|(_, bytes, format)| (bytes.clone(), *format)),
+        // Keyframes are made in this shape, and a clip is framed as its
+        // first frame.
+        aspect_ratio: KEYFRAME_ASPECT,
+        references: Vec::new(),
+    };
+    let params = generator.canonical_params(&request);
     let plans = shot.plan_videos(
         project,
         VideoGenerationSpec {
@@ -1317,13 +1648,6 @@ pub fn start_videos<G: VideoGenerator>(
             content_hash: end.keyframe.content_hash.as_str().to_owned(),
             shot: format!("{}/{}", end.shot.scene(), end.shot.shot()),
         }),
-    };
-    let request = VideoSubmission {
-        prompt: prompt.compiled.prompt().to_owned(),
-        first_frame: frame,
-        clip_seconds: prompt.duration_seconds,
-        lines,
-        last_frame: end_frame.map(|(_, bytes, format)| (bytes, format)),
     };
     let mut started = Started {
         jobs: Vec::with_capacity(plans.len()),
@@ -1502,7 +1826,10 @@ pub fn watch<G: VideoGenerator>(
             Err(error) => {
                 return Some(VideoDone {
                     job,
-                    result: Err(failure(generator, error)),
+                    result: Err(VideoFailure {
+                        class: generator.ended_class(&error),
+                        source: Box::new(error),
+                    }),
                 });
             }
         };
@@ -1721,6 +2048,11 @@ pub fn in_flight(project: &CanonicalProject, provider: &str) -> Result<InFlight,
 /// The client type the session uses.
 pub type VideoClient = MinimaxClient<SharedTransport>;
 
+/// The Veo client type the session uses.
+pub type VeoVideoClient = VeoClient<kineto_provider_gemini::SharedTransport>;
+/// A Gemini Omni client shareable between threads.
+pub type OmniVideoClient = OmniClient<kineto_provider_gemini::SharedTransport>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1745,6 +2077,23 @@ mod tests {
             missing,
             ["video.start_frame_format", "video.start_frame_bytes"]
         );
+    }
+
+    #[test]
+    fn a_provider_that_cannot_frame_the_keyframe_is_refused_by_capability() {
+        let png = (vec![0x89; 64], ImageFormat::Png);
+        for veo in [VeoModel::Lite, VeoModel::Fast, VeoModel::Standard] {
+            assert!(check_capabilities(&veo.capabilities(), Some(&png)).is_ok());
+        }
+        let tall_only = VideoCapabilities {
+            aspect_ratios: [AspectRatio::new(9, 16).unwrap()].into_iter().collect(),
+            ..VeoModel::Lite.capabilities()
+        };
+        let Err(GenerationError::Incapable(missing)) = check_capabilities(&tall_only, Some(&png))
+        else {
+            panic!("a 16:9 keyframe must be refused");
+        };
+        assert_eq!(missing, ["video.aspect_ratio"]);
     }
 
     #[test]
@@ -1780,7 +2129,69 @@ mod tests {
             VideoProvider::select(Some("minimax"), &without_key).unwrap(),
             Some(VideoProvider::Minimax(None))
         ));
+        assert!(matches!(
+            VideoProvider::select(Some("veo"), &with_key).unwrap(),
+            Some(VideoProvider::Veo {
+                model: VeoModel::Lite,
+                client: Some(_)
+            })
+        ));
+        assert!(matches!(
+            VideoProvider::select(Some("veo:standard"), &without_key).unwrap(),
+            Some(VideoProvider::Veo {
+                model: VeoModel::Standard,
+                client: None
+            })
+        ));
+        assert!(VideoProvider::select(Some("veo:ultra"), &with_key).is_err());
+        assert!(matches!(
+            VideoProvider::select(Some("omni"), &with_key).unwrap(),
+            Some(VideoProvider::Omni(Some(_)))
+        ));
+        assert!(matches!(
+            VideoProvider::select(Some("omni"), &without_key).unwrap(),
+            Some(VideoProvider::Omni(None))
+        ));
+        assert!(VideoProvider::select(Some("omni:pro"), &with_key).is_err());
         assert!(VideoProvider::select(Some("sora"), &with_key).is_err());
+    }
+
+    #[test]
+    fn veo_is_priced_per_second_at_720p_and_ready_only_with_its_key() {
+        let lite = VideoProvider::Veo {
+            model: VeoModel::Lite,
+            client: None,
+        };
+        assert_eq!(lite.key(), VEO_VIDEO_PROVIDER);
+        let info = lite.info();
+        assert!(!info.ready);
+        assert_eq!((info.clip_seconds, info.clip_cost_micros), (4, 200_000));
+        assert_eq!(
+            lite.estimate(Some(8.0), None),
+            Some(VideoEstimate {
+                clip_seconds: 8,
+                cost_micros: Some(400_000)
+            })
+        );
+    }
+
+    #[test]
+    fn omni_is_priced_by_the_second_it_is_asked_for_and_ready_only_with_its_key() {
+        let omni = VideoProvider::Omni(None);
+        assert_eq!(omni.key(), OMNI_VIDEO_PROVIDER);
+        assert_eq!(omni.kind(), VideoProviderKind::Omni);
+        let info = omni.info();
+        assert!(!info.ready);
+        assert_eq!((info.clip_seconds, info.clip_cost_micros), (4, 405_440));
+        // Any whole second from 4 to 10 is asked for, at its token price.
+        assert_eq!(
+            omni.estimate(Some(5.0), None),
+            Some(VideoEstimate {
+                clip_seconds: 5,
+                cost_micros: Some(506_800)
+            })
+        );
+        assert_eq!(omni.estimate(Some(30.0), None).unwrap().clip_seconds, 10);
     }
 
     #[test]

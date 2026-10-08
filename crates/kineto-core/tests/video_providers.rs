@@ -134,8 +134,8 @@ impl VideoGenerator for TextOnly {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, _request: &VideoSubmission) -> Result<String, Infallible> {
@@ -195,8 +195,8 @@ impl VideoGenerator for Gated {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, _request: &VideoSubmission) -> Result<String, Infallible> {
@@ -371,7 +371,7 @@ fn a_video_says_what_its_provider_could_not_do_and_goes_stale_when_the_plan_move
         .iter()
         .find(|artifact| artifact["type"] == "shot_video")
         .unwrap();
-    assert_eq!(record["compiler_version"], "video-prompt/6");
+    assert_eq!(record["compiler_version"], "video-prompt/7");
     let dropped: Vec<(&str, &str)> = record["dropped_constraints"]
         .as_array()
         .unwrap()

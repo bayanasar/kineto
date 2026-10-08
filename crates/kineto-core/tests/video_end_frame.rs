@@ -6,7 +6,12 @@
 //! anything is written.
 //!
 //! The `planned` fixture's `office_night_02` continues from
-//! `office_night_01` and has keyframe candidates with images.
+//! `office_night_01`. As planned, it cuts from a static wide shot on 28mm
+//! to a medium close-up on 50mm; most tests first make `office_night_01` a
+//! dolly in on 50mm, which carries the framing on to it. Both shots'
+//! keyframes are drawn by a fake MiniMax as real JPEGs, alike unless a
+//! test draws them otherwise: a clip closes only on a keyframe that looks
+//! like its own.
 
 use std::{
     convert::Infallible,
@@ -19,8 +24,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine as _;
 use kineto_core::{
-    generation::GenerationError,
+    generation::{self, GenerationError, NoHooks},
+    minimax::MinimaxKeyframes,
     video::{self, DEMO_CLIP, LocalDemoVideos, TaskState, VideoGenerator, VideoSubmission},
 };
 use kineto_jobs::{ErrorClass, ProviderJobId};
@@ -29,7 +36,8 @@ use kineto_project::{
     manifest::CanonicalProject,
     shot::{ShotKey, ShotWorkflow, ShotWorkflowError, VideoState},
 };
-use kineto_providers::{ImageFormat, Price, VideoCapabilities, VideoClip};
+use kineto_provider_minimax::{HttpResponse, MinimaxClient, Transport, TransportFailure};
+use kineto_providers::{ImageFormat, Price, VideoCapabilities, VideoClip, secret::SecretString};
 
 struct TempDir(PathBuf);
 
@@ -77,21 +85,116 @@ fn following() -> ShotKey {
     ShotKey::new("office_night", "office_night_02").unwrap()
 }
 
-/// The planned film with `office_night_01`'s keyframe locked (a demo one,
-/// without an image) and `office_night_02`'s locked at candidate `which`.
-fn film(target: &Path, which: usize) -> CanonicalProject {
+/// A 160x90 JPEG of a place (`place` seeds its texture) with a lit
+/// figure at `x`, as wide as `size`; `nudge` changes one pixel, so every
+/// keyframe's bytes differ.
+fn picture((place, x, size): (u32, u32, u32), nudge: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(160, 90, |px, py| {
+        if (px, py) == (0, 0) {
+            image::Rgb([u8::try_from(nudge % 256).unwrap(), 0, 0])
+        } else if px.abs_diff(x) < size / 2 && py.abs_diff(45) < size * 3 / 4 {
+            image::Rgb([200, 170, 150])
+        } else {
+            let grain = (px / 4).wrapping_mul(73_856_093)
+                ^ (py / 4).wrapping_mul(19_349_663)
+                ^ place.wrapping_mul(83_492_791);
+            let level = u8::try_from(30 + grain % 90).unwrap();
+            image::Rgb([level, level, level.saturating_add(10)])
+        }
+    });
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    bytes
+}
+
+/// MiniMax `image-01`, offline, drawing `figure` for every keyframe.
+struct Drawing {
+    figure: (u32, u32, u32),
+    calls: AtomicU64,
+}
+
+impl Transport for Drawing {
+    fn post_json(
+        &self,
+        _url: &str,
+        _api_key: &SecretString,
+        _body: &[u8],
+    ) -> Result<HttpResponse, TransportFailure> {
+        let call = u32::try_from(self.calls.fetch_add(1, Ordering::SeqCst)).unwrap();
+        Ok(HttpResponse {
+            status: 200,
+            body: format!(
+                r#"{{"id":"k{call}","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0}}}}"#,
+                base64::engine::general_purpose::STANDARD.encode(picture(self.figure, call))
+            )
+            .into_bytes(),
+        })
+    }
+
+    fn get(&self, url: &str, _api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("keyframes make no GET request: {url}")
+    }
+
+    fn download(&self, url: &str, _max_bytes: u64) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("keyframes download nothing: {url}")
+    }
+}
+
+/// Lock `key`'s first keyframe candidate, drawn as `figure` says.
+fn draw(project: &CanonicalProject, key: &ShotKey, figure: (u32, u32, u32)) {
+    let client = MinimaxClient::with_transport(
+        Drawing {
+            figure,
+            calls: AtomicU64::new(u64::from(figure.1)),
+        },
+        SecretString::new("sk-test".to_owned()).unwrap(),
+        "https://example.test",
+    );
+    let mut shot = ShotWorkflow::load(project, key).unwrap();
+    generation::generate_with(
+        project,
+        &mut shot,
+        MinimaxKeyframes::new(project, Some(&client)),
+        &mut NoHooks,
+    )
+    .unwrap();
+    shot.select(project, 0).unwrap();
+    shot.lock(project).unwrap();
+}
+
+/// The place, where the figure stands and how wide it is, in a keyframe.
+const FIGURE: (u32, u32, u32) = (1, 80, 30);
+
+/// The planned film with `office_night_01` a slow dolly in on 50mm that
+/// `office_night_02` carries on, both keyframes locked and alike.
+fn film(target: &Path) -> CanonicalProject {
+    filmed(target, Some(("50mm", "slow_dolly_in")), FIGURE)
+}
+
+/// [`film`], with `office_night_01` on `setup`'s lens and camera motion,
+/// or as planned, and `office_night_02`'s keyframe drawn with `next`'s
+/// figure.
+fn filmed(target: &Path, setup: Option<(&str, &str)>, next: (u32, u32, u32)) -> CanonicalProject {
     copy_tree(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/planned"),
         target,
     );
+    if let Some((lens, motion)) = setup {
+        let path = target.join("scenes/office_night/shots/office_night_01/shot.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["lens"] = lens.into();
+        record["camera_motion"] = motion.into();
+        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    }
     let project = CanonicalProject::open(target).unwrap();
-    let mut first = ShotWorkflow::load(&project, &opening()).unwrap();
-    first.generate(&project).unwrap();
-    first.select(&project, 0).unwrap();
-    first.lock(&project).unwrap();
-    let mut next = ShotWorkflow::load(&project, &following()).unwrap();
-    next.select(&project, which).unwrap();
-    next.lock(&project).unwrap();
+    draw(&project, &opening(), FIGURE);
+    draw(&project, &following(), next);
     project
 }
 
@@ -101,6 +204,8 @@ fn film(target: &Path, which: usize) -> CanonicalProject {
 struct Closing {
     formats: Vec<ImageFormat>,
     resumable: bool,
+    /// The clip lengths it closes on a last frame at; any when empty.
+    closes_at: Vec<u8>,
     sent: Arc<Mutex<Vec<VideoSubmission>>>,
 }
 
@@ -109,6 +214,7 @@ impl Closing {
         Self {
             formats: formats.to_vec(),
             resumable: true,
+            closes_at: Vec::new(),
             sent: Arc::default(),
         }
     }
@@ -141,6 +247,7 @@ impl VideoGenerator for Closing {
             .into_iter()
             .collect(),
             resumable_remote_handle: self.resumable,
+            end_frame_seconds: self.closes_at.iter().copied().collect(),
             ..video::demo_video_capabilities()
         }
     }
@@ -149,8 +256,12 @@ impl VideoGenerator for Closing {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
-        format!("duration={clip_seconds};lines={}", lines.unwrap_or(0))
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!(
+            "duration={};lines={}",
+            request.clip_seconds,
+            request.lines.unwrap_or(0)
+        )
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, Infallible> {
@@ -244,7 +355,7 @@ fn compiled(project: &CanonicalProject) -> (String, Vec<String>, Vec<(String, St
 fn a_clip_closes_on_the_next_shots_keyframe_and_goes_stale_when_it_changes() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
-    let project = film(&target, 0);
+    let project = film(&target);
     let closing = Closing::new(&[ImageFormat::Jpeg, ImageFormat::Png]);
     let mut shot = make(&project, &closing);
 
@@ -307,7 +418,7 @@ impl ContentHashed {
 #[test]
 fn a_clip_whose_closing_frame_changed_is_not_locked() {
     let temp = TempDir::new();
-    let project = film(&temp.0.join("film"), 0);
+    let project = film(&temp.0.join("film"));
     let mut shot = make(&project, &Closing::new(&[ImageFormat::Jpeg]));
     // The next shot no longer continues from this one.
     let path = project.root().resolve(
@@ -330,7 +441,7 @@ fn a_clip_whose_closing_frame_changed_is_not_locked() {
 #[test]
 fn where_no_last_frame_can_be_sent_the_prompt_says_why() {
     let temp = TempDir::new();
-    let project = film(&temp.0.join("film"), 0);
+    let project = film(&temp.0.join("film"));
     // The demo takes no last frame.
     make(&project, &LocalDemoVideos);
     let (_, _, dropped) = compiled(&project);
@@ -341,7 +452,7 @@ fn where_no_last_frame_can_be_sent_the_prompt_says_why() {
 
     // One that takes only WebP cannot take the next shot's JPEG.
     let temp = TempDir::new();
-    let project = film(&temp.0.join("film"), 0);
+    let project = film(&temp.0.join("film"));
     let webp = Closing::new(&[ImageFormat::Webp]);
     let shot = make(&project, &webp);
     assert!(webp.sent.lock().unwrap()[0].last_frame.is_none());
@@ -355,13 +466,99 @@ fn where_no_last_frame_can_be_sent_the_prompt_says_why() {
         ))
     );
     assert_eq!(shot.video_staleness().unwrap(), Vec::<String>::new());
+
+    // One that closes on a last frame only in 8 s clips, for a 2 s clip.
+    let temp = TempDir::new();
+    let project = film(&temp.0.join("film"));
+    let long = Closing {
+        closes_at: vec![8],
+        ..Closing::new(&[ImageFormat::Jpeg])
+    };
+    make(&project, &long);
+    assert!(long.sent.lock().unwrap()[0].last_frame.is_none());
+    let (_, _, dropped) = compiled(&project);
+    assert!(dropped.contains(&(
+        "continuity.end_frame".to_owned(),
+        "office_night_02 continues from this shot, but the provider closes on a last frame only \
+         in a clip of 8 s, and this clip is 2 s"
+            .to_owned()
+    )));
+}
+
+#[test]
+fn a_next_shot_that_cuts_away_is_not_closed_on() {
+    let temp = TempDir::new();
+    // As planned: a static wide shot on 28mm, then a close one on 50mm.
+    let project = filmed(&temp.0.join("film"), None, FIGURE);
+    let closing = Closing::new(&[ImageFormat::Jpeg]);
+    let shot = make(&project, &closing);
+    assert!(closing.sent.lock().unwrap()[0].last_frame.is_none());
+    let (prompt, applied, dropped) = compiled(&project);
+    assert!(!prompt.contains("End on the opening frame"), "{prompt}");
+    assert!(!applied.contains(&"continuity.end_frame".to_owned()));
+    assert!(
+        dropped.contains(&(
+            "continuity.end_frame".to_owned(),
+            "office_night_02 continues from this shot, but it is a cut, not a continuation: the \
+         lens changes from 28mm to 50mm"
+                .to_owned()
+        ))
+    );
+    // Nothing closes on the next shot, so nothing goes stale with it.
+    assert!(shot.locked_video().unwrap().is_none());
+    assert_eq!(shot.video_staleness().unwrap(), Vec::<String>::new());
+
+    // On one lens, a static camera still does not explain the change of
+    // framing.
+    let temp = TempDir::new();
+    let project = filmed(&temp.0.join("film"), Some(("50mm", "static")), FIGURE);
+    let closing = Closing::new(&[ImageFormat::Jpeg]);
+    make(&project, &closing);
+    assert!(closing.sent.lock().unwrap()[0].last_frame.is_none());
+    let (_, _, dropped) = compiled(&project);
+    assert!(
+        dropped.contains(&(
+            "continuity.end_frame".to_owned(),
+            "office_night_02 continues from this shot, but it is a cut, not a continuation: the \
+         framing changes from wide to medium close up, which a static camera does not explain"
+                .to_owned()
+        ))
+    );
+}
+
+#[test]
+fn a_next_keyframe_framed_unlike_this_ones_is_not_closed_on() {
+    let temp = TempDir::new();
+    // Planned as one setup, but the next keyframe shows another place,
+    // its figure elsewhere.
+    let project = filmed(
+        &temp.0.join("film"),
+        Some(("50mm", "slow_dolly_in")),
+        (2, 130, 60),
+    );
+    let closing = Closing::new(&[ImageFormat::Jpeg]);
+    make(&project, &closing);
+    assert!(closing.sent.lock().unwrap()[0].last_frame.is_none());
+    let (_, applied, dropped) = compiled(&project);
+    assert!(!applied.contains(&"continuity.end_frame".to_owned()));
+    let (_, why) = dropped
+        .iter()
+        .find(|(id, _)| id == "continuity.end_frame")
+        .unwrap();
+    assert!(
+        why.starts_with(
+            "office_night_02 continues from this shot, but it is a cut, not a continuation: its \
+             keyframe is framed unlike this shot's (likeness 0."
+        ) && why.ends_with(", below 0.50)"),
+        "{why}"
+    );
 }
 
 #[test]
 fn a_provider_whose_tasks_do_not_survive_a_restart_is_refused_before_anything_is_written() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
-    let project = film(&target, 0);
+    let project = film(&target);
     let forgetful = Closing {
         resumable: false,
         ..Closing::new(&[ImageFormat::Jpeg])

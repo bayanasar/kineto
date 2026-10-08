@@ -858,10 +858,12 @@ fn a_plugin_video_closes_on_the_next_locked_keyframe() {
     .unwrap();
     next.select(&project, 0).unwrap();
     next.lock(&project).unwrap();
-    // The second shot continues from the first.
+    // The second shot continues from the first, in its setup.
     let path = target.join("scenes/scene_001/shots/shot_002/shot.json");
     let mut intent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     intent["continuity_from"] = "shot_001".into();
+    intent["framing"] = "medium_close_up".into();
+    intent["lens"] = "50mm".into();
     fs::write(&path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
 
     video::start(&project, &shot, &PluginVideos::new(Arc::clone(&plugin))).unwrap();
