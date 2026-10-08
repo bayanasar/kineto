@@ -6,8 +6,9 @@
 //! are never read from or written to a project directory.
 //!
 //! [`EnvSecretSource`] is the development source: it reads
-//! `KINETO_<PROVIDER>_API_KEY` from the process environment. Desktop secure
-//! storage is a separate source behind the same [`SecretSource`] interface.
+//! `KINETO_<PROVIDER>_API_KEY` from the process environment. The system's
+//! secure storage is `kineto-keychain`, behind the same [`SecretSource`]
+//! interface, and comes first.
 
 use std::{error::Error, ffi::OsString, fmt};
 
@@ -64,6 +65,8 @@ pub enum SecretError {
     NotUnicode {
         variable: String,
     },
+    /// The secure storage could not be read, and why; never what it held.
+    Storage(String),
 }
 
 impl fmt::Display for SecretError {
@@ -73,6 +76,7 @@ impl fmt::Display for SecretError {
             Self::NotUnicode { variable } => {
                 write!(formatter, "{variable} is set but is not valid Unicode")
             }
+            Self::Storage(reason) => write!(formatter, "the secure storage failed: {reason}"),
         }
     }
 }

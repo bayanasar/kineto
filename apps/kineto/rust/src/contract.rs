@@ -83,10 +83,12 @@ pub(crate) const PROJECT_ERR_PLUGIN_UNAVAILABLE: i32 = 166;
 pub(crate) const PROJECT_ERR_MCP_NOT_ALLOWED: i32 = 167;
 pub(crate) const PROJECT_ERR_INVALID_REFERENCE: i32 = 168;
 pub(crate) const PROJECT_ERR_PLANNED_DIRECTION: i32 = 169;
+pub(crate) const PROJECT_ERR_KEYCHAIN_UNAVAILABLE: i32 = 170;
+pub(crate) const PROJECT_ERR_KEYCHAIN_FAILED: i32 = 171;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 72] = [
+const STATUSES: [(&str, i32); 74] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -170,6 +172,8 @@ const STATUSES: [(&str, i32); 72] = [
     ("mcp_not_allowed", PROJECT_ERR_MCP_NOT_ALLOWED),
     ("invalid_reference", PROJECT_ERR_INVALID_REFERENCE),
     ("planned_direction", PROJECT_ERR_PLANNED_DIRECTION),
+    ("keychain_unavailable", PROJECT_ERR_KEYCHAIN_UNAVAILABLE),
+    ("keychain_failed", PROJECT_ERR_KEYCHAIN_FAILED),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -206,6 +210,18 @@ pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
 pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 pub(crate) const VIDEO_PROVIDER_VEO: u32 = 4;
 pub(crate) const VIDEO_PROVIDER_OMNI: u32 = 5;
+
+/// The providers whose keys settings manage, by the name each key is stored
+/// under; the codes `kineto_keys_*` take.
+pub(crate) const KEY_PROVIDERS: [(&str, u32); 4] =
+    [("minimax", 1), ("gemini", 2), ("kimi", 3), ("veo", 4)];
+pub(crate) const KEY_STATE_STORED: u32 = 1;
+pub(crate) const KEY_STATE_ENVIRONMENT: u32 = 2;
+/// The bits of `kineto_keys_state`: where a provider's key is.
+const KEY_STATES: [(&str, u32); 2] = [
+    ("stored", KEY_STATE_STORED),
+    ("environment", KEY_STATE_ENVIRONMENT),
+];
 
 /// Video provider codes returned by `kineto_project_video_provider`.
 const VIDEO_PROVIDERS: [(&str, u32); 5] = [
@@ -1055,6 +1071,8 @@ const ENTRY_TOOL_ARGUMENT_KIND: u32 = 63;
 const ENTRY_REFERENCE_TEXT: u32 = 64;
 const ENTRY_MCP_VALUE: u32 = 65;
 const ENTRY_MCP_TEXT: u32 = 66;
+const ENTRY_KEY_PROVIDER: u32 = 67;
+const ENTRY_KEY_STATE: u32 = 68;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1160,6 +1178,8 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_REFERENCE_TEXT, &REFERENCE_TEXTS);
         codes(&mut entries, ENTRY_MCP_VALUE, &MCP_VALUES);
         codes(&mut entries, ENTRY_MCP_TEXT, &MCP_TEXTS);
+        codes(&mut entries, ENTRY_KEY_PROVIDER, &KEY_PROVIDERS);
+        codes(&mut entries, ENTRY_KEY_STATE, &KEY_STATES);
         entries
     })
 }
@@ -1326,9 +1346,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_MCP_TEXT);
-        assert_eq!(&name[..len as usize], b"parameter_description");
-        assert_eq!((value, extra), (9, 0));
+        assert_eq!(kind, ENTRY_KEY_STATE);
+        assert_eq!(&name[..len as usize], b"environment");
+        assert_eq!((value, extra), (2, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

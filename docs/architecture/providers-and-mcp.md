@@ -357,11 +357,9 @@ Kineto is an MCP client only (ADR-0007). It connects to stdio servers the user r
 
 Secrets are stored outside project files.
 
-Recommended strategy:
+A provider's key is read from the system's secure storage first (`kineto-keychain`): the macOS Keychain, the Windows Credential Manager, or a Secret Service (GNOME Keyring, KWallet, KeePassXC) on Linux, reached over D-Bus without a system library. Each key is one credential, service `kineto`, account the provider's name (`minimax`, `gemini`, `kimi`, `veo`). When the storage holds none, or cannot be read, the environment's `KINETO_<PROVIDER>_API_KEY` is read instead, for development and CLI use; a locked or missing storage never stops a project opening. There is no file fallback, encrypted or not: where the system offers no secure storage, settings say why and keys come from the environment only.
 
-- OS keychain / secure credential store for desktop
-- environment variables for development/CLI
-- local encrypted settings fallback only if platform secure storage is unavailable
+Settings manage the keys (`kineto_keys_*`, independent of any project, called off the UI thread because the storage can wait on the user): where each provider's key is (saved, from the environment, or not set), and a field to save, replace or remove one. A key crosses into the engine once, from a buffer Dart clears afterwards; it is never read back across the boundary or shown again. Projects opened after a change use it.
 
 Never write API keys or authentication material into:
 

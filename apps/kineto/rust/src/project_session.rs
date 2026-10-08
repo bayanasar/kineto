@@ -47,7 +47,7 @@ use kineto_project::{
     style::StyleError,
     voice::VoiceError,
 };
-use kineto_providers::secret::EnvSecretSource;
+use kineto_providers::secret::SecretSource;
 
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
@@ -318,15 +318,18 @@ unsafe fn spawn(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    let provider = match image_provider_from_environment() {
+    // Keys from the system's secure storage, then the environment; read
+    // once for the whole open.
+    let secrets = crate::keys::provider_keys();
+    let provider = match image_provider_from_environment(&secrets) {
         Ok(provider) => provider,
         Err(code) => return code,
     };
-    let video_provider = match video_provider_from_environment() {
+    let video_provider = match video_provider_from_environment(&secrets) {
         Ok(provider) => provider,
         Err(code) => return code,
     };
-    let Ok(model) = document_model_from_environment() else {
+    let Ok(model) = document_model_from_environment(&secrets) else {
         return PROJECT_ERR_MODEL_UNKNOWN;
     };
     match ProjectSession::spawn_with_model(
@@ -357,14 +360,13 @@ unsafe fn spawn(
 /// to be set.
 pub(crate) const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
 
-fn image_provider_from_environment() -> Result<ImageProvider, i32> {
+fn image_provider_from_environment(secrets: &impl SecretSource) -> Result<ImageProvider, i32> {
     let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process())
-        .map_err(selection_error)
+    ImageProvider::select(selection.as_deref(), secrets).map_err(selection_error)
 }
 
 /// The environment variable that names the video provider a session uses:
@@ -373,14 +375,15 @@ fn image_provider_from_environment() -> Result<ImageProvider, i32> {
 /// provider. As for images, a paid provider is used only when named.
 const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
 
-fn video_provider_from_environment() -> Result<Option<VideoProvider>, i32> {
+fn video_provider_from_environment(
+    secrets: &impl SecretSource,
+) -> Result<Option<VideoProvider>, i32> {
     let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process())
-        .map_err(selection_error)
+    VideoProvider::select(selection.as_deref(), secrets).map_err(selection_error)
 }
 
 fn selection_error(error: ProviderSelectionError) -> i32 {
@@ -395,13 +398,13 @@ fn selection_error(error: ProviderSelectionError) -> i32 {
 /// The language model named by `KINETO_LLM_PROVIDER` (see
 /// `kineto_core::llm`). Unset means none: documents are refused rather than
 /// sent to a model nobody chose.
-fn document_model_from_environment() -> Result<DocumentModel, ()> {
+fn document_model_from_environment(secrets: &impl SecretSource) -> Result<DocumentModel, ()> {
     let selection = match std::env::var(LLM_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(()),
     };
-    DocumentModel::select(selection.as_deref(), &EnvSecretSource::process(), |name| {
+    DocumentModel::select(selection.as_deref(), secrets, |name| {
         std::env::var(name).ok()
     })
     .map_err(|_| ())

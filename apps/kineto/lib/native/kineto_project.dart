@@ -616,6 +616,12 @@ final class KinetoProjectException implements Exception {
   /// again to change it.
   static const int plannedDirection = 169;
 
+  /// The system offers no secure storage for keys.
+  static const int keychainUnavailable = 170;
+
+  /// The secure storage refused or failed, as when it is locked.
+  static const int keychainFailed = 171;
+
   final int code;
   final String message;
 
@@ -1433,6 +1439,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'mcp_not_allowed': 167,
   'invalid_reference': 168,
   'planned_direction': 169,
+  'keychain_unavailable': 170,
+  'keychain_failed': 171,
   'panic': 199,
 };
 
@@ -1511,6 +1519,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   167: 'That MCP server or tool is not registered, enabled and allowed in mcp.toml',
   168: 'A reference needs text, at most 20,000 characters, about the world or bible entries',
   169: 'The shot\'s direction comes from the locked shot plan; plan the scene again to change it',
+  170: 'This system offers no secure storage for keys; set them in the environment instead',
+  171: 'The system\'s secure storage refused or failed; it may be locked',
   199: 'Native project call failed unexpectedly',
 };
 

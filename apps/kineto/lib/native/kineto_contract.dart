@@ -140,6 +140,8 @@ final class KinetoNativeContract {
   static const int _referenceTextKind = 64;
   static const int _mcpValueKind = 65;
   static const int _mcpTextKind = 66;
+  static const int _keyProviderKind = 67;
+  static const int _keyStateKind = 68;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -242,6 +244,8 @@ final class KinetoNativeContract {
 
   /// Text fields of an MCP server, tool or tool parameter, by name.
   Map<String, int> get mcpTexts => _table(_mcpTextKind);
+  Map<String, int> get keyProviders => _table(_keyProviderKind);
+  Map<String, int> get keyStates => _table(_keyStateKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

@@ -69,6 +69,14 @@ void main() {
     );
   });
 
+  test('key providers and states match the native tables', () {
+    expect(
+      KinetoKeyProvider.values.map((provider) => provider.wireName).toSet(),
+      contract.keyProviders.keys.toSet(),
+    );
+    expect(contract.keyStates.keys.toSet(), <String>{'stored', 'environment'});
+  });
+
   test('document codes match the native tables name for name', () {
     Set<String> names<T>(Iterable<T> values, String Function(T) wireName) =>
         <String>{for (final value in values) wireName(value)};
@@ -156,6 +164,8 @@ void main() {
       KinetoProjectException.mcpNotAllowed: 'mcp_not_allowed',
       KinetoProjectException.invalidReference: 'invalid_reference',
       KinetoProjectException.plannedDirection: 'planned_direction',
+      KinetoProjectException.keychainUnavailable: 'keychain_unavailable',
+      KinetoProjectException.keychainFailed: 'keychain_failed',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);
