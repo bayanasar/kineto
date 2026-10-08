@@ -222,4 +222,21 @@ void main() {
       sandbox.deleteSync(recursive: true);
     }
   });
+
+  test("a planned shot's direction is the locked plan's", () async {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-planned-direction-ffi-');
+    try {
+      final session = await KinetoProjectSession.open(_fixtureCopy(sandbox).path);
+      expect(session.shotSnapshot(0).direction, KinetoShotDirection.spatialClarity);
+      await expectLater(
+        session.setShotDirection(0, KinetoShotDirection.tension),
+        _refusedWith(KinetoProjectException.plannedDirection),
+      );
+      expect(session.shotSnapshot(0).direction, KinetoShotDirection.spatialClarity);
+      await session.setShotDirection(0, KinetoShotDirection.spatialClarity);
+      session.close();
+    } finally {
+      sandbox.deleteSync(recursive: true);
+    }
+  });
 }

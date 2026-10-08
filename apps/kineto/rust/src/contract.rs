@@ -82,10 +82,11 @@ pub(crate) const PROJECT_ERR_PLUGIN_CONFIG_INVALID: i32 = 165;
 pub(crate) const PROJECT_ERR_PLUGIN_UNAVAILABLE: i32 = 166;
 pub(crate) const PROJECT_ERR_MCP_NOT_ALLOWED: i32 = 167;
 pub(crate) const PROJECT_ERR_INVALID_REFERENCE: i32 = 168;
+pub(crate) const PROJECT_ERR_PLANNED_DIRECTION: i32 = 169;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 71] = [
+const STATUSES: [(&str, i32); 72] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -168,6 +169,7 @@ const STATUSES: [(&str, i32); 71] = [
     ("plugin_unavailable", PROJECT_ERR_PLUGIN_UNAVAILABLE),
     ("mcp_not_allowed", PROJECT_ERR_MCP_NOT_ALLOWED),
     ("invalid_reference", PROJECT_ERR_INVALID_REFERENCE),
+    ("planned_direction", PROJECT_ERR_PLANNED_DIRECTION),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

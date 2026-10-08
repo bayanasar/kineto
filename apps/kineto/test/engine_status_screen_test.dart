@@ -137,6 +137,58 @@ void main() {
     },
   );
 
+  testWidgets("a planned shot's direction is changed by planning its scene again", (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const planned = KinetoShotSnapshot(
+      direction: KinetoShotDirection.spatialClarity,
+      generated: false,
+      stale: false,
+      selectedIndex: null,
+      locked: false,
+      candidateCount: 0,
+      generation: 0,
+      supersededCount: 0,
+    );
+    Widget workspace({required bool directionPlanned}) => MaterialApp(
+          theme: WabTheme.materialTheme(lightTheme: false),
+          home: DemoWorkspaceView(
+            engineSnapshot: const KinetoEngineSnapshot(abiVersion: 44),
+            shotSnapshot: planned,
+            // The demo content has two shots.
+            shotSnapshots: const <KinetoShotSnapshot>[planned, planned],
+            activeShotIndex: 0,
+            onShotChanged: (_) {},
+            onDirectionChanged: (_) {},
+            directionPlanned: directionPlanned,
+            onGenerate: () {},
+            onSelect: (_) {},
+            onLock: () {},
+            onReset: () {},
+          ),
+        );
+    WabButton direction(KinetoShotDirection direction) =>
+        tester.widget<WabButton>(find.byKey(ValueKey<String>('direction-${direction.wireName}')));
+
+    await tester.pumpWidget(workspace(directionPlanned: true));
+    for (final value in KinetoShotDirection.values) {
+      expect(direction(value).onPressed, isNull, reason: value.wireName);
+    }
+    expect(find.textContaining('comes from the locked shot plan'), findsOneWidget);
+
+    // A bootstrap shot, which no plan holds, still takes any direction.
+    await tester.pumpWidget(workspace(directionPlanned: false));
+    for (final value in KinetoShotDirection.values) {
+      expect(direction(value).onPressed, isNotNull, reason: value.wireName);
+    }
+    expect(find.textContaining('comes from the locked shot plan'), findsNothing);
+  });
+
   testWidgets('stale canonical candidates remain visible but cannot be locked', (
     tester,
   ) async {

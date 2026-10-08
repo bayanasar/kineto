@@ -1217,6 +1217,10 @@ impl ShotWorkflow {
         Ok(report)
     }
 
+    /// Set the direction of a shot no locked plan holds. A planned shot
+    /// takes its direction from the plan, which opening the project writes
+    /// back over `shot.json`; another one is refused, since what was made
+    /// for it would go stale on the next open.
     pub fn set_direction(
         &mut self,
         project: &CanonicalProject,
@@ -1225,6 +1229,9 @@ impl ShotWorkflow {
         self.ensure_mutation_allowed()?;
         if self.snapshot()?.locked {
             return Err(ShotWorkflowError::Locked);
+        }
+        if planned_direction(project, &self.key)?.is_some_and(|planned| planned != direction) {
+            return Err(ShotWorkflowError::PlannedDirection);
         }
         if self.shot.direction == direction {
             return Ok(());
@@ -1499,15 +1506,7 @@ impl ShotWorkflow {
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
         let mut next_shot = self.shot.clone();
-        next_shot.direction = crate::shot_plan::planned_direction(project, &self.key)
-            .map_err(|error| match error {
-                RevisionError::Path(error) => ShotWorkflowError::Path(error),
-                RevisionError::Fs(error) => ShotWorkflowError::Fs(error),
-                RevisionError::Manifest(error) => ShotWorkflowError::Manifest(error),
-                RevisionError::Json(error) => ShotWorkflowError::Json(error),
-                _ => ShotWorkflowError::InvalidCanonicalState,
-            })?
-            .unwrap_or_default();
+        next_shot.direction = planned_direction(project, &self.key)?.unwrap_or_default();
         let mut next_artifacts = self.artifacts.clone();
         supersede_active_shot_candidates(&mut next_artifacts)?;
         supersede_active_videos(&mut next_artifacts)?;
@@ -3017,6 +3016,10 @@ pub enum ShotWorkflowError {
     NoVideo,
     /// The video was made from a keyframe that is no longer the locked one.
     StaleVideo,
+    /// The locked shot plan gives the shot another direction. Opening the
+    /// project writes the plan's intent back over `shot.json`, so the plan
+    /// is changed instead, by planning the scene again.
+    PlannedDirection,
     /// A candidate already in canonical state does not hold the output its
     /// generation produced, so that generation cannot be acknowledged.
     AttachedRecordMismatch(String),
@@ -3030,6 +3033,21 @@ pub enum ShotWorkflowError {
     Hash(HashValueError),
     Lifecycle(LifecycleError),
     Selection(SelectionError),
+}
+
+/// The direction the locked plan gives `key`'s shot, or `None` when no plan
+/// holds it.
+fn planned_direction(
+    project: &CanonicalProject,
+    key: &ShotKey,
+) -> Result<Option<ShotDirection>, ShotWorkflowError> {
+    crate::shot_plan::planned_direction(project, key).map_err(|error| match error {
+        RevisionError::Path(error) => ShotWorkflowError::Path(error),
+        RevisionError::Fs(error) => ShotWorkflowError::Fs(error),
+        RevisionError::Manifest(error) => ShotWorkflowError::Manifest(error),
+        RevisionError::Json(error) => ShotWorkflowError::Json(error),
+        _ => ShotWorkflowError::InvalidCanonicalState,
+    })
 }
 
 impl fmt::Display for ShotWorkflowError {
@@ -3075,6 +3093,10 @@ impl fmt::Display for ShotWorkflowError {
             Self::StaleVideo => formatter.write_str(
                 "the video no longer follows the shot: its locked keyframe or its intent changed \
                  since; regenerate it",
+            ),
+            Self::PlannedDirection => formatter.write_str(
+                "the shot's direction comes from the locked shot plan; plan the scene again to \
+                 change it",
             ),
             Self::MediaMismatch(path) => write!(
                 formatter,
@@ -3130,6 +3152,7 @@ impl Error for ShotWorkflowError {
             | Self::VideoLocked
             | Self::NoVideo
             | Self::StaleVideo
+            | Self::PlannedDirection
             | Self::AttachedRecordMismatch(_)
             | Self::InvalidTarget(_) => None,
         }

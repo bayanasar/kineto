@@ -1572,6 +1572,7 @@ fn shot_error_code(error: &ShotWorkflowError) -> i32 {
         ShotWorkflowError::VideoLocked => PROJECT_ERR_VIDEO_LOCKED,
         ShotWorkflowError::NoVideo => PROJECT_ERR_NO_VIDEO,
         ShotWorkflowError::StaleVideo => PROJECT_ERR_STALE_VIDEO,
+        ShotWorkflowError::PlannedDirection => PROJECT_ERR_PLANNED_DIRECTION,
         ShotWorkflowError::Manifest(ProjectManifestError::ReadOnlyFormatVersion(_)) => {
             PROJECT_ERR_READ_ONLY
         }
