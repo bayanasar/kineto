@@ -7,6 +7,8 @@
 //! ```text
 //! <destination>/<name>/
 //! ├── manifest.json
+//! ├── timeline.otio                      (the shots and lines as a rough cut)
+//! ├── timeline.edl                       (the same, as a CMX 3600 list)
 //! ├── <scene>_<shot>.mp4
 //! ├── <scene>_<shot>.json
 //! ├── <scene>_<shot>_first_frame.<ext>   (when the keyframe has an image)
@@ -17,6 +19,11 @@
 //! locked takes go with it, named by the line's place in its scene. Under a
 //! recipe with a dialogue step, a shot whose lines are not all locked, or
 //! whose locked takes no longer fit, is not ready.
+//!
+//! The package's timeline ([`crate::timeline`]) lays the shots end to end and
+//! each one's lines within it, for an editor to open as a rough cut. It is
+//! written unless the director leaves it out; the manifest then has no
+//! `timeline`.
 //!
 //! Only locked videos that still follow their shot are exported, each
 //! checked against its recorded hash. A shot that is not ready is reported
@@ -49,11 +56,18 @@ use serde_json::{Value, json};
 use crate::{
     dubbing::{self, DubbedLine},
     generation::GenerationError,
+    timeline::{self, TimelineLine, TimelineShot},
 };
 
 /// The manifest and sidecar schema version this module writes: 2 adds the
-/// lines each shot carries.
-pub const EXPORT_SCHEMA_VERSION: u32 = 2;
+/// lines each shot carries, 3 the timeline.
+pub const EXPORT_SCHEMA_VERSION: u32 = 3;
+
+/// The package's OpenTimelineIO timeline.
+pub const TIMELINE_FILE: &str = "timeline.otio";
+
+/// The package's timeline as a CMX 3600 edit decision list.
+pub const EDL_FILE: &str = "timeline.edl";
 
 /// A shot in play that is not in the package, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +111,8 @@ pub enum ExportError {
     Mismatch(String),
     /// The lines and their takes could not be read.
     Lines(Box<GenerationError>),
+    /// The timeline cannot be written in a format the package holds.
+    Timeline(String),
     Io(std::io::Error),
 }
 
@@ -120,6 +136,7 @@ impl fmt::Display for ExportError {
             Self::Exists(path) => write!(formatter, "{} exists already", path.display()),
             Self::Mismatch(path) => write!(formatter, "{path} is not what its record says"),
             Self::Lines(error) => error.fmt(formatter),
+            Self::Timeline(reason) => formatter.write_str(reason),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -226,6 +243,9 @@ pub struct ExportRequest {
     pub partial: bool,
     /// Replace a package of the same name.
     pub replace: bool,
+    /// Write the timeline for an editor too: [`TIMELINE_FILE`] and
+    /// [`EDL_FILE`].
+    pub timeline: bool,
 }
 
 /// What an export wrote.
@@ -273,7 +293,7 @@ pub fn export(
         std::fs::remove_dir_all(&staging)?;
     }
     std::fs::create_dir_all(&staging)?;
-    let written = write_package(project, &readiness, &staging, exported_at);
+    let written = write_package(project, &readiness, &staging, exported_at, request.timeline);
     let (bytes, lines) = match written {
         Ok(written) => written,
         Err(error) => {
@@ -401,18 +421,20 @@ fn exchange(_a: &Path, _b: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Write every file of the package into `folder`; the bytes written and
-/// the dubbed lines carried.
+/// Write every file of the package into `folder`, and the timeline when
+/// `with_timeline`; the bytes written and the dubbed lines carried.
 fn write_package(
     project: &CanonicalProject,
     readiness: &Readiness,
     folder: &Path,
     exported_at: SystemTime,
+    with_timeline: bool,
 ) -> Result<(u64, usize), ExportError> {
     let mut bytes = 0;
     let mut carried_lines = 0;
     let mut scenes: Vec<(String, Vec<Value>)> = Vec::new();
     let mut runtime: u64 = 0;
+    let mut cut: Vec<TimelineShot> = Vec::new();
     let lines = dubbed_lines(project)?;
     for (key, order) in &readiness.ready {
         let shot = ShotWorkflow::load(project, key)?;
@@ -448,6 +470,10 @@ fn write_package(
         let dialogue = shot.intent()?.and_then(|intent| intent.dialogue);
         let mut line_files = Vec::new();
         let mut spoken = Vec::new();
+        // The file says how long it lasts; the length asked for, otherwise.
+        let duration_ms = timeline::mp4_duration_ms(&std::fs::read(folder.join(&video_file))?)
+            .unwrap_or_else(|| u32::from(video.clip_seconds.unwrap_or(0)) * 1000);
+        let mut timed = Vec::new();
         for line in carried(&lines, key.scene(), dialogue.as_deref()) {
             let (Some(lock), true) = (&line.lock, line.stale.is_empty()) else {
                 continue;
@@ -489,9 +515,26 @@ fn write_package(
                 "emotion": take.voice.emotion,
                 "speed_permille": take.voice.speed_permille,
             }));
+            timed.push(TimelineLine {
+                line: line.line.line,
+                character: take.character.clone(),
+                file: file.clone(),
+                artifact_id: take.artifact_id.clone(),
+                content_hash: take.content_hash.clone(),
+                duration_ms: take.duration_ms,
+            });
             line_files.push(file);
             carried_lines += 1;
         }
+        cut.push(TimelineShot {
+            scene_id: key.scene().to_owned(),
+            shot_id: key.shot().to_owned(),
+            file: video_file.clone(),
+            artifact_id: video.artifact_id.clone(),
+            content_hash: video.content_hash.as_str().to_owned(),
+            duration_ms,
+            lines: timed,
+        });
         let sidecar_file = format!("{stem}.json");
         let mut sidecar = sidecar(
             &shot,
@@ -519,6 +562,16 @@ fn write_package(
         }
     }
     let manifest = project.manifest();
+    let placed = timeline::place(&cut);
+    if with_timeline {
+        bytes += write_json(
+            &folder.join(TIMELINE_FILE),
+            &timeline::otio(&manifest.title, &placed),
+        )?;
+        let list = timeline::edl(&manifest.title, &placed).map_err(ExportError::Timeline)?;
+        std::fs::write(folder.join(EDL_FILE), &list)?;
+        bytes += list.len() as u64;
+    }
     let scenes = scenes
         .into_iter()
         .map(|(scene_id, shots)| {
@@ -531,7 +584,7 @@ fn write_package(
             }))
         })
         .collect::<Result<Vec<_>, ShotWorkflowError>>()?;
-    let document = json!({
+    let mut document = json!({
         "schema_version": EXPORT_SCHEMA_VERSION,
         "kind": "kineto.export",
         "project": {
@@ -553,6 +606,18 @@ fn write_package(
         })).collect::<Vec<_>>(),
         "total_runtime_seconds": runtime,
     });
+    if with_timeline {
+        document["timeline"] = json!({
+            "otio": TIMELINE_FILE,
+            "edl": EDL_FILE,
+            "frame_rate": timeline::FRAME_RATE,
+            "trimmed_lines": placed.trimmed.iter().map(|trimmed| json!({
+                "shot_id": trimmed.shot_id,
+                "line": trimmed.line,
+                "cut_ms": trimmed.cut_ms,
+            })).collect::<Vec<_>>(),
+        });
+    }
     bytes += write_json(&folder.join("manifest.json"), &document)?;
     Ok((bytes, carried_lines))
 }

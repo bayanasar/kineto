@@ -113,11 +113,18 @@ void main() {
           as Map<String, Object?>;
       expect(manifest['complete'], isTrue);
       expect(manifest['total_runtime_seconds'], 4);
+      expect((manifest['timeline'] as Map<String, Object?>)['otio'], 'timeline.otio');
+      expect(File('${export.last!.path}${Platform.pathSeparator}timeline.edl').existsSync(), isTrue);
       await expectLater(
         session.exportPackage(destination: out.path, name: 'dailies'),
         _refusedWith(KinetoProjectException.exportExists),
       );
-      await session.exportPackage(destination: out.path, name: 'dailies', replace: true);
+      // Without the timeline, at the director's choice.
+      await session.exportPackage(destination: out.path, name: 'dailies', replace: true, timeline: false);
+      final bare = jsonDecode(File('${export.last!.path}${Platform.pathSeparator}manifest.json').readAsStringSync())
+          as Map<String, Object?>;
+      expect(bare.containsKey('timeline'), isFalse);
+      expect(File('${export.last!.path}${Platform.pathSeparator}timeline.otio').existsSync(), isFalse);
       session.close();
 
       // Every take and choice is in the project's files.

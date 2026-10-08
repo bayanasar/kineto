@@ -108,7 +108,7 @@ external int _kinetoProjectMediaTextCopy(
   Pointer<Uint64> length,
 );
 
-@Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint8>, Uint64, Bool, Bool, Uint64)>(
+@Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint8>, Uint64, Bool, Bool, Bool, Uint64)>(
   symbol: 'kineto_project_export',
 )
 external int _kinetoProjectExport(
@@ -119,6 +119,7 @@ external int _kinetoProjectExport(
   int nameLength,
   bool partial,
   bool replace,
+  bool timeline,
   int token,
 );
 
@@ -444,6 +445,7 @@ extension KinetoProjectHandoff on KinetoProjectSession {
     required String name,
     bool partial = false,
     bool replace = false,
+    bool timeline = true,
   }) =>
       _submitDocument((token) {
         final arena = Arena();
@@ -458,6 +460,7 @@ extension KinetoProjectHandoff on KinetoProjectSession {
             package.length,
             partial,
             replace,
+            timeline,
             token,
           );
         } finally {

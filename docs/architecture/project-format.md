@@ -21,6 +21,8 @@ my-film/
 │   ├── revisions.json
 │   ├── bible_r0001.json
 │   └── style.json
+├── references/
+│   └── references.json
 ├── shot_plan/
 │   ├── revisions.json
 │   └── shot_plan_r0001.json
@@ -86,6 +88,12 @@ Character IDs are screenplay cast IDs; location IDs are story analysis location 
 
 A bible depends on the story analysis and source the locked screenplay was made from, on each of that screenplay's scenes (`screenplay_scene.<id>`, semantic), and on the screenplay revision itself as a cosmetic dependency that only records where the scenes were read. It is stale when the locked screenplay changes a scene it read, removes one, adds one, or is made from another analysis or source; formatting changes and locking a revision whose scenes say the same thing leave it fresh. Staleness names each cause. Edits and locks follow the screenplay's rules (a new revision, `based_on`, refused when not started from the latest; one locked revision), and both hold the bible to the locked screenplay and its analysis exactly as a model's bible is held, so no revision that names a character, location or scene they lack is saved or locked. A stale bible that names only what they define can still be locked, since the director decides whether it holds, and staleness keeps saying why it may not.
 
+## References
+
+A reference is text the director brought in from an outside source, an MCP tool (ADR-0007), as material for the bible. `references/references.json` (`references.schema.json`) keeps each one as `reference.NNNN` (an ID is never given again after a reference is removed; `next_number` says the next), with the registered server and tool it came from, the arguments it was asked with, its text and the text's hash, and what it is about: `bible_world` or bible entries by the IDs work depends on them by (`bible_character.<id>`, `bible_location.<id>`, `bible_prop.<id>`), which need not exist yet. No time is recorded. The director attaches, detaches, edits or removes references; a tool is called only when the director asks.
+
+When the bible is written, every reference attached to anything goes into its prompt after the screenplay, in a `<references>` block, each as a `<reference>` element naming its ID, source and what it is about, its text escaped so it cannot end its element and every attribute, the tool's name among them, escaped so it cannot end its quotes, under the same rule as the source: material, not instructions. The bible depends on each one it read, semantically, by the hash of that element, so it is stale (cause `reference`, naming it) when the reference's text or what it is about changes, when it is removed, or when one it never read is attached. Without references the request is what it was before references existed.
+
 ## Style exploration
 
 A style direction is explored with sample images. Each sample is one paid image call on a scene of the locked screenplay (the director's choice, or the scene with the most people), described from the bible when there is one, in one of a few tested presets compiled by Rust (`style-sample/1`), optionally with the director's note. `style/samples.json` (`style-samples.schema.json`) records every sample as `style_sNNNN` in order:
@@ -107,6 +115,8 @@ A character of the bible is cast with paid images in the locked style. Portrait 
 - two expressions (a smile and a tense close-up).
 
 Which kinds and frames the pack holds follows the provider's declared capabilities: a full-length view wants 9:16 and is made at the nearest frame the provider takes, reported as a dropped constraint; with no identity reference there is no pack, since it would not show the same person. Prompts never truncate; what does not fit is dropped and reported (`cast-portrait/1`, `cast-reference/1`).
+
+A portrait can also be the director's own image: imported from a path they chose (the only read outside the project), copied in by its hash, free, and recorded with provider `import`, compiler `import/1` and the bible entry and locked style it was brought in for as dependencies. It must be a JPEG, PNG or WebP of at most 20 MB, and a format and size the session's image provider takes as an identity reference when it declares one. Importing the same image again records nothing new. From there it is selected, packed and locked like a generated portrait.
 
 `characters/<id>/casting.json` (`casting.schema.json`) records every image as `cast.<id>.NNNN` in order, with its kind, its status (portraits only), the portrait it was made from (references only), its hashes, provider, model, prompt provenance and dependencies. Locking writes `characters/<id>/character.json` (`character.schema.json`):
 - the canonical portrait and the newest reference of each kind made from it, by artifact ID, content hash and path;

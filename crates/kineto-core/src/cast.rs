@@ -6,7 +6,8 @@
 //! provider's identity reference, from the angles and in the expressions
 //! later shots need; which kinds and frames the pack holds follows what the
 //! provider declares, and what it cannot hold is reported. Every image is a
-//! paid image (see [`crate::paid_image`]) in the `minimax-cast` partition.
+//! paid image (see [`crate::paid_image`]) in its provider's casting
+//! partition (`minimax-cast` for MiniMax).
 
 use std::sync::Arc;
 
@@ -22,7 +23,6 @@ use kineto_project::{
     style::{self as style_document, StyleLock},
 };
 use kineto_prompts::{ConstraintId, DegradationLevel, DroppedConstraint};
-use kineto_provider_minimax::{IMAGE_MODEL, PROVIDER, Transport};
 use kineto_providers::{AspectRatio, ImageCapabilities, Price, ReferenceRole};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,10 +37,11 @@ use crate::{
     keyframe_prompt::{KeyframePrompt, KeyframePromptError},
     minimax::MinimaxKeyframes,
     paid_image::{self, Jobs, Ledger},
+    plugin::PluginImages,
     style_prompt::{Part, fit, sentence},
 };
 
-/// The job partition casting images are recorded under.
+/// The job partition MiniMax's casting images are recorded under.
 pub const CAST_PROVIDER: &str = "minimax-cast";
 
 /// Version of the portrait prompt.
@@ -48,6 +49,15 @@ pub const PORTRAIT_COMPILER_VERSION: &str = "cast-portrait/1";
 
 /// Version of the reference prompt.
 pub const REFERENCE_COMPILER_VERSION: &str = "cast-reference/1";
+
+/// The provider an imported portrait records: the director brought it.
+pub const IMPORT_PROVIDER: &str = "import";
+
+/// What an imported portrait's provenance names in place of a compiler.
+pub const IMPORT_VERSION: &str = "import/1";
+
+/// The largest image the director may import, in bytes.
+pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 
 const INTENT_DOMAIN: &[u8] = b"kineto.cast-intent.v1";
 
@@ -441,8 +451,7 @@ struct Casting;
 impl Ledger for Casting {
     type Plan = CastPlan;
 
-    const PARTITION: &'static str = CAST_PROVIDER;
-    const PLAN: &'static str = "cast";
+    const KIND: &'static str = "cast";
 
     fn artifact_id(plan: &CastPlan) -> &str {
         &plan.artifact_id
@@ -469,10 +478,27 @@ fn numbered(character_id: &str) -> impl Fn(&str) -> bool + '_ {
     move |artifact_id| document::character_of(artifact_id) == Some(character_id)
 }
 
-/// Record casting images an interrupted session left, as a project opens.
-/// Never calls MiniMax.
+/// Record casting images an interrupted session left with MiniMax, as a
+/// project opens. Never calls MiniMax.
 pub fn recover(project: &CanonicalProject) -> Result<CastRecovery, GenerationError> {
     paid_image::recover::<Casting>(project)
+}
+
+/// [`recover`], and the images `provider` left when it is a plugin. Makes
+/// no new call; the plugin may be asked whether it kept a sent call's
+/// answer.
+pub fn recover_for(
+    project: &CanonicalProject,
+    provider: &ImageProvider,
+) -> Result<CastRecovery, GenerationError> {
+    let mut recovery = recover(project)?;
+    if let ImageProvider::Plugin(plugin) = provider {
+        recovery.extend(paid_image::recover_with::<Casting, _>(
+            project,
+            PluginImages::new(project, plugin),
+        )?);
+    }
+    Ok(recovery)
 }
 
 /// One image to make: what it shows and in which frame.
@@ -494,12 +520,13 @@ struct Planned {
 
 /// Compile `shot` of the character in `material` and derive its input
 /// hash: what makes two images the same request.
-fn plan_shot(
+fn plan_shot<G: CandidateGenerator>(
     material: &Material,
     shot: &Shot,
     identity: Option<&ReferenceImage>,
-    capabilities: &ImageCapabilities,
+    generator: &G,
 ) -> Result<Planned, GenerationError> {
+    let capabilities = &generator.capabilities();
     let prompt = compile(
         &material.character,
         shot.kind,
@@ -527,8 +554,8 @@ fn plan_shot(
             &material.style,
             identity.is_some(),
         ),
-        provider: PROVIDER,
-        model: IMAGE_MODEL,
+        provider: generator.provider().as_str(),
+        model: &generator.model(),
         canonical_params: params.as_bytes(),
         compiler_version: prompt.compiled.compiler_version(),
     });
@@ -541,9 +568,9 @@ fn plan_shot(
 
 /// Generate `shot` as `planned` and record it.
 #[allow(clippy::too_many_arguments)]
-fn make<T: Transport + Sync>(
+fn make<G: CandidateGenerator>(
     project: &CanonicalProject,
-    jobs: &mut Jobs<'_, '_, Casting, T>,
+    jobs: &mut Jobs<'_, Casting, G>,
     character_id: &str,
     shot: &Shot,
     identity: Option<&ReferenceImage>,
@@ -613,13 +640,21 @@ pub fn audition(
             submission,
             hooks,
         ),
+        ImageProvider::Plugin(plugin) => audition_with(
+            project,
+            PluginImages::new(project, plugin),
+            character_id,
+            count,
+            submission,
+            hooks,
+        ),
     }
 }
 
-/// [`audition`] with an explicit MiniMax adapter.
-pub fn audition_with<T: Transport + Sync>(
+/// [`audition`] with an explicit image generator.
+pub fn audition_with<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     character_id: &str,
     count: usize,
     submission: Submission,
@@ -652,7 +687,7 @@ pub fn audition_with<T: Transport + Sync>(
         }),
     };
     // A prompt that cannot fit is refused before anything is written.
-    let planned = plan_shot(&material, &shot, None, &capabilities)?;
+    let planned = plan_shot(&material, &shot, None, &adapter)?;
     // Portraits an interruption left are recorded first, so they count.
     let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
     let mut portraits: Vec<CastImage> = document::images(project, character_id)
@@ -716,13 +751,21 @@ pub fn remake_pack(
             submission,
             hooks,
         ),
+        ImageProvider::Plugin(plugin) => remake_pack_with(
+            project,
+            PluginImages::new(project, plugin),
+            character_id,
+            remake,
+            submission,
+            hooks,
+        ),
     }
 }
 
-/// [`make_pack`] with an explicit MiniMax adapter.
-pub fn make_pack_with<T: Transport + Sync>(
+/// [`make_pack`] with an explicit image generator.
+pub fn make_pack_with<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     character_id: &str,
     submission: Submission,
     hooks: &mut dyn GenerationHooks,
@@ -730,10 +773,10 @@ pub fn make_pack_with<T: Transport + Sync>(
     remake_pack_with(project, adapter, character_id, &[], submission, hooks)
 }
 
-/// [`remake_pack`] with an explicit MiniMax adapter.
-pub fn remake_pack_with<T: Transport + Sync>(
+/// [`remake_pack`] with an explicit image generator.
+pub fn remake_pack_with<G: CandidateGenerator>(
     project: &CanonicalProject,
-    adapter: MinimaxKeyframes<'_, T>,
+    adapter: G,
     character_id: &str,
     remake: &[CastImageKind],
     submission: Submission,
@@ -783,7 +826,7 @@ pub fn remake_pack_with<T: Transport + Sync>(
                 frame: pack_shot.aspect_ratio,
                 degraded: pack_shot.degraded.clone(),
             };
-            let planned = plan_shot(&material, &shot, Some(&identity), &capabilities)?;
+            let planned = plan_shot(&material, &shot, Some(&identity), &adapter)?;
             Ok((shot, planned))
         })
         .collect::<Result<Vec<_>, GenerationError>>()?;
@@ -858,6 +901,93 @@ pub fn lock(
         },
     )
     .map_err(document_error)
+}
+
+/// Import `bytes`, an image the director chose, as a portrait candidate of
+/// `character_id`: copied into the project, recorded by its hash with the
+/// bible entry and locked style it was brought in for, and selected,
+/// packed and locked like a generated portrait. Free. The image must be a
+/// format and size `capabilities` takes as an identity reference, when it
+/// declares one; importing the same image again records nothing new.
+pub fn import_portrait(
+    project: &CanonicalProject,
+    capabilities: &ImageCapabilities,
+    character_id: &str,
+    bytes: &[u8],
+) -> Result<CastImage, GenerationError> {
+    let material = Material::gather(project, character_id)?;
+    let format = kineto_provider_minimax::sniff(bytes);
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let takes_identity = capabilities.reference_limit(ReferenceRole::Identity) > 0;
+    let fits = format
+        .is_some_and(|format| !takes_identity || capabilities.reference_formats.contains(&format))
+        && size <= MAX_IMPORT_BYTES
+        && (!takes_identity
+            || capabilities
+                .max_reference_bytes
+                .is_none_or(|max| size <= max));
+    if !fits {
+        return Err(GenerationError::Prerequisite(
+            Prerequisite::IdentityReference,
+        ));
+    }
+    let content_hash = kineto_project::ContentHash::of(bytes);
+    let recorded = document::images(project, character_id).map_err(document_error)?;
+    if let Some(image) = recorded.iter().find(|image| {
+        image.provider == IMPORT_PROVIDER && image.content_hash == content_hash.as_str()
+    }) {
+        return Ok(image.clone());
+    }
+    if project.is_read_only() {
+        return Err(document_error(document::CastError::Manifest(
+            kineto_project::manifest::ProjectManifestError::ReadOnlyFormatVersion(
+                project.manifest().format_version,
+            ),
+        )));
+    }
+    let artifact_id = document::next_artifact_id(project, character_id).map_err(document_error)?;
+    let extension = match format {
+        Some(kineto_providers::ImageFormat::Png) => "png",
+        Some(kineto_providers::ImageFormat::Webp) => "webp",
+        _ => "jpg",
+    };
+    let media = document::media_path(
+        character_id,
+        &artifact_id,
+        CastImageKind::Portrait,
+        extension,
+    )
+    .map_err(document_error)?;
+    project
+        .root()
+        .write_atomic(&media, bytes)
+        .map_err(|error| document_error(document::CastError::Fs(error)))?;
+    let image = CastImage {
+        artifact_id: artifact_id.as_str().to_owned(),
+        kind: CastImageKind::Portrait,
+        status: Some(PortraitStatus::Candidate),
+        identity_reference: None,
+        content_hash: content_hash.as_str().to_owned(),
+        input_hash: content_hash.as_str().to_owned(),
+        provider: IMPORT_PROVIDER.to_owned(),
+        model: IMPORT_PROVIDER.to_owned(),
+        media_path: media.as_path().to_string_lossy().into_owned(),
+        provenance: kineto_project::shot::PromptProvenance {
+            compiler_version: IMPORT_VERSION.to_owned(),
+            compiled_prompt: "Imported by the director.".to_owned(),
+            prompt_hash: content_hash.as_str().to_owned(),
+            applied_constraints: Vec::new(),
+            dropped_constraints: Vec::new(),
+        },
+        dependencies: material
+            .dependencies
+            .iter()
+            .map(DependencyRecord::from)
+            .collect(),
+        media_state: None,
+    };
+    document::attach(project, character_id, image.clone()).map_err(document_error)?;
+    Ok(image)
 }
 
 /// What makes the cast of `character_id` stale: each parent of its locked
@@ -936,6 +1066,13 @@ fn price_of(provider: &ImageProvider, count: usize) -> Option<Price> {
                 ..price
             })
         }
+        ImageProvider::Plugin(plugin) => plugin
+            .image_capabilities()
+            .and_then(|capabilities| capabilities.price_per_image)
+            .map(|price| Price {
+                amount_micros: price.amount_micros * u64::try_from(count).unwrap_or(u64::MAX),
+                ..price
+            }),
         ImageProvider::Minimax(None) | ImageProvider::LocalDemo => None,
     }
 }

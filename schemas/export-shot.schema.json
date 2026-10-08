@@ -22,7 +22,8 @@
     "schema_version": {
       "enum": [
         1,
-        2
+        2,
+        3
       ],
       "description": "2 adds the shot's spoken lines."
     },

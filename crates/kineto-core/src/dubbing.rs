@@ -35,7 +35,7 @@ use crate::{
     paid_image::Submission,
     speech::{
         DEMO_SPEECH_PROVIDER, MINIMAX_SPEECH_PROVIDER, SpeechGenerator, SpeechHooks, SpeechJobs,
-        SpeechLedger, SpeechRecovery, SpokenOutput, check_speech,
+        SpeechLedger, SpeechProvider, SpeechRecovery, SpokenOutput, check_speech,
     },
     speech_prompt::{self, LineDirection},
     voice,
@@ -237,8 +237,30 @@ fn numbered<'a>(spoken: &'a ScreenplayLine) -> impl Fn(&str) -> bool + 'a {
 /// Record takes an interrupted session left, as a project opens, for every
 /// speech provider. Never calls one.
 pub fn recover(project: &CanonicalProject) -> Result<SpeechRecovery, GenerationError> {
+    recover_providers(project, &SPEECH_PROVIDERS)
+}
+
+/// [`recover`], and the takes `speech` left when it is a plugin. Never
+/// calls one.
+pub fn recover_for(
+    project: &CanonicalProject,
+    speech: &SpeechProvider,
+) -> Result<SpeechRecovery, GenerationError> {
+    match speech {
+        SpeechProvider::Plugin(plugin) => {
+            let [demo, minimax] = SPEECH_PROVIDERS;
+            recover_providers(project, &[demo, minimax, plugin.key()])
+        }
+        SpeechProvider::LocalDemo | SpeechProvider::Minimax(_) => recover(project),
+    }
+}
+
+fn recover_providers(
+    project: &CanonicalProject,
+    providers: &[&str],
+) -> Result<SpeechRecovery, GenerationError> {
     let mut all = SpeechRecovery::default();
-    for provider in SPEECH_PROVIDERS {
+    for provider in providers {
         let recovery = crate::speech::recover::<LineTakes>(project, provider)?;
         all.attached.extend(recovery.attached);
         all.unresolved.extend(recovery.unresolved);

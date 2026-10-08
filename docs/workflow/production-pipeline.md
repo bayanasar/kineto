@@ -302,8 +302,6 @@ The project manifest (`schemas/export-manifest.schema.json`) holds the project a
 
 Only locked videos that still follow their shot are exported, each checked against its recorded hash. When a shot is not ready, the export says which and why, and writes nothing unless the director asks for the ready shots only. The package is written beside its destination and renamed into place, so an interruption never leaves half a package under its name, and exporting the same project again gives the same bytes. Replacing a package of the same name exchanges the two in one step where the system can (Linux, macOS), so the name always holds a whole package; where it cannot (Windows), an interruption can leave the earlier package set aside, and the next export puts it back first. A sidecar's lock time is the one the video's record kept when it was locked (`null` for a video locked before Kineto recorded it); the manifest records when the package was made.
 
-Later ecosystem exports can add:
+The package also holds its timeline (`timeline.otio`, OpenTimelineIO): the shots end to end on a video track and each shot's locked lines on a dialogue track, at 24 frames a second. A shot lasts as long as its file does, read from the MP4's movie header without decoding. A shot's lines follow one another from its start with a 250 ms breath between them, as planning times them, and a line running past its shot's end is cut there and listed in the manifest (`timeline.trimmed_lines`). Each clip names its file relative to the package and carries its Kineto identity, so the package can move as a whole. The same placement is written as a CMX 3600 edit decision list (`timeline.edl`, non-drop timecode): one video event a shot and one audio event a line, in record order, each with a comment naming its file, and a blank (`BL`) audio event for the silence before the first line. A list that would hold more than 999 events refuses the export rather than being cut short.
 
-- OTIO
-- EDL
-- NLE-specific metadata
+Later ecosystem exports can add NLE-specific metadata.

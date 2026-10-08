@@ -146,7 +146,9 @@ dependencies = [
  "base64",
  "kineto-job-runtime",
  "kineto-jobs",
+ "kineto-json-schema",
  "kineto-llm",
+ "kineto-plugins",
  "kineto-project",
  "kineto-prompts",
  "kineto-provider-minimax",
@@ -201,9 +203,20 @@ dependencies = [
  "kineto-core",
  "kineto-jobs",
  "kineto-llm",
+ "kineto-plugins",
  "kineto-project",
  "kineto-providers",
  "serde_json",
+]
+
+[[package]]
+name = "kineto-plugins"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
 ]
 
 [[package]]

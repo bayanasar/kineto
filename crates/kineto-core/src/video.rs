@@ -39,7 +39,10 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU16,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -79,8 +82,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     generation::{
         GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
-        provenance_of,
+        provenance_of, selected_plugin,
     },
+    plugin::{self, PluginProvider},
     video_prompt::{self, EndFrameUse, Successor, VIDEO_COMPILER_VERSION, VideoPromptInput},
 };
 
@@ -164,8 +168,8 @@ pub trait VideoGenerator {
 
     /// The key its jobs are recorded under, which the videos it makes name
     /// as their provider.
-    fn provider(&self) -> &'static str;
-    fn model(&self) -> &'static str;
+    fn provider(&self) -> &str;
+    fn model(&self) -> &str;
     fn capabilities(&self) -> VideoCapabilities;
     /// Whether a first frame must be an image: false only for the demo,
     /// which starts from a demo keyframe that has none.
@@ -193,11 +197,11 @@ pub trait VideoGenerator {
 impl<T: Transport> VideoGenerator for MinimaxClient<T> {
     type Error = MinimaxError;
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> &str {
         VIDEO_PROVIDER
     }
 
-    fn model(&self) -> &'static str {
+    fn model(&self) -> &str {
         VIDEO_MODEL
     }
 
@@ -298,11 +302,11 @@ pub fn demo_video_capabilities() -> VideoCapabilities {
 impl VideoGenerator for LocalDemoVideos {
     type Error = Infallible;
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> &str {
         DEMO_VIDEO_PROVIDER
     }
 
-    fn model(&self) -> &'static str {
+    fn model(&self) -> &str {
         DEMO_VIDEO_MODEL
     }
 
@@ -357,6 +361,9 @@ pub enum VideoProvider {
     /// MiniMax Hailuo. Paid. Without a client, videos an earlier session
     /// submitted are not followed and no new one is submitted.
     Minimax(Option<VideoClient>),
+    /// A plugin the user registered (ADR-0006), as it described itself.
+    /// One that declares no video makes none.
+    Plugin(Arc<PluginProvider>),
 }
 
 /// Which video provider a session generates with.
@@ -364,6 +371,7 @@ pub enum VideoProvider {
 pub enum VideoProviderKind {
     LocalDemo,
     Minimax,
+    Plugin,
 }
 
 /// What the director needs to know about the session's video provider
@@ -381,9 +389,10 @@ pub struct VideoProviderInfo {
 
 impl VideoProvider {
     /// The provider named by `selection`: `local-demo` for the free demo,
-    /// `minimax` for MiniMax with the key `secrets` holds. `None` when
-    /// nothing is named, so the session follows its image provider. A paid
-    /// provider is used only when it is named.
+    /// `minimax` for MiniMax with the key `secrets` holds, `plugin:<id>` for
+    /// the plugin registered as `<id>`. `None` when nothing is named, so the
+    /// session follows its image provider. A paid provider is used only when
+    /// it is named.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
@@ -397,7 +406,10 @@ impl VideoProvider {
                     .map_err(ProviderSelectionError::Secret)?
                     .map(MinimaxClient::shared),
             ))),
-            Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            Some(other) => match selected_plugin(other) {
+                Some(selected) => selected.map(|plugin| Some(Self::Plugin(plugin))),
+                None => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            },
         }
     }
 
@@ -406,6 +418,17 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => VideoProviderKind::LocalDemo,
             Self::Minimax(_) => VideoProviderKind::Minimax,
+            Self::Plugin(_) => VideoProviderKind::Plugin,
+        }
+    }
+
+    /// The key its video jobs are kept under.
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::LocalDemo => DEMO_VIDEO_PROVIDER.to_owned(),
+            Self::Minimax(_) => VIDEO_PROVIDER.to_owned(),
+            Self::Plugin(plugin) => plugin::video_key(plugin.key()),
         }
     }
 
@@ -414,6 +437,7 @@ impl VideoProvider {
         match self {
             Self::LocalDemo => demo_video_capabilities(),
             Self::Minimax(_) => video_capabilities(),
+            Self::Plugin(plugin) => plugin.video_capabilities().cloned().unwrap_or_default(),
         }
     }
 
@@ -429,6 +453,7 @@ impl VideoProvider {
             ready: match self {
                 Self::LocalDemo => true,
                 Self::Minimax(client) => client.is_some(),
+                Self::Plugin(plugin) => plugin.video_capabilities().is_some(),
             },
             clip_cost_micros: price,
             clip_seconds,
@@ -509,7 +534,7 @@ pub struct VideoJob {
     pub artifact_id: ArtifactId,
     /// The provider key the job is recorded under, which says which
     /// provider follows its task.
-    pub provider: &'static str,
+    pub provider: String,
     pub task: ProviderJobId,
 }
 
@@ -692,8 +717,8 @@ fn remove_receipt(root: &ProjectRoot, artifact_id: &ArtifactId) {
     }
 }
 
-fn provider_key(provider: &'static str) -> ProviderKey {
-    ProviderKey::new(provider).expect("static provider key is valid")
+fn provider_key(provider: &str) -> ProviderKey {
+    ProviderKey::new(provider).expect("a video provider's key is a provider key")
 }
 
 /// How video jobs of `provider` run: two submissions at once to a paid
@@ -718,7 +743,7 @@ fn policy(provider: &str) -> JobRuntimePolicy {
     }
 }
 
-fn runtime<'a>(project: &'a CanonicalProject, provider: &'static str) -> JobRuntime<'a> {
+fn runtime<'a>(project: &'a CanonicalProject, provider: &str) -> JobRuntime<'a> {
     JobRuntime::new(project, provider_key(provider), policy(provider))
 }
 
@@ -896,7 +921,7 @@ fn deferred(what: &'static str) -> VideoFailure {
 fn job_from_intent(
     project: &CanonicalProject,
     runtime: &JobRuntime<'_>,
-    provider: &'static str,
+    provider: &str,
     job_id: &JobId,
 ) -> Result<Option<VideoJob>, JobRuntimeError> {
     let Some(record) = runtime.load(job_id)? else {
@@ -916,7 +941,7 @@ fn job_from_intent(
         shot,
         revision: plan.revision(),
         artifact_id: artifact_id.clone(),
-        provider,
+        provider: provider.to_owned(),
         task: task.clone(),
     }))
 }
@@ -1420,7 +1445,7 @@ fn submit_one<G: VideoGenerator>(
             shot: shot.key().clone(),
             revision: plan.revision(),
             artifact_id: plan.artifact_id().clone(),
-            provider,
+            provider: provider.to_owned(),
             task: provider_job_id,
         }),
         Ok(DispatchOutcome::Completed { .. }) => Err(GenerationError::Unexpected(
@@ -1552,7 +1577,7 @@ pub fn finish(
     shot: &mut ShotWorkflow,
     done: VideoDone,
 ) -> Result<AttachOutcome, GenerationError> {
-    let runtime = runtime(project, done.job.provider);
+    let runtime = runtime(project, &done.job.provider);
     let job_id = JobId::new(done.job.artifact_id.as_str())?;
     if let Err(failure) = done.result {
         runtime.retire_remote_failure(&job_id)?;
@@ -1588,7 +1613,7 @@ pub fn finish(
         &VideoOutput {
             artifact_id: done.job.artifact_id.clone(),
             content_hash,
-            provider: done.job.provider.to_owned(),
+            provider: done.job.provider.clone(),
             model: receipt.model,
             media_path: video_media_path(shot.key(), &done.job.artifact_id)?,
             provenance: Some(receipt.provenance),
@@ -1635,10 +1660,7 @@ pub struct InFlight {
 }
 
 /// The video jobs recorded under `provider` that an earlier session left.
-pub fn in_flight(
-    project: &CanonicalProject,
-    provider: &'static str,
-) -> Result<InFlight, JobRuntimeError> {
+pub fn in_flight(project: &CanonicalProject, provider: &str) -> Result<InFlight, JobRuntimeError> {
     let runtime = runtime(project, provider);
     let mut found = InFlight::default();
     let mut deferred = Deferred {

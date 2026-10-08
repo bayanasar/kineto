@@ -19,6 +19,8 @@ The workflow engine asks for capabilities, not vendor names.
 
 Provider interfaces stay typed, but Kineto should not pay for runtime dynamic dispatch or boxed futures before a real plugin boundary requires it. Built-in providers should initially use concrete types or enum/static dispatch.
 
+Third-party image, video and speech providers are plugins (ADR-0006): executables the user registers in Kineto's configuration, never named by a project as a command, started once per operation and spoken to with one JSON message each way (`kineto-plugin/1`). A plugin declares the same capabilities a built-in does and runs behind the same routing, write-ahead jobs and receipts; its files pass through a scratch directory outside the project and are checked against their declared hashes, sizes and formats before they enter it.
+
 Conceptual Rust interface for a statically dispatched provider:
 
 ```rust
@@ -341,6 +343,8 @@ Architecture:
 ```
 
 The core workflow remains functional without MCP. MCP output is untrusted data and cannot authorize provider spend, arbitrary process execution, or unrestricted filesystem writes.
+
+Kineto is an MCP client only (ADR-0007). It connects to stdio servers the user registers in Kineto's configuration, calls only the tools each entry allows, and only when the director asks. It offers no sampling, roots or elicitation. A tool's text result becomes a reference: project state under `references/`, with its source, attached to the world or to bible entries, given to the bible's prompts as material, and recorded as a dependency so a changed reference makes the bible stale.
 
 ## Secrets
 

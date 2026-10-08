@@ -598,7 +598,8 @@ pub unsafe extern "C" fn kineto_project_media_text_copy(
 
 /// Queue writing a production package named `name` in folder `destination`
 /// (an absolute path), with only the ready shots when `partial`, replacing
-/// one of the same name when `replace`.
+/// one of the same name when `replace`, and with the timeline for an editor
+/// (OpenTimelineIO and a CMX 3600 EDL) when `timeline`.
 ///
 /// # Safety
 /// `session` must be a live project-session handle. `destination` and
@@ -612,6 +613,7 @@ pub unsafe extern "C" fn kineto_project_export(
     name_len: u64,
     partial: bool,
     replace: bool,
+    timeline: bool,
     token: u64,
 ) -> i32 {
     guarded(PROJECT_ERR_PANIC, || {
@@ -636,6 +638,7 @@ pub unsafe extern "C" fn kineto_project_export(
                 name: package,
                 partial,
                 replace,
+                timeline,
             },
             token,
         ))

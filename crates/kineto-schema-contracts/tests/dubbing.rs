@@ -279,6 +279,7 @@ fn dubbed_lines_and_the_package_that_carries_them_match_committed_schemas() {
             name: "dailies".to_owned(),
             partial: true,
             replace: false,
+            timeline: true,
         },
         UNIX_EPOCH + Duration::from_secs(1_791_015_045),
     )

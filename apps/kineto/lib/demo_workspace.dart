@@ -722,8 +722,8 @@ class DemoWorkspaceView extends StatelessWidget {
                       ],
                       if (keyframesUnresolved) ...<Widget>[
                         const Text(
-                          'The last generation did not finish cleanly, and MiniMax may already have '
-                          'charged for keyframes Kineto never received. Check your MiniMax account; '
+                          'The last generation did not finish cleanly, and the image provider may already '
+                          'have charged for keyframes Kineto never received. Check your account with it; '
                           'generate again only if you accept paying twice.',
                         ),
                         const SizedBox(height: 12),

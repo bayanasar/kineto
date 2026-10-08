@@ -327,6 +327,90 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
 }
 
 #[test]
+fn an_imported_portrait_is_cast_like_a_generated_one() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let minimax = Minimax::new();
+    let capabilities = provider().capabilities();
+    // The director's own photo of the actor, a JPEG.
+    let photo = [
+        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x42,
+    ];
+
+    // Not an image, or too large for MiniMax's identity reference: refused,
+    // nothing written.
+    for refused in [b"not an image".to_vec(), {
+        let mut big = photo.to_vec();
+        big.resize(11 * 1024 * 1024, 0);
+        big
+    }] {
+        assert!(matches!(
+            cast::import_portrait(&project, &capabilities, "filmmaker", &refused),
+            Err(GenerationError::Prerequisite(
+                Prerequisite::IdentityReference
+            ))
+        ));
+    }
+    assert!(document::images(&project, "filmmaker").unwrap().is_empty());
+
+    let imported = cast::import_portrait(&project, &capabilities, "filmmaker", &photo).unwrap();
+    assert_eq!(imported.artifact_id, "cast.filmmaker.0001");
+    assert_eq!(
+        (imported.provider.as_str(), imported.kind),
+        ("import", CastImageKind::Portrait)
+    );
+    assert_eq!(imported.status, Some(document::PortraitStatus::Candidate));
+    assert_eq!(fs::read(target.join(&imported.media_path)).unwrap(), photo);
+    assert_eq!(imported.content_hash, ContentHash::of(&photo).as_str());
+    let depends_on: Vec<_> = imported
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.artifact_id.as_str())
+        .collect();
+    assert_eq!(depends_on, ["bible_character.filmmaker", "style_s0001"]);
+    // The record keeps to the casting schema.
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/casting.schema.json")).unwrap();
+    let log: serde_json::Value = serde_json::from_slice(
+        &fs::read(target.join("characters/filmmaker/casting.json")).unwrap(),
+    )
+    .unwrap();
+    kineto_json_schema::validate(&schema, &log).unwrap();
+    // The same photo again records nothing new.
+    assert_eq!(
+        cast::import_portrait(&project, &capabilities, "filmmaker", &photo).unwrap(),
+        imported
+    );
+    assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 1);
+    assert_eq!(minimax.calls(), 0, "importing is free");
+
+    // Selected, its pack made from it, and locked: the pack shows the photo.
+    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
+    cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    let identity = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(photo)
+    );
+    for body in minimax.bodies.lock().unwrap().iter() {
+        assert_eq!(
+            body["subject_reference"][0]["image_file"],
+            identity.as_str()
+        );
+    }
+    let locked = cast::lock(&project, &provider(), "filmmaker").unwrap();
+    assert_eq!(locked.portrait.artifact_id, "cast.filmmaker.0001");
+    assert!(cast::staleness(&project, "filmmaker").unwrap().is_empty());
+}
+
+#[test]
 fn the_cast_goes_stale_when_its_entry_or_the_style_changes_and_only_then() {
     let temp = TempDir::new();
     let project = film(&temp.0.join("film"), true);

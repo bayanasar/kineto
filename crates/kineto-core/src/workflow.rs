@@ -327,7 +327,8 @@ fn bible(project: &CanonicalProject) -> Result<Progress, WorkflowError> {
             bible_document::StaleCause::Material(id)
             | bible_document::StaleCause::SceneChanged(id)
             | bible_document::StaleCause::SceneRemoved(id)
-            | bible_document::StaleCause::SceneAdded(id) => id,
+            | bible_document::StaleCause::SceneAdded(id)
+            | bible_document::StaleCause::Reference(id) => id,
         })
         .collect();
     Ok(Progress {

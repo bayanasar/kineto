@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kineto.local/schemas/references.schema.json",
+  "title": "Kineto References",
+  "description": "Text the director brought in from an outside source (an MCP tool, ADR-0007) as material for the bible: the server and tool it came from, the arguments it was asked with, the text and its hash, and what it is about, the world (bible_world) or bible entries by the IDs work depends on them by. IDs are reference.NNNN and never reused; next_number is the next one's number. No time is recorded.",
+  "type": "object",
+  "required": ["schema_version", "next_number", "references"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "next_number": {"type": "integer", "minimum": 1},
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reference_id", "server", "tool", "arguments", "text", "content_hash", "attached_to"],
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$", "description": "reference.NNNN"},
+          "server": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$", "description": "A registered server ID: lowercase letters, digits, - and _, at most 48."},
+          "tool": {"type": "string", "minLength": 1},
+          "arguments": {"type": "object"},
+          "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+          "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "attached_to": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$", "description": "bible_world, or bible_character., bible_location. or bible_prop. and an entry ID."}
+          }
+        }
+      }
+    }
+  }
+}

@@ -78,10 +78,14 @@ pub(crate) const PROJECT_ERR_NOTHING_TO_EXPORT: i32 = 161;
 pub(crate) const PROJECT_ERR_MEDIA_CHANGED: i32 = 162;
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_CAST: i32 = 163;
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_VOICE: i32 = 164;
+pub(crate) const PROJECT_ERR_PLUGIN_CONFIG_INVALID: i32 = 165;
+pub(crate) const PROJECT_ERR_PLUGIN_UNAVAILABLE: i32 = 166;
+pub(crate) const PROJECT_ERR_MCP_NOT_ALLOWED: i32 = 167;
+pub(crate) const PROJECT_ERR_INVALID_REFERENCE: i32 = 168;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 67] = [
+const STATUSES: [(&str, i32); 71] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -160,6 +164,10 @@ const STATUSES: [(&str, i32); 67] = [
     ("media_changed", PROJECT_ERR_MEDIA_CHANGED),
     ("needs_locked_cast", PROJECT_ERR_NEEDS_LOCKED_CAST),
     ("needs_locked_voice", PROJECT_ERR_NEEDS_LOCKED_VOICE),
+    ("plugin_config_invalid", PROJECT_ERR_PLUGIN_CONFIG_INVALID),
+    ("plugin_unavailable", PROJECT_ERR_PLUGIN_UNAVAILABLE),
+    ("mcp_not_allowed", PROJECT_ERR_MCP_NOT_ALLOWED),
+    ("invalid_reference", PROJECT_ERR_INVALID_REFERENCE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -172,6 +180,7 @@ const DIRECTIONS: [(&str, ShotDirection); 4] = [
 
 pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
+pub(crate) const IMAGE_PROVIDER_PLUGIN: u32 = 3;
 
 /// Video state codes in the snapshot's `video_state` field.
 const VIDEO_STATES: [(&str, u8); 6] = [
@@ -184,18 +193,21 @@ const VIDEO_STATES: [(&str, u8); 6] = [
 ];
 
 /// Image provider codes returned by `kineto_project_image_provider`.
-const IMAGE_PROVIDERS: [(&str, u32); 2] = [
+const IMAGE_PROVIDERS: [(&str, u32); 3] = [
     ("local_demo", IMAGE_PROVIDER_LOCAL_DEMO),
     ("minimax", IMAGE_PROVIDER_MINIMAX),
+    ("plugin", IMAGE_PROVIDER_PLUGIN),
 ];
 
 pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
+pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 
 /// Video provider codes returned by `kineto_project_video_provider`.
-const VIDEO_PROVIDERS: [(&str, u32); 2] = [
+const VIDEO_PROVIDERS: [(&str, u32); 3] = [
     ("local_demo", VIDEO_PROVIDER_LOCAL_DEMO),
     ("minimax", VIDEO_PROVIDER_MINIMAX),
+    ("plugin", VIDEO_PROVIDER_PLUGIN),
 ];
 
 /// What `kineto_project_video_take_count` counts.
@@ -442,12 +454,13 @@ pub(crate) const PRODUCTION_TEXTS: [(&str, u32); 47] = [
 ];
 
 /// Why a bible may no longer describe the locked screenplay.
-pub(crate) const STALE_CAUSES: [(&str, u32); 5] = [
+pub(crate) const STALE_CAUSES: [(&str, u32); 6] = [
     ("no_locked_screenplay", 1),
     ("material", 2),
     ("scene_changed", 3),
     ("scene_removed", 4),
     ("scene_added", 5),
+    ("reference", 6),
 ];
 
 /// A style sample's or a portrait's standing; 0 is none, for an image that
@@ -899,7 +912,73 @@ pub(crate) const STANCES: [(&str, u32); 2] = [("prefer", 1), ("avoid", 2)];
 /// Where a line's length comes from.
 pub(crate) const DURATION_SOURCES: [(&str, u32); 2] = [("estimated", 1), ("measured", 2)];
 
-pub(crate) const SPEECH_PROVIDERS: [(&str, u32); 2] = [("local_demo", 1), ("minimax", 2)];
+pub(crate) const SPEECH_PROVIDERS: [(&str, u32); 3] =
+    [("local_demo", 1), ("minimax", 2), ("plugin", 3)];
+
+/// How a tool takes an argument, as `KinetoToolArgument.kind` says.
+pub(crate) const TOOL_ARGUMENT_KINDS: [(&str, u32); 3] = [("text", 1), ("number", 2), ("flag", 3)];
+
+/// Text fields `kineto_project_reference_text_copy` copies of a reference.
+pub(crate) const REFERENCE_TEXTS: [(&str, u32); 7] = [
+    ("id", 1),
+    ("server", 2),
+    ("tool", 3),
+    ("arguments", 4),
+    ("text", 5),
+    ("attached_to", 6),
+    ("content_hash", 7),
+];
+
+/// Number fields `kineto_mcp_value` reads of a server or a tool parameter.
+pub(crate) const MCP_VALUES: [(&str, u32); 4] =
+    [("enabled", 1), ("listed", 2), ("required", 3), ("kind", 4)];
+
+/// Text fields `kineto_mcp_text_copy` copies of a server, a tool or a tool
+/// parameter.
+pub(crate) const MCP_TEXTS: [(&str, u32); 9] = [
+    ("id", 1),
+    ("executable", 2),
+    ("secrets", 3),
+    ("allowed", 4),
+    ("problem", 5),
+    ("tool_name", 6),
+    ("tool_description", 7),
+    ("parameter_name", 8),
+    ("parameter_description", 9),
+];
+
+/// Number fields `kineto_plugins_value` reads of a registered plugin.
+pub(crate) const PLUGIN_VALUES: [(&str, u32); 12] = [
+    ("enabled", 1),
+    ("described", 2),
+    ("selected", 3),
+    ("makes_images", 4),
+    ("speaks", 5),
+    ("identity_references", 6),
+    ("composition_reference", 7),
+    ("image_price_known", 8),
+    ("image_price_micros", 9),
+    ("speech_price_known", 10),
+    ("speech_character_price_micros", 11),
+    ("makes_videos", 12),
+];
+
+/// Text fields `kineto_plugins_text_copy` copies of a registered plugin.
+/// Lists are one item per line.
+pub(crate) const PLUGIN_TEXTS: [(&str, u32); 12] = [
+    ("id", 1),
+    ("name", 2),
+    ("version", 3),
+    ("executable", 4),
+    ("secrets", 5),
+    ("image_model", 6),
+    ("speech_model", 7),
+    ("problem", 8),
+    ("aspect_ratios", 9),
+    ("languages", 10),
+    ("video_model", 11),
+    ("clip_seconds", 12),
+];
 
 /// What the director decides about a suggestion.
 pub(crate) const SUGGESTION_DECISIONS: [(&str, u32); 2] = [("accept", 1), ("reject", 2)];
@@ -964,6 +1043,12 @@ const ENTRY_STANCE: u32 = 57;
 const ENTRY_DURATION_SOURCE: u32 = 58;
 const ENTRY_SPEECH_PROVIDER: u32 = 59;
 const ENTRY_SUGGESTION_DECISION: u32 = 60;
+const ENTRY_PLUGIN_VALUE: u32 = 61;
+const ENTRY_PLUGIN_TEXT: u32 = 62;
+const ENTRY_TOOL_ARGUMENT_KIND: u32 = 63;
+const ENTRY_REFERENCE_TEXT: u32 = 64;
+const ENTRY_MCP_VALUE: u32 = 65;
+const ENTRY_MCP_TEXT: u32 = 66;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1063,6 +1148,12 @@ fn entries() -> &'static [Entry] {
             ENTRY_SUGGESTION_DECISION,
             &SUGGESTION_DECISIONS,
         );
+        codes(&mut entries, ENTRY_PLUGIN_VALUE, &PLUGIN_VALUES);
+        codes(&mut entries, ENTRY_PLUGIN_TEXT, &PLUGIN_TEXTS);
+        codes(&mut entries, ENTRY_TOOL_ARGUMENT_KIND, &TOOL_ARGUMENT_KINDS);
+        codes(&mut entries, ENTRY_REFERENCE_TEXT, &REFERENCE_TEXTS);
+        codes(&mut entries, ENTRY_MCP_VALUE, &MCP_VALUES);
+        codes(&mut entries, ENTRY_MCP_TEXT, &MCP_TEXTS);
         entries
     })
 }
@@ -1229,9 +1320,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_SUGGESTION_DECISION);
-        assert_eq!(&name[..len as usize], b"reject");
-        assert_eq!((value, extra), (2, 0));
+        assert_eq!(kind, ENTRY_MCP_TEXT);
+        assert_eq!(&name[..len as usize], b"parameter_description");
+        assert_eq!((value, extra), (9, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

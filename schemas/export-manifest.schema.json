@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kineto.local/schemas/export-manifest.schema.json",
   "title": "Kineto Export Manifest",
-  "description": "The project-level manifest of a production package: the scenes in screenplay order, each shot's locked video, sidecar and first frame in shot order, what is missing from a partial export, and the total runtime. Enough for an editor to assemble the shots without opening Kineto.",
+  "description": "The project-level manifest of a production package: the scenes in screenplay order, each shot's locked video, sidecar and first frame in shot order, what is missing from a partial export, the total runtime and the timeline. Enough for an editor to assemble the shots without opening Kineto.",
   "type": "object",
   "required": [
     "schema_version",
@@ -19,9 +19,10 @@
     "schema_version": {
       "enum": [
         1,
-        2
+        2,
+        3
       ],
-      "description": "2 adds each shot's spoken lines."
+      "description": "2 adds each shot's spoken lines; 3 the timeline."
     },
     "kind": {
       "const": "kineto.export"
@@ -191,6 +192,57 @@
     "total_runtime_seconds": {
       "type": "integer",
       "minimum": 0
+    },
+    "timeline": {
+      "description": "The package's timeline: the OpenTimelineIO file, the same timeline as a CMX 3600 edit decision list, its frame rate, and each line cut at the end of the shot that carries it.",
+      "type": "object",
+      "required": [
+        "otio",
+        "edl",
+        "frame_rate",
+        "trimmed_lines"
+      ],
+      "properties": {
+        "otio": {
+          "type": "string",
+          "minLength": 1
+        },
+        "edl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "frame_rate": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trimmed_lines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "shot_id",
+              "line",
+              "cut_ms"
+            ],
+            "properties": {
+              "shot_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "cut_ms": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

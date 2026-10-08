@@ -765,6 +765,7 @@ fn value(published: &Published, field: &str, group: u32, item: u32) -> Option<u6
             match published.speech.kind {
                 SpeechProviderKind::LocalDemo => "local_demo",
                 SpeechProviderKind::Minimax => "minimax",
+                SpeechProviderKind::Plugin => "plugin",
             },
         )),
         "speech_ready" => u64::from(published.speech.ready),

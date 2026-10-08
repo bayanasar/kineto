@@ -17,9 +17,13 @@ use std::{collections::BTreeMap, ffi::CString, path::PathBuf, ptr, slice, str};
 use crate::{contract::*, guarded};
 use kineto_core::{
     export::ExportError,
-    generation::{Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite},
+    generation::{
+        Consent, GenerationError, ImageProvider, ImageProviderKind, Prerequisite,
+        ProviderSelectionError,
+    },
     keyframe_prompt::KeyframePromptError,
     llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
+    references::ReferenceCallError,
     session::{
         DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Recovery,
         SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError, SubmitError,
@@ -36,6 +40,7 @@ use kineto_project::{
         ProjectSource, ProjectStoreError, ProjectWorkflow,
     },
     recipe::{DEFAULT_RECIPE_ID, DEFAULT_RECIPE_VERSION},
+    references::ReferenceError,
     revisions::{DocumentKind, RevisionError},
     shot::{CandidateOrigin, ShotDirection, ShotWorkflowError},
     source::SourceError,
@@ -313,11 +318,13 @@ unsafe fn spawn(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    let Ok(provider) = image_provider_from_environment() else {
-        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    let provider = match image_provider_from_environment() {
+        Ok(provider) => provider,
+        Err(code) => return code,
     };
-    let Ok(video_provider) = video_provider_from_environment() else {
-        return PROJECT_ERR_PROVIDER_UNKNOWN;
+    let video_provider = match video_provider_from_environment() {
+        Ok(provider) => provider,
+        Err(code) => return code,
     };
     let Ok(model) = document_model_from_environment() else {
         return PROJECT_ERR_MODEL_UNKNOWN;
@@ -344,17 +351,20 @@ unsafe fn spawn(
 
 /// The environment variable that names the image provider a session uses.
 /// Unset, empty or `local-demo` means the free demo generator; `minimax`
-/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`. A paid provider is
-/// used only when named here, never because a key happens to be set.
-const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
+/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`; `plugin:<id>` the
+/// plugin registered as `<id>` (ADR-0006), which also speaks when it can. A
+/// paid provider is used only when named here, never because a key happens
+/// to be set.
+pub(crate) const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
 
-fn image_provider_from_environment() -> Result<ImageProvider, ()> {
+fn image_provider_from_environment() -> Result<ImageProvider, i32> {
     let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process())
+        .map_err(selection_error)
 }
 
 /// The environment variable that names the video provider a session uses:
@@ -363,13 +373,23 @@ fn image_provider_from_environment() -> Result<ImageProvider, ()> {
 /// provider. As for images, a paid provider is used only when named.
 const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
 
-fn video_provider_from_environment() -> Result<Option<VideoProvider>, ()> {
+fn video_provider_from_environment() -> Result<Option<VideoProvider>, i32> {
     let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
     };
-    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process()).map_err(|_| ())
+    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process())
+        .map_err(selection_error)
+}
+
+fn selection_error(error: ProviderSelectionError) -> i32 {
+    match error {
+        ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
+        ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
+            PROJECT_ERR_PROVIDER_UNKNOWN
+        }
+    }
 }
 
 /// The language model named by `KINETO_LLM_PROVIDER` (see
@@ -657,6 +677,7 @@ pub unsafe extern "C" fn kineto_project_video_provider(
         match session.session.video_provider().kind {
             VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
             VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
+            VideoProviderKind::Plugin => VIDEO_PROVIDER_PLUGIN,
         }
     })
 }
@@ -701,6 +722,7 @@ fn image_provider_code(kind: ImageProviderKind) -> u32 {
     match kind {
         ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
         ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
+        ImageProviderKind::Plugin => IMAGE_PROVIDER_PLUGIN,
     }
 }
 
@@ -1315,12 +1337,25 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::Production(ProductionError::Cast(error)) => cast_error_code(error),
         SessionError::Production(ProductionError::Voice(error)) => voice_error_code(error),
         SessionError::Production(ProductionError::Dubbing(error)) => dubbing_error_code(error),
+        SessionError::Production(ProductionError::References(error)) => reference_error_code(error),
         SessionError::Media(_) => PROJECT_ERR_MEDIA_UNREADABLE,
         SessionError::NoCollectionPlan => PROJECT_ERR_NO_COLLECTION_PLAN,
         SessionError::Export(error) => export_error_code(error),
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+    }
+}
+
+fn reference_error_code(error: &ReferenceError) -> i32 {
+    match error {
+        ReferenceError::NoSuchReference(_) => PROJECT_ERR_NO_SUCH_ARTIFACT,
+        ReferenceError::Invalid(_) => PROJECT_ERR_INVALID_REFERENCE,
+        ReferenceError::Fs(_) => PROJECT_ERR_IO,
+        ReferenceError::Manifest(error) => manifest_error_code(error),
+        ReferenceError::InvalidLog | ReferenceError::Path(_) | ReferenceError::Json(_) => {
+            PROJECT_ERR_DOCUMENT_DAMAGED
+        }
     }
 }
 
@@ -1334,6 +1369,7 @@ fn export_error_code(error: &ExportError) -> i32 {
         ExportError::Exists(_) => PROJECT_ERR_EXPORT_EXISTS,
         ExportError::Mismatch(_) => PROJECT_ERR_MEDIA_CHANGED,
         ExportError::Lines(error) => generation_error_code(error),
+        ExportError::Timeline(_) => PROJECT_ERR_INVALID_DOCUMENT,
         ExportError::Io(_) => PROJECT_ERR_IO,
     }
 }
@@ -1365,6 +1401,10 @@ fn generation_error_code(error: &GenerationError) -> i32 {
                 voice_error_code(error)
             } else if let Some(error) = source.downcast_ref::<DubbingError>() {
                 dubbing_error_code(error)
+            } else if let Some(error) = source.downcast_ref::<ReferenceError>() {
+                reference_error_code(error)
+            } else if let Some(ReferenceCallError::NotAllowed(_)) = source.downcast_ref() {
+                PROJECT_ERR_MCP_NOT_ALLOWED
             } else {
                 PROJECT_ERR_PROVIDER_REFUSED
             }

@@ -87,6 +87,19 @@ void main() {
       await expectLater(session.lockStyle('style_s0009'), _refusedWith(KinetoProjectException.noSuchArtifact));
       await expectLater(session.lockCharacter('interviewer'), _refusedWith(KinetoProjectException.needsSelectedPortrait));
       await session.selectPortrait('interviewer', 'cast.interviewer.0001');
+      // The director's own photo comes in as a free portrait candidate; a
+      // path that is not an image is refused.
+      final photo = File([sandbox.path, 'actor.jpg'].join(Platform.pathSeparator))
+        ..writeAsBytesSync(<int>[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x42]);
+      final note = File([sandbox.path, 'note.txt'].join(Platform.pathSeparator))..writeAsStringSync('a note');
+      await session.importPortrait('interviewer', photo.path);
+      await expectLater(
+        session.importPortrait('interviewer', note.path),
+        _refusedWith(KinetoProjectException.noIdentityReference),
+      );
+      final imported = session.production.characters.last.portraits.last;
+      expect(imported.status, KinetoChoiceStatus.candidate);
+      expect(File(imported.mediaPath).readAsBytesSync(), photo.readAsBytesSync());
       // A cast is locked for the provider that keeps its identity, which
       // the local demo cannot.
       await expectLater(session.lockCharacter('interviewer'), _refusedWith(KinetoProjectException.noIdentityReference));

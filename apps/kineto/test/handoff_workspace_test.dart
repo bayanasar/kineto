@@ -61,8 +61,8 @@ Future<_Calls> _pump(
         onPlanCollection: () => calls.log.add('plan'),
         onCollect: () => calls.log.add('collect'),
         onVerify: () => calls.log.add('verify'),
-        onExport: (folder, name, {required partial, required replace}) =>
-            calls.log.add('export $folder $name partial=$partial replace=$replace'),
+        onExport: (folder, name, {required partial, required replace, required timeline}) =>
+            calls.log.add('export $folder $name partial=$partial replace=$replace timeline=$timeline'),
         onOpenFolder: (path) => calls.log.add('open $path'),
       ),
     ),
@@ -97,7 +97,7 @@ void main() {
     await _tap(tester, find.descendant(of: find.byKey(_key('export-partial')), matching: find.byType(Checkbox)));
     await tester.enterText(find.byKey(_key('export-name')), 'rough-cut');
     await _tap(tester, find.byKey(_key('export')));
-    expect(calls.log, <String>['export /films/exports rough-cut partial=true replace=false']);
+    expect(calls.log, <String>['export /films/exports rough-cut partial=true replace=false timeline=true']);
   });
 
   testWidgets('a complete package is exported, then its folder opened', (tester) async {
@@ -112,10 +112,12 @@ void main() {
     expect(find.byKey(_key('export-partial')), findsNothing);
     expect(find.text('Wrote /films/exports/dailies · 3 shots · 2 dubbed lines · 3.1 MB'), findsOneWidget);
     await _tap(tester, find.descendant(of: find.byKey(_key('export-replace')), matching: find.byType(Checkbox)));
+    // The timeline is the director's to leave out.
+    await _tap(tester, find.descendant(of: find.byKey(_key('export-timeline')), matching: find.byType(Checkbox)));
     await _tap(tester, find.text('Export 3 shots'));
     await _tap(tester, find.byKey(_key('open-package')));
     expect(calls.log, <String>[
-      'export /films/exports dailies partial=false replace=true',
+      'export /films/exports dailies partial=false replace=true timeline=false',
       'open /films/exports/dailies',
     ]);
   });

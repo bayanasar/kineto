@@ -50,7 +50,8 @@ use kineto_project::{
 use kineto_prompts::{CompiledPrompt, DegradationLevel, PromptHash};
 use kineto_provider_minimax::{MinimaxClient, PROVIDER as MINIMAX_PROVIDER, SharedTransport};
 use kineto_providers::{
-    AspectRatio, ImageCapabilities, ImageRequirements, Price, SeedSupport, evaluate_image,
+    AspectRatio, ImageCapabilities, ImageRequirements, Price, ReferenceRole, SeedSupport,
+    evaluate_image,
     secret::{SecretError, SecretSource},
 };
 
@@ -60,6 +61,7 @@ use crate::{
         self, KeyframePrompt, KeyframePromptError, Locks, PREVIOUS_FRAME_FIELD, PreviousFrame,
     },
     minimax::MinimaxKeyframes,
+    plugin::{self, PluginImages, PluginProvider},
 };
 
 /// The capability a shot candidate is generated with.
@@ -135,6 +137,12 @@ pub trait CandidateGenerator:
     /// The provider key its jobs are recorded under.
     fn provider(&self) -> ProviderKey;
 
+    /// The model its images are made with, as their records and input
+    /// hashes name it.
+    fn model(&self) -> String {
+        String::new()
+    }
+
     fn policy(&self) -> JobRuntimePolicy;
 
     /// Whether candidates need a compiled prompt.
@@ -190,6 +198,9 @@ pub enum ImageProvider {
     /// MiniMax `image-01`. Paid. Without a client, finished calls can still
     /// be completed from their receipts but no new call is made.
     Minimax(Option<MinimaxClient<SharedTransport>>),
+    /// A plugin the user registered (ADR-0006), as it described itself.
+    /// One that declares no images makes none.
+    Plugin(Arc<PluginProvider>),
 }
 
 /// Which image provider a session generates with.
@@ -197,6 +208,7 @@ pub enum ImageProvider {
 pub enum ImageProviderKind {
     LocalDemo,
     Minimax,
+    Plugin,
 }
 
 /// What the director needs to know about the session's image provider before
@@ -215,6 +227,9 @@ pub enum ProviderSelectionError {
     /// The selection names no provider this build has.
     Unknown(String),
     Secret(SecretError),
+    /// The selection names a plugin that is not registered and enabled, or
+    /// could not describe itself; why, as text.
+    Plugin(String),
 }
 
 impl fmt::Display for ProviderSelectionError {
@@ -222,17 +237,31 @@ impl fmt::Display for ProviderSelectionError {
         match self {
             Self::Unknown(name) => write!(formatter, "unknown image provider {name:?}"),
             Self::Secret(error) => error.fmt(formatter),
+            Self::Plugin(reason) => formatter.write_str(reason),
         }
     }
+}
+
+/// The plugin `selection` names, as `plugin:<id>`, from the user's
+/// configuration; `None` when it names none.
+pub(crate) fn selected_plugin(
+    selection: &str,
+) -> Option<Result<Arc<PluginProvider>, ProviderSelectionError>> {
+    plugin::select_named(selection).map(|selected| {
+        selected
+            .map(Arc::new)
+            .map_err(|error| ProviderSelectionError::Plugin(error.to_string()))
+    })
 }
 
 impl Error for ProviderSelectionError {}
 
 impl ImageProvider {
     /// The provider named by `selection`: none or `local-demo` for the free
-    /// demo generator, `minimax` for MiniMax with the key `secrets` holds.
-    /// A paid provider is used only when it is named, never because a key
-    /// happens to be present.
+    /// demo generator, `minimax` for MiniMax with the key `secrets` holds,
+    /// `plugin:<id>` for the plugin registered as `<id>`. A paid provider is
+    /// used only when it is named, never because a key happens to be
+    /// present.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
@@ -245,7 +274,10 @@ impl ImageProvider {
                     .map_err(ProviderSelectionError::Secret)?
                     .map(MinimaxClient::shared),
             )),
-            Some(other) => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            Some(other) => match selected_plugin(other) {
+                Some(selected) => selected.map(Self::Plugin),
+                None => Err(ProviderSelectionError::Unknown(other.to_owned())),
+            },
         }
     }
 
@@ -253,10 +285,16 @@ impl ImageProvider {
     /// records it: the provider and the request field the reference travels
     /// in. `None` when it takes no identity reference.
     #[must_use]
-    pub const fn identity_mechanism(&self) -> Option<(&'static str, &'static str)> {
+    pub fn identity_mechanism(&self) -> Option<(&str, &'static str)> {
         match self {
             Self::LocalDemo => None,
             Self::Minimax(_) => Some((MINIMAX_PROVIDER, "subject_reference")),
+            Self::Plugin(plugin) => plugin
+                .image_capabilities()
+                .is_some_and(|capabilities| {
+                    capabilities.reference_limit(ReferenceRole::Identity) > 0
+                })
+                .then(|| (plugin.key(), plugin::REFERENCE_MECHANISM)),
         }
     }
 
@@ -267,6 +305,7 @@ impl ImageProvider {
         match self {
             Self::LocalDemo => local_demo_capabilities(),
             Self::Minimax(_) => kineto_provider_minimax::image_capabilities(),
+            Self::Plugin(plugin) => plugin.image_capabilities().cloned().unwrap_or_default(),
         }
     }
 
@@ -287,6 +326,11 @@ impl ImageProvider {
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
                 ready: client.is_some(),
+                generation_cost_micros,
+            },
+            Self::Plugin(plugin) => ImageProviderInfo {
+                kind: ImageProviderKind::Plugin,
+                ready: plugin.image_capabilities().is_some(),
                 generation_cost_micros,
             },
         }
@@ -323,6 +367,19 @@ pub(crate) fn require_synchronous(capabilities: &ImageCapabilities) -> Result<()
         Err(GenerationError::Prerequisite(
             Prerequisite::SynchronousImageProvider,
         ))
+    }
+}
+
+/// Refuse a provider that declares its frames and cannot make `frame`.
+/// One that declares none is taken at its word that it makes any.
+pub(crate) fn require_frame(
+    capabilities: &ImageCapabilities,
+    frame: AspectRatio,
+) -> Result<(), GenerationError> {
+    if capabilities.aspect_ratios.is_empty() || capabilities.aspect_ratios.contains(&frame) {
+        Ok(())
+    } else {
+        Err(GenerationError::Incapable(vec!["image.aspect_ratios"]))
     }
 }
 
@@ -769,6 +826,9 @@ pub fn generate(
             MinimaxKeyframes::new(project, client.as_ref()),
             hooks,
         ),
+        ImageProvider::Plugin(plugin) => {
+            generate_with(project, shot, PluginImages::new(project, plugin), hooks)
+        }
     }
 }
 
@@ -793,6 +853,13 @@ pub fn resubmit(
             project,
             shot,
             MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+            Consent::RISK_PAYING_TWICE,
+        ),
+        ImageProvider::Plugin(plugin) => generate_consenting(
+            project,
+            shot,
+            PluginImages::new(project, plugin),
             hooks,
             Consent::RISK_PAYING_TWICE,
         ),
@@ -863,6 +930,13 @@ pub fn generate_with_consent(
             hooks,
             consent,
         ),
+        ImageProvider::Plugin(plugin) => generate_consenting(
+            project,
+            shot,
+            PluginImages::new(project, plugin),
+            hooks,
+            consent,
+        ),
     }
 }
 
@@ -921,6 +995,14 @@ pub fn refine(
             consent,
             Some(note),
         ),
+        ImageProvider::Plugin(plugin) => generate_noted(
+            project,
+            shot,
+            PluginImages::new(project, plugin),
+            hooks,
+            consent,
+            Some(note),
+        ),
     }
 }
 
@@ -941,6 +1023,7 @@ pub fn generate_noted<G: CandidateGenerator>(
         return Err(GenerationError::NotConfigured);
     }
     require_synchronous(&generator.capabilities())?;
+    require_frame(&generator.capabilities(), KEYFRAME_ASPECT)?;
     let prompt = compile_prompt(project, shot, &generator, note)?;
     if let Some(prompt) = &prompt
         && !consent.identity_drift
@@ -1012,6 +1095,13 @@ pub fn complete(
             shot,
             plan,
             MinimaxKeyframes::new(project, client.as_ref()),
+            hooks,
+        ),
+        ImageProvider::Plugin(plugin) => complete_with(
+            project,
+            shot,
+            plan,
+            PluginImages::new(project, plugin),
             hooks,
         ),
     }
@@ -1500,6 +1590,9 @@ pub fn unfinished(
         ImageProvider::LocalDemo => unfinished_with(project, LocalDemoAdapter),
         ImageProvider::Minimax(client) => {
             unfinished_with(project, MinimaxKeyframes::new(project, client.as_ref()))
+        }
+        ImageProvider::Plugin(plugin) => {
+            unfinished_with(project, PluginImages::new(project, plugin))
         }
     }
 }

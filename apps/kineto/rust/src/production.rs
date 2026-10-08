@@ -445,6 +445,42 @@ pub unsafe extern "C" fn kineto_project_lock_character(
     })
 }
 
+/// Queue importing the image at `path`, which the director chose, as a
+/// portrait candidate of `character`. Free; the image must be one the
+/// session's image provider takes as an identity reference.
+///
+/// # Safety
+/// `session` must be a live project-session handle. Each non-empty input must
+/// be readable for its length and hold UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_import_portrait(
+    session: *const KinetoProjectSession,
+    character_ptr: *const u8,
+    character_len: u64,
+    path_ptr: *const u8,
+    path_len: u64,
+    token: u64,
+) -> i32 {
+    guarded(PROJECT_ERR_PANIC, || {
+        // SAFETY: forwarded caller contract.
+        let (character, path) = match unsafe {
+            (
+                required(character_ptr, character_len),
+                required(path_ptr, path_len),
+            )
+        } {
+            (Ok(character), Ok(path)) => (character, std::path::PathBuf::from(path)),
+            (Err(code), _) | (_, Err(code)) => return code,
+        };
+        if !path.is_absolute() {
+            return PROJECT_ERR_INVALID_ARGUMENT;
+        }
+        let command = ProductionCommand::ImportPortrait { character, path };
+        // SAFETY: forwarded caller contract.
+        unsafe { submit_production(session, command, false, token) }
+    })
+}
+
 fn cast_image_kind(name: &str) -> Option<CastImageKind> {
     std::iter::once(CastImageKind::Portrait)
         .chain(CastImageKind::PACK)
@@ -599,6 +635,7 @@ fn stale_cause(cause: &StaleCause) -> (&'static str, &str) {
         StaleCause::SceneChanged(id) => ("scene_changed", id),
         StaleCause::SceneRemoved(id) => ("scene_removed", id),
         StaleCause::SceneAdded(id) => ("scene_added", id),
+        StaleCause::Reference(id) => ("reference", id),
     }
 }
 
@@ -866,6 +903,7 @@ mod tests {
             StaleCause::SceneChanged("a".to_owned()),
             StaleCause::SceneRemoved("a".to_owned()),
             StaleCause::SceneAdded("a".to_owned()),
+            StaleCause::Reference("reference.0001".to_owned()),
         ] {
             assert!(name(&STALE_CAUSES, code(&STALE_CAUSES, stale_cause(&cause).0)).is_some());
         }

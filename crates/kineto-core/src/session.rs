@@ -35,6 +35,7 @@ use kineto_project::{
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
     media::{self, MediaRecord},
     preferences::{self as preferences_document, Preferences},
+    references::{self as reference_document, Reference, ReferenceError},
     revisions::{self, DocumentKind, RevisionError, RevisionRecord},
     screenplay::{self as screenplay_document, SceneEdit, Screenplay},
     shot::{
@@ -60,6 +61,8 @@ use crate::{
     learning,
     llm::{DocumentModel, DocumentModelInfo},
     paid_image::{ImageRecovery, Submission},
+    plugin::{PluginSpeech, PluginVideos},
+    references::{self, Ask},
     screenplay, shot_plan,
     speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
@@ -252,6 +255,38 @@ pub enum ProductionCommand {
     LockCharacter {
         character: String,
     },
+    /// Free: import the image at `path`, which the director chose, as a
+    /// portrait candidate of `character`. The only read outside the project.
+    ImportPortrait {
+        character: String,
+        path: PathBuf,
+    },
+    /// Call `tool` of the registered MCP server `server` with `arguments`,
+    /// as the director asks, and keep its text as a reference about
+    /// `attached_to` (ADR-0007). Kineto pays nothing; the server is the
+    /// user's.
+    AskReference {
+        server: String,
+        tool: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        attached_to: Vec<String>,
+    },
+    /// The director's own words in place of a reference's text.
+    EditReference {
+        reference: String,
+        text: String,
+    },
+    AttachReference {
+        reference: String,
+        target: String,
+    },
+    DetachReference {
+        reference: String,
+        target: String,
+    },
+    RemoveReference {
+        reference: String,
+    },
     /// Free: ask the speech provider which voices it offers.
     LoadVoices,
     /// Paid: have each voice of `choices` say `line` as `character`, or
@@ -300,6 +335,7 @@ pub enum ProductionError {
     Cast(CastError),
     Voice(VoiceError),
     Dubbing(DubbingError),
+    References(ReferenceError),
 }
 
 impl fmt::Display for ProductionError {
@@ -309,6 +345,7 @@ impl fmt::Display for ProductionError {
             Self::Cast(error) => error.fmt(formatter),
             Self::Voice(error) => error.fmt(formatter),
             Self::Dubbing(error) => error.fmt(formatter),
+            Self::References(error) => error.fmt(formatter),
         }
     }
 }
@@ -320,6 +357,7 @@ impl Error for ProductionError {
             Self::Cast(error) => Some(error),
             Self::Voice(error) => Some(error),
             Self::Dubbing(error) => Some(error),
+            Self::References(error) => Some(error),
         }
     }
 }
@@ -617,6 +655,8 @@ pub struct PublishedProduction {
     pub voices: Vec<Voice>,
     /// Why the voices could not be listed, when they could not.
     pub voices_problem: Option<String>,
+    /// The references the director brought in, oldest first.
+    pub references: Vec<Reference>,
     /// The style or the cast could not be read; why.
     pub damaged: Option<String>,
 }
@@ -1510,13 +1550,22 @@ struct Videos {
 impl Videos {
     /// Follow `job` on its own thread, with the provider it was submitted
     /// to, until its video is on disk or failed. A MiniMax job waits for a
-    /// session with the key.
+    /// session with the key, a plugin's for a session that uses it.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
         if job.provider == video::DEMO_VIDEO_PROVIDER {
             self.spawn_watcher(LocalDemoVideos, job, root);
-        } else if let VideoProvider::Minimax(Some(client)) = &self.provider {
-            let client = client.clone();
-            self.spawn_watcher(client, job, root);
+        } else if job.provider == self.provider.key() {
+            match &self.provider {
+                VideoProvider::Minimax(Some(client)) => {
+                    let client = client.clone();
+                    self.spawn_watcher(client, job, root);
+                }
+                VideoProvider::Plugin(plugin) => {
+                    let videos = PluginVideos::new(Arc::clone(plugin));
+                    self.spawn_watcher(videos, job, root);
+                }
+                VideoProvider::LocalDemo | VideoProvider::Minimax(None) => {}
+            }
         }
     }
 
@@ -1768,6 +1817,19 @@ impl Worker {
             VideoProvider::Minimax(None) => {
                 return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
+            VideoProvider::Plugin(plugin) => {
+                let videos = PluginVideos::new(plugin);
+                self.with_shot(key, |project, _, shot| {
+                    video::start_videos(
+                        project,
+                        shot,
+                        &videos,
+                        ask,
+                        &mut NoHooks,
+                        risk_paying_twice,
+                    )
+                })
+            }
         }
         .map_err(generation_error)?;
         // Candidates submitted before one could not be are followed whatever
@@ -1792,17 +1854,20 @@ impl Worker {
 
     /// Watch again the videos an earlier session submitted. Nothing is
     /// submitted. The demo's are always followed; MiniMax's wait for a
-    /// session with the key.
+    /// session with the key, a plugin's for a session that uses it.
     fn resume_videos(&mut self) -> usize {
         if self.project.is_read_only() {
             return 0;
         }
-        let keyed = matches!(self.videos.provider, VideoProvider::Minimax(Some(_)));
+        let mut providers = vec![video::DEMO_VIDEO_PROVIDER.to_owned()];
+        if matches!(
+            self.videos.provider,
+            VideoProvider::Minimax(Some(_)) | VideoProvider::Plugin(_)
+        ) {
+            providers.push(self.videos.provider.key());
+        }
         let mut needs_attention = 0;
-        for provider in [video::DEMO_VIDEO_PROVIDER, video::VIDEO_PROVIDER] {
-            if provider == video::VIDEO_PROVIDER && !keyed {
-                continue;
-            }
+        for provider in &providers {
             match video::in_flight(&self.project, provider) {
                 Ok(found) => {
                     for job in found.jobs {
@@ -1854,7 +1919,8 @@ impl Worker {
     ///
     /// Each provider's jobs are completed by that provider, whichever one this
     /// session generates with: a session without MiniMax credentials still
-    /// completes MiniMax calls that finished before the restart.
+    /// completes MiniMax calls that finished before the restart. A plugin's
+    /// jobs are completed while it is the session's provider.
     fn recover(&mut self) -> Vec<Recovery> {
         if self.project.is_read_only() {
             return Vec::new();
@@ -1869,13 +1935,14 @@ impl Worker {
             keyframes_unresolved,
             ..
         } = self;
-        let minimax = match provider {
-            ImageProvider::Minimax(_) => &*provider,
-            ImageProvider::LocalDemo => &keyless,
+        let (minimax, plugin) = match provider {
+            ImageProvider::Minimax(_) => (&*provider, None),
+            ImageProvider::LocalDemo => (&keyless, None),
+            ImageProvider::Plugin(_) => (&keyless, Some(&*provider)),
         };
         let mut recoveries = Vec::new();
         let mut unplaced = 0;
-        for provider in [&demo, minimax] {
+        for provider in [&demo, minimax].into_iter().chain(plugin) {
             let Unfinished {
                 plans,
                 needs_attention,
@@ -2145,6 +2212,29 @@ impl Worker {
                     .map(|_| ())
                     .map_err(generation_error)
             }
+            ProductionCommand::ImportPortrait { character, path } => {
+                let unreadable = |error: std::io::Error| {
+                    cast_error(cast_document::CastError::Fs(
+                        kineto_project::fs::ProjectFsError::Io(error),
+                    ))
+                };
+                std::fs::metadata(path)
+                    .map_err(unreadable)
+                    .and_then(|metadata| {
+                        if metadata.len() > cast::MAX_IMPORT_BYTES {
+                            Err(generation_error(GenerationError::Prerequisite(
+                                crate::generation::Prerequisite::IdentityReference,
+                            )))
+                        } else {
+                            std::fs::read(path).map_err(unreadable)
+                        }
+                    })
+                    .and_then(|bytes| {
+                        cast::import_portrait(project, &provider.capabilities(), character, &bytes)
+                            .map(|_| ())
+                            .map_err(generation_error)
+                    })
+            }
             ProductionCommand::LoadVoices => {
                 let listed = match &self.speech {
                     SpeechProvider::LocalDemo => {
@@ -2157,6 +2247,13 @@ impl Worker {
                         })
                     }
                     SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    SpeechProvider::Plugin(plugin) => {
+                        let speech = PluginSpeech::new(plugin);
+                        speech.voices().map_err(|error| GenerationError::Provider {
+                            class: speech.class(&error),
+                            source: Box::new(error),
+                        })
+                    }
                 };
                 self.voices = Some(
                     listed
@@ -2187,6 +2284,15 @@ impl Worker {
                             project, client, character, choices, line, submission, &mut hooks,
                         ),
                         SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                        SpeechProvider::Plugin(plugin) => voice::audition(
+                            project,
+                            &PluginSpeech::new(plugin),
+                            character,
+                            choices,
+                            line,
+                            submission,
+                            &mut hooks,
+                        ),
                     }
                     .map(|_| ()),
                 )
@@ -2221,6 +2327,15 @@ impl Worker {
                         project, client, scene, *line, request, submission, &mut hooks,
                     ),
                     SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    SpeechProvider::Plugin(plugin) => dubbing::dub(
+                        project,
+                        &PluginSpeech::new(plugin),
+                        scene,
+                        *line,
+                        request,
+                        submission,
+                        &mut hooks,
+                    ),
                 }
                 .map(|_| ()),
             ),
@@ -2233,6 +2348,43 @@ impl Worker {
             ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
                 .map(|_| ())
                 .map_err(generation_error),
+            ProductionCommand::AskReference {
+                server,
+                tool,
+                arguments,
+                attached_to,
+            } => references::server(server)
+                .and_then(|server| {
+                    references::ask(
+                        project,
+                        &server,
+                        Ask {
+                            tool,
+                            arguments: arguments.clone(),
+                            attached_to: attached_to.clone(),
+                        },
+                    )
+                })
+                .map(|_| ())
+                .map_err(generation_error),
+            ProductionCommand::EditReference { reference, text } => {
+                reference_document::edit(project, reference, text)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::AttachReference { reference, target } => {
+                reference_document::attach(project, reference, target)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::DetachReference { reference, target } => {
+                reference_document::detach(project, reference, target)
+                    .map(|_| ())
+                    .map_err(reference_error)
+            }
+            ProductionCommand::RemoveReference { reference } => {
+                reference_document::remove(project, reference).map_err(reference_error)
+            }
         }))
         .unwrap_or(Err(SessionError::Panicked));
         // A paid call cut short may have been charged without its result;
@@ -2261,8 +2413,14 @@ impl Worker {
         let mut recoveries = Vec::new();
         let mut attention = 0;
         for (kind, recovered) in [
-            (ImageWork::StyleSample, style::recover(&self.project)),
-            (ImageWork::Casting, cast::recover(&self.project)),
+            (
+                ImageWork::StyleSample,
+                style::recover_for(&self.project, &self.provider),
+            ),
+            (
+                ImageWork::Casting,
+                cast::recover_for(&self.project, &self.provider),
+            ),
         ] {
             match recovered {
                 Ok(recovery) => {
@@ -2278,7 +2436,7 @@ impl Worker {
                 Err(_) => attention += 1,
             }
         }
-        match voice::recover(&self.project) {
+        match voice::recover_for(&self.project, &self.speech) {
             Ok(recovery) => {
                 attention += recovery.needs_attention;
                 if !recovery.attached.is_empty() {
@@ -2291,7 +2449,7 @@ impl Worker {
             }
             Err(_) => attention += 1,
         }
-        match dubbing::recover(&self.project) {
+        match dubbing::recover_for(&self.project, &self.speech) {
             Ok(recovery) => {
                 attention += recovery.needs_attention;
                 if !recovery.attached.is_empty() {
@@ -2311,25 +2469,25 @@ impl Worker {
     }
 
     fn note_unresolved_lines(&mut self) {
-        if let Ok(recovery) = dubbing::recover(&self.project) {
+        if let Ok(recovery) = dubbing::recover_for(&self.project, &self.speech) {
             self.lines_unresolved.clone_from(&recovery.unresolved);
         }
     }
 
     fn note_unresolved_voices(&mut self) {
-        if let Ok(recovery) = voice::recover(&self.project) {
+        if let Ok(recovery) = voice::recover_for(&self.project, &self.speech) {
             self.voice_unresolved = unresolved_characters(&recovery.unresolved);
         }
     }
 
     fn note_unresolved_samples(&mut self) {
-        if let Ok(recovery) = style::recover(&self.project) {
+        if let Ok(recovery) = style::recover_for(&self.project, &self.provider) {
             self.note_unresolved(ImageWork::StyleSample, &recovery);
         }
     }
 
     fn note_unresolved_casting(&mut self) {
-        if let Ok(recovery) = cast::recover(&self.project) {
+        if let Ok(recovery) = cast::recover_for(&self.project, &self.provider) {
             self.note_unresolved(ImageWork::Casting, &recovery);
         }
     }
@@ -2818,6 +2976,7 @@ impl Worker {
             lines,
             voices,
             voices_problem,
+            references: reference_document::references(project).map_err(reference_error)?,
             damaged: None,
         })
     }
@@ -2947,21 +3106,33 @@ impl Worker {
 }
 
 /// The video provider a session follows its image provider with: MiniMax
-/// with the same key, otherwise the local demo.
+/// with the same key, the same plugin when it makes video, otherwise the
+/// local demo.
 fn video_provider_for(images: &ImageProvider) -> VideoProvider {
     match images {
         ImageProvider::Minimax(client) => VideoProvider::Minimax(client.clone()),
-        ImageProvider::LocalDemo => VideoProvider::LocalDemo,
+        ImageProvider::Plugin(plugin) if plugin.video_capabilities().is_some() => {
+            VideoProvider::Plugin(Arc::clone(plugin))
+        }
+        ImageProvider::LocalDemo | ImageProvider::Plugin(_) => VideoProvider::LocalDemo,
     }
 }
 
 /// The speech provider a session follows its image provider with: MiniMax
-/// with the same key, otherwise the local demo.
+/// with the same key, the same plugin when it speaks, otherwise the local
+/// demo.
 fn speech_provider_for(images: &ImageProvider) -> SpeechProvider {
     match images {
         ImageProvider::Minimax(client) => SpeechProvider::Minimax(client.clone()),
-        ImageProvider::LocalDemo => SpeechProvider::LocalDemo,
+        ImageProvider::Plugin(plugin) if plugin.speech_capabilities().is_some() => {
+            SpeechProvider::Plugin(Arc::clone(plugin))
+        }
+        ImageProvider::LocalDemo | ImageProvider::Plugin(_) => SpeechProvider::LocalDemo,
     }
+}
+
+fn reference_error(error: ReferenceError) -> SessionError {
+    SessionError::Production(ProductionError::References(error))
 }
 
 /// The characters `unresolved` auditions belong to.
@@ -4210,6 +4381,7 @@ mod tests {
                 name: "dailies".to_owned(),
                 partial,
                 replace: false,
+                timeline: true,
             };
             let export = |request: export::ExportRequest, token: u64| {
                 session.submit_export(request, token).unwrap();

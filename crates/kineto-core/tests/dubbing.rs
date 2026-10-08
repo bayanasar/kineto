@@ -447,6 +447,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
             name: "dailies".to_owned(),
             partial: true,
             replace: false,
+            timeline: true,
         },
         UNIX_EPOCH + Duration::from_secs(1_791_015_045),
     )
@@ -461,7 +462,7 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
         serde_json::from_slice(&fs::read(folder.join(name)).unwrap()).unwrap()
     };
     let sidecar = json("office_night_02.json");
-    assert_eq!(sidecar["schema_version"], 2);
+    assert_eq!(sidecar["schema_version"], 3);
     let line = &sidecar["lines"][0];
     assert_eq!(line["line"], 1);
     assert_eq!(line["character"], "interviewer");
@@ -477,6 +478,42 @@ fn a_line_is_dubbed_in_its_characters_voice_chosen_locked_and_carried_into_the_p
     assert_eq!(
         manifest["scenes"][0]["shots"][0]["lines"],
         serde_json::json!(["office_night_02_line01.wav"])
+    );
+
+    // The timeline: the shot as long as its file, its line at its start.
+    assert_eq!(
+        manifest["timeline"],
+        serde_json::json!({
+            "otio": "timeline.otio",
+            "edl": "timeline.edl",
+            "frame_rate": 24,
+            "trimmed_lines": []
+        })
+    );
+    let list = fs::read_to_string(folder.join("timeline.edl")).unwrap();
+    assert!(list.contains("* FROM CLIP NAME: office_night_02.mp4"));
+    assert!(list.contains("* FROM CLIP NAME: office_night_02_line01.wav"));
+    let timeline = json("timeline.otio");
+    assert_eq!(timeline["OTIO_SCHEMA"], "Timeline.1");
+    let tracks = &timeline["tracks"]["children"];
+    let clip = &tracks[0]["children"][0];
+    assert_eq!(clip["media_reference"]["target_url"], "office_night_02.mp4");
+    let seconds = kineto_core::timeline::mp4_duration_ms(
+        &fs::read(folder.join("office_night_02.mp4")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        clip["source_range"]["duration"]["value"],
+        kineto_core::timeline::frames(u64::from(seconds)) as f64
+    );
+    let spoken = &tracks[1]["children"][0];
+    assert_eq!(
+        spoken["media_reference"]["target_url"],
+        "office_night_02_line01.wav"
+    );
+    assert_eq!(
+        spoken["metadata"]["kineto"]["artifact_id"],
+        "line.office_night.01-2c40ae8c8fe4.0002"
     );
     drop(project);
 
