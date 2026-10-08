@@ -56,10 +56,11 @@ use crate::{
     dubbing::{self, DubRequest, DubbedLine},
     export,
     generation::{
-        self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks, Unfinished,
+        self, Consent, GenerationError, ImageProvider, ImageProviderInfo, NoHooks,
+        ProviderSelectionError, Unfinished,
     },
     learning,
-    llm::{DocumentModel, DocumentModelInfo},
+    llm::{DocumentModel, DocumentModelInfo, ModelSelectionError},
     paid_image::{ImageRecovery, Submission},
     plugin::{PluginSpeech, PluginVideos},
     references::{self, Ask},
@@ -414,6 +415,12 @@ pub enum SessionError {
     /// The worker caught a panic. The affected shot is reloaded from its
     /// canonical files before its next use.
     Panicked,
+    /// The image or video provider the session was to use could not be
+    /// chosen; nothing was opened.
+    Provider(ProviderSelectionError),
+    /// The model the session was to write documents with could not be
+    /// chosen; nothing was opened.
+    Model(ModelSelectionError),
 }
 
 impl fmt::Display for SessionError {
@@ -434,6 +441,8 @@ impl fmt::Display for SessionError {
                 formatter.write_str("this shot's video is still being generated")
             }
             Self::Panicked => formatter.write_str("project session worker panicked"),
+            Self::Provider(error) => error.fmt(formatter),
+            Self::Model(error) => error.fmt(formatter),
         }
     }
 }
@@ -448,6 +457,8 @@ impl Error for SessionError {
             Self::Production(error) => Some(error),
             Self::Media(error) => Some(error),
             Self::Export(error) => Some(error),
+            Self::Provider(error) => Some(error),
+            Self::Model(error) => Some(error),
             Self::NoCollectionPlan | Self::NotOpen | Self::VideoInFlight | Self::Panicked => None,
         }
     }
@@ -662,7 +673,7 @@ pub struct PublishedProduction {
 }
 
 /// What paid images cost with the session's image provider, as it declares.
-/// Fixed at spawn.
+/// Fixed once chosen.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImagePrices {
     pub sample: Option<Price>,
@@ -746,8 +757,36 @@ struct PublishedShot {
 
 type ShotSlot = Option<Result<PublishedShot, Arc<ShotWorkflowError>>>;
 
+/// What the director is told about the session's providers. Fixed once
+/// chosen.
+#[derive(Debug)]
+struct PublishedProviders {
+    image: ImageProviderInfo,
+    video: VideoProviderInfo,
+    speech: SpeechProviderInfo,
+    image_prices: ImagePrices,
+    document_model: DocumentModelInfo,
+}
+
+/// What a session generates with.
+pub struct Providers {
+    pub image: ImageProvider,
+    /// The model documents are written with.
+    pub model: DocumentModel,
+    /// `None` keeps [`SessionOptions::video_provider`].
+    pub video: Option<VideoProvider>,
+}
+
+/// Chooses a session's providers, on its worker before the open. Choosing
+/// may wait, as on the system's secure storage for a key; the open waits
+/// with it, and the caller of [`ProjectSession::spawn_choosing`] does not.
+pub type ChooseProviders = Box<dyn FnOnce() -> Result<Providers, SessionError> + Send>;
+
 #[derive(Default)]
 struct View {
+    /// What the director is told about the session's providers, set once
+    /// the worker has chosen them.
+    providers: OnceLock<PublishedProviders>,
     metadata: OnceLock<ProjectMetadata>,
     /// The shots in play, in order, each with what was last published for
     /// it; `None` until the open finishes.
@@ -860,11 +899,6 @@ struct Envelope {
 /// published state. Only the owner may drop it.
 pub struct ProjectSession {
     commands: Option<mpsc::Sender<Envelope>>,
-    image_provider: ImageProviderInfo,
-    video_provider: VideoProviderInfo,
-    speech_provider: SpeechProviderInfo,
-    image_prices: ImagePrices,
-    document_model: DocumentModelInfo,
     view: Arc<View>,
     gate: Arc<Gate>,
     worker: Option<thread::JoinHandle<()>>,
@@ -899,44 +933,46 @@ impl ProjectSession {
         sink: Box<dyn SessionSink>,
         options: SessionOptions,
     ) -> std::io::Result<Self> {
-        let image_provider = provider.info();
-        let mut options = options;
-        let videos = options
-            .video_provider
-            .get_or_insert_with(|| video_provider_for(&provider));
-        let video_provider = videos.info();
-        let speech_provider = options
-            .speech_provider
-            .get_or_insert_with(|| speech_provider_for(&provider))
-            .info();
-        let image_prices = ImagePrices {
-            sample: style::sample_cost(&provider),
-            portrait: cast::audition_cost(&provider, 1),
-            pack: cast::pack_cost(&provider),
-        };
-        let document_model = model.describe();
+        Self::spawn_choosing(
+            request,
+            Box::new(move || {
+                Ok(Providers {
+                    image: provider,
+                    model,
+                    video: None,
+                })
+            }),
+            sink,
+            options,
+        )
+    }
+
+    /// Start a session whose providers `choose` picks on the worker, before
+    /// the open. Returns as soon as the worker thread exists, whatever
+    /// choosing waits on. What the providers are reads as `None` until they
+    /// are chosen; a choice that fails is reported through
+    /// [`SessionSink::opened`], and nothing is opened.
+    pub fn spawn_choosing(
+        request: OpenRequest,
+        choose: ChooseProviders,
+        sink: Box<dyn SessionSink>,
+        options: SessionOptions,
+    ) -> std::io::Result<Self> {
         let (commands, inbox) = mpsc::channel();
         let view = Arc::new(View::default());
         let gate = Arc::new(Gate {
             closed: Arc::new(AtomicBool::new(false)),
             sink: Mutex::new(Some(sink)),
         });
-        // Closing the session stops an agent that is still answering.
-        let model = model.cancelled_by(Arc::clone(&gate.closed));
         let worker = thread::Builder::new()
             .name("kineto-project-session".to_owned())
             .spawn({
                 let view = Arc::clone(&view);
                 let gate = Arc::clone(&gate);
-                move || run(request, provider, model, options, &inbox, &view, &gate)
+                move || run(request, choose, options, &inbox, &view, &gate)
             })?;
         Ok(Self {
             commands: Some(commands),
-            image_provider,
-            video_provider,
-            speech_provider,
-            image_prices,
-            document_model,
             view,
             gate,
             worker: Some(worker),
@@ -1087,17 +1123,21 @@ impl ProjectSession {
             .ok_or(SnapshotError::NotOpen)
     }
 
-    /// What paid images cost with this session's image provider. Fixed at
-    /// spawn.
+    /// What paid images cost with this session's image provider; `None`
+    /// until the provider is chosen. Never waits.
     #[must_use]
-    pub const fn image_prices(&self) -> ImagePrices {
-        self.image_prices
+    pub fn image_prices(&self) -> Option<ImagePrices> {
+        self.view.providers.get().map(|chosen| chosen.image_prices)
     }
 
-    /// The model this session writes documents with. Fixed at spawn.
+    /// The model this session writes documents with; `None` until it is
+    /// chosen. Never waits.
     #[must_use]
-    pub const fn document_model(&self) -> &DocumentModelInfo {
-        &self.document_model
+    pub fn document_model(&self) -> Option<&DocumentModelInfo> {
+        self.view
+            .providers
+            .get()
+            .map(|chosen| &chosen.document_model)
     }
 
     /// How many shots are in play: those of the locked shot plan, or of the
@@ -1236,22 +1276,25 @@ impl ProjectSession {
         }
     }
 
-    /// The image provider this session generates with. Fixed at spawn.
+    /// The image provider this session generates with; `None` until it is
+    /// chosen, which is before the open finishes. Never waits.
     #[must_use]
-    pub const fn image_provider(&self) -> ImageProviderInfo {
-        self.image_provider
+    pub fn image_provider(&self) -> Option<ImageProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.image)
     }
 
-    /// The provider this session makes videos with.
+    /// The provider this session makes videos with; `None` until it is
+    /// chosen. Never waits.
     #[must_use]
-    pub const fn video_provider(&self) -> VideoProviderInfo {
-        self.video_provider
+    pub fn video_provider(&self) -> Option<VideoProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.video)
     }
 
-    /// The provider this session speaks lines with.
+    /// The provider this session speaks lines with; `None` until it is
+    /// chosen. Never waits.
     #[must_use]
-    pub const fn speech_provider(&self) -> SpeechProviderInfo {
-        self.speech_provider
+    pub fn speech_provider(&self) -> Option<SpeechProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.speech)
     }
 
     /// Project metadata, available once the open has succeeded.
@@ -1275,17 +1318,26 @@ impl Drop for ProjectSession {
 
 fn run(
     request: OpenRequest,
-    provider: ImageProvider,
-    model: DocumentModel,
+    choose: ChooseProviders,
     options: SessionOptions,
     inbox: &mpsc::Receiver<Envelope>,
     view: &View,
     gate: &Arc<Gate>,
 ) {
-    let opened = panic::catch_unwind(AssertUnwindSafe(|| open(request)))
-        .unwrap_or(Err(SessionError::Panicked));
+    let chosen = panic::catch_unwind(AssertUnwindSafe(choose))
+        .unwrap_or(Err(SessionError::Panicked))
+        .map(|providers| publish_providers(providers, options, view, gate));
+    // A session closed while its providers were chosen opens nothing.
+    if gate.is_closed() {
+        return;
+    }
+    let opened = chosen.and_then(|chosen| {
+        panic::catch_unwind(AssertUnwindSafe(|| open(request)))
+            .unwrap_or(Err(SessionError::Panicked))
+            .map(|project| (project, chosen))
+    });
     let mut worker = match opened {
-        Ok(project) => {
+        Ok((project, (provider, model, options))) => {
             let mut worker = Worker::new(project, provider, model, Arc::clone(gate), options);
             // The locked plan's shots are on disk before anything reads them.
             let mut recoveries = Vec::new();
@@ -1620,6 +1672,46 @@ impl Videos {
             let _ = watcher.join();
         }
     }
+}
+
+/// Settle what the session generates with and publish what the director is
+/// told about it.
+fn publish_providers(
+    providers: Providers,
+    mut options: SessionOptions,
+    view: &View,
+    gate: &Gate,
+) -> (ImageProvider, DocumentModel, SessionOptions) {
+    let Providers {
+        image: provider,
+        model,
+        video,
+    } = providers;
+    if video.is_some() {
+        options.video_provider = video;
+    }
+    let video = options
+        .video_provider
+        .get_or_insert_with(|| video_provider_for(&provider))
+        .info();
+    let speech = options
+        .speech_provider
+        .get_or_insert_with(|| speech_provider_for(&provider))
+        .info();
+    let _ = view.providers.set(PublishedProviders {
+        image: provider.info(),
+        video,
+        speech,
+        image_prices: ImagePrices {
+            sample: style::sample_cost(&provider),
+            portrait: cast::audition_cost(&provider, 1),
+            pack: cast::pack_cost(&provider),
+        },
+        document_model: model.describe(),
+    });
+    // Closing the session stops an agent that is still answering.
+    let model = model.cancelled_by(Arc::clone(&gate.closed));
+    (provider, model, options)
 }
 
 fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
@@ -3420,6 +3512,122 @@ mod tests {
         );
     }
 
+    fn create_text(target: &std::path::Path) -> OpenRequest {
+        OpenRequest::CreateText {
+            path: target.to_path_buf(),
+            manifest: Box::new(manifest()),
+            source: b"A filmmaker waits across the table.\n".to_vec(),
+        }
+    }
+
+    /// Providers chosen once `release` sends, as a key read from a locked
+    /// keyring is chosen once its unlock prompt is answered. `asked` hears
+    /// the thread that chooses.
+    fn chosen_when_released() -> (ChooseProviders, mpsc::Sender<()>, Receiver<String>) {
+        let (release, waiting) = mpsc::channel::<()>();
+        let (asked, choosing) = mpsc::channel();
+        let choose: ChooseProviders = Box::new(move || {
+            let _ = asked.send(thread::current().name().unwrap_or_default().to_owned());
+            let _ = waiting.recv();
+            Ok(Providers {
+                image: ImageProvider::LocalDemo,
+                model: DocumentModel::None,
+                video: None,
+            })
+        });
+        (choose, release, choosing)
+    }
+
+    #[test]
+    fn providers_are_chosen_on_the_worker_and_the_caller_never_waits_for_them() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let (choose, release, choosing) = chosen_when_released();
+        let (sink, events) = sink();
+        let session = ProjectSession::spawn_choosing(
+            create_text(&target),
+            choose,
+            sink,
+            SessionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            choosing.recv_timeout(WAIT).unwrap(),
+            "kineto-project-session"
+        );
+
+        // While the choice waits, every read answers at once and nothing is
+        // opened or created.
+        assert_eq!(session.image_provider(), None);
+        assert_eq!(session.video_provider(), None);
+        assert_eq!(session.speech_provider(), None);
+        assert_eq!(session.image_prices(), None);
+        assert_eq!(session.document_model(), None);
+        assert_eq!(session.shot_count(), 0);
+        assert!(events.try_recv().is_err());
+        assert!(!target.exists());
+
+        release.send(()).unwrap();
+        assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+        assert_eq!(
+            session.image_provider().unwrap().kind,
+            ImageProviderKind::LocalDemo
+        );
+        assert!(!session.document_model().unwrap().ready);
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn a_provider_that_cannot_be_chosen_fails_the_open_before_anything_is_created() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let (sink, events) = sink();
+        let session = ProjectSession::spawn_choosing(
+            create_text(&target),
+            Box::new(|| {
+                Err(SessionError::Provider(ProviderSelectionError::Unknown(
+                    "midjourney".to_owned(),
+                )))
+            }),
+            sink,
+            SessionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            events.recv_timeout(WAIT).unwrap(),
+            Event::Opened(Err(r#"Provider(Unknown("midjourney"))"#.to_owned()))
+        );
+        assert_eq!(session.image_provider(), None);
+        assert!(!target.exists());
+        session.submit(0, ShotCommand::Generate, 1).unwrap();
+        assert_eq!(completion(&events, 1), Err("NotOpen".to_owned()));
+    }
+
+    #[test]
+    fn a_session_closed_while_its_providers_are_chosen_opens_nothing() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let (choose, release, choosing) = chosen_when_released();
+        let (sink, events) = sink();
+        let session = ProjectSession::spawn_choosing(
+            create_text(&target),
+            choose,
+            sink,
+            SessionOptions::default(),
+        )
+        .unwrap();
+        choosing.recv_timeout(WAIT).unwrap();
+        let closing = thread::spawn(move || drop(session));
+        // Closing lets go of the sink before it waits for the worker.
+        assert_eq!(
+            events.recv_timeout(WAIT),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        release.send(()).unwrap();
+        closing.join().unwrap();
+        assert!(!target.exists());
+    }
+
     #[test]
     fn a_session_completes_every_providers_finished_calls_on_open() {
         use crate::minimax::MinimaxKeyframes;
@@ -3505,7 +3713,10 @@ mod tests {
         let snapshot = session.snapshot(0).unwrap();
         assert!(snapshot.generated);
         assert_eq!(snapshot.candidate_count, 3);
-        assert_eq!(session.image_provider().kind, ImageProviderKind::LocalDemo);
+        assert_eq!(
+            session.image_provider().unwrap().kind,
+            ImageProviderKind::LocalDemo
+        );
         for candidate in 0..3 {
             let media = session.candidate_media(0, candidate).unwrap().unwrap();
             assert!(
@@ -4456,10 +4667,13 @@ mod tests {
             let temp = TempDir::new();
             let target = temp.0.join("film");
             let (session, events) = create(&target);
-            assert_eq!(session.video_provider().kind, VideoProviderKind::LocalDemo);
-            assert_eq!(session.video_provider().clip_cost_micros, 0);
             assert_eq!(
-                session.speech_provider(),
+                session.video_provider().unwrap().kind,
+                VideoProviderKind::LocalDemo
+            );
+            assert_eq!(session.video_provider().unwrap().clip_cost_micros, 0);
+            assert_eq!(
+                session.speech_provider().unwrap(),
                 crate::speech::SpeechProviderInfo {
                     kind: crate::speech::SpeechProviderKind::LocalDemo,
                     ready: true,
@@ -4518,12 +4732,18 @@ mod tests {
             let fake = Arc::new(FakeMinimax::default());
             let (session, events) = spawn(OpenRequest::Open { path: target }, &fake);
             assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
-            assert_eq!(session.video_provider().kind, VideoProviderKind::Minimax);
             assert_eq!(
-                session.speech_provider().kind,
+                session.video_provider().unwrap().kind,
+                VideoProviderKind::Minimax
+            );
+            assert_eq!(
+                session.speech_provider().unwrap().kind,
                 crate::speech::SpeechProviderKind::Minimax
             );
-            assert_eq!(session.speech_provider().character_cost_micros, Some(100));
+            assert_eq!(
+                session.speech_provider().unwrap().character_cost_micros,
+                Some(100)
+            );
             session.submit(1, ShotCommand::GenerateVideo, 10).unwrap();
             assert!(
                 completion(&events, 10)
@@ -4949,7 +5169,7 @@ mod tests {
         fn without_a_model_documents_are_refused_and_nothing_is_asked() {
             let temp = TempDir::new();
             let (session, events) = create_with(&temp.0.join("film"), DocumentModel::None);
-            assert!(!session.document_model().ready);
+            assert!(!session.document_model().unwrap().ready);
             assert_eq!(
                 run(&session, &events, DocumentCommand::AnalyzeStory),
                 Err("Generation(ModelNotConfigured)".to_owned())
@@ -5277,7 +5497,7 @@ mod tests {
                     .contains("scar")
             );
 
-            let prices = session.image_prices();
+            let prices = session.image_prices().unwrap();
             assert_eq!(prices.sample.unwrap().amount_micros, 3_500);
             assert_eq!(prices.pack.unwrap().0, 7);
             let production = session.production().unwrap();

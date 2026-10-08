@@ -598,12 +598,14 @@ pub unsafe extern "C" fn kineto_project_screenplay_text_copy(
 pub unsafe extern "C" fn kineto_project_llm_provider(session: *const KinetoProjectSession) -> u32 {
     guarded(0, || {
         // SAFETY: forwarded caller contract.
-        let Some(session) = (unsafe { session_ref(session) }) else {
+        let Some(model) =
+            (unsafe { session_ref(session) }).and_then(|session| session.document_model())
+        else {
             return 0;
         };
         code(
             &LLM_PROVIDERS,
-            match session.document_model().kind {
+            match model.kind {
                 DocumentModelKind::None => "none",
                 DocumentModelKind::KimiCode => "kimi_code",
                 DocumentModelKind::Kimi => "kimi",
@@ -623,7 +625,8 @@ pub unsafe extern "C" fn kineto_project_llm_ready(session: *const KinetoProjectS
     guarded(0, || {
         // SAFETY: forwarded caller contract.
         unsafe { session_ref(session) }
-            .map_or(0, |session| u8::from(session.document_model().ready))
+            .and_then(|session| session.document_model())
+            .map_or(0, |model| u8::from(model.ready))
     })
 }
 
@@ -644,15 +647,11 @@ pub unsafe extern "C" fn kineto_project_llm_model_copy(
         let Some(session) = (unsafe { session_ref(session) }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
+        let Some(model) = session.document_model() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
         // SAFETY: forwarded caller-owned output contract.
-        unsafe {
-            copy_utf8(
-                session.document_model().model.as_bytes(),
-                out_buf,
-                out_cap,
-                out_len,
-            )
-        }
+        unsafe { copy_utf8(model.model.as_bytes(), out_buf, out_cap, out_len) }
     })
 }
 
@@ -686,7 +685,9 @@ pub unsafe extern "C" fn kineto_project_document_cost(
             Ok(documents) => documents,
             Err(code) => return code,
         };
-        let model = handle.document_model();
+        let Some(model) = handle.document_model() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
         let estimate = match name(&DOCUMENT_COSTS, document) {
             Some("analysis") => documents.analysis_cost,
             Some("screenplay") if documents.analysis.is_none() => {

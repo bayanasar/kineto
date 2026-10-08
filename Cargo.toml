@@ -3,6 +3,7 @@ members = [
     "apps/kineto/rust",
     "crates/kineto-core",
     "crates/kineto-job-runtime",
+    "crates/kineto-keychain",
     "crates/kineto-jobs",
     "crates/kineto-json-schema",
     "crates/kineto-llm",

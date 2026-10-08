@@ -89,6 +89,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadKeys: () async => const KinetoKeys(unavailable: null, states: <KinetoKeyProvider, KinetoKeyState>{}),
         loadPlugins: () {
           reads++;
           return reads == 1 ? plugins.future : Future<List<KinetoPlugin>>.value(const <KinetoPlugin>[]);
@@ -98,7 +99,7 @@ void main() {
         ),
       ),
     );
-    expect(find.text('Reading'), findsNWidgets(2));
+    expect(find.text('Reading'), findsNWidgets(3), reason: 'keys, plugins and servers are read off the screen');
     plugins.complete(_plugins);
     await tester.pumpAndSettle();
     expect(find.text('3 registered'), findsOneWidget);
@@ -108,5 +109,74 @@ void main() {
     await tester.pumpAndSettle();
     expect(reads, 2);
     expect(find.text('None registered.'), findsOneWidget);
+  });
+
+  testWidgets('a key is saved into the secure storage, cleared from the field, and removed', (tester) async {
+    final stored = <KinetoKeyProvider, String>{};
+    final deleted = <KinetoKeyProvider>[];
+    KinetoKeys keys() => KinetoKeys(
+          unavailable: null,
+          states: <KinetoKeyProvider, KinetoKeyState>{
+            for (final provider in KinetoKeyProvider.values)
+              provider: KinetoKeyState(
+                stored: stored.containsKey(provider),
+                inEnvironment: provider == KinetoKeyProvider.gemini,
+              ),
+          },
+        );
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadKeys: () async => keys(),
+        storeKey: (provider, key) async => stored[provider] = key,
+        deleteKey: (provider) async {
+          deleted.add(provider);
+          stored.remove(provider);
+        },
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Secure storage'), findsOneWidget);
+    expect(find.text('Read from KINETO_GEMINI_API_KEY, since the secure storage holds none.'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('key-delete-minimax')), findsNothing);
+
+    final input = find.byKey(const ValueKey<String>('key-input-minimax'));
+    expect(tester.widget<TextField>(input).obscureText, isTrue);
+    await tester.enterText(input, '  sk-live-0123  ');
+    await tester.tap(find.byKey(const ValueKey<String>('key-save-minimax')));
+    await tester.pumpAndSettle();
+    expect(stored, <KinetoKeyProvider, String>{KinetoKeyProvider.minimax: 'sk-live-0123'});
+    expect(tester.widget<TextField>(input).controller!.text, isEmpty, reason: 'the key is not kept on screen');
+    expect(find.textContaining('sk-live'), findsNothing);
+    expect(find.text('MiniMax key saved. Projects opened from now on use it.'), findsOneWidget);
+    expect(find.text('Replace'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('key-delete-minimax')));
+    await tester.pumpAndSettle();
+    expect(deleted, <KinetoKeyProvider>[KinetoKeyProvider.minimax]);
+    expect(find.byKey(const ValueKey<String>('key-delete-minimax')), findsNothing);
+  });
+
+  testWidgets('without secure storage, keys come from the environment and none is asked for', (tester) async {
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadKeys: () async => const KinetoKeys(
+          unavailable: 'no secure storage is available: the platform failed (no Secret Service)',
+          states: <KinetoKeyProvider, KinetoKeyState>{
+            KinetoKeyProvider.minimax: KinetoKeyState(stored: false, inEnvironment: true),
+          },
+        ),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No secure storage'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('keys-unavailable')), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('From the environment'), findsOneWidget);
   });
 }

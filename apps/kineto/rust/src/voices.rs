@@ -546,7 +546,10 @@ pub unsafe extern "C" fn kineto_project_speech_cost(
             Ok(text) => text,
             Err(code) => return code,
         };
-        let Some(per_character) = handle.speech_provider().character_cost_micros else {
+        let Some(speech) = handle.speech_provider() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
+        let Some(per_character) = speech.character_cost_micros else {
             return PROJECT_ERR_COST_UNKNOWN;
         };
         let characters = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
@@ -577,7 +580,7 @@ unsafe fn read(session: *const KinetoProjectSession) -> Result<Published, i32> {
     Ok(Published {
         documents,
         production,
-        speech: handle.speech_provider(),
+        speech: handle.speech_provider().ok_or(PROJECT_ERR_NOT_OPEN)?,
     })
 }
 

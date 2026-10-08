@@ -22,11 +22,12 @@ use kineto_core::{
         ProviderSelectionError,
     },
     keyframe_prompt::KeyframePromptError,
-    llm::{DocumentModel, LLM_PROVIDER_VARIABLE},
+    llm::{DocumentModel, LLM_PROVIDER_VARIABLE, ModelSelectionError},
     references::ReferenceCallError,
     session::{
-        DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Recovery,
-        SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError, SubmitError,
+        DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Providers,
+        Recovery, SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError,
+        SubmitError,
     },
     video::{VideoProvider, VideoProviderKind},
 };
@@ -47,7 +48,7 @@ use kineto_project::{
     style::StyleError,
     voice::VoiceError,
 };
-use kineto_providers::secret::EnvSecretSource;
+use kineto_providers::secret::SecretSource;
 
 /// Message kinds posted to a session's Dart port.
 const MESSAGE_OPENED: i64 = 1;
@@ -309,35 +310,26 @@ pub struct KinetoProjectSession {
     pub(crate) session: ProjectSession,
 }
 
-unsafe fn spawn(
+/// Start a session whose providers are chosen on its worker, with the keys
+/// `keys` gives there. The caller is Dart's UI isolate, and reading the
+/// system's secure storage can wait, as on a locked keyring's unlock prompt;
+/// only the open waits with it. A provider that cannot be chosen fails the
+/// open, as an `OPENED` message.
+unsafe fn spawn<K: SecretSource + 'static>(
     request: OpenRequest,
     post: Option<PostCObject>,
     port: i64,
     out_session: *mut *mut KinetoProjectSession,
+    keys: fn() -> K,
 ) -> i32 {
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
-    let provider = match image_provider_from_environment() {
-        Ok(provider) => provider,
-        Err(code) => return code,
-    };
-    let video_provider = match video_provider_from_environment() {
-        Ok(provider) => provider,
-        Err(code) => return code,
-    };
-    let Ok(model) = document_model_from_environment() else {
-        return PROJECT_ERR_MODEL_UNKNOWN;
-    };
-    match ProjectSession::spawn_with_model(
+    match ProjectSession::spawn_choosing(
         request,
-        provider,
-        model,
+        Box::new(move || chosen_providers(&keys())),
         Box::new(DartPort { post, port }),
-        SessionOptions {
-            video_provider,
-            ..SessionOptions::default()
-        },
+        SessionOptions::default(),
     ) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
@@ -349,6 +341,16 @@ unsafe fn spawn(
     }
 }
 
+/// The providers the environment names, with keys from `secrets`, read once
+/// for the whole open.
+fn chosen_providers(secrets: &impl SecretSource) -> Result<Providers, SessionError> {
+    Ok(Providers {
+        image: image_provider_from_environment(secrets).map_err(SessionError::Provider)?,
+        video: video_provider_from_environment(secrets).map_err(SessionError::Provider)?,
+        model: document_model_from_environment(secrets).map_err(SessionError::Model)?,
+    })
+}
+
 /// The environment variable that names the image provider a session uses.
 /// Unset, empty or `local-demo` means the free demo generator; `minimax`
 /// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`; `plugin:<id>` the
@@ -357,14 +359,11 @@ unsafe fn spawn(
 /// to be set.
 pub(crate) const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
 
-fn image_provider_from_environment() -> Result<ImageProvider, i32> {
-    let selection = match std::env::var(IMAGE_PROVIDER_VARIABLE) {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
-    };
-    ImageProvider::select(selection.as_deref(), &EnvSecretSource::process())
-        .map_err(selection_error)
+fn image_provider_from_environment(
+    secrets: &impl SecretSource,
+) -> Result<ImageProvider, ProviderSelectionError> {
+    let selection = selection(IMAGE_PROVIDER_VARIABLE).map_err(ProviderSelectionError::Unknown)?;
+    ImageProvider::select(selection.as_deref(), secrets)
 }
 
 /// The environment variable that names the video provider a session uses:
@@ -373,17 +372,24 @@ fn image_provider_from_environment() -> Result<ImageProvider, i32> {
 /// provider. As for images, a paid provider is used only when named.
 const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
 
-fn video_provider_from_environment() -> Result<Option<VideoProvider>, i32> {
-    let selection = match std::env::var(VIDEO_PROVIDER_VARIABLE) {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(PROJECT_ERR_PROVIDER_UNKNOWN),
-    };
-    VideoProvider::select(selection.as_deref(), &EnvSecretSource::process())
-        .map_err(selection_error)
+fn video_provider_from_environment(
+    secrets: &impl SecretSource,
+) -> Result<Option<VideoProvider>, ProviderSelectionError> {
+    let selection = selection(VIDEO_PROVIDER_VARIABLE).map_err(ProviderSelectionError::Unknown)?;
+    VideoProvider::select(selection.as_deref(), secrets)
 }
 
-fn selection_error(error: ProviderSelectionError) -> i32 {
+/// What `variable` names, `None` when it is unset; a value that is not
+/// Unicode, as text, is named nothing this build has.
+fn selection(variable: &str) -> Result<Option<String>, String> {
+    match std::env::var(variable) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(value)) => Err(value.to_string_lossy().into_owned()),
+    }
+}
+
+fn selection_error(error: &ProviderSelectionError) -> i32 {
     match error {
         ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
         ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
@@ -395,16 +401,13 @@ fn selection_error(error: ProviderSelectionError) -> i32 {
 /// The language model named by `KINETO_LLM_PROVIDER` (see
 /// `kineto_core::llm`). Unset means none: documents are refused rather than
 /// sent to a model nobody chose.
-fn document_model_from_environment() -> Result<DocumentModel, ()> {
-    let selection = match std::env::var(LLM_PROVIDER_VARIABLE) {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(()),
-    };
-    DocumentModel::select(selection.as_deref(), &EnvSecretSource::process(), |name| {
+fn document_model_from_environment(
+    secrets: &impl SecretSource,
+) -> Result<DocumentModel, ModelSelectionError> {
+    let selection = selection(LLM_PROVIDER_VARIABLE).map_err(ModelSelectionError::Unknown)?;
+    DocumentModel::select(selection.as_deref(), secrets, |name| {
         std::env::var(name).ok()
     })
-    .map_err(|_| ())
 }
 
 /// Start opening an existing canonical Kineto project.
@@ -437,7 +440,15 @@ pub unsafe extern "C" fn kineto_project_open(
             Err(code) => return code,
         };
         // SAFETY: `out_session` was checked above.
-        unsafe { spawn(OpenRequest::Open { path }, post, port, out_session) }
+        unsafe {
+            spawn(
+                OpenRequest::Open { path },
+                post,
+                port,
+                out_session,
+                crate::keys::provider_keys,
+            )
+        }
     })
 }
 
@@ -529,7 +540,7 @@ pub unsafe extern "C" fn kineto_project_create_text(
             source,
         };
         // SAFETY: `out_session` was checked above.
-        unsafe { spawn(request, post, port, out_session) }
+        unsafe { spawn(request, post, port, out_session, crate::keys::provider_keys) }
     })
 }
 
@@ -601,7 +612,10 @@ pub unsafe extern "C" fn kineto_project_image_provider(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        image_provider_code(session.session.image_provider().kind)
+        session
+            .session
+            .image_provider()
+            .map_or(0, |provider| image_provider_code(provider.kind))
     })
 }
 
@@ -619,7 +633,10 @@ pub unsafe extern "C" fn kineto_project_image_provider_ready(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        u8::from(session.session.image_provider().ready)
+        session
+            .session
+            .image_provider()
+            .map_or(0, |provider| u8::from(provider.ready))
     })
 }
 
@@ -637,7 +654,10 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        session.session.image_provider().generation_cost_micros
+        session
+            .session
+            .image_provider()
+            .map_or(0, |provider| provider.generation_cost_micros)
     })
 }
 
@@ -656,7 +676,10 @@ pub unsafe extern "C" fn kineto_project_video_cost_micros(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        session.session.video_provider().clip_cost_micros
+        session
+            .session
+            .video_provider()
+            .map_or(0, |provider| provider.clip_cost_micros)
     })
 }
 
@@ -674,7 +697,10 @@ pub unsafe extern "C" fn kineto_project_video_provider(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        match session.session.video_provider().kind {
+        let Some(provider) = session.session.video_provider() else {
+            return 0;
+        };
+        match provider.kind {
             VideoProviderKind::LocalDemo => VIDEO_PROVIDER_LOCAL_DEMO,
             VideoProviderKind::Minimax => VIDEO_PROVIDER_MINIMAX,
             VideoProviderKind::Veo => VIDEO_PROVIDER_VEO,
@@ -698,7 +724,10 @@ pub unsafe extern "C" fn kineto_project_video_provider_ready(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        u8::from(session.session.video_provider().ready)
+        session
+            .session
+            .video_provider()
+            .map_or(0, |provider| u8::from(provider.ready))
     })
 }
 
@@ -716,7 +745,10 @@ pub unsafe extern "C" fn kineto_project_video_clip_seconds(
         let Some(session) = (unsafe { session.as_ref() }) else {
             return 0;
         };
-        u32::from(session.session.video_provider().clip_seconds)
+        session
+            .session
+            .video_provider()
+            .map_or(0, |provider| u32::from(provider.clip_seconds))
     })
 }
 
@@ -1346,6 +1378,8 @@ fn session_error_code(error: &SessionError) -> i32 {
         SessionError::NotOpen => PROJECT_ERR_NOT_OPEN,
         SessionError::VideoInFlight => PROJECT_ERR_VIDEO_IN_FLIGHT,
         SessionError::Panicked => PROJECT_ERR_PANIC,
+        SessionError::Provider(error) => selection_error(error),
+        SessionError::Model(_) => PROJECT_ERR_MODEL_UNKNOWN,
     }
 }
 
@@ -1860,6 +1894,70 @@ mod tests {
             PROJECT_OK
         );
         state
+    }
+
+    /// Released once a test has seen the open return.
+    static KEYS_RELEASED: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+    /// Keys that come only once released, as a locked keyring's come once
+    /// its unlock prompt is answered.
+    fn keys_once_released() -> kineto_providers::secret::EnvSecretSource {
+        let (released, signal) = &KEYS_RELEASED;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = signal.wait(released).unwrap();
+        }
+        kineto_providers::secret::EnvSecretSource::process()
+    }
+
+    #[test]
+    fn opening_returns_while_the_keys_are_still_being_read() {
+        let target = temp_target();
+        let path = target.to_string_lossy();
+        let (session, _port) = created(&path);
+        unsafe { kineto_project_destroy(session) };
+
+        let port = Port::new();
+        let port_id = port.0;
+        let request = OpenRequest::Open {
+            path: target.clone(),
+        };
+        let (returned, answer) = std::sync::mpsc::channel();
+        // On another thread, so an open that waited for the keys fails this
+        // test instead of hanging it.
+        std::thread::spawn(move || {
+            let mut session = ptr::null_mut();
+            // SAFETY: `session` is writable pointer storage for the call.
+            let status = unsafe {
+                spawn(
+                    request,
+                    Some(record_post),
+                    port_id,
+                    &raw mut session,
+                    keys_once_released,
+                )
+            };
+            let _ = returned.send((status, session as usize));
+        });
+        let (status, session) = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the open returns while its keys are read");
+        assert_eq!(status, PROJECT_OK);
+        let session = session as *mut KinetoProjectSession;
+        // Nothing is chosen or opened yet, and every read answers at once.
+        assert_eq!(unsafe { kineto_project_image_provider(session) }, 0);
+        assert_eq!(unsafe { kineto_project_video_provider(session) }, 0);
+        assert_eq!(unsafe { kineto_project_format_version(session) }, 0);
+        assert!(port.pending().is_empty());
+
+        let (released, signal) = &KEYS_RELEASED;
+        *released.lock().unwrap() = true;
+        signal.notify_all();
+        assert_eq!(port.opened(), PROJECT_OK);
+        assert_ne!(unsafe { kineto_project_image_provider(session) }, 0);
+        assert_eq!(unsafe { kineto_project_format_version(session) }, 1);
+        unsafe { kineto_project_destroy(session) };
+        fs::remove_dir_all(target).unwrap();
     }
 
     #[test]
