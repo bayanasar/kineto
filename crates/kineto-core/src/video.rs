@@ -77,16 +77,16 @@ use kineto_provider_veo::{
     OperationState, PROVIDER as VEO_PROVIDER, VeoClient, VeoError, VeoModel, VeoRequest,
 };
 use kineto_providers::{
-    CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
-    VideoRequirements, evaluate_video, secret::SecretSource,
+    AspectRatio, CameraControl, ImageFormat, Price, ReferenceRole, VideoCapabilities, VideoClip,
+    VideoContainer, VideoMode, VideoRequirements, evaluate_video, secret::SecretSource,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{
-        GenerationError, NoHooks, ProviderSelectionError, invoke_when_permitted, parse_job_key,
-        provenance_of, selected_plugin,
+        GenerationError, KEYFRAME_ASPECT, NoHooks, ProviderSelectionError, invoke_when_permitted,
+        parse_job_key, provenance_of, selected_plugin,
     },
     likeness,
     plugin::{self, PluginProvider},
@@ -142,6 +142,20 @@ pub struct VideoSubmission {
     /// The locked keyframe of the shot that continues from this one, for
     /// the clip to close on, and its format.
     pub last_frame: Option<(Vec<u8>, ImageFormat)>,
+    /// The clip's frame shape: its first frame's, one the provider renders.
+    pub aspect_ratio: AspectRatio,
+    /// Images the clip keeps a subject as, within the provider's reference
+    /// limits. A shot's video sends none yet: its locked keyframe already
+    /// carries who is in it.
+    pub references: Vec<VideoReference>,
+}
+
+/// An image a clip keeps something as it looks, and what it is kept for.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VideoReference {
+    pub role: ReferenceRole,
+    pub image: Vec<u8>,
+    pub format: ImageFormat,
 }
 
 impl fmt::Debug for VideoSubmission {
@@ -164,6 +178,15 @@ impl fmt::Debug for VideoSubmission {
                     .last_frame
                     .as_ref()
                     .map(|(bytes, format)| (bytes.len(), *format)),
+            )
+            .field("aspect_ratio", &self.aspect_ratio)
+            .field(
+                "references",
+                &self
+                    .references
+                    .iter()
+                    .map(|reference| (reference.role, reference.image.len(), reference.format))
+                    .collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -189,9 +212,10 @@ pub trait VideoGenerator {
     fn camera_command(&self, _motion: &str) -> Option<&'static str> {
         None
     }
-    /// The parameters a submission of `clip_seconds` at `lines` is made
-    /// with, as they enter the input hash.
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String;
+    /// The parameters `request` is made with, as they enter the input
+    /// hash: everything it sends besides its prompt and frames, which enter
+    /// it on their own.
+    fn canonical_params(&self, request: &VideoSubmission) -> String;
     /// Submit the video: the paid call. Returns the task to follow.
     fn submit(&self, request: &VideoSubmission) -> Result<String, Self::Error>;
     fn query(&self, task: &ProviderJobId) -> Result<TaskState, Self::Error>;
@@ -228,10 +252,11 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
         camera_command(motion)
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
         format!(
-            "duration={clip_seconds};resolution={}P",
-            lines.unwrap_or(VideoResolution::P768.lines())
+            "duration={};resolution={}P",
+            request.clip_seconds,
+            request.lines.unwrap_or(VideoResolution::P768.lines())
         )
     }
 
@@ -239,6 +264,11 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
         let Some((frame, format)) = &request.first_frame else {
             return Err(MinimaxError::InvalidRequest("Hailuo needs a first frame"));
         };
+        if !request.references.is_empty() {
+            return Err(MinimaxError::InvalidRequest(
+                "Hailuo takes no reference images with a first frame",
+            ));
+        }
         let resolution =
             VideoResolution::from_lines(request.lines.unwrap_or(VideoResolution::P768.lines()))
                 .ok_or(MinimaxError::InvalidRequest(
@@ -292,11 +322,19 @@ impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
         VeoClient::model(self).capabilities()
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
-        format!(
-            "duration={clip_seconds};resolution={}p;aspect=16:9",
-            lines.unwrap_or(0)
-        )
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        let mut params = format!(
+            "duration={};resolution={}p;aspect={}:{}",
+            request.clip_seconds,
+            request.lines.unwrap_or(0),
+            request.aspect_ratio.width,
+            request.aspect_ratio.height
+        );
+        for reference in &request.references {
+            params.push_str(";reference=");
+            params.push_str(ContentHash::of(&reference.image).as_str());
+        }
+        params
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, VeoError> {
@@ -304,6 +342,17 @@ impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
             .first_frame
             .clone()
             .ok_or(VeoError::InvalidRequest("Veo needs a first frame"))?;
+        // An `asset` keeps a subject as it looks: who someone is.
+        let references = request
+            .references
+            .iter()
+            .map(|reference| match reference.role {
+                ReferenceRole::Identity => Ok((reference.image.clone(), reference.format)),
+                ReferenceRole::Style | ReferenceRole::Composition => Err(VeoError::InvalidRequest(
+                    "Veo keeps a subject from a reference, not a style or a composition",
+                )),
+            })
+            .collect::<Result<_, _>>()?;
         VeoClient::submit(
             self,
             &VeoRequest {
@@ -314,6 +363,8 @@ impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
                 lines: request
                     .lines
                     .ok_or(VeoError::InvalidRequest("Veo needs a clip height"))?,
+                aspect_ratio: request.aspect_ratio,
+                references,
             },
         )
     }
@@ -398,8 +449,8 @@ impl VideoGenerator for LocalDemoVideos {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, Infallible> {
@@ -1138,8 +1189,9 @@ fn single(started: Started) -> Result<VideoJob, GenerationError> {
 }
 
 /// What a shot's video needs of a provider: a clip made from the locked
-/// keyframe. A provider that would make it from words alone, or cannot take
-/// that keyframe, is refused rather than quietly used.
+/// keyframe, framed as it is. A provider that would make it from words
+/// alone, or cannot take or frame that keyframe, is refused rather than
+/// quietly used.
 fn check_capabilities(
     capabilities: &VideoCapabilities,
     frame: Option<&(Vec<u8>, ImageFormat)>,
@@ -1161,6 +1213,9 @@ fn check_capabilities(
         .filter(|gap| gap.severity == kineto_providers::GapSeverity::Incompatible)
         .map(|gap| gap.capability)
         .collect();
+    if !capabilities.frames(KEYFRAME_ASPECT) {
+        missing.push("video.aspect_ratio");
+    }
     if let Some((bytes, format)) = frame {
         if !capabilities.start_frame_formats.contains(format) {
             missing.push("video.start_frame_format");
@@ -1445,8 +1500,20 @@ pub fn start_videos<G: VideoGenerator>(
         dialogue_ms,
         preferences: preferences.as_deref(),
     })?;
-    let lines = capabilities.clip_lines(prompt.duration_seconds);
-    let params = generator.canonical_params(prompt.duration_seconds, lines);
+    let request = VideoSubmission {
+        prompt: prompt.compiled.prompt().to_owned(),
+        first_frame: frame,
+        clip_seconds: prompt.duration_seconds,
+        lines: capabilities.clip_lines(prompt.duration_seconds),
+        last_frame: end_frame
+            .as_ref()
+            .map(|(_, bytes, format)| (bytes.clone(), *format)),
+        // Keyframes are made in this shape, and a clip is framed as its
+        // first frame.
+        aspect_ratio: KEYFRAME_ASPECT,
+        references: Vec::new(),
+    };
+    let params = generator.canonical_params(&request);
     let plans = shot.plan_videos(
         project,
         VideoGenerationSpec {
@@ -1481,13 +1548,6 @@ pub fn start_videos<G: VideoGenerator>(
             content_hash: end.keyframe.content_hash.as_str().to_owned(),
             shot: format!("{}/{}", end.shot.scene(), end.shot.shot()),
         }),
-    };
-    let request = VideoSubmission {
-        prompt: prompt.compiled.prompt().to_owned(),
-        first_frame: frame,
-        clip_seconds: prompt.duration_seconds,
-        lines,
-        last_frame: end_frame.map(|(_, bytes, format)| (bytes, format)),
     };
     let mut started = Started {
         jobs: Vec::with_capacity(plans.len()),
@@ -1915,6 +1975,23 @@ mod tests {
             missing,
             ["video.start_frame_format", "video.start_frame_bytes"]
         );
+    }
+
+    #[test]
+    fn a_provider_that_cannot_frame_the_keyframe_is_refused_by_capability() {
+        let png = (vec![0x89; 64], ImageFormat::Png);
+        for veo in [VeoModel::Lite, VeoModel::Fast, VeoModel::Standard] {
+            assert!(check_capabilities(&veo.capabilities(), Some(&png)).is_ok());
+        }
+        let tall_only = VideoCapabilities {
+            aspect_ratios: [AspectRatio::new(9, 16).unwrap()].into_iter().collect(),
+            ..VeoModel::Lite.capabilities()
+        };
+        let Err(GenerationError::Incapable(missing)) = check_capabilities(&tall_only, Some(&png))
+        else {
+            panic!("a 16:9 keyframe must be refused");
+        };
+        assert_eq!(missing, ["video.aspect_ratio"]);
     }
 
     #[test]

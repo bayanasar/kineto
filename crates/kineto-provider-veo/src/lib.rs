@@ -15,14 +15,19 @@
 //! `bytesBase64Encoded` (the documented `inlineData` is refused). Every
 //! clip carries an AAC sound track Veo makes itself; it cannot be turned
 //! off.
+//!
+//! A clip is framed 16:9 or 9:16. Standard and Fast also take up to 3
+//! reference images of a subject to keep (`referenceImages`, as `asset`),
+//! only in an 8 s clip; Lite takes none. They are sent the way frames are,
+//! and have not been tried live.
 
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kineto_jobs::ErrorClass;
 use kineto_providers::{
-    CameraControl, ImageFormat, Price, VideoCapabilities, VideoClip, VideoContainer, VideoMode,
-    secret::SecretString,
+    AspectRatio, CameraControl, ImageFormat, Price, ReferenceRole, VideoCapabilities, VideoClip,
+    VideoContainer, VideoMode, secret::SecretString,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,11 +39,30 @@ pub const MAX_VIDEO_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest first or last frame sent. A request carries both, base64
 /// encoded, under the API's 20 MB inline limit.
 pub const MAX_FRAME_BYTES: u64 = 7 * 1024 * 1024;
+/// Largest reference image sent.
+pub const MAX_REFERENCE_BYTES: u64 = MAX_FRAME_BYTES;
+/// Most images one request carries together, in bytes before encoding: two
+/// frames at their largest, which keeps the request under the inline limit.
+pub const MAX_REQUEST_IMAGE_BYTES: u64 = 2 * MAX_FRAME_BYTES;
+/// Most reference images Standard and Fast take.
+pub const MAX_REFERENCE_IMAGES: u16 = 3;
 /// Longest prompt sent. Veo reads 1,024 tokens; English runs about four
 /// characters a token, so this leaves room.
 pub const MAX_PROMPT_CHARS: usize = 3_000;
-/// The only length Veo closes a clip on a last frame at.
+/// The only length Veo closes a clip on a last frame at, or takes
+/// reference images in.
 pub const END_FRAME_SECONDS: u8 = 8;
+/// The frame shapes Veo renders.
+pub const ASPECT_RATIOS: [AspectRatio; 2] = [
+    AspectRatio {
+        width: 16,
+        height: 9,
+    },
+    AspectRatio {
+        width: 9,
+        height: 16,
+    },
+];
 
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -46,7 +70,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_MESSAGE_CHARS: usize = 200;
 const FPS: u16 = 24;
-const ASPECT_RATIO: &str = "16:9";
 
 /// A Veo 3.1 model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,9 +112,18 @@ impl VeoModel {
         }
     }
 
+    /// How many reference images it takes: none for Lite.
+    const fn max_reference_images(self) -> u16 {
+        match self {
+            Self::Lite => 0,
+            Self::Fast | Self::Standard => MAX_REFERENCE_IMAGES,
+        }
+    }
+
     /// What it can do, as documented: 4, 6 or 8 s at 720p, and only 8 s
-    /// above it; 24 fps; a first frame and, in an 8 s clip, a last one;
-    /// camera motion in words; its own sound.
+    /// above it; 24 fps; 16:9 or 9:16; a first frame and, in an 8 s clip, a
+    /// last one and reference images where it takes them; camera motion in
+    /// words; its own sound.
     #[must_use]
     pub fn capabilities(self) -> VideoCapabilities {
         let mut clips = BTreeSet::new();
@@ -113,10 +145,23 @@ impl VeoModel {
             start_frame: true,
             end_frame: true,
             camera_control: CameraControl::Textual,
-            identity_reference: false,
             async_jobs: true,
             resumable_remote_handle: true,
             output_containers: [VideoContainer::Mp4].into(),
+            aspect_ratios: ASPECT_RATIOS.into(),
+            max_reference_images: self.max_reference_images(),
+            reference_roles: if self.max_reference_images() == 0 {
+                BTreeSet::new()
+            } else {
+                [ReferenceRole::Identity].into()
+            },
+            reference_formats: if self.max_reference_images() == 0 {
+                BTreeSet::new()
+            } else {
+                frames.clone()
+            },
+            max_reference_bytes: (self.max_reference_images() > 0).then_some(MAX_REFERENCE_BYTES),
+            reference_seconds: [END_FRAME_SECONDS].into(),
             clip_seconds: [4, 6, 8].into(),
             max_prompt_chars: Some(MAX_PROMPT_CHARS),
             start_frame_formats: frames.clone(),
@@ -456,6 +501,11 @@ pub struct VeoRequest {
     pub seconds: u8,
     /// The clip's height in lines: 720, 1080 or 2160.
     pub lines: u16,
+    /// The clip's frame shape: 16:9 or 9:16.
+    pub aspect_ratio: AspectRatio,
+    /// Images of subjects the clip keeps as they look, as `asset`
+    /// references.
+    pub references: Vec<(Vec<u8>, ImageFormat)>,
 }
 
 impl fmt::Debug for VeoRequest {
@@ -470,6 +520,15 @@ impl fmt::Debug for VeoRequest {
             )
             .field("seconds", &self.seconds)
             .field("lines", &self.lines)
+            .field("aspect_ratio", &self.aspect_ratio)
+            .field(
+                "references",
+                &self
+                    .references
+                    .iter()
+                    .map(|(bytes, _)| bytes.len())
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -497,6 +556,15 @@ struct WireInstance<'a> {
     image: WireImage,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_frame: Option<WireImage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reference_images: Vec<WireReference>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireReference {
+    image: WireImage,
+    reference_type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -647,32 +715,68 @@ impl<T: Transport> VeoClient<T> {
                 "Veo closes on a last frame only in an 8 s clip",
             ));
         }
-        let image = |(bytes, format): &(Vec<u8>, ImageFormat)| {
-            let mime_type = match format {
-                ImageFormat::Jpeg => "image/jpeg",
-                ImageFormat::Png => "image/png",
-                ImageFormat::Webp => {
-                    return Err(VeoError::InvalidRequest("Veo takes JPEG or PNG frames"));
+        let aspect_ratio = aspect_ratio(request.aspect_ratio)
+            .filter(|_| capabilities.frames(request.aspect_ratio))
+            .ok_or(VeoError::InvalidRequest("Veo frames a clip 16:9 or 9:16"))?;
+        if request.references.len() > usize::from(capabilities.max_reference_images) {
+            return Err(VeoError::InvalidRequest(
+                "the model takes fewer reference images; Lite takes none",
+            ));
+        }
+        if !request.references.is_empty()
+            && !capabilities.reference_seconds.contains(&request.seconds)
+        {
+            return Err(VeoError::InvalidRequest(
+                "Veo takes reference images only in an 8 s clip",
+            ));
+        }
+        let images = std::iter::once(&request.first_frame)
+            .chain(&request.last_frame)
+            .chain(&request.references);
+        if images.map(|(bytes, _)| bytes.len() as u64).sum::<u64>() > MAX_REQUEST_IMAGE_BYTES {
+            return Err(VeoError::InvalidRequest(
+                "the request's images are larger together than Veo takes",
+            ));
+        }
+        let image = |max: u64| {
+            move |(bytes, format): &(Vec<u8>, ImageFormat)| {
+                let mime_type = match format {
+                    ImageFormat::Jpeg => "image/jpeg",
+                    ImageFormat::Png => "image/png",
+                    ImageFormat::Webp => {
+                        return Err(VeoError::InvalidRequest("Veo takes JPEG or PNG images"));
+                    }
+                };
+                if bytes.is_empty() || bytes.len() as u64 > max {
+                    return Err(VeoError::InvalidRequest(
+                        "an image is empty or larger than Veo takes",
+                    ));
                 }
-            };
-            if bytes.is_empty() || bytes.len() as u64 > MAX_FRAME_BYTES {
-                return Err(VeoError::InvalidRequest(
-                    "a frame is empty or larger than Veo takes",
-                ));
+                Ok(WireImage {
+                    bytes_base64_encoded: STANDARD.encode(bytes),
+                    mime_type,
+                })
             }
-            Ok(WireImage {
-                bytes_base64_encoded: STANDARD.encode(bytes),
-                mime_type,
-            })
         };
+        let frame = image(MAX_FRAME_BYTES);
         let body = serde_json::to_vec(&WireRequest {
             instances: [WireInstance {
                 prompt,
-                image: image(&request.first_frame)?,
-                last_frame: request.last_frame.as_ref().map(image).transpose()?,
+                image: frame(&request.first_frame)?,
+                last_frame: request.last_frame.as_ref().map(&frame).transpose()?,
+                reference_images: request
+                    .references
+                    .iter()
+                    .map(|reference| {
+                        image(MAX_REFERENCE_BYTES)(reference).map(|image| WireReference {
+                            image,
+                            reference_type: "asset",
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
             }],
             parameters: WireParameters {
-                aspect_ratio: ASPECT_RATIO,
+                aspect_ratio,
                 duration_seconds: request.seconds,
                 resolution: resolution(request.lines)
                     .ok_or(VeoError::InvalidRequest("Veo renders 720p, 1080p or 4k"))?,
@@ -759,6 +863,15 @@ impl<T: Transport> VeoClient<T> {
             return Err(VeoError::Malformed("the video is not an MP4"));
         }
         Ok(response.body)
+    }
+}
+
+/// The name Veo gives a frame shape.
+fn aspect_ratio(ratio: AspectRatio) -> Option<&'static str> {
+    match (ratio.width, ratio.height) {
+        (16, 9) => Some("16:9"),
+        (9, 16) => Some("9:16"),
+        _ => None,
     }
 }
 
@@ -900,6 +1013,8 @@ mod tests {
             last_frame: last_frame.then(|| (vec![0x89, b'P', b'N', b'G'], ImageFormat::Png)),
             seconds,
             lines: 720,
+            aspect_ratio: ASPECT_RATIOS[0],
+            references: Vec::new(),
         }
     }
 
@@ -920,7 +1035,25 @@ mod tests {
         assert_eq!(lite.end_frame_seconds, [8].into());
         assert!(lite.audio && lite.end_frame && lite.async_jobs && lite.resumable_remote_handle);
         assert_eq!(lite.camera_control, CameraControl::Textual);
-        assert!(!lite.identity_reference);
+        let wide = AspectRatio::new(16, 9).unwrap();
+        let tall = AspectRatio::new(9, 16).unwrap();
+        assert_eq!(lite.aspect_ratios, [wide, tall].into());
+        assert!(!lite.frames(AspectRatio::new(1, 1).unwrap()));
+        assert_eq!(lite.max_reference_images, 0);
+        assert_eq!(lite.reference_limit(ReferenceRole::Identity), 0);
+
+        for model in [VeoModel::Fast, VeoModel::Standard] {
+            let capabilities = model.capabilities();
+            assert_eq!(capabilities.aspect_ratios, [wide, tall].into());
+            assert_eq!(capabilities.reference_limit(ReferenceRole::Identity), 3);
+            assert_eq!(capabilities.reference_limit(ReferenceRole::Style), 0);
+            assert_eq!(capabilities.reference_seconds, [8].into());
+            assert_eq!(
+                capabilities.reference_formats,
+                [ImageFormat::Jpeg, ImageFormat::Png].into()
+            );
+            assert_eq!(capabilities.max_reference_bytes, Some(MAX_REFERENCE_BYTES));
+        }
 
         let fast = VeoModel::Fast.capabilities();
         assert!(fast.renders(clip(8, 2160)));
@@ -989,6 +1122,78 @@ mod tests {
             requests[3],
             ("DOWNLOAD".to_owned(), VIDEO.to_owned(), Vec::new())
         );
+    }
+
+    #[test]
+    fn a_tall_clip_with_references_is_sent_as_asked() {
+        let recorded = Recorded::answering(vec![ok(&format!(r#"{{"name":"{OPERATION}"}}"#))]);
+        let veo = client(&recorded, VeoModel::Fast);
+        let mut tall = request(8, false);
+        tall.aspect_ratio = AspectRatio::new(9, 16).unwrap();
+        tall.references = vec![
+            (vec![0x89, b'P', b'N', b'G'], ImageFormat::Png),
+            (vec![0xff, 0xd8, 0xff, 0xe1], ImageFormat::Jpeg),
+        ];
+        assert_eq!(veo.submit(&tall).unwrap(), OPERATION);
+
+        let requests = recorded.requests.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].2).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "instances": [{
+                    "prompt": "A woman waits by the window. No speech",
+                    "image": {"bytesBase64Encoded": "/9j/4A==", "mimeType": "image/jpeg"},
+                    "referenceImages": [
+                        {
+                            "image": {"bytesBase64Encoded": "iVBORw==", "mimeType": "image/png"},
+                            "referenceType": "asset"
+                        },
+                        {
+                            "image": {"bytesBase64Encoded": "/9j/4Q==", "mimeType": "image/jpeg"},
+                            "referenceType": "asset"
+                        }
+                    ]
+                }],
+                "parameters": {
+                    "aspectRatio": "9:16",
+                    "durationSeconds": 8,
+                    "resolution": "720p",
+                    "personGeneration": "allow_adult"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn references_are_refused_where_the_model_takes_none_or_fewer() {
+        let recorded = Recorded::default();
+        let reference = (vec![0x89, b'P', b'N', b'G'], ImageFormat::Png);
+        let with = |count: usize, seconds: u8| VeoRequest {
+            references: vec![reference.clone(); count],
+            ..request(seconds, false)
+        };
+        let refused = |model, request: &VeoRequest| {
+            matches!(
+                client(&recorded, model).submit(request),
+                Err(VeoError::InvalidRequest(_))
+            )
+        };
+        assert!(refused(VeoModel::Lite, &with(1, 8)), "Lite takes none");
+        assert!(refused(VeoModel::Fast, &with(4, 8)), "at most 3");
+        assert!(refused(VeoModel::Standard, &with(4, 8)), "at most 3");
+        assert!(refused(VeoModel::Fast, &with(1, 6)), "only in an 8 s clip");
+        let mut webp = with(1, 8);
+        webp.references[0].1 = ImageFormat::Webp;
+        assert!(refused(VeoModel::Fast, &webp));
+        let mut heavy = with(3, 8);
+        heavy.first_frame.0 = vec![0; MAX_FRAME_BYTES as usize];
+        heavy.references[0].0 = vec![0; MAX_FRAME_BYTES as usize];
+        assert!(refused(VeoModel::Fast, &heavy), "the images together");
+        let mut square = request(8, false);
+        square.aspect_ratio = AspectRatio::new(1, 1).unwrap();
+        assert!(refused(VeoModel::Lite, &square));
+        assert!(recorded.requests.lock().unwrap().is_empty());
     }
 
     #[test]

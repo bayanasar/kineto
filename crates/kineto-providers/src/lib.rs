@@ -169,10 +169,23 @@ pub struct VideoCapabilities {
     pub start_frame: bool,
     pub end_frame: bool,
     pub camera_control: CameraControl,
-    pub identity_reference: bool,
     pub async_jobs: bool,
     pub resumable_remote_handle: bool,
     pub output_containers: BTreeSet<VideoContainer>,
+    /// Frame shapes it renders a clip in; empty when it does not say and
+    /// frames a clip as its first frame.
+    pub aspect_ratios: BTreeSet<AspectRatio>,
+    /// Reference images one request may carry, across every role; 0 when it
+    /// takes none.
+    pub max_reference_images: u16,
+    pub reference_roles: BTreeSet<ReferenceRole>,
+    /// Formats a reference image may be sent in.
+    pub reference_formats: BTreeSet<ImageFormat>,
+    /// Largest reference image it accepts, in bytes.
+    pub max_reference_bytes: Option<u64>,
+    /// The clip lengths reference images can be sent with, in seconds;
+    /// empty when any length it renders can take them.
+    pub reference_seconds: BTreeSet<u8>,
     /// Clip lengths the provider renders, in seconds; empty when it renders
     /// any length between the minimum and maximum duration.
     pub clip_seconds: BTreeSet<u8>,
@@ -204,6 +217,22 @@ pub struct VideoCapabilities {
 }
 
 impl VideoCapabilities {
+    /// How many reference images of `role` one request may carry.
+    #[must_use]
+    pub fn reference_limit(&self, role: ReferenceRole) -> u16 {
+        if self.reference_roles.contains(&role) {
+            self.max_reference_images
+        } else {
+            0
+        }
+    }
+
+    /// Whether it renders a clip framed as `ratio`.
+    #[must_use]
+    pub fn frames(&self, ratio: AspectRatio) -> bool {
+        self.aspect_ratios.is_empty() || self.aspect_ratios.contains(&ratio)
+    }
+
     /// The clip length closest to `seconds` that the provider renders;
     /// ties go to the shorter, cheaper clip. `None` when it declares no
     /// lengths and no range.
@@ -481,7 +510,9 @@ pub fn evaluate_video(
             severity: GapSeverity::Incompatible,
         });
     }
-    if requirements.requires_identity_reference && !capabilities.identity_reference {
+    if requirements.requires_identity_reference
+        && capabilities.reference_limit(ReferenceRole::Identity) == 0
+    {
         gaps.push(CapabilityGap {
             capability: "video.identity_reference",
             severity: GapSeverity::Incompatible,
@@ -695,10 +726,20 @@ pub mod fake {
             start_frame: true,
             end_frame: false,
             camera_control: CameraControl::Textual,
-            identity_reference: true,
             async_jobs: true,
             resumable_remote_handle: true,
             output_containers: [VideoContainer::Mp4].into_iter().collect(),
+            aspect_ratios: [
+                AspectRatio::new(16, 9).unwrap(),
+                AspectRatio::new(9, 16).unwrap(),
+            ]
+            .into_iter()
+            .collect(),
+            max_reference_images: 2,
+            reference_roles: [ReferenceRole::Identity].into_iter().collect(),
+            reference_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
+            max_reference_bytes: Some(10 * 1024 * 1024),
+            reference_seconds: BTreeSet::new(),
             clip_seconds: [5, 10].into_iter().collect(),
             max_prompt_chars: Some(2_000),
             start_frame_formats: [ImageFormat::Jpeg, ImageFormat::Png].into_iter().collect(),
@@ -963,6 +1004,51 @@ mod tests {
         assert!(report.is_compatible());
         assert!(!report.is_lossless());
         assert_eq!(report.gaps[0].severity, GapSeverity::Warning);
+    }
+
+    #[test]
+    fn an_identity_reference_needs_a_provider_that_takes_one() {
+        let requirements = VideoRequirements {
+            mode: VideoMode::ImageToVideo,
+            requires_start_frame: true,
+            requires_end_frame: false,
+            requires_identity_reference: true,
+            preferred_camera_control: CameraControl::None,
+            requires_resumable_jobs: true,
+        };
+        let listed = fake::video_i2v_resumable();
+        assert_eq!(listed.reference_limit(ReferenceRole::Identity), 2);
+        assert_eq!(listed.reference_limit(ReferenceRole::Style), 0);
+        assert!(evaluate_video(requirements, &listed).is_lossless());
+        for none in [
+            VideoCapabilities {
+                max_reference_images: 0,
+                ..fake::video_i2v_resumable()
+            },
+            VideoCapabilities {
+                reference_roles: [ReferenceRole::Style].into_iter().collect(),
+                ..fake::video_i2v_resumable()
+            },
+        ] {
+            assert_eq!(
+                evaluate_video(requirements, &none).gaps,
+                [CapabilityGap {
+                    capability: "video.identity_reference",
+                    severity: GapSeverity::Incompatible,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_clip_is_framed_only_as_its_provider_declares() {
+        let listed = fake::video_i2v_resumable();
+        let tall = AspectRatio::new(9, 16).unwrap();
+        assert!(listed.frames(AspectRatio::new(16, 9).unwrap()));
+        assert!(listed.frames(tall));
+        assert!(!listed.frames(AspectRatio::new(1, 1).unwrap()));
+        // One that does not say frames a clip as its first frame.
+        assert!(VideoCapabilities::default().frames(tall));
     }
 
     #[test]

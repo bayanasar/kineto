@@ -134,8 +134,8 @@ impl VideoGenerator for TextOnly {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, _request: &VideoSubmission) -> Result<String, Infallible> {
@@ -195,8 +195,8 @@ impl VideoGenerator for Gated {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, _lines: Option<u16>) -> String {
-        format!("duration={clip_seconds}")
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!("duration={}", request.clip_seconds)
     }
 
     fn submit(&self, _request: &VideoSubmission) -> Result<String, Infallible> {

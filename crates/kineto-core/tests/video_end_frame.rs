@@ -256,8 +256,12 @@ impl VideoGenerator for Closing {
         false
     }
 
-    fn canonical_params(&self, clip_seconds: u8, lines: Option<u16>) -> String {
-        format!("duration={clip_seconds};lines={}", lines.unwrap_or(0))
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!(
+            "duration={};lines={}",
+            request.clip_seconds,
+            request.lines.unwrap_or(0)
+        )
     }
 
     fn submit(&self, request: &VideoSubmission) -> Result<String, Infallible> {

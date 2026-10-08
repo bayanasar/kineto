@@ -5,6 +5,9 @@
 //! no longer on Veo's server, is final, and asking again submits afresh;
 //! the busy one is reported as worth asking again.
 //!
+//! A submission reaches Veo in the frame shape it asks for, with the
+//! reference images the model takes, and its parameters name both.
+//!
 //! The `planned` fixture's `office_night_02` has keyframe candidates with
 //! images, which Veo starts from.
 
@@ -21,7 +24,7 @@ use std::{
 use base64::Engine as _;
 use kineto_core::{
     generation::GenerationError,
-    video::{self, DEMO_CLIP, VEO_VIDEO_PROVIDER},
+    video::{self, DEMO_CLIP, VEO_VIDEO_PROVIDER, VideoGenerator, VideoReference, VideoSubmission},
 };
 use kineto_jobs::ErrorClass;
 use kineto_project::{
@@ -31,7 +34,7 @@ use kineto_project::{
 use kineto_provider_veo::{
     DEFAULT_BASE_URL, HttpResponse, Transport, TransportFailure, VeoClient, VeoError, VeoModel,
 };
-use kineto_providers::secret::SecretString;
+use kineto_providers::{AspectRatio, ImageFormat, ReferenceRole, secret::SecretString};
 
 struct TempDir(PathBuf);
 
@@ -359,4 +362,132 @@ fn a_busy_or_expired_operation_is_final_and_asking_again_submits_afresh() {
             .video,
         VideoState::Ready
     );
+}
+
+/// Any model's submissions, kept as sent.
+#[derive(Clone, Default)]
+struct Sent(Arc<Mutex<Vec<(String, serde_json::Value)>>>);
+
+impl Transport for Sent {
+    fn post_json(
+        &self,
+        url: &str,
+        _api_key: &SecretString,
+        body: &[u8],
+    ) -> Result<HttpResponse, TransportFailure> {
+        let mut sent = self.0.lock().unwrap();
+        sent.push((url.to_owned(), serde_json::from_slice(body).unwrap()));
+        answer(
+            200,
+            format!(r#"{{"name":"models/m/operations/op{}"}}"#, sent.len()).as_bytes(),
+        )
+    }
+
+    fn get(&self, _url: &str, _api_key: &SecretString) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("only submissions are made")
+    }
+
+    fn download(
+        &self,
+        _url: &str,
+        _api_key: &SecretString,
+        _max_bytes: u64,
+    ) -> Result<HttpResponse, TransportFailure> {
+        unreachable!("only submissions are made")
+    }
+}
+
+#[test]
+fn a_tall_clip_and_its_references_reach_only_a_model_that_takes_them() {
+    let sent = Sent::default();
+    let veo = |model| {
+        VeoClient::with_transport(
+            sent.clone(),
+            SecretString::new("AQ.test".to_owned()).unwrap(),
+            DEFAULT_BASE_URL,
+            model,
+        )
+    };
+    let portrait = vec![0x89, b'P', b'N', b'G', 1];
+    let submission = VideoSubmission {
+        prompt: "She turns to the window.".to_owned(),
+        first_frame: Some((vec![0xff, 0xd8, 0xff, 0xe0], ImageFormat::Jpeg)),
+        clip_seconds: 8,
+        lines: Some(720),
+        last_frame: None,
+        aspect_ratio: AspectRatio::new(9, 16).unwrap(),
+        references: vec![VideoReference {
+            role: ReferenceRole::Identity,
+            image: portrait.clone(),
+            format: ImageFormat::Png,
+        }],
+    };
+
+    // Its parameters name the frame shape and each reference by its hash,
+    // so a different shape or portrait is a different input.
+    let fast = veo(VeoModel::Fast);
+    let params = fast.canonical_params(&submission);
+    assert_eq!(
+        params,
+        format!(
+            "duration=8;resolution=720p;aspect=9:16;reference={}",
+            kineto_project::ContentHash::of(&portrait).as_str()
+        )
+    );
+    let wide = VideoSubmission {
+        aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+        references: Vec::new(),
+        ..submission.clone()
+    };
+    assert_eq!(
+        fast.canonical_params(&wide),
+        "duration=8;resolution=720p;aspect=16:9",
+        "a clip without references keeps the parameters it was made with"
+    );
+
+    VideoGenerator::submit(&fast, &submission).unwrap();
+    {
+        let sent = sent.0.lock().unwrap();
+        let (url, body) = &sent[0];
+        assert!(url.ends_with("/models/veo-3.1-fast-generate-preview:predictLongRunning"));
+        assert_eq!(body["parameters"]["aspectRatio"], "9:16");
+        assert_eq!(
+            body["instances"][0]["referenceImages"],
+            serde_json::json!([{
+                "image": {
+                    "bytesBase64Encoded":
+                        base64::engine::general_purpose::STANDARD.encode(&portrait),
+                    "mimeType": "image/png"
+                },
+                "referenceType": "asset"
+            }])
+        );
+    }
+
+    // Lite takes no reference, Veo keeps no style from one, and neither
+    // reaches the API.
+    assert!(matches!(
+        VideoGenerator::submit(&veo(VeoModel::Lite), &submission),
+        Err(VeoError::InvalidRequest(_))
+    ));
+    let styled = VideoSubmission {
+        references: vec![VideoReference {
+            role: ReferenceRole::Style,
+            ..submission.references[0].clone()
+        }],
+        ..submission.clone()
+    };
+    assert!(matches!(
+        VideoGenerator::submit(&veo(VeoModel::Standard), &styled),
+        Err(VeoError::InvalidRequest(_))
+    ));
+    let plain = VideoSubmission {
+        references: Vec::new(),
+        ..submission
+    };
+    VideoGenerator::submit(&veo(VeoModel::Lite), &plain).unwrap();
+    let sent = sent.0.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].1["parameters"]["aspectRatio"], "9:16");
+    assert!(sent[1].1["instances"][0].get("referenceImages").is_none());
 }
