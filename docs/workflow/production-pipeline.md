@@ -137,7 +137,7 @@ Dialogue duration (`kineto_core::dialogue`):
 - **Planning.** Shot planning (`shot-plan/2`, `shot-plan-scene/2`) is given each line's length between `<line_durations>` and `</line_durations>`, and asked to give a shot that carries dialogue at least as long. The plan's input label names the hash of those lengths.
 - **A shot's dialogue.** Its length is the sum of the screenplay lines it holds verbatim, with a 250 ms breath between them. Any other words are estimated, and a speaker's name before a colon is not said.
 - **Short shots.** A planned shot shorter than its dialogue is published as a short shot. It is reported, not refused.
-- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/6`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
+- **Video clips.** A video clip that would cut a shot's dialogue off is made at the shortest length the provider declares that holds it. When even the longest is too short, the prompt (`video-prompt/7`) reports `shot.dialogue_duration` among what it dropped. The cost shown before asking uses the same length.
 
 ## Stage 8 — Scene breakdown and shot planning
 
@@ -155,6 +155,8 @@ For each scene, generate explicit shots with:
 - continuity requirements
 
 The intent remains expressive even if a target provider cannot preserve every field.
+
+A shot's action is only what the camera sees. Shot planning (`shot-plan/4`, `shot-plan-scene/4`) asks for no transition or editing direction in it or in what must stay (FADE IN, FADE OUT, CUT TO, DISSOLVE TO, "the fade" and the like), which the edit decides, and no words meant to appear on screen; an answer with one is asked for again, with the shot named. In the live run, a planned "FADE OUT" came back from Veo as words across the picture. A plan locked before this rule can still name one; the video compiler leaves it out of the clip and reports it ([Providers and MCP](../architecture/providers-and-mcp.md)).
 
 ## Stage 9 — Keyframes first
 
@@ -239,9 +241,9 @@ How it works now (`kineto_project::preferences`, `kineto_core::preferences`):
 
 **What reads it.** Each kind of work reads the dimensions it can show, worded as one sentence ("The director's preferences, where the locked style allows: prefer …; avoid …"):
 
-- Shot planning (`shot-plan/3`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
+- Shot planning (`shot-plan/4`) reads every dimension between `<preferences>` and `</preferences>`, and favours them where the screenplay leaves the choice open.
 - Keyframes (`keyframe-prompt/4`) read lighting, framing, lens, colour, composition and performance, after the locked style.
-- Videos (`video-prompt/6`) read camera motion, lighting, colour, performance and pacing.
+- Videos (`video-prompt/7`) read camera motion, lighting, colour, performance and pacing.
 
 In a prompt, the preferences are the lowest-ranked part, the first cut when the prompt runs out of room.
 
