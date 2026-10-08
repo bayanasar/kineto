@@ -15,6 +15,7 @@ use crate::{
     fs::{ProjectFsError, ProjectPathError, ProjectRelativePath},
     manifest::{CanonicalProject, ProjectManifestError, ProjectStoreError},
     media::{MediaKind, MediaOwner, MediaRecord, MediaState},
+    revisions::RevisionError,
 };
 
 const SHOT_SCHEMA_VERSION: u32 = 1;
@@ -1487,13 +1488,26 @@ impl ShotWorkflow {
         Ok(())
     }
 
+    /// Discard the shot's candidates, selection and videos, a lock among
+    /// them. Its direction goes back to what the locked plan gives it, or
+    /// to the default for a shot no plan holds: opening the project writes
+    /// the plan's intent back over `shot.json`, so anything else would make
+    /// what is made after the reset stale on the next open.
     pub fn reset(&mut self, project: &CanonicalProject) -> Result<(), ShotWorkflowError> {
         self.ensure_mutation_allowed()?;
         project
             .validate_for_write()
             .map_err(ShotWorkflowError::Manifest)?;
         let mut next_shot = self.shot.clone();
-        next_shot.direction = ShotDirection::Reaction;
+        next_shot.direction = crate::shot_plan::planned_direction(project, &self.key)
+            .map_err(|error| match error {
+                RevisionError::Path(error) => ShotWorkflowError::Path(error),
+                RevisionError::Fs(error) => ShotWorkflowError::Fs(error),
+                RevisionError::Manifest(error) => ShotWorkflowError::Manifest(error),
+                RevisionError::Json(error) => ShotWorkflowError::Json(error),
+                _ => ShotWorkflowError::InvalidCanonicalState,
+            })?
+            .unwrap_or_default();
         let mut next_artifacts = self.artifacts.clone();
         supersede_active_shot_candidates(&mut next_artifacts)?;
         supersede_active_videos(&mut next_artifacts)?;
