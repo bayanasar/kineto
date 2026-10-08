@@ -1,6 +1,6 @@
 # ADR-0007: MCP Client for Director-Requested References
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 
 ## Context

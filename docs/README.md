@@ -45,7 +45,7 @@ This directory contains the product and technical design baseline for Kineto. It
 - [ADR-0003: Local Engine Security Boundary](adr/0003-local-engine-security-boundary.md) — desktop stdio/session portion superseded by ADR-0005; future network transport requirements remain relevant
 - [ADR-0004: Canonical Project State and Derived Local Index](adr/0004-canonical-project-state.md)
 - [ADR-0005: In-process Rust Engine with Typed Flutter FFI](adr/0005-in-process-rust-ffi.md)
-- [ADR-0006: Provider Plugins as Configured Local Processes](adr/0006-provider-plugins.md) — proposed
-- [ADR-0007: MCP Client for Director-Requested References](adr/0007-mcp-client-references.md) — proposed
+- [ADR-0006: Provider Plugins as Configured Local Processes](adr/0006-provider-plugins.md)
+- [ADR-0007: MCP Client for Director-Requested References](adr/0007-mcp-client-references.md)
 
 Accepted ADRs remain immutable records. A changed decision is documented by a superseding ADR rather than rewriting history.

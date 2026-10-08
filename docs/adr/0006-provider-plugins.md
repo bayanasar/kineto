@@ -1,6 +1,6 @@
 # ADR-0006: Provider Plugins as Configured Local Processes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 
 ## Context
