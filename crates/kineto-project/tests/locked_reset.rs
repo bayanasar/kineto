@@ -10,7 +10,7 @@ use kineto_project::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
     },
-    shot::{ShotDirection, ShotKey, ShotWorkflow},
+    shot::{ShotDirection, ShotKey, ShotWorkflow, ShotWorkflowError},
     shot_plan,
 };
 
@@ -164,4 +164,43 @@ fn reset_keeps_the_planned_direction_and_what_follows_stays_current() {
     assert!(!snapshot.stale);
     assert_eq!(snapshot.direction, ShotDirection::SpatialClarity);
     assert_eq!(snapshot, locked);
+}
+
+/// A planned shot's direction is the locked plan's, which opening the
+/// project writes back over `shot.json`. Another is refused and nothing is
+/// written; the planned one is accepted. A shot no plan holds still takes
+/// any direction.
+#[test]
+fn a_planned_shot_keeps_the_plans_direction() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/planned"),
+        &target,
+    );
+    let project = CanonicalProject::open(&target).unwrap();
+    let key = ShotKey::new("office_night", "office_night_01").unwrap();
+    let shot_json = target.join("scenes/office_night/shots/office_night_01/shot.json");
+    let before = fs::read(&shot_json).unwrap();
+    let mut shot = ShotWorkflow::load(&project, &key).unwrap();
+
+    assert!(matches!(
+        shot.set_direction(&project, ShotDirection::Tension),
+        Err(ShotWorkflowError::PlannedDirection)
+    ));
+    assert_eq!(fs::read(&shot_json).unwrap(), before);
+    assert_eq!(
+        shot.snapshot().unwrap().direction,
+        ShotDirection::SpatialClarity
+    );
+    shot.set_direction(&project, ShotDirection::SpatialClarity)
+        .unwrap();
+    assert_eq!(fs::read(&shot_json).unwrap(), before);
+
+    let bootstrap = temp.0.join("bootstrap");
+    let project = self::project(&bootstrap);
+    let mut shot = ShotWorkflow::load(&project, &ShotKey::bootstrap(1)).unwrap();
+    shot.set_direction(&project, ShotDirection::Tension)
+        .unwrap();
+    assert_eq!(shot.snapshot().unwrap().direction, ShotDirection::Tension);
 }

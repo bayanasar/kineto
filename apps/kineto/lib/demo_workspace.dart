@@ -314,6 +314,8 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onDirectionChanged: (direction) => _run(
         () => widget.project.setShotDirection(_activeShotIndex, direction),
       ),
+      // With a plan locked, every shot in play is one of its shots.
+      directionPlanned: widget.project.planning.lockedRevision != null,
       keyframesUnresolved: widget.project.keyframesUnresolved(_activeShotIndex),
       onGenerate: () => _run(
         () => widget.project.generateShotCandidates(_activeShotIndex),
@@ -384,6 +386,7 @@ class DemoWorkspaceView extends StatelessWidget {
     required this.activeShotIndex,
     required this.onShotChanged,
     required this.onDirectionChanged,
+    this.directionPlanned = false,
     required this.onGenerate,
     required this.onSelect,
     required this.onLock,
@@ -440,6 +443,10 @@ class DemoWorkspaceView extends StatelessWidget {
   final VoidCallback? onThemeToggle;
   final ValueChanged<int> onShotChanged;
   final ValueChanged<KinetoShotDirection> onDirectionChanged;
+
+  /// The active shot is one of the locked plan's, which gives its direction;
+  /// planning its scene again is how that changes.
+  final bool directionPlanned;
   final VoidCallback onGenerate;
   final ValueChanged<int> onSelect;
   final VoidCallback onLock;
@@ -677,7 +684,10 @@ class DemoWorkspaceView extends StatelessWidget {
                       Text(
                         shotSnapshot.locked
                             ? "Direction is frozen with this shot's locked selection."
-                            : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
+                            : directionPlanned
+                                ? "This shot's direction comes from the locked shot plan. To change it, plan "
+                                    'the scene again in Shot plan and say which direction you want.'
+                                : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
                       ),
                       const SizedBox(height: 12),
                       Wrap(
@@ -686,10 +696,11 @@ class DemoWorkspaceView extends StatelessWidget {
                         children: <Widget>[
                           for (final direction in KinetoShotDirection.values)
                             WabButton(
+                              key: ValueKey<String>('direction-${direction.wireName}'),
                               kind: direction == shotSnapshot.direction
                                   ? WabMaterialKind.seal
                                   : WabMaterialKind.zhuwen,
-                              onPressed: shotSnapshot.locked || blocked
+                              onPressed: shotSnapshot.locked || directionPlanned || blocked
                                   ? null
                                   : () => onDirectionChanged(direction),
                               child: Text(direction.label),

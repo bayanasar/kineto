@@ -611,6 +611,10 @@ final class KinetoProjectException implements Exception {
   /// bible entries.
   static const int invalidReference = 168;
 
+  /// The locked shot plan gives the shot another direction; plan the scene
+  /// again to change it.
+  static const int plannedDirection = 169;
+
   final int code;
   final String message;
 
@@ -1427,6 +1431,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'plugin_unavailable': 166,
   'mcp_not_allowed': 167,
   'invalid_reference': 168,
+  'planned_direction': 169,
   'panic': 199,
 };
 
@@ -1504,6 +1509,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   166: 'KINETO_IMAGE_PROVIDER or KINETO_VIDEO_PROVIDER names a plugin that is not registered, is disabled, or did not describe itself',
   167: 'That MCP server or tool is not registered, enabled and allowed in mcp.toml',
   168: 'A reference needs text, at most 20,000 characters, about the world or bible entries',
+  169: 'The shot\'s direction comes from the locked shot plan; plan the scene again to change it',
   199: 'Native project call failed unexpectedly',
 };
 

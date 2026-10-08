@@ -155,6 +155,7 @@ void main() {
       KinetoProjectException.pluginUnavailable: 'plugin_unavailable',
       KinetoProjectException.mcpNotAllowed: 'mcp_not_allowed',
       KinetoProjectException.invalidReference: 'invalid_reference',
+      KinetoProjectException.plannedDirection: 'planned_direction',
     };
     for (final MapEntry(key: code, value: name) in statuses.entries) {
       expect(code, contract.statuses[name], reason: name);
