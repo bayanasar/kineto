@@ -572,16 +572,16 @@ fn a_plugin_makes_keyframes_and_the_session_follows_it_for_speech() {
 
     let (session, _) = open(OpenRequest::Open { path: target }, provider);
     assert_eq!(
-        session.speech_provider().kind,
+        session.speech_provider().unwrap().kind,
         kineto_core::speech::SpeechProviderKind::Plugin
     );
-    assert!(session.speech_provider().ready);
+    assert!(session.speech_provider().unwrap().ready);
     assert_eq!(
-        session.video_provider().kind,
+        session.video_provider().unwrap().kind,
         kineto_core::video::VideoProviderKind::Plugin
     );
-    assert!(session.video_provider().ready);
-    assert_eq!(session.video_provider().clip_seconds, 6);
+    assert!(session.video_provider().unwrap().ready);
+    assert_eq!(session.video_provider().unwrap().clip_seconds, 6);
 }
 
 fn a_plugin_cut_off_after_taking_a_call_is_never_paid_again_unasked() {

@@ -900,7 +900,9 @@ pub unsafe extern "C" fn kineto_project_image_cost(
         let Some(session) = (unsafe { session_ref(session) }) else {
             return PROJECT_ERR_INVALID_ARGUMENT;
         };
-        let prices = session.image_prices();
+        let Some(prices) = session.image_prices() else {
+            return PROJECT_ERR_NOT_OPEN;
+        };
         let priced: Option<(usize, Price)> = match name(&IMAGE_COSTS, what) {
             Some("sample") => prices.sample.map(|price| (1, price)),
             Some("portrait") => prices.portrait.map(|price| (1, price)),

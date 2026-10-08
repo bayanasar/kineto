@@ -14,7 +14,8 @@ use kineto_keychain::{Keychain, KeychainError, KeychainFirst};
 use kineto_providers::secret::{EnvSecretSource, SecretSource, SecretString};
 
 /// Where a session's provider keys come from: the system's secure storage,
-/// then the environment.
+/// then the environment. A session calls this on its worker, never on the
+/// thread that opens it, since opening and reading the storage can wait.
 pub(crate) fn provider_keys() -> KeychainFirst<EnvSecretSource> {
     KeychainFirst {
         keychain: Keychain::open().ok(),
