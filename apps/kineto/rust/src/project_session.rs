@@ -1459,6 +1459,7 @@ fn source_error_code(error: &SourceError) -> i32 {
             PROJECT_ERR_INVALID_SOURCE
         }
         SourceError::Fs(_) => PROJECT_ERR_IO,
+        SourceError::Exhausted => PROJECT_ERR_GENERATION_OVERFLOW,
         SourceError::Manifest(error) => manifest_error_code(error),
         SourceError::InvalidManifest | SourceError::Path(_) | SourceError::Json(_) => {
             PROJECT_ERR_DOCUMENT_DAMAGED
@@ -1470,6 +1471,7 @@ fn revision_error_code(error: &RevisionError) -> i32 {
     match error {
         RevisionError::NotLatest { .. } => PROJECT_ERR_NOT_LATEST,
         RevisionError::InvalidDocument(_) => PROJECT_ERR_INVALID_DOCUMENT,
+        RevisionError::Exhausted => PROJECT_ERR_GENERATION_OVERFLOW,
         RevisionError::NoSuchRevision(_) | RevisionError::Superseded(_) => {
             PROJECT_ERR_INVALID_REVISION
         }
