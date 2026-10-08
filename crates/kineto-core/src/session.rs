@@ -1549,8 +1549,8 @@ struct Videos {
 
 impl Videos {
     /// Follow `job` on its own thread, with the provider it was submitted
-    /// to, until its video is on disk or failed. A MiniMax or Veo job waits
-    /// for a session with the key, a plugin's for a session that uses it.
+    /// to, until its video is on disk or failed. A MiniMax, Veo or Omni job
+    /// waits for a session with the key, a plugin's for a session that uses it.
     fn watch(&mut self, job: VideoJob, root: ProjectRoot) {
         if job.provider == video::DEMO_VIDEO_PROVIDER {
             self.spawn_watcher(LocalDemoVideos, job, root);
@@ -1567,13 +1567,18 @@ impl Videos {
                     let client = client.clone();
                     self.spawn_watcher(client, job, root);
                 }
+                VideoProvider::Omni(Some(client)) => {
+                    let client = client.clone();
+                    self.spawn_watcher(client, job, root);
+                }
                 VideoProvider::Plugin(plugin) => {
                     let videos = PluginVideos::new(Arc::clone(plugin));
                     self.spawn_watcher(videos, job, root);
                 }
                 VideoProvider::LocalDemo
                 | VideoProvider::Minimax(None)
-                | VideoProvider::Veo { client: None, .. } => {}
+                | VideoProvider::Veo { client: None, .. }
+                | VideoProvider::Omni(None) => {}
             }
         }
     }
@@ -1829,7 +1834,12 @@ impl Worker {
             } => self.with_shot(key, |project, _, shot| {
                 video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
             }),
-            VideoProvider::Minimax(None) | VideoProvider::Veo { client: None, .. } => {
+            VideoProvider::Omni(Some(client)) => self.with_shot(key, |project, _, shot| {
+                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
+            }),
+            VideoProvider::Minimax(None)
+            | VideoProvider::Veo { client: None, .. }
+            | VideoProvider::Omni(None) => {
                 return Err(SessionError::Generation(GenerationError::NotConfigured));
             }
             VideoProvider::Plugin(plugin) => {
@@ -1882,6 +1892,7 @@ impl Worker {
                     client: Some(_),
                     ..
                 }
+                | VideoProvider::Omni(Some(_))
                 | VideoProvider::Plugin(_)
         ) {
             providers.push(self.videos.provider.key());

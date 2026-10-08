@@ -237,8 +237,8 @@ dependencies = [
  "kineto-plugins",
  "kineto-project",
  "kineto-prompts",
+ "kineto-provider-gemini",
  "kineto-provider-minimax",
- "kineto-provider-veo",
  "kineto-providers",
  "libc",
  "serde",
@@ -324,7 +324,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kineto-provider-minimax"
+name = "kineto-provider-gemini"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -336,7 +336,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kineto-provider-veo"
+name = "kineto-provider-minimax"
 version = "0.1.0"
 dependencies = [
  "base64",

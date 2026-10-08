@@ -68,13 +68,14 @@ use kineto_project::{
     },
     shot_plan::shots_in_play,
 };
+use kineto_provider_gemini::{
+    omni::{self, InteractionState, OmniClient, OmniError, OmniRequest},
+    veo::{OperationState, PROVIDER as VEO_PROVIDER, VeoClient, VeoError, VeoModel, VeoRequest},
+};
 use kineto_provider_minimax::{
     MinimaxClient, MinimaxError, PROVIDER as MINIMAX_PROVIDER, SharedTransport, Transport,
     VIDEO_MODEL, VideoDuration, VideoRequest, VideoResolution, VideoTask, VideoTaskState,
     camera_command, sniff, video_capabilities,
-};
-use kineto_provider_veo::{
-    OperationState, PROVIDER as VEO_PROVIDER, VeoClient, VeoError, VeoModel, VeoRequest,
 };
 use kineto_providers::{
     AspectRatio, CameraControl, ImageFormat, Price, ReferenceRole, VideoCapabilities, VideoClip,
@@ -101,6 +102,11 @@ pub const VIDEO_PROVIDER: &str = "minimax-video";
 /// Provider key Veo video jobs are recorded under, whichever Veo model
 /// made them.
 pub const VEO_VIDEO_PROVIDER: &str = "veo-video";
+/// The name a session selects Gemini Omni by, as in
+/// `KINETO_VIDEO_PROVIDER=omni`.
+pub const OMNI_PROVIDER: &str = "omni";
+/// Provider key Gemini Omni video jobs are recorded under.
+pub const OMNI_VIDEO_PROVIDER: &str = "gemini-omni-video";
 /// Provider key the local demo's video jobs are recorded under.
 pub const DEMO_VIDEO_PROVIDER: &str = "local-demo-video";
 /// The model the local demo names: one bundled clip.
@@ -307,7 +313,7 @@ impl<T: Transport> VideoGenerator for MinimaxClient<T> {
     }
 }
 
-impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
+impl<T: kineto_provider_gemini::Transport> VideoGenerator for VeoClient<T> {
     type Error = VeoError;
 
     fn provider(&self) -> &str {
@@ -389,6 +395,85 @@ impl<T: kineto_provider_veo::Transport> VideoGenerator for VeoClient<T> {
     }
 
     fn certainly_not_accepted(&self, error: &VeoError) -> bool {
+        error.certainly_not_accepted()
+    }
+}
+
+impl<T: kineto_provider_gemini::Transport> VideoGenerator for OmniClient<T> {
+    type Error = OmniError;
+
+    fn provider(&self) -> &str {
+        OMNI_VIDEO_PROVIDER
+    }
+
+    fn model(&self) -> &str {
+        omni::MODEL
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        omni::capabilities()
+    }
+
+    /// Its length and frame shape, and the version of the words the
+    /// adapter adds to the prompt to bind the frames and say the length
+    /// ([`omni::text`]), which follow from them.
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!(
+            "duration={};resolution={}p;aspect={}:{};wording=1",
+            request.clip_seconds,
+            request.lines.unwrap_or(0),
+            request.aspect_ratio.width,
+            request.aspect_ratio.height
+        )
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, OmniError> {
+        let first_frame = request
+            .first_frame
+            .clone()
+            .ok_or(OmniError::InvalidRequest("Omni needs a first frame"))?;
+        if !request.references.is_empty() {
+            return Err(OmniError::InvalidRequest(
+                "kineto sends Omni no reference images",
+            ));
+        }
+        if request.lines != Some(omni::LINES) {
+            return Err(OmniError::InvalidRequest("Omni is asked for 720p"));
+        }
+        OmniClient::submit(
+            self,
+            &OmniRequest {
+                prompt: request.prompt.clone(),
+                first_frame,
+                last_frame: request.last_frame.clone(),
+                seconds: request.clip_seconds,
+                aspect_ratio: request.aspect_ratio,
+            },
+        )
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, OmniError> {
+        Ok(match self.interaction(task.as_str())? {
+            InteractionState::Running => TaskState::Pending,
+            InteractionState::Completed => TaskState::Succeeded {
+                file: task.as_str().to_owned(),
+            },
+        })
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, OmniError> {
+        self.video(file)
+    }
+
+    fn class(&self, error: &OmniError) -> ErrorClass {
+        error.class()
+    }
+
+    fn ended_class(&self, error: &OmniError) -> ErrorClass {
+        error.ended_class()
+    }
+
+    fn certainly_not_accepted(&self, error: &OmniError) -> bool {
         error.certainly_not_accepted()
     }
 }
@@ -493,11 +578,15 @@ pub enum VideoProvider {
     /// submitted are not followed and no new one is submitted.
     Minimax(Option<VideoClient>),
     /// Google Veo, one model of it. Paid. Without a client, as for
-    /// MiniMax.
+    /// MiniMax. Google shuts its models down on 2026-10-22
+    /// ([`kineto_provider_gemini::veo::SHUTDOWN`]); [`Self::Omni`] replaces
+    /// it.
     Veo {
         model: VeoModel,
         client: Option<VeoVideoClient>,
     },
+    /// Google Gemini Omni Flash. Paid. Without a client, as for MiniMax.
+    Omni(Option<OmniVideoClient>),
     /// A plugin the user registered (ADR-0006), as it described itself.
     /// One that declares no video makes none.
     Plugin(Arc<PluginProvider>),
@@ -509,6 +598,7 @@ pub enum VideoProviderKind {
     LocalDemo,
     Minimax,
     Veo,
+    Omni,
     Plugin,
 }
 
@@ -559,6 +649,12 @@ impl VideoProvider {
                         .map(|key| VeoClient::shared(key, model)),
                 }))
             }
+            Some(name) if name == OMNI_PROVIDER => Ok(Some(Self::Omni(
+                secrets
+                    .api_key(omni::PROVIDER)
+                    .map_err(ProviderSelectionError::Secret)?
+                    .map(OmniClient::shared),
+            ))),
             Some(other) => match selected_plugin(other) {
                 Some(selected) => selected.map(|plugin| Some(Self::Plugin(plugin))),
                 None => Err(ProviderSelectionError::Unknown(other.to_owned())),
@@ -572,6 +668,7 @@ impl VideoProvider {
             Self::LocalDemo => VideoProviderKind::LocalDemo,
             Self::Minimax(_) => VideoProviderKind::Minimax,
             Self::Veo { .. } => VideoProviderKind::Veo,
+            Self::Omni(_) => VideoProviderKind::Omni,
             Self::Plugin(_) => VideoProviderKind::Plugin,
         }
     }
@@ -583,6 +680,7 @@ impl VideoProvider {
             Self::LocalDemo => DEMO_VIDEO_PROVIDER.to_owned(),
             Self::Minimax(_) => VIDEO_PROVIDER.to_owned(),
             Self::Veo { .. } => VEO_VIDEO_PROVIDER.to_owned(),
+            Self::Omni(_) => OMNI_VIDEO_PROVIDER.to_owned(),
             Self::Plugin(plugin) => plugin::video_key(plugin.key()),
         }
     }
@@ -593,6 +691,7 @@ impl VideoProvider {
             Self::LocalDemo => demo_video_capabilities(),
             Self::Minimax(_) => video_capabilities(),
             Self::Veo { model, .. } => model.capabilities(),
+            Self::Omni(_) => omni::capabilities(),
             Self::Plugin(plugin) => plugin.video_capabilities().cloned().unwrap_or_default(),
         }
     }
@@ -610,6 +709,7 @@ impl VideoProvider {
                 Self::LocalDemo => true,
                 Self::Minimax(client) => client.is_some(),
                 Self::Veo { client, .. } => client.is_some(),
+                Self::Omni(client) => client.is_some(),
                 Self::Plugin(plugin) => plugin.video_capabilities().is_some(),
             },
             clip_cost_micros: price,
@@ -1949,7 +2049,9 @@ pub fn in_flight(project: &CanonicalProject, provider: &str) -> Result<InFlight,
 pub type VideoClient = MinimaxClient<SharedTransport>;
 
 /// The Veo client type the session uses.
-pub type VeoVideoClient = VeoClient<kineto_provider_veo::SharedTransport>;
+pub type VeoVideoClient = VeoClient<kineto_provider_gemini::SharedTransport>;
+/// A Gemini Omni client shareable between threads.
+pub type OmniVideoClient = OmniClient<kineto_provider_gemini::SharedTransport>;
 
 #[cfg(test)]
 mod tests {
@@ -2042,6 +2144,15 @@ mod tests {
             })
         ));
         assert!(VideoProvider::select(Some("veo:ultra"), &with_key).is_err());
+        assert!(matches!(
+            VideoProvider::select(Some("omni"), &with_key).unwrap(),
+            Some(VideoProvider::Omni(Some(_)))
+        ));
+        assert!(matches!(
+            VideoProvider::select(Some("omni"), &without_key).unwrap(),
+            Some(VideoProvider::Omni(None))
+        ));
+        assert!(VideoProvider::select(Some("omni:pro"), &with_key).is_err());
         assert!(VideoProvider::select(Some("sora"), &with_key).is_err());
     }
 
@@ -2062,6 +2173,25 @@ mod tests {
                 cost_micros: Some(400_000)
             })
         );
+    }
+
+    #[test]
+    fn omni_is_priced_by_the_second_it_is_asked_for_and_ready_only_with_its_key() {
+        let omni = VideoProvider::Omni(None);
+        assert_eq!(omni.key(), OMNI_VIDEO_PROVIDER);
+        assert_eq!(omni.kind(), VideoProviderKind::Omni);
+        let info = omni.info();
+        assert!(!info.ready);
+        assert_eq!((info.clip_seconds, info.clip_cost_micros), (4, 405_440));
+        // Any whole second from 4 to 10 is asked for, at its token price.
+        assert_eq!(
+            omni.estimate(Some(5.0), None),
+            Some(VideoEstimate {
+                clip_seconds: 5,
+                cost_micros: Some(506_800)
+            })
+        );
+        assert_eq!(omni.estimate(Some(30.0), None).unwrap().clip_seconds, 10);
     }
 
     #[test]

@@ -10,7 +10,7 @@ members = [
     "crates/kineto-project",
     "crates/kineto-prompts",
     "crates/kineto-provider-minimax",
-    "crates/kineto-provider-veo",
+    "crates/kineto-provider-gemini",
     "crates/kineto-providers",
     "crates/kineto-schema-contracts",
     "crates/kineto-testkit",

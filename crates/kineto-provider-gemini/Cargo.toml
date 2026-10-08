@@ -1,5 +1,5 @@
 [package]
-name = "kineto-provider-veo"
+name = "kineto-provider-gemini"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
