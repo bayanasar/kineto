@@ -526,18 +526,27 @@ impl<'project> JobRuntime<'project> {
         Ok(record)
     }
 
+    /// The intent recorded for `job_id`, if any, whichever provider made it,
+    /// as when the director chose another provider after an attempt.
+    pub fn load_recorded(&self, job_id: &JobId) -> Result<Option<RuntimeIntent>, JobRuntimeError> {
+        let store = IntentStore::new(self.project);
+        let _guard = lock_intent_store();
+        store.load_optional(job_id)
+    }
+
     /// Give up on a prepared intent whose last provider call failed, so the
     /// same job can be prepared afresh.
     ///
     /// Only a `Prepared` intent with a recorded failure is retired: it never
-    /// produced a result, so nothing is lost. Returns whether an intent was
-    /// retired. The reservation is first returned to `Reserved`, then the
+    /// produced a result, so nothing is lost, whichever provider made it; a
+    /// director who chose another provider after a failure asks again with
+    /// it. Returns whether an intent was retired. The reservation is first returned to `Reserved`, then the
     /// intent is removed, then the reservation: a crash after the first step
     /// leaves the intent in place and the next lookup reactivates it, and a
     /// crash after the second leaves a `Reserved` mapping without an intent,
     /// which the next lookup clears.
     pub fn retire_failed(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
-        self.retire_where(job_id, |record| {
+        self.retire_where(job_id, Owner::Anyone, |record| {
             record.intent.state() == IntentState::Prepared && record.last_error_class.is_some()
         })
     }
@@ -549,7 +558,8 @@ impl<'project> JobRuntime<'project> {
     /// caller asserts the provider reported that job as failed, so there is
     /// no result to lose. The removal order is that of [`Self::retire_failed`].
     pub fn retire_remote_failure(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
-        self.retire_where(job_id, |record| {
+        // Only the provider that holds the remote job can report it failed.
+        self.retire_where(job_id, Owner::This, |record| {
             record.intent.state() == IntentState::Invoked
                 && record.intent.provider_job_id().is_some()
         })
@@ -561,11 +571,11 @@ impl<'project> JobRuntime<'project> {
     ///
     /// The provider may have accepted, and charged for, that attempt. Only a
     /// caller acting on a person's explicit decision to risk paying twice
-    /// may retire it. An intent that was never attempted, or that has a
-    /// result, is not retired. The removal order is that of
-    /// [`Self::retire_failed`].
+    /// may retire it, whichever provider made it. An intent that was never
+    /// attempted, or that has a result, is not retired. The removal order is
+    /// that of [`Self::retire_failed`].
     pub fn retire_unresolved(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
-        self.retire_where(job_id, |record| {
+        self.retire_where(job_id, Owner::Anyone, |record| {
             record.intent.state() == IntentState::Prepared && record.attempts > 0
         })
     }
@@ -575,7 +585,7 @@ impl<'project> JobRuntime<'project> {
     /// was made, so nothing is lost. The removal order is that of
     /// [`Self::retire_failed`].
     pub fn retire_unattempted(&self, job_id: &JobId) -> Result<bool, JobRuntimeError> {
-        self.retire_where(job_id, |record| {
+        self.retire_where(job_id, Owner::Anyone, |record| {
             record.intent.state() == IntentState::Prepared && record.attempts == 0
         })
     }
@@ -583,6 +593,7 @@ impl<'project> JobRuntime<'project> {
     fn retire_where(
         &self,
         job_id: &JobId,
+        owner: Owner,
         eligible: impl FnOnce(&RuntimeIntent) -> bool,
     ) -> Result<bool, JobRuntimeError> {
         self.ensure_writable()?;
@@ -593,18 +604,22 @@ impl<'project> JobRuntime<'project> {
         let Some(record) = store.load_optional(job_id)? else {
             return Ok(false);
         };
-        self.ensure_provider(&record)?;
+        if owner == Owner::This {
+            self.ensure_provider(&record)?;
+        }
         if !eligible(&record) {
             return Ok(false);
         }
+        // The reservation is kept under the provider that made the intent.
+        let provider = &record.provider;
         let key = record.intent.idempotency_key();
-        if let Some(mut reservation) = store.load_reservation(&self.provider, key)? {
+        if let Some(mut reservation) = store.load_reservation(provider, key)? {
             validate_reservation_record(&reservation, &record)?;
             reservation.state = StoredReservationState::Reserved;
             store.save_reservation(&reservation)?;
         }
         store.remove_intent(job_id)?;
-        store.remove_reservation(&self.provider, key)?;
+        store.remove_reservation(provider, key)?;
         Ok(true)
     }
 
@@ -794,6 +809,15 @@ impl<'project> JobRuntime<'project> {
             Err(JobRuntimeError::ProviderMismatch)
         }
     }
+}
+
+/// Whose intent a retirement may remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    /// Only one this runtime's provider made.
+    This,
+    /// One any provider made: the job's slot is what is being freed.
+    Anyone,
 }
 
 fn derive_idempotency_key(

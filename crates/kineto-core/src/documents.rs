@@ -554,7 +554,10 @@ pub fn generate<B: LlmBackend, T: DeserializeOwned, D: Serialize>(
 
 /// Make way for asking for `job_id` again. An earlier attempt that may have
 /// been answered, and charged for, without its answer being kept is refused
-/// as unresolved; one that failed is retired.
+/// as unresolved; one that failed is retired. An attempt made with another
+/// provider, as when the director chose another model after it, is settled
+/// the same way; whether that provider charges per call is not known here,
+/// so it is taken to.
 fn settle_earlier_attempt(
     project: &CanonicalProject,
     runtime: &JobRuntime<'_>,
@@ -562,8 +565,8 @@ fn settle_earlier_attempt(
     artifact_id: &ArtifactId,
     billing: Billing,
 ) -> Result<(), GenerationError> {
-    if billing.charged_per_call()
-        && let Some(record) = runtime.load(job_id)?
+    if let Some(record) = runtime.load_recorded(job_id)?
+        && (billing.charged_per_call() || record.provider() != runtime.provider())
         && record.intent().state() == IntentState::Prepared
         && record.attempts() > 0
         && !refused(project, artifact_id, record.intent().input_hash())
