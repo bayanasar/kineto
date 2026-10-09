@@ -57,4 +57,5 @@ The director's choices live in `<config>/kineto/providers.toml`, beside `plugins
 - Any provider a director can reach is usable: a built-in, a plugin, any OpenAI-compatible server with its key, or an agent CLI they already pay for.
 - Kimi Code no longer gets a sandboxed data root, so the user's hooks run and long requests are refused rather than truncated. The trade is no second sign-in. Claude Code and Codex lose nothing.
 - Each agent's flags are measured against one version. A CLI that renames or drops a flag fails the call with its own words rather than running with tools. The isolation is re-measured when one is upgraded.
+- The macOS app leaves the App Sandbox (both entitlements files). In it, the app's home is its container, so an agent CLI it starts cannot see the director's sign-in, and it had no outgoing network either, so no network provider worked on macOS. Kineto is distributed directly, not through the App Store, so it runs with the director's own user rights, as on Linux and Windows. An App Store build would need another way to reach the agents.
 - The native ABI gains provider settings and agent discovery, and the key calls change shape (v47).
