@@ -81,7 +81,9 @@ class KinetoWork extends ChangeNotifier {
     try {
       await action();
     } on KinetoProjectException catch (failure) {
-      problem = failure.message;
+      // The status says what kind of failure; the reason, when there is
+      // one, says what the provider or the engine actually said.
+      problem = failure.explanation;
       if (failure.code == retryCode && retry != null) offer = retry;
     } on Object catch (failure) {
       problem = failure.toString();

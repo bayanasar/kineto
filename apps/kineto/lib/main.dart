@@ -292,14 +292,13 @@ class _KinetoAppState extends State<KinetoApp> {
     return MaterialApp(
       title: 'Kineto',
       theme: WabTheme.materialTheme(lightTheme: !_darkMode),
-      home: _home(),
-      // The status bar is outside every workspace, so work under way is in
-      // sight whichever is open.
-      builder: (context, navigator) => KinetoWorkScope(
-        work: _work,
+      // Any text can be selected and copied, an error included. The status
+      // bar is outside every workspace, so work under way is in sight
+      // whichever is open.
+      home: SelectionArea(
         child: Column(
           children: <Widget>[
-            Expanded(child: navigator ?? const SizedBox.shrink()),
+            Expanded(child: _home()),
             KinetoStatusBar(
               work: _work,
               pageLabel: (page) => _labels[KinetoWorkspace.values.byName(page)] ?? page,
@@ -308,6 +307,8 @@ class _KinetoAppState extends State<KinetoApp> {
           ],
         ),
       ),
+      // Above every route, so a button in a dialog shows its work too.
+      builder: (context, navigator) => KinetoWorkScope(work: _work, child: navigator ?? const SizedBox.shrink()),
     );
   }
 

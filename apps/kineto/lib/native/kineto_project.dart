@@ -1483,7 +1483,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   118: 'Legacy shot hashes need migration before this shot can change',
   119: 'Project cannot be locked for single-writer access on this filesystem',
   120: 'Project session is not open',
-  121: 'Generation did not finish. Finished candidates are kept; generate again to retry the rest',
+  121: 'The request did not finish; anything it finished is kept, and asking again retries the rest',
   122: 'KINETO_IMAGE_PROVIDER names an image provider this Kineto build does not have',
   123: 'The image provider has no API key configured',
   124: 'This shot has no written intent to generate from',

@@ -4,8 +4,8 @@ import 'package:wabisabi/wabisabi.dart';
 import 'kineto_work.dart';
 
 /// Kineto's button: a small plain block of colour. Gold for the action a
-/// screen is for and for the option chosen, grey for everything else. In
-/// the dark theme it stands in a faint lamplight.
+/// screen is for and for the option chosen, grey for everything else. It
+/// casts a soft shadow by day and stands in lamplight by night.
 ///
 /// The request a button starts shows on it, with the project's work rather
 /// than the page's, so it is still there after the director looks at
@@ -64,14 +64,32 @@ class _KinetoButtonState extends State<KinetoButton> {
       (true, false, true) => Color.lerp(base, WabTheme.paperWhite, .12)!,
       _ => base,
     };
-    final glow = dark && (enabled || busy)
-        ? <BoxShadow>[
-            BoxShadow(
-              color: WabTheme.accentColor.withValues(alpha: _hovered && enabled ? .30 : .14),
-              blurRadius: _hovered && enabled ? 14 : 9,
-            ),
-          ]
-        : null;
+    // Lifted off the page: a soft shadow below it by day, lamplight behind
+    // it by night. Hovering lifts it further; pressing sets it down.
+    final lift = !(enabled || busy)
+        ? 0.0
+        : _pressed
+            ? .5
+            : _hovered
+                ? 1.6
+                : 1.0;
+    final glow = lift == 0
+        ? null
+        : dark
+            ? <BoxShadow>[
+                BoxShadow(
+                  color: WabTheme.accentColor.withValues(alpha: (.30 * lift).clamp(0, .55)),
+                  blurRadius: 8 + 5 * lift,
+                  spreadRadius: .5 * lift,
+                ),
+              ]
+            : <BoxShadow>[
+                BoxShadow(
+                  color: WabTheme.textColor.withValues(alpha: (.20 * lift).clamp(0, .34)),
+                  blurRadius: 3 + 3 * lift,
+                  offset: Offset(0, 1 + 1.4 * lift),
+                ),
+              ];
     final style = (Theme.of(context).textTheme.labelLarge ?? const TextStyle()).copyWith(
       color: ink,
       fontSize: 13.5,

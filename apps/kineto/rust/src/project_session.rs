@@ -175,15 +175,22 @@ impl DartPort {
 /// What a provider said when it refused or failed. Its status cannot say
 /// whether to change the request, wait, or top up the account. Project
 /// records refused through a generation are named by their status already.
+/// A failure of the engine's own bookkeeping says what it was, too: its
+/// status is shared by every request that did not finish.
 fn provider_reason(error: &SessionError) -> Option<CString> {
-    let SessionError::Generation(GenerationError::Provider { source, .. }) = error else {
-        return None;
+    let text = match error {
+        SessionError::Generation(GenerationError::Provider { source, .. }) => {
+            if source.is::<StyleError>() || source.is::<CastError>() || source.is::<RevisionError>()
+            {
+                return None;
+            }
+            source.to_string()
+        }
+        SessionError::Generation(GenerationError::Runtime(source)) => source.to_string(),
+        SessionError::Generation(GenerationError::Unexpected(what)) => (*what).to_owned(),
+        _ => return None,
     };
-    if source.is::<StyleError>() || source.is::<CastError>() || source.is::<RevisionError>() {
-        return None;
-    }
-    let text: String = source
-        .to_string()
+    let text: String = text
         .chars()
         .filter(|character| *character != '\0')
         .take(MAX_REASON_CHARS)
