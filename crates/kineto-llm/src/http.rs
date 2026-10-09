@@ -5,7 +5,7 @@
 //! Failures are reduced to a kind; no library error text, which could carry
 //! request details, is kept.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, net::IpAddr, sync::Arc, time::Duration};
 
 use kineto_providers::secret::SecretString;
 
@@ -59,6 +59,11 @@ impl Transport for SharedTransport {
 }
 
 /// Whether `url` may be used: HTTPS, or HTTP to a loopback host.
+///
+/// The host must be `localhost` or a loopback IP address written as one.
+/// A name that only starts like one (`127.0.0.1.example`) may resolve
+/// anywhere, and an authority with user information (`localhost:80@host`)
+/// is refused, because the host is what follows the `@`.
 #[must_use]
 pub fn is_permitted(url: &str) -> bool {
     if url.starts_with("https://") {
@@ -68,12 +73,18 @@ pub fn is_permitted(url: &str) -> bool {
         return false;
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains(['@', '\\']) {
+        return false;
+    }
     let host = if let Some(bracketed) = authority.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or_default()
     } else {
         authority.split(':').next().unwrap_or_default()
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    host == "localhost"
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[derive(Clone)]
@@ -160,6 +171,7 @@ mod tests {
             "https://api.moonshot.ai/v1/chat/completions",
             "http://localhost:11434/v1/chat/completions",
             "http://127.0.0.1:8080/v1",
+            "http://127.0.0.2:8080/v1",
             "http://[::1]:8080/v1",
         ] {
             assert!(is_permitted(permitted), "{permitted}");
@@ -168,6 +180,12 @@ mod tests {
             "http://api.moonshot.ai/v1",
             "http://localhost.evil.test/v1",
             "http://127.0.0.1.evil.test/v1",
+            "http://127.attacker.example/v1",
+            "http://localhost:80@evil.test/v1",
+            "http://127.0.0.1@evil.test/v1",
+            "http://localhost\\@evil.test/v1",
+            "http://[::ffff:8.8.8.8]/v1",
+            "http://10.0.0.2/v1",
             "ftp://localhost/v1",
             "localhost:8080",
         ] {

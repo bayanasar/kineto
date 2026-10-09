@@ -28,6 +28,7 @@
 use std::{
     collections::BTreeMap,
     fmt, fs, io,
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
@@ -210,21 +211,34 @@ impl ProviderSettings {
     }
 }
 
-/// HTTPS anywhere, or HTTP to a loopback address.
+/// HTTPS anywhere, or HTTP to a loopback address: the rule the requests
+/// themselves are held to (`kineto_llm::http::is_permitted`), so an address
+/// accepted here is never refused when used.
+///
+/// The host must be `localhost` or a loopback IP address written as one.
+/// A name that only starts like one (`127.attacker.example`) may resolve
+/// anywhere and would receive the key in the clear. An authority with user
+/// information (`localhost:80@host`) is refused, because the host is what
+/// follows the `@`.
 fn acceptable_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("https://") {
-        return lower.len() > "https://".len();
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty();
     }
-    let Some(rest) = lower.strip_prefix("http://") else {
+    let Some(rest) = url.strip_prefix("http://") else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = match host.strip_prefix('[') {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains(['@', '\\']) {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
         Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
-        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+        None => authority.split(':').next().unwrap_or_default(),
     };
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    host == "localhost"
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// Where the user's provider settings are, beside their plugins.
@@ -281,6 +295,7 @@ claude-code = "/opt/claude/bin/claude"
             "https://api.example.test/v1",
             "http://localhost:11434/v1",
             "http://127.0.0.1:8080",
+            "http://127.0.0.2:8080",
             "http://[::1]:8080/v1",
         ] {
             settings.set(Setting::EndpointUrl, url).unwrap();
@@ -290,6 +305,17 @@ claude-code = "/opt/claude/bin/claude"
             "ftp://x",
             "https://",
             "http://10.0.0.2/v1",
+            // Names that only look local may resolve anywhere.
+            "http://127.attacker.example/v1",
+            "http://127.0.0.1.attacker.example/v1",
+            "http://localhost.attacker.example/v1",
+            // The host is what follows the user information.
+            "http://localhost:80@attacker.example/v1",
+            "http://127.0.0.1@attacker.example/v1",
+            "http://localhost\\@attacker.example/v1",
+            // Refused when used, so refused when chosen.
+            "HTTPS://api.example.test/v1",
+            "http://LOCALHOST:11434/v1",
         ] {
             assert!(settings.set(Setting::EndpointUrl, url).is_err(), "{url}");
         }
