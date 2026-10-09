@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
 import 'native/kineto_engine.dart';
 
 /// What the bible can be told about: the world, and each entry.
@@ -151,9 +152,8 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
         runSpacing: 8,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: <Widget>[
-          WabButton(
+          KinetoButton(
             key: const ValueKey<String>('load-tools'),
-            kind: WabMaterialKind.paper,
             onPressed: widget.loadingTools ? null : widget.onLoadTools,
             child: Text(widget.loadingTools ? 'Asking the servers for their tools' : 'Show the tools I can ask'),
           ),
@@ -165,7 +165,7 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
     final tool = _chosenTool;
     if (server == null || tool == null) {
       return const Text(
-        'No registered MCP server offers a tool it allows. Register one in mcp.toml; see Plugins & tools.',
+        'No registered MCP server offers a tool it allows. Register one in mcp.toml; see Settings.',
       );
     }
     final arguments = _arguments(tool);
@@ -243,9 +243,9 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
         const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
-          child: WabButton(
+          child: KinetoButton(
             key: const ValueKey<String>('ask-reference'),
-            kind: WabMaterialKind.seal,
+            primary: true,
             onPressed: widget.enabled && arguments != null
                 ? () => widget.onAsk(
                       server.id,
@@ -311,9 +311,9 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
             runSpacing: 8,
             children: editing
                 ? <Widget>[
-                    WabButton(
+                    KinetoButton(
                       key: ValueKey<String>('save-reference-${reference.id}'),
-                      kind: WabMaterialKind.seal,
+                      primary: true,
                       onPressed: widget.enabled && _edit.text.trim().isNotEmpty
                           ? () {
                               widget.onEdit(reference.id, _edit.text);
@@ -322,17 +322,15 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
                           : null,
                       child: const Text('Save'),
                     ),
-                    WabButton(
+                    KinetoButton(
                       key: ValueKey<String>('cancel-reference-${reference.id}'),
-                      kind: WabMaterialKind.paper,
                       onPressed: () => setState(() => _editing = null),
                       child: const Text('Cancel'),
                     ),
                   ]
                 : <Widget>[
-                    WabButton(
+                    KinetoButton(
                       key: ValueKey<String>('edit-reference-${reference.id}'),
-                      kind: WabMaterialKind.paper,
                       onPressed: widget.enabled
                           ? () => setState(() {
                                 _editing = reference.id;
@@ -341,9 +339,8 @@ class _ReferencesPanelState extends State<ReferencesPanel> {
                           : null,
                       child: const Text('Edit'),
                     ),
-                    WabButton(
+                    KinetoButton(
                       key: ValueKey<String>('remove-reference-${reference.id}'),
-                      kind: WabMaterialKind.zhuwen,
                       onPressed: widget.enabled ? () => _confirmRemove(context, reference) : null,
                       child: const Text('Remove'),
                     ),

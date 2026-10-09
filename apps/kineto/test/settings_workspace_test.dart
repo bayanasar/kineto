@@ -160,7 +160,7 @@ void main() {
     expect(stored, <String, String>{'minimax': 'sk-live-0123'});
     expect(tester.widget<TextField>(input).controller!.text, isEmpty, reason: 'the key is not kept on screen');
     expect(find.textContaining('sk-live'), findsNothing);
-    expect(find.text('MiniMax key saved. Projects opened from now on use it.'), findsOneWidget);
+    expect(find.text('MiniMax key saved. Your project uses it as soon as you go back to it.'), findsOneWidget);
     expect(find.text('Replace'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey<String>('key-delete-minimax')));
@@ -253,7 +253,7 @@ void main() {
     expect(settings.value(KinetoProviderSetting.endpointKey), 'deepseek');
     expect(asked.last, contains('deepseek'), reason: "the server's key is listed under the name it was given");
     expect(find.text('deepseek · The OpenAI-compatible server chosen for documents'), findsOneWidget);
-    expect(find.text('Saved. Projects opened from now on use it.'), findsOneWidget);
+    expect(find.text('Saved. Your project uses it as soon as you go back to it.'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey<String>('choose-image')));
     await tester.pumpAndSettle();

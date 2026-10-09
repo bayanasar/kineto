@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'handoff_workspace.dart';
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -23,6 +25,7 @@ typedef SpeechCost = int? Function(String text, int count);
 
 class VoicesWorkspaceScreen extends StatefulWidget {
   const VoicesWorkspaceScreen({
+    required this.work,
     required this.project,
     this.navigation,
     this.isDarkMode = true,
@@ -37,6 +40,9 @@ class VoicesWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<VoicesWorkspaceScreen> createState() => _VoicesWorkspaceScreenState();
 }
@@ -45,17 +51,22 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
   late final KinetoLanguageModel _model;
   late KinetoVoices _voices;
   int? _recommendCost;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
+  static const String _page = 'voices';
+  int _finished = 0;
 
-  /// Asks again for what the last command asked for although its paid
-  /// request may already have been charged; offered only after that refusal.
-  VoidCallback? _resubmit;
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _resubmit => widget.work.retryOn(_page);
+
 
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _model = widget.project.languageModel;
     _read();
   }
@@ -67,33 +78,24 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
 
   // Speech is made on the project's worker; this isolate only waits. One
   // command at a time keeps the page honest about what it shows.
-  Future<void> _run(Future<void> Function() action, String label, {Future<void> Function()? resubmit}) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _resubmit = null;
-    });
-    String? error;
-    VoidCallback? offer;
-    try {
-      await action();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
-        offer = () => _run(resubmit, label);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
+  void _workChanged() {
     if (!mounted) return;
     setState(() {
-      _working = false;
-      _read();
-      _error = error;
-      _resubmit = offer;
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
     });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() action, String label, {Future<void> Function()? resubmit}) async {
+    await widget.work.run(_page, label, action, retry: resubmit);
   }
 
   @override
@@ -232,12 +234,7 @@ class VoicesWorkspaceView extends StatelessWidget {
           title: const Text('Kineto'),
           action: onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -248,13 +245,6 @@ class VoicesWorkspaceView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (working) ...<Widget>[
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
                   _providerPanel(),
                   const SizedBox(height: 20),
@@ -281,9 +271,8 @@ class VoicesWorkspaceView extends StatelessWidget {
                 'answer reaching Kineto. Check your account before asking again.',
               ),
               const SizedBox(height: 12),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('resubmit-paid'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: onResubmit,
                 child: const Text('Ask again'),
               ),
@@ -325,15 +314,13 @@ class VoicesWorkspaceView extends StatelessWidget {
             spacing: 12,
             runSpacing: 8,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('load-voices'),
-                kind: WabMaterialKind.paper,
                 onPressed: _idle && voices.speechReady ? onLoadVoices : null,
                 child: Text(voices.voices.isEmpty ? 'List voices · free' : 'List again · free'),
               ),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('recommend-voices'),
-                kind: WabMaterialKind.paper,
                 onPressed: _idle && model.ready && voices.characters.isNotEmpty ? onRecommend : null,
                 child: Text('Recommend voices · ${documentCostLabel(model, recommendCostMicros)}'),
               ),
@@ -535,9 +522,8 @@ class _VoiceCastingCardState extends State<VoiceCastingCard> {
             ),
           if (!character.locked && selected.isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('lock-voice-$id'),
-              kind: WabMaterialKind.zhuwen,
               onPressed: widget.enabled ? widget.onLock : null,
               child: Text('Lock ${selected.first.voiceName}'),
             ),
@@ -588,9 +574,8 @@ class _VoiceCastingCardState extends State<VoiceCastingCard> {
                     ],
                     onChanged: widget.enabled ? (value) => setState(() => _delivery = value) : null,
                   ),
-                  WabButton(
+                  KinetoButton(
                     key: ValueKey<String>('audition-$id'),
-                    kind: WabMaterialKind.paper,
                     onPressed: widget.enabled && _chosen.isNotEmpty
                         ? () => widget.onAudition(
                               <KinetoVoiceChoice>[
@@ -737,9 +722,8 @@ class _LineDubbingCardState extends State<LineDubbingCard> {
             ),
           if (!line.locked && selected.isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('lock-line-$_key'),
-              kind: WabMaterialKind.zhuwen,
               onPressed: widget.enabled ? widget.onLock : null,
               child: const Text('Lock the chosen take'),
             ),
@@ -779,9 +763,8 @@ class _LineDubbingCardState extends State<LineDubbingCard> {
                     ],
                     onChanged: widget.enabled ? (value) => setState(() => _delivery = value) : null,
                   ),
-                  WabButton(
+                  KinetoButton(
                     key: ValueKey<String>('dub-$_key'),
-                    kind: WabMaterialKind.paper,
                     onPressed: widget.enabled
                         ? () => widget.onDub(
                               DubRequest(

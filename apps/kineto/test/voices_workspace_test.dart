@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:kineto/voices_workspace.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -130,7 +131,7 @@ void main() {
     expect(find.text('Grave Man · calm · 1.4 s · “This is how I sound.”'), findsOneWidget);
 
     // Nothing chosen, nothing to pay for.
-    expect(tester.widget<WabButton>(find.byKey(_key('audition-filmmaker'))).onPressed, isNull);
+    expect(tester.widget<KinetoButton>(find.byKey(_key('audition-filmmaker'))).onPressed, isNull);
     await _tap(tester, find.byKey(_key('choose-filmmaker-bright_woman')));
     await _tap(tester, find.byKey(_key('choose-filmmaker-calm_woman')));
     // Two voices saying the 20-character default line.

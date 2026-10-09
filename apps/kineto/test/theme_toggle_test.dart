@@ -1,30 +1,38 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/demo_workspace.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 void main() {
-  testWidgets('workspace toggles WabiSabi dark and light palettes', (tester) async {
+  testWidgets('the sun and moon key switches the WabiSabi palettes and stays small', (tester) async {
     await tester.pumpWidget(const _ThemeHarness());
 
     expect(WabTheme.isDark, isTrue);
-    var toggle = tester.widget<WabToggleButton>(find.byType(WabToggleButton));
-    expect(toggle.isOn, isTrue);
-    expect(toggle.pair, WabTogglePair.sealZhuwen);
-    expect(
-      tester.widgetList<WabButton>(find.byType(WabButton)).any(
-            (button) => button.kind == WabMaterialKind.zhuwen,
-          ),
-      isTrue,
-    );
+    expect(find.byIcon(Icons.light_mode_outlined), findsOneWidget, reason: 'the sun leads out of the dark');
+    expect(find.byIcon(Icons.dark_mode_outlined), findsNothing);
+    final size = tester.getSize(find.byKey(const ValueKey<String>('theme-toggle')));
+    expect(size.width, lessThan(40), reason: 'an app bar stretches its actions; the key keeps its size');
+    expect(size.height, lessThan(40));
 
-    await tester.tap(find.text('Dark mode'));
+    await tester.tap(find.byKey(const ValueKey<String>('theme-toggle')));
     await tester.pump();
 
     expect(WabTheme.isDark, isFalse);
-    toggle = tester.widget<WabToggleButton>(find.byType(WabToggleButton));
-    expect(toggle.isOn, isFalse);
+    expect(find.byIcon(Icons.dark_mode_outlined), findsOneWidget, reason: 'the moon leads back');
+    expect(find.byIcon(Icons.light_mode_outlined), findsNothing);
+  });
+
+  testWidgets('buttons are plain blocks of colour, gold for the chosen one', (tester) async {
+    await tester.pumpWidget(const _ThemeHarness());
+
+    expect(find.byType(WabButton), findsNothing, reason: 'no textured material');
+    expect(find.byType(KinetoButton), findsWidgets);
+    final chosen = tester.widget<KinetoButton>(find.byKey(const ValueKey<String>('direction-reaction')));
+    expect(chosen.primary, isTrue, reason: 'the chosen direction is gold');
+    final other = tester.widget<KinetoButton>(find.byKey(const ValueKey<String>('direction-tension')));
+    expect(other.primary, isFalse);
   });
 }
 

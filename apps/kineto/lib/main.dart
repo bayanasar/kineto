@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show AppExitResponse;
 
@@ -6,6 +7,8 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'demo_workspace.dart';
 import 'handoff_workspace.dart';
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'preferences_workspace.dart';
 import 'production_workspace.dart';
@@ -33,16 +36,27 @@ Future<void> run({Future<String?> Function()? pickImage}) async {
       ),
     );
   } on KinetoProjectException catch (error) {
-    engine.close();
     // A project Kineto cannot hold as its only writer is never opened for
     // writing; explain why instead of opening it or crashing.
     switch (error.code) {
       case KinetoProjectException.busy:
+        engine.close();
         runApp(KinetoProjectBusyApp(projectPath: _demoProjectPath()));
       case KinetoProjectException.lockUnavailable:
+        engine.close();
         runApp(KinetoProjectLockUnavailableApp(projectPath: _demoProjectPath()));
       default:
-        rethrow;
+        // A provider chosen in settings that cannot be used here, such as
+        // an agent that is not installed, must not keep the director out
+        // of the settings that change it.
+        runApp(
+          KinetoApp(
+            engine: engine,
+            openProblem: error.message,
+            exportFolder: [Directory(_demoProjectPath()).parent.path, 'exports'].join(Platform.pathSeparator),
+            pickImage: pickImage ?? pickImageFile,
+          ),
+        );
     }
   } on Object {
     engine.close();
@@ -115,14 +129,23 @@ String _demoProjectPath() {
 class KinetoApp extends StatefulWidget {
   const KinetoApp({
     required this.engine,
-    required this.project,
+    this.project,
+    this.openProblem,
+    this.openProject = _openDemoProject,
     this.exportFolder = '',
     this.pickImage = pickImageFile,
     super.key,
   });
 
   final KinetoEngine engine;
-  final KinetoProjectSession project;
+
+  /// The open project; `null` when it could not be opened, and then
+  /// [openProblem] says why.
+  final KinetoProjectSession? project;
+  final String? openProblem;
+
+  /// Opens the project again, which chooses its providers again.
+  final Future<KinetoProjectSession> Function() openProject;
 
   /// Asks the director for an image to import.
   final Future<String?> Function() pickImage;
@@ -142,19 +165,85 @@ class _KinetoAppState extends State<KinetoApp> {
   bool _darkMode = true;
   KinetoWorkspace _workspace = KinetoWorkspace.screenplay;
   late final AppLifecycleListener _lifecycle;
+  KinetoProjectSession? _project;
+  String? _openProblem;
+  bool _reopening = false;
+
+  /// A provider choice, a key or the configuration changed in settings
+  /// since the project was opened; its providers are chosen when it opens.
+  bool _choicesChanged = false;
+  Timer? _waitForIdle;
+
+  /// The open project's requests, shown on their buttons and in the status
+  /// bar whatever workspace is open.
+  KinetoWork? _work;
 
   @override
   void initState() {
     super.initState();
+    _project = widget.project;
+    _openProblem = widget.openProblem;
+    if (_project != null) _work = KinetoWork();
+    if (_project == null) _workspace = KinetoWorkspace.settings;
     // Close the session before the process exits so its worker stops
     // reporting and the project's writer lock is released cleanly.
     _lifecycle = AppLifecycleListener(onExitRequested: _closeNative);
   }
 
   Future<AppExitResponse> _closeNative() async {
-    widget.project.close();
+    _waitForIdle?.cancel();
+    _project?.close();
     widget.engine.close();
     return AppExitResponse.exit;
+  }
+
+  void _show(KinetoWorkspace workspace) {
+    final leavingSettings = _workspace == KinetoWorkspace.settings && workspace != KinetoWorkspace.settings;
+    setState(() => _workspace = workspace);
+    if (leavingSettings && (_choicesChanged || (_project == null && !_reopening))) _reopen();
+  }
+
+  /// Open the project again so it uses what was chosen in settings. Work
+  /// under way finishes first: a choice never cuts a request off. Videos
+  /// already submitted are watched again by the new session.
+  Future<void> _reopen() async {
+    _waitForIdle?.cancel();
+    if (_reopening) return;
+    final current = _project;
+    if (current != null && (current.working || (_work?.busy ?? false))) {
+      _waitForIdle = Timer(const Duration(seconds: 1), _reopen);
+      return;
+    }
+    final finished = _work;
+    setState(() {
+      _reopening = true;
+      _choicesChanged = false;
+      _project = null;
+      _work = null;
+      _openProblem = null;
+    });
+    // The pages and the status bar let go of it as this frame rebuilds them.
+    WidgetsBinding.instance.addPostFrameCallback((_) => finished?.dispose());
+    current?.close();
+    KinetoProjectSession? opened;
+    String? problem;
+    try {
+      opened = await widget.openProject();
+    } on KinetoProjectException catch (error) {
+      problem = error.message;
+    } on Object catch (error) {
+      problem = error.toString();
+    }
+    if (!mounted) {
+      opened?.close();
+      return;
+    }
+    setState(() {
+      _reopening = false;
+      _project = opened;
+      if (opened != null) _work = KinetoWork();
+      _openProblem = problem;
+    });
   }
 
   void _toggleTheme() {
@@ -166,28 +255,33 @@ class _KinetoAppState extends State<KinetoApp> {
   @override
   void dispose() {
     _lifecycle.dispose();
-    widget.project.close();
+    _waitForIdle?.cancel();
+    _project?.close();
+    _work?.dispose();
     widget.engine.close();
     super.dispose();
   }
 
+  static const Map<KinetoWorkspace, String> _labels = <KinetoWorkspace, String>{
+    KinetoWorkspace.screenplay: 'Story & screenplay',
+    KinetoWorkspace.production: 'Bible, style & cast',
+    KinetoWorkspace.voices: 'Voices & dialogue',
+    KinetoWorkspace.shotPlan: 'Shot plan',
+    KinetoWorkspace.shots: 'Shots',
+    KinetoWorkspace.handoff: 'Handoff',
+    KinetoWorkspace.preferences: 'Preferences',
+    KinetoWorkspace.settings: 'Settings',
+  };
+
   Widget _navigation() => Wrap(
-        spacing: 12,
+        spacing: 8,
+        runSpacing: 8,
         children: <Widget>[
-          for (final (workspace, label) in <(KinetoWorkspace, String)>[
-            (KinetoWorkspace.screenplay, 'Story & screenplay'),
-            (KinetoWorkspace.production, 'Bible, style & cast'),
-            (KinetoWorkspace.voices, 'Voices & dialogue'),
-            (KinetoWorkspace.shotPlan, 'Shot plan'),
-            (KinetoWorkspace.shots, 'Shots'),
-            (KinetoWorkspace.handoff, 'Handoff'),
-            (KinetoWorkspace.preferences, 'Preferences'),
-            (KinetoWorkspace.settings, 'Plugins & tools'),
-          ])
-            WabButton(
+          for (final MapEntry(key: workspace, value: label) in _labels.entries)
+            KinetoButton(
               key: ValueKey<String>('workspace-${workspace.name}'),
-              kind: workspace == _workspace ? WabMaterialKind.seal : WabMaterialKind.zhuwen,
-              onPressed: () => setState(() => _workspace = workspace),
+              primary: workspace == _workspace,
+              onPressed: () => _show(workspace),
               child: Text(label),
             ),
         ],
@@ -198,52 +292,98 @@ class _KinetoAppState extends State<KinetoApp> {
     return MaterialApp(
       title: 'Kineto',
       theme: WabTheme.materialTheme(lightTheme: !_darkMode),
-      home: switch (_workspace) {
+      home: _home(),
+      // The status bar is outside every workspace, so work under way is in
+      // sight whichever is open.
+      builder: (context, navigator) => KinetoWorkScope(
+        work: _work,
+        child: Column(
+          children: <Widget>[
+            Expanded(child: navigator ?? const SizedBox.shrink()),
+            KinetoStatusBar(
+              work: _work,
+              pageLabel: (page) => _labels[KinetoWorkspace.values.byName(page)] ?? page,
+              onShow: (page) => _show(KinetoWorkspace.values.byName(page)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _home() {
+    if (_workspace == KinetoWorkspace.settings) {
+      return SettingsWorkspaceScreen(
+        navigation: _navigation(),
+        isDarkMode: _darkMode,
+        onThemeToggle: _toggleTheme,
+        onChanged: () => _choicesChanged = true,
+      );
+    }
+    final project = _project;
+    final work = _work;
+    if (project == null || work == null) {
+      return ProjectUnavailableScreen(
+        opening: _reopening,
+        problem: _openProblem,
+        navigation: _navigation(),
+        isDarkMode: _darkMode,
+        onThemeToggle: _toggleTheme,
+      );
+    }
+    // A project opened again is a new session: every workspace starts over
+    // with it rather than keep the closed one.
+    return KeyedSubtree(
+      key: ObjectKey(project),
+      child: switch (_workspace) {
         KinetoWorkspace.screenplay => ScreenplayWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.production => ProductionWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             pickImage: widget.pickImage,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.voices => VoicesWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.preferences => PreferencesWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.shotPlan => ShotPlanWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.shots => DemoWorkspaceScreen(
             engine: widget.engine,
-            project: widget.project,
+            project: project,
+            work: work,
             navigation: _navigation(),
             isDarkMode: _darkMode,
             onThemeToggle: _toggleTheme,
           ),
-        KinetoWorkspace.settings => SettingsWorkspaceScreen(
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
-          ),
+        KinetoWorkspace.settings => throw StateError('settings are built above'),
         KinetoWorkspace.handoff => HandoffWorkspaceScreen(
-            project: widget.project,
+            project: project,
+            work: work,
             exportFolder: widget.exportFolder,
             navigation: _navigation(),
             isDarkMode: _darkMode,

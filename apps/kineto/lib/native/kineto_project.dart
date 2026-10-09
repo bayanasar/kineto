@@ -1063,6 +1063,11 @@ final class KinetoProjectSession implements Finalizable {
             _kinetoProjectShotMigrateLegacyHashes(_handle, shotIndex, token),
       );
 
+  /// Whether a command is queued or running, so closing now would cut it
+  /// off. Videos that finish in the background are not commands: a session
+  /// opened again watches them.
+  bool get working => _port.owing;
+
   /// Close the session. Commands that have not started are discarded and their
   /// futures fail; the command already running finishes before this returns,
   /// and the project's single-writer lock is released.
@@ -1133,6 +1138,9 @@ final class _SessionPort {
   // ignore: unused_field
   Object? _owner;
   final Map<int, Completer<void>> _pending = <int, Completer<void>>{};
+
+  /// An answer is still owed for a command.
+  bool get owing => _pending.isNotEmpty;
   final List<KinetoRecovery> recoveries = <KinetoRecovery>[];
   int _nextToken = 1;
   bool _closed = false;

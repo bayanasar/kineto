@@ -50,7 +50,7 @@ Plugins and MCP servers read their secrets from the secure storage first, as ADR
 
 ### Providers are chosen in settings
 
-The director's choices live in `<config>/kineto/providers.toml`, beside `plugins.toml`. The file holds the image, video, speech and language-model choices, the OpenAI-compatible server's address, model and key name (never the key), and where an agent is when Kineto would not find it. Settings show and change it: each agent as installed or not found, each plugin by what it makes, and the server's fields. A session reads the file when it opens. An environment variable that is set still wins, for development, and settings say so. The file keeps what a newer build wrote that this one does not know.
+The director's choices live in `<config>/kineto/providers.toml`, beside `plugins.toml`. The file holds the image, video, speech and language-model choices, the OpenAI-compatible server's address, model and key name (never the key), and where an agent is when Kineto would not find it. Settings show and change it: each agent as installed or not found, each plugin by what it makes, and the server's fields. A session reads the file when it opens, so when the director leaves settings having changed a choice, a key or the plugin configuration, the open project is opened again; work under way finishes first, and a choice that cannot be used on this computer is explained in the app, with settings still reachable, rather than keeping it from starting. An environment variable that is set still wins, for development, and settings say so. The file keeps what a newer build wrote that this one does not know.
 
 ## Consequences
 

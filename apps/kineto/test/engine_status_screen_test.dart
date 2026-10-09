@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/demo_workspace.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -172,8 +173,8 @@ void main() {
             onReset: () {},
           ),
         );
-    WabButton direction(KinetoShotDirection direction) =>
-        tester.widget<WabButton>(find.byKey(ValueKey<String>('direction-${direction.wireName}')));
+    KinetoButton direction(KinetoShotDirection direction) =>
+        tester.widget<KinetoButton>(find.byKey(ValueKey<String>('direction-${direction.wireName}')));
 
     await tester.pumpWidget(workspace(directionPlanned: true));
     for (final value in KinetoShotDirection.values) {

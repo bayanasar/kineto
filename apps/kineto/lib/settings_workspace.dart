@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -21,6 +22,7 @@ class SettingsWorkspaceScreen extends StatefulWidget {
     this.navigation,
     this.isDarkMode = true,
     this.onThemeToggle,
+    this.onChanged,
     super.key,
   });
 
@@ -44,6 +46,10 @@ class SettingsWorkspaceScreen extends StatefulWidget {
   final Widget? navigation;
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
+
+  /// Told when a choice, a key or the configuration changed, so the open
+  /// project takes it up when the director goes back to it.
+  final VoidCallback? onChanged;
 
   @override
   State<SettingsWorkspaceScreen> createState() => _SettingsWorkspaceScreenState();
@@ -150,10 +156,11 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
       _settingWorking = true;
       _settingNote = null;
     });
-    String note = 'Saved. Projects opened from now on use it.';
+    String note = 'Saved. Your project uses it as soon as you go back to it.';
     try {
       for (final MapEntry(key: setting, value: value) in choices.entries) {
         await widget.setSetting(setting, value);
+        widget.onChanged?.call();
       }
     } on Object catch (error) {
       note = _problem(error);
@@ -177,6 +184,7 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
     String note;
     try {
       await change();
+      widget.onChanged?.call();
       note = done;
     } on Object catch (error) {
       note = _problem(error);
@@ -204,18 +212,22 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
         onStoreKey: (slot, key) => _changeKey(
           slot.name,
           () => widget.storeKey(slot.name, key),
-          '${slot.label} key saved. Projects opened from now on use it.',
+          '${slot.label} key saved. Your project uses it as soon as you go back to it.',
         ),
         onDeleteKey: (slot) => _changeKey(
           slot.name,
           () => widget.deleteKey(slot.name),
-          '${slot.label} key removed. Projects opened from now on do without it.',
+          '${slot.label} key removed. Your project does without it as soon as you go back to it.',
         ),
         plugins: _plugins,
         pluginsProblem: _pluginsProblem,
         servers: _servers,
         serversProblem: _serversProblem,
-        onReload: _load,
+        onReload: () {
+          // plugins.toml and mcp.toml name providers too.
+          widget.onChanged?.call();
+          _load();
+        },
         navigation: widget.navigation,
         isDarkMode: widget.isDarkMode,
         onThemeToggle: widget.onThemeToggle,
@@ -289,12 +301,7 @@ class SettingsWorkspaceView extends StatelessWidget {
           title: const Text('Kineto'),
           action: onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -315,9 +322,8 @@ class SettingsWorkspaceView extends StatelessWidget {
                   const SizedBox(height: 12),
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: WabButton(
+                    child: KinetoButton(
                       key: const ValueKey<String>('settings-reload'),
-                      kind: WabMaterialKind.paper,
                       onPressed: plugins == null && pluginsProblem == null ? null : onReload,
                       child: const Text('Read the configuration again'),
                     ),
@@ -626,17 +632,16 @@ class _KeyRowState extends State<_KeyRow> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('key-save-${slot.name}'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: ready ? _save : null,
                   child: Text(stored ? 'Replace' : 'Save'),
                 ),
                 if (stored) ...<Widget>[
                   const SizedBox(width: 12),
-                  WabButton(
+                  KinetoButton(
                     key: ValueKey<String>('key-delete-${slot.name}'),
-                    kind: WabMaterialKind.zhuwen,
                     onPressed: widget.idle && widget.onDelete != null ? widget.onDelete : null,
                     child: const Text('Remove'),
                   ),
@@ -839,7 +844,7 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
           const Text(
             'Choose who makes each part. The agent tools you already use are found on this computer '
             'and run under your own sign-in: Kineto starts them without tools and never reads their '
-            'sign-in. Projects opened from now on use these choices.',
+            'sign-in. Your project uses these choices as soon as you go back to it.',
           ),
           if (widget.problem != null) ...<Widget>[const SizedBox(height: 12), Text(widget.problem!)],
           if (settings?.problem != null) ...<Widget>[
@@ -885,9 +890,9 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
-                child: WabButton(
+                child: KinetoButton(
                   key: const ValueKey<String>('server-save'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: ready
                       ? () => widget.onChoose!(<KinetoProviderSetting, String>{
                             KinetoProviderSetting.endpointUrl: _url.text,

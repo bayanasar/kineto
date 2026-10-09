@@ -4,6 +4,8 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'references_panel.dart';
 import 'screenplay_workspace.dart';
@@ -53,6 +55,7 @@ Future<String?> pickImageFile() async {
 
 class ProductionWorkspaceScreen extends StatefulWidget {
   const ProductionWorkspaceScreen({
+    required this.work,
     required this.project,
     this.navigation,
     this.isDarkMode = true,
@@ -75,6 +78,9 @@ class ProductionWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<ProductionWorkspaceScreen> createState() => _ProductionWorkspaceScreenState();
 }
@@ -85,13 +91,16 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   late KinetoProduction _production;
   late bool _screenplayLocked;
   int? _bibleCost;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
+  static const String _page = 'production';
+  int _finished = 0;
 
-  /// Asks again for what the last command asked for although its paid
-  /// request may already have been charged; offered only after that refusal.
-  VoidCallback? _resubmit;
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _resubmit => widget.work.retryOn(_page);
+
   String? _editingEntry;
   late List<KinetoReference> _references;
   List<KinetoMcpServer>? _servers;
@@ -101,6 +110,8 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _model = widget.project.languageModel;
     final images = widget.project.imageProvider;
     _prices = ProductionPrices(
@@ -122,39 +133,30 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   // The bible, the style and the cast are made on the project's worker; this
   // isolate only waits. One command at a time keeps the page honest about
   // what it shows.
+  void _workChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
   Future<void> _run(
     Future<void> Function() action,
     String label, {
     VoidCallback? onDone,
     Future<void> Function()? resubmit,
   }) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _resubmit = null;
-    });
-    String? error;
-    VoidCallback? offer;
-    try {
-      await action();
-      onDone?.call();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
-        offer = () => _run(resubmit, label, onDone: onDone);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
-    if (!mounted) return;
-    setState(() {
-      _working = false;
-      _read();
-      _error = error;
-      _resubmit = offer;
-    });
+    final done = await widget.work.run(_page, label, action, retry: resubmit);
+    if (done && mounted) onDone?.call();
   }
 
   Future<void> _loadTools() async {
@@ -248,8 +250,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       ),
       onEditEntry: (key) => setState(() {
         _editingEntry = key;
-        _error = null;
-        _resubmit = null;
+        widget.work.dismiss();
       }),
       onSaveEntry: (edit) => _run(
         () => project.saveBibleEntry(_production.bible!.revision, edit),
@@ -401,12 +402,7 @@ class ProductionWorkspaceView extends StatelessWidget {
           title: const Text('Kineto'),
           action: onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -417,13 +413,6 @@ class ProductionWorkspaceView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (working) ...<Widget>[
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
                   if (production.damaged) ...<Widget>[
                     const WabPanel(
@@ -476,9 +465,8 @@ class ProductionWorkspaceView extends StatelessWidget {
                 'answer reaching Kineto. Check your account before asking again.',
               ),
               const SizedBox(height: 12),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('resubmit-paid'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: working ? null : onResubmit,
                 child: const Text('Ask again · may pay twice'),
               ),
@@ -542,16 +530,16 @@ class ProductionWorkspaceView extends StatelessWidget {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('write-bible'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: _idle && model.ready && screenplayLocked ? onWriteBible : null,
                 child: Text(bible == null ? 'Write the bible' : 'Write it again'),
               ),
               if (bible != null && !production.bibleIsLocked)
-                WabButton(
+                KinetoButton(
                   key: const ValueKey<String>('lock-bible'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: _idle ? () => onLockBible(bible.revision) : null,
                   child: Text('Lock revision ${bible.revision}'),
                 ),
@@ -582,9 +570,8 @@ class ProductionWorkspaceView extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('edit-${_entryKey(entry)}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: _idle ? () => onEditEntry(_entryKey(entry)) : null,
                   child: const Text('Edit'),
                 ),
@@ -630,7 +617,7 @@ class ProductionWorkspaceView extends StatelessWidget {
             const SizedBox(height: 8),
             const Text(
               'Style samples need an image provider that makes images: choose one under Settings, '
-              'Providers, and save its key if it takes one, then reopen the project.',
+              'Providers, and save its key if it takes one.',
             ),
           ],
           const SizedBox(height: 12),
@@ -639,9 +626,8 @@ class ProductionWorkspaceView extends StatelessWidget {
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('import-style'),
-                kind: WabMaterialKind.paper,
                 onPressed: _idle ? onImportStyle : null,
                 child: const Text('Import an image as a style'),
               ),
@@ -691,31 +677,28 @@ class ProductionWorkspaceView extends StatelessWidget {
             runSpacing: 8,
             children: <Widget>[
               if (!selected && !rejected)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('select-${sample.id}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: _idle ? () => onSelectStyle(sample.id) : null,
                   child: const Text('Select'),
                 ),
               if (selected && !locked)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('lock-${sample.id}'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: _idle ? () => onLockStyle(sample.id) : null,
                   child: const Text('Lock style'),
                 ),
               if (!rejected && !locked)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('reject-${sample.id}'),
-                  kind: WabMaterialKind.zhuwen,
                   onPressed: _idle ? () => onRejectStyle(sample.id) : null,
                   child: const Text('Reject'),
                 ),
               // An imported image has no preset to sample again from.
               if (!sample.imported)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('refine-${sample.id}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: _idle && prices.makesImages ? () => _refineDialog(context, sample) : null,
                   child: const Text('Refine'),
                 ),
@@ -838,9 +821,9 @@ class _StyleComposerState extends State<StyleComposer> {
           runSpacing: 8,
           children: <Widget>[
             for (final option in widget.presets)
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('preset-${option.id}'),
-                kind: option.id == preset ? WabMaterialKind.seal : WabMaterialKind.paper,
+                primary: option.id == preset,
                 onPressed: () => setState(() => _preset = option.id),
                 child: Text(option.name),
               ),
@@ -856,9 +839,9 @@ class _StyleComposerState extends State<StyleComposer> {
         const SizedBox(height: 12),
         Align(
           alignment: Alignment.centerLeft,
-          child: WabButton(
+          child: KinetoButton(
             key: const ValueKey<String>('sample-style'),
-            kind: WabMaterialKind.seal,
+            primary: true,
             onPressed: widget.enabled && preset != null
                 ? () {
                     final note = _note.text.trim();
@@ -954,9 +937,9 @@ class _CastingCardState extends State<CastingCard> {
                   onChanged: (size) => setState(() => _have = size ?? _have),
                 ),
               ),
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('audition-$id'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: enabled && toMake > 0 && widget.prices.makesImages
                     ? () => widget.onAudition(_have)
                     : null,
@@ -967,9 +950,8 @@ class _CastingCardState extends State<CastingCard> {
                 ),
               ),
               if (widget.onImport != null)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('import-portrait-$id'),
-                  kind: WabMaterialKind.paper,
                   onPressed: enabled ? widget.onImport : null,
                   child: const Text('Import a portrait · free'),
                 ),
@@ -1003,18 +985,18 @@ class _CastingCardState extends State<CastingCard> {
               runSpacing: 12,
               children: <Widget>[
                 if (missing > 0)
-                  WabButton(
+                  KinetoButton(
                     key: ValueKey<String>('pack-$id'),
-                    kind: WabMaterialKind.seal,
+                    primary: true,
                     onPressed: enabled && widget.prices.makesImages
                         ? () => widget.onMakePack(const <KinetoCastImageKind>[])
                         : null,
                     child: Text('Make the pack · ${imageCostLabel(timesImages(widget.prices.portrait, missing))}'),
                   ),
                 if (missing <= 0 && character.lockedPortrait != selected.id)
-                  WabButton(
+                  KinetoButton(
                     key: ValueKey<String>('lock-cast-$id'),
-                    kind: WabMaterialKind.seal,
+                    primary: true,
                     onPressed: enabled ? widget.onLock : null,
                     child: Text('Lock ${character.name}'),
                   ),
@@ -1044,16 +1026,14 @@ class _CastingCardState extends State<CastingCard> {
             runSpacing: 8,
             children: <Widget>[
               if (!selected && !rejected)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('select-${portrait.id}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: widget.enabled ? () => widget.onSelectPortrait(portrait.id) : null,
                   child: const Text('Select'),
                 ),
               if (!rejected && !locked)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('reject-${portrait.id}'),
-                  kind: WabMaterialKind.zhuwen,
                   onPressed: widget.enabled ? () => widget.onRejectPortrait(portrait.id) : null,
                   child: const Text('Reject'),
                 ),
@@ -1078,9 +1058,8 @@ class _CastingCardState extends State<CastingCard> {
             ),
             const SizedBox(height: 4),
             Text(reference.kind.label),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('remake-${widget.character.id}-${reference.kind.wireName}'),
-              kind: WabMaterialKind.paper,
               onPressed: widget.enabled && widget.prices.makesImages
                   ? () => _confirmRemake(reference.kind)
                   : null,
@@ -1208,14 +1187,13 @@ class _BibleEntryEditorState extends State<BibleEntryEditor> {
             Wrap(
               spacing: 12,
               children: <Widget>[
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('save-entry-$id'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: widget.working ? null : _save,
                   child: const Text('Save as a new revision'),
                 ),
-                WabButton(
-                  kind: WabMaterialKind.zhuwen,
+                KinetoButton(
                   onPressed: widget.working ? null : widget.onCancel,
                   child: const Text('Cancel'),
                 ),

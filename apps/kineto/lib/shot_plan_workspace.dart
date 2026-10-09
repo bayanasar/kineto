@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -49,6 +51,7 @@ class RecipeStrip extends StatelessWidget {
 
 class ShotPlanWorkspaceScreen extends StatefulWidget {
   const ShotPlanWorkspaceScreen({
+    required this.work,
     required this.project,
     this.navigation,
     this.isDarkMode = true,
@@ -61,6 +64,9 @@ class ShotPlanWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<ShotPlanWorkspaceScreen> createState() => _ShotPlanWorkspaceScreenState();
 }
@@ -70,15 +76,22 @@ class _ShotPlanWorkspaceScreenState extends State<ShotPlanWorkspaceScreen> {
   late KinetoPlanning _planning;
   late bool _ready;
   int? _cost;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
-  VoidCallback? _resubmit;
+  static const String _page = 'shotPlan';
+  int _finished = 0;
+
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _resubmit => widget.work.retryOn(_page);
   String? _editingScene;
 
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _model = widget.project.languageModel;
     _read();
   }
@@ -90,39 +103,30 @@ class _ShotPlanWorkspaceScreenState extends State<ShotPlanWorkspaceScreen> {
     _cost = widget.project.documentCostMicros(KinetoDocumentKind.shotPlan);
   }
 
+  void _workChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
   Future<void> _run(
     Future<void> Function() action,
     String label, {
     VoidCallback? onDone,
     Future<void> Function()? resubmit,
   }) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _resubmit = null;
-    });
-    String? error;
-    VoidCallback? offer;
-    try {
-      await action();
-      onDone?.call();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
-        offer = () => _run(resubmit, label, onDone: onDone);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
-    if (!mounted) return;
-    setState(() {
-      _working = false;
-      _read();
-      _error = error;
-      _resubmit = offer;
-    });
+    final done = await widget.work.run(_page, label, action, retry: resubmit);
+    if (done && mounted) onDone?.call();
   }
 
   @override
@@ -154,8 +158,7 @@ class _ShotPlanWorkspaceScreenState extends State<ShotPlanWorkspaceScreen> {
       ),
       onEdit: (scene) => setState(() {
         _editingScene = scene;
-        _error = null;
-        _resubmit = null;
+        widget.work.dismiss();
       }),
       onSave: (scene) => _run(
         () => project.saveScenePlan(_planning.revision!, scene),
@@ -220,12 +223,7 @@ class ShotPlanWorkspaceView extends StatelessWidget {
           title: const Text('Kineto'),
           action: onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -238,13 +236,6 @@ class ShotPlanWorkspaceView extends StatelessWidget {
                   if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
                   RecipeStrip(steps: planning.steps, problem: planning.workflowProblem),
                   const SizedBox(height: 20),
-                  if (working) ...<Widget>[
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
                   _planPanel(context),
                   for (final scene in planning.scenes) ...<Widget>[
@@ -288,9 +279,8 @@ class ShotPlanWorkspaceView extends StatelessWidget {
                 'answer reaching Kineto. Check your account before asking again.',
               ),
               const SizedBox(height: 12),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('resubmit-plan'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: working ? null : onResubmit,
                 child: const Text('Ask again · may pay twice'),
               ),
@@ -334,16 +324,16 @@ class ShotPlanWorkspaceView extends StatelessWidget {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('plan-shots'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: _idle && ready && model.ready ? onPlan : null,
                 child: Text(planning.revision == null ? 'Plan the shots' : 'Plan them again'),
               ),
               if (planning.revision != null && !planning.planLocked)
-                WabButton(
+                KinetoButton(
                   key: const ValueKey<String>('lock-plan'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: _idle ? () => onLock(planning.revision!) : null,
                   child: Text('Lock revision ${planning.revision}'),
                 ),
@@ -370,15 +360,13 @@ class ShotPlanWorkspaceView extends StatelessWidget {
               spacing: 12,
               runSpacing: 12,
               children: <Widget>[
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('edit-scene-${scene.sceneId}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: _idle ? () => onEdit(scene.sceneId) : null,
                   child: const Text('Edit shots'),
                 ),
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('replan-${scene.sceneId}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: _idle && model.ready ? () => _replanDialog(context, scene.sceneId) : null,
                   child: const Text('Plan this scene again'),
                 ),
@@ -641,14 +629,13 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
             Wrap(
               spacing: 12,
               children: <Widget>[
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('save-scene-plan-${widget.scene.sceneId}'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: widget.working ? null : _save,
                   child: const Text('Save as a new revision'),
                 ),
-                WabButton(
-                  kind: WabMaterialKind.zhuwen,
+                KinetoButton(
                   onPressed: widget.working ? null : widget.onCancel,
                   child: const Text('Cancel'),
                 ),
@@ -670,27 +657,23 @@ class _ScenePlanEditorState extends State<ScenePlanEditor> {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
             Text('${index + 1}. $id', style: Theme.of(context).textTheme.titleSmall),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('shot-$id-up'),
-              kind: WabMaterialKind.paper,
               onPressed: index > 0 ? () => _move(index, -1) : null,
               child: const Text('Earlier'),
             ),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('shot-$id-down'),
-              kind: WabMaterialKind.paper,
               onPressed: index < _shots.length - 1 ? () => _move(index, 1) : null,
               child: const Text('Later'),
             ),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('shot-$id-add-after'),
-              kind: WabMaterialKind.paper,
               onPressed: () => _addAfter(index),
               child: const Text('Add a shot after'),
             ),
-            WabButton(
+            KinetoButton(
               key: ValueKey<String>('shot-$id-remove'),
-              kind: WabMaterialKind.zhuwen,
               onPressed: _shots.length > 1 ? () => _remove(index) : null,
               child: const Text('Remove'),
             ),

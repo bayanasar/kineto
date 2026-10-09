@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -10,6 +12,7 @@ const int choicesWorthAsking = 5;
 
 class PreferencesWorkspaceScreen extends StatefulWidget {
   const PreferencesWorkspaceScreen({
+    required this.work,
     required this.project,
     this.navigation,
     this.isDarkMode = true,
@@ -24,6 +27,9 @@ class PreferencesWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<PreferencesWorkspaceScreen> createState() => _PreferencesWorkspaceScreenState();
 }
@@ -32,14 +38,21 @@ class _PreferencesWorkspaceScreenState extends State<PreferencesWorkspaceScreen>
   late final KinetoLanguageModel _model;
   late KinetoVoices _voices;
   int? _suggestCost;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
-  VoidCallback? _resubmit;
+  static const String _page = 'preferences';
+  int _finished = 0;
+
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _resubmit => widget.work.retryOn(_page);
 
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _model = widget.project.languageModel;
     _read();
   }
@@ -49,33 +62,24 @@ class _PreferencesWorkspaceScreenState extends State<PreferencesWorkspaceScreen>
     _suggestCost = widget.project.documentCostMicros(KinetoDocumentKind.preferenceSuggestions);
   }
 
-  Future<void> _run(Future<void> Function() action, String label, {Future<void> Function()? resubmit}) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _resubmit = null;
-    });
-    String? error;
-    VoidCallback? offer;
-    try {
-      await action();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
-        offer = () => _run(resubmit, label);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
+  void _workChanged() {
     if (!mounted) return;
     setState(() {
-      _working = false;
-      _read();
-      _error = error;
-      _resubmit = offer;
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
     });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() action, String label, {Future<void> Function()? resubmit}) async {
+    await widget.work.run(_page, label, action, retry: resubmit);
   }
 
   @override
@@ -148,12 +152,7 @@ class PreferencesWorkspaceView extends StatelessWidget {
           title: const Text('Kineto'),
           action: onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -164,13 +163,6 @@ class PreferencesWorkspaceView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (working) ...<Widget>[
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   if (error != null) ...<Widget>[
                     WabPanel(
                       title: 'That did not work',
@@ -180,9 +172,8 @@ class PreferencesWorkspaceView extends StatelessWidget {
                           Text(error!),
                           if (onResubmit != null) ...<Widget>[
                             const SizedBox(height: 12),
-                            WabButton(
+                            KinetoButton(
                               key: const ValueKey<String>('resubmit-paid'),
-                              kind: WabMaterialKind.zhuwen,
                               onPressed: onResubmit,
                               child: const Text('Ask again'),
                             ),
@@ -231,9 +222,8 @@ class PreferencesWorkspaceView extends StatelessWidget {
             const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerLeft,
-              child: WabButton(
+              child: KinetoButton(
                 key: const ValueKey<String>('suggest-preferences'),
-                kind: WabMaterialKind.paper,
                 onPressed: !working && model.ready && voices.unconsideredChoices > 0 ? onSuggest : null,
                 child: Text('Ask for suggestions · ${documentCostLabel(model, suggestCostMicros)}'),
               ),
@@ -337,9 +327,8 @@ class _PreferenceEditorState extends State<PreferenceEditor> {
           Wrap(
             spacing: 12,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('add-preference'),
-                kind: WabMaterialKind.paper,
                 onPressed: widget.enabled
                     ? () => setState(
                           () => _drafts.add(
@@ -355,9 +344,8 @@ class _PreferenceEditorState extends State<PreferenceEditor> {
                     : null,
                 child: const Text('Add a preference'),
               ),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('save-preferences'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: widget.enabled ? _save : null,
                 child: const Text('Save'),
               ),
@@ -478,17 +466,15 @@ class _SuggestionCardState extends State<SuggestionCard> {
           Wrap(
             spacing: 12,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('suggestion-$_key-accept'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: widget.enabled && _words.text.trim().isNotEmpty
                     ? () => widget.onAccept(_words.text.trim() == suggestion.value ? null : _words.text.trim())
                     : null,
                 child: const Text('Accept'),
               ),
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('suggestion-$_key-reject'),
-                kind: WabMaterialKind.paper,
                 onPressed: widget.enabled ? widget.onReject : null,
                 child: const Text('Reject'),
               ),

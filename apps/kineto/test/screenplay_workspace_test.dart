@@ -177,7 +177,7 @@ void main() {
 
   testWidgets('while a document is being written every change waits', (tester) async {
     final calls = await _pump(tester, working: true);
-    expect(find.text('Writing the screenplay with Kimi Code'), findsOneWidget);
+    expect(find.text('Writing the screenplay with Kimi Code'), findsNothing, reason: 'it shows on its button and the status bar');
     for (final key in <String>['analyse', 'write', 'lock', 'edit-office_night', 'rewrite-office_night']) {
       await _tap(tester, find.byKey(ValueKey<String>(key)));
     }

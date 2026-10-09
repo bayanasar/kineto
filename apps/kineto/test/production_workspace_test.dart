@@ -391,7 +391,6 @@ void main() {
 
   testWidgets('while something is made every change waits', (tester) async {
     final calls = await _pump(tester, production: _casting, working: true);
-    expect(find.text('Casting'), findsWidgets);
     for (final key in <String>[
       'write-bible',
       'edit-character-filmmaker',

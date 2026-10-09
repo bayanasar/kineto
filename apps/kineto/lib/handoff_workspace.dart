@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 
 /// [bytes] for a person, for example `12.4 MB`.
@@ -29,6 +31,7 @@ Future<void> openInSystem(String path) async {
 
 class HandoffWorkspaceScreen extends StatefulWidget {
   const HandoffWorkspaceScreen({
+    required this.work,
     required this.project,
     required this.exportFolder,
     this.navigation,
@@ -45,6 +48,9 @@ class HandoffWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<HandoffWorkspaceScreen> createState() => _HandoffWorkspaceScreenState();
 }
@@ -53,13 +59,20 @@ class _HandoffWorkspaceScreenState extends State<HandoffWorkspaceScreen> {
   late List<KinetoSceneProgress> _scenes;
   late KinetoStorage _storage;
   late KinetoExportState _export;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
+  static const String _page = 'handoff';
+  int _finished = 0;
+
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
 
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _read();
   }
 
@@ -69,27 +82,24 @@ class _HandoffWorkspaceScreenState extends State<HandoffWorkspaceScreen> {
     _export = widget.project.exportState;
   }
 
-  Future<void> _run(Future<void> Function() action, String label) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-    });
-    String? error;
-    try {
-      await action();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
+  void _workChanged() {
     if (!mounted) return;
     setState(() {
-      _working = false;
-      _read();
-      _error = error;
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
     });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() action, String label) async {
+    await widget.work.run(_page, label, action);
   }
 
   @override
@@ -192,12 +202,7 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
           title: const Text('Kineto'),
           action: widget.onThemeToggle == null
               ? null
-              : WabToggleButton(
-                  text: const Text('Dark mode'),
-                  isOn: widget.isDarkMode,
-                  pair: WabTogglePair.sealZhuwen,
-                  callback: widget.onThemeToggle,
-                ),
+              : KinetoThemeToggle(isDarkMode: widget.isDarkMode, onToggle: widget.onThemeToggle),
         ),
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -208,13 +213,6 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   if (widget.navigation != null) ...<Widget>[widget.navigation!, const SizedBox(height: 20)],
-                  if (widget.working) ...<Widget>[
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: WabStatusBadge(widget.workingLabel, kind: WabBadgeKind.progress),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   if (widget.error != null) ...<Widget>[
                     WabPanel(title: 'Not done', child: Text(widget.error!)),
                     const SizedBox(height: 20),
@@ -371,9 +369,9 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('export'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: _idle && export.ready > 0 && (export.missing.isEmpty || _partial)
                     ? () => widget.onExport(
                           _folder.text.trim(),
@@ -392,9 +390,8 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
                   ' · ${formatBytes(last.bytes)}${last.complete ? '' : ' · partial'}',
                 ),
                 if (widget.onOpenFolder != null)
-                  WabButton(
+                  KinetoButton(
                     key: const ValueKey<String>('open-package'),
-                    kind: WabMaterialKind.paper,
                     onPressed: () => widget.onOpenFolder!(last.path),
                     child: const Text('Open folder'),
                   ),
@@ -443,15 +440,13 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
             spacing: 12,
             runSpacing: 12,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('plan-collection'),
-                kind: WabMaterialKind.paper,
                 onPressed: _idle ? widget.onPlanCollection : null,
                 child: const Text('Show what can be let go'),
               ),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('verify-media'),
-                kind: WabMaterialKind.paper,
                 onPressed: _idle ? widget.onVerify : null,
                 child: const Text('Check every file'),
               ),
@@ -469,9 +464,8 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
               const SizedBox(height: 8),
               for (final item in plan.items) Text('${item.artifactId} (${item.owner}): ${item.reason}.'),
               const SizedBox(height: 8),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('collect'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: _idle ? () => _confirmCollect(context, plan) : null,
                 child: Text('Let go of ${plan.items.length} file${plan.items.length == 1 ? '' : 's'}…'),
               ),

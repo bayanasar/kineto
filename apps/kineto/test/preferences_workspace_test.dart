@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:kineto/preferences_workspace.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -135,6 +136,6 @@ void main() {
   testWidgets('with no new choices there is nothing to ask', (tester) async {
     await _pump(tester, voices: const KinetoVoices());
     expect(find.text('Your preferences'), findsOneWidget);
-    expect(tester.widget<WabButton>(find.byKey(_key('suggest-preferences'))).onPressed, isNull);
+    expect(tester.widget<KinetoButton>(find.byKey(_key('suggest-preferences'))).onPressed, isNull);
   });
 }

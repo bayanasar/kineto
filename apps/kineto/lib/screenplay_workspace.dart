@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 
 /// What the director saved from the scene editor.
@@ -41,19 +43,20 @@ String? languageModelProblem(KinetoLanguageModel model) {
   if (model.ready) return null;
   return switch (model.kind) {
     KinetoLanguageModelKind.none =>
-      'No language model is chosen. Choose one under Settings, Providers, then reopen the project.',
+      'No language model is chosen. Choose one under Settings, Providers.',
     KinetoLanguageModelKind.kimi =>
-      'The Kimi API is chosen but has no key; save one under Settings, Keys, then reopen the project.',
+      'The Kimi API is chosen but has no key; save one under Settings, Keys.',
     KinetoLanguageModelKind.local =>
       'An OpenAI-compatible server is chosen, but its address or model is missing, or the key it '
-          'names is not saved; complete it under Settings, then reopen the project.',
+          'names is not saved; complete it under Settings.',
     _ => '${model.kind.label} is chosen but was not found on this computer. Install it and sign in '
-        'with it once, or choose another under Settings, Providers, then reopen the project.',
+        'with it once, or choose another under Settings, Providers.',
   };
 }
 
 class ScreenplayWorkspaceScreen extends StatefulWidget {
   const ScreenplayWorkspaceScreen({
+    required this.work,
     required this.project,
     this.navigation,
     this.isDarkMode = true,
@@ -68,6 +71,9 @@ class ScreenplayWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<ScreenplayWorkspaceScreen> createState() => _ScreenplayWorkspaceScreenState();
 }
@@ -77,18 +83,23 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
   late KinetoDocuments _documents;
   int? _analysisCost;
   int? _screenplayCost;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
+  static const String _page = 'screenplay';
+  int _finished = 0;
 
-  /// Asks again for what the last command asked for although its paid
-  /// request may already have been charged; offered only after that refusal.
-  VoidCallback? _resubmit;
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _resubmit => widget.work.retryOn(_page);
+
   String? _editingScene;
 
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _model = widget.project.languageModel;
     _read();
   }
@@ -105,39 +116,30 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
   // [resubmit] asks for the same document at the risk of paying twice; it is
   // offered when [action] is refused because its last paid request is
   // unresolved.
+  void _workChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _read();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.work.removeListener(_workChanged);
+    super.dispose();
+  }
+
   Future<void> _run(
     Future<void> Function() action,
     String label, {
     VoidCallback? onDone,
     Future<void> Function()? resubmit,
   }) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _resubmit = null;
-    });
-    String? error;
-    VoidCallback? offer;
-    try {
-      await action();
-      onDone?.call();
-    } on KinetoProjectException catch (failure) {
-      error = failure.message;
-      if (failure.code == KinetoProjectException.paidCallUnresolved && resubmit != null) {
-        offer = () => _run(resubmit, label, onDone: onDone);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
-    if (!mounted) return;
-    setState(() {
-      _working = false;
-      _read();
-      _error = error;
-      _resubmit = offer;
-    });
+    final done = await widget.work.run(_page, label, action, retry: resubmit);
+    if (done && mounted) onDone?.call();
   }
 
   @override
@@ -174,8 +176,7 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
       ),
       onEdit: (sceneId) => setState(() {
         _editingScene = sceneId;
-        _error = null;
-        _resubmit = null;
+        widget.work.dismiss();
       }),
       onSave: (draft) => _run(
         () => widget.project.saveScene(
@@ -259,12 +260,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
         title: const Text('Kineto'),
         action: onThemeToggle == null
             ? null
-            : WabToggleButton(
-                text: const Text('Dark mode'),
-                isOn: isDarkMode,
-                pair: WabTogglePair.sealZhuwen,
-                callback: onThemeToggle,
-              ),
+            : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
@@ -275,13 +271,6 @@ class ScreenplayWorkspaceView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                if (working) ...<Widget>[
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: WabStatusBadge(workingLabel, kind: WabBadgeKind.progress),
-                  ),
-                  const SizedBox(height: 12),
-                ],
                 if (error != null) ...<Widget>[
                   WabPanel(
                     title: 'That did not work',
@@ -297,9 +286,8 @@ class ScreenplayWorkspaceView extends StatelessWidget {
                             'again.',
                           ),
                           const SizedBox(height: 12),
-                          WabButton(
+                          KinetoButton(
                             key: const ValueKey<String>('resubmit-document'),
-                            kind: WabMaterialKind.zhuwen,
                             onPressed: working ? null : onResubmit,
                             child: const Text('Ask again · may pay twice'),
                           ),
@@ -381,14 +369,13 @@ class ScreenplayWorkspaceView extends StatelessWidget {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
-                kind: WabMaterialKind.zhuwen,
+              KinetoButton(
                 onPressed: _idle ? () => _importDialog(context) : null,
                 child: const Text('Import text'),
               ),
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('analyse'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: _idle && model.ready ? onAnalyze : null,
                 child: Text(analysis == null ? 'Analyse story' : 'Analyse again'),
               ),
@@ -436,17 +423,17 @@ class ScreenplayWorkspaceView extends StatelessWidget {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: const ValueKey<String>('write'),
-                kind: screenplay == null ? WabMaterialKind.seal : WabMaterialKind.zhuwen,
+                primary: screenplay == null,
                 onPressed: canWrite ? onWrite : null,
                 child: Text(screenplay == null ? 'Write screenplay' : 'Write a new draft'),
               ),
               Text('${model.kind.label} · ${documentCostLabel(model, screenplayCostMicros)}'),
               if (screenplay != null && !documents.screenplayLocked)
-                WabButton(
+                KinetoButton(
                   key: const ValueKey<String>('lock'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: _idle ? () => onLock(screenplay.revision) : null,
                   child: Text('Lock revision ${screenplay.revision}'),
                 ),
@@ -474,15 +461,13 @@ class ScreenplayWorkspaceView extends StatelessWidget {
           Wrap(
             spacing: 12,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('edit-${scene.id}'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: _idle ? () => onEdit(scene.id) : null,
                 child: const Text('Edit'),
               ),
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('rewrite-${scene.id}'),
-                kind: WabMaterialKind.zhuwen,
                 onPressed: _idle && model.ready ? () => _rewriteDialog(context, scene) : null,
                 child: const Text('Rewrite…'),
               ),
@@ -772,8 +757,7 @@ class _SceneEditorState extends State<SceneEditor> {
             runSpacing: 12,
             children: <Widget>[
               for (final kind in KinetoBlockKind.values)
-                WabButton(
-                  kind: WabMaterialKind.paper,
+                KinetoButton(
                   onPressed: () => setState(
                     () => _blocks.add(_BlockDraft(KinetoScreenplayBlock(kind: kind, text: ''))),
                   ),
@@ -786,14 +770,13 @@ class _SceneEditorState extends State<SceneEditor> {
           Wrap(
             spacing: 12,
             children: <Widget>[
-              WabButton(
+              KinetoButton(
                 key: ValueKey<String>('save-$id'),
-                kind: WabMaterialKind.seal,
+                primary: true,
                 onPressed: widget.working ? null : _save,
                 child: const Text('Save as a new revision'),
               ),
-              WabButton(
-                kind: WabMaterialKind.zhuwen,
+              KinetoButton(
                 onPressed: widget.working ? null : widget.onCancel,
                 child: const Text('Cancel'),
               ),

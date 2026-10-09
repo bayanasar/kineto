@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'kineto_controls.dart';
+import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart' show TextPromptDialog;
 
@@ -133,6 +135,7 @@ String _shotLabel(int shotIndex) =>
 
 class DemoWorkspaceScreen extends StatefulWidget {
   const DemoWorkspaceScreen({
+    required this.work,
     required this.engine,
     required this.project,
     this.navigation,
@@ -149,6 +152,9 @@ class DemoWorkspaceScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback? onThemeToggle;
 
+  /// The project's requests, which outlive this page.
+  final KinetoWork work;
+
   @override
   State<DemoWorkspaceScreen> createState() => _DemoWorkspaceScreenState();
 }
@@ -159,13 +165,16 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   late final KinetoVideoProvider _videoProvider;
   late List<KinetoShotSnapshot> _shotSnapshots;
   int _activeShotIndex = 0;
-  bool _working = false;
-  String _workingLabel = 'Working';
-  String? _error;
+  static const String _page = 'shots';
+  int _finished = 0;
 
-  /// Generates although a character would be shown without an identity
-  /// reference; offered only after the project's policy refused that.
-  VoidCallback? _identityDriftConsent;
+  // The project's requests outlive this page: what is under way, and how
+  // the last one asked for here ended, come from them.
+  bool get _working => widget.work.busy;
+  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  String? get _error => widget.work.problemOn(_page);
+  VoidCallback? get _identityDriftConsent => widget.work.retryOn(_page);
+
   late List<String> _recoveryNotes;
   StreamSubscription<KinetoVideoEvent>? _videoEvents;
 
@@ -176,6 +185,8 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   @override
   void initState() {
     super.initState();
+    _finished = widget.work.finished;
+    widget.work.addListener(_workChanged);
     _engineSnapshot = widget.engine.snapshot;
     _imageProvider = widget.project.imageProvider;
     _videoProvider = widget.project.videoProvider;
@@ -196,6 +207,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 
   @override
   void dispose() {
+    widget.work.removeListener(_workChanged);
     unawaited(_videoEvents?.cancel());
     super.dispose();
   }
@@ -225,7 +237,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   void _switchShot(int index) {
     setState(() {
       _activeShotIndex = index;
-      _error = null;
+      widget.work.dismiss();
     });
   }
 
@@ -235,37 +247,28 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   //
   // [consenting] generates despite identity drift; it is offered when
   // [action] is refused because the project's policy blocks that.
+  void _workChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (widget.work.finished != _finished) {
+        _finished = widget.work.finished;
+        _shotSnapshots = _readShotSnapshots();
+      }
+    });
+  }
+
   Future<void> _run(
     Future<void> Function() action, {
     String label = 'Working',
     Future<void> Function()? consenting,
   }) async {
-    if (_working) return;
-    setState(() {
-      _working = true;
-      _workingLabel = label;
-      _error = null;
-      _identityDriftConsent = null;
-    });
-    String? error;
-    VoidCallback? consent;
-    try {
-      await action();
-    } on KinetoProjectException catch (failure) {
-      error = failure.toString();
-      if (failure.code == KinetoProjectException.identityDrift && consenting != null) {
-        consent = () => _run(consenting, label: label);
-      }
-    } on Object catch (failure) {
-      error = failure.toString();
-    }
-    if (!mounted) return;
-    setState(() {
-      _working = false;
-      _shotSnapshots = _readShotSnapshots();
-      _error = error;
-      _identityDriftConsent = consent;
-    });
+    await widget.work.run(
+      _page,
+      label,
+      action,
+      retry: consenting,
+      retryCode: KinetoProjectException.identityDrift,
+    );
   }
 
   /// What each shot in play is: a bootstrap shot shows its demo content, a
@@ -551,12 +554,7 @@ class DemoWorkspaceView extends StatelessWidget {
         title: const Text('Kineto'),
         action: onThemeToggle == null
             ? null
-            : WabToggleButton(
-                text: const Text('Dark mode'),
-                isOn: isDarkMode,
-                pair: WabTogglePair.sealZhuwen,
-                callback: onThemeToggle,
-              ),
+            : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
@@ -591,8 +589,7 @@ class DemoWorkspaceView extends StatelessWidget {
                           const SizedBox(height: 8),
                         ],
                         const SizedBox(height: 4),
-                        WabButton(
-                          kind: WabMaterialKind.zhuwen,
+                        KinetoButton(
                           onPressed: onDismissRecovery,
                           child: const Text('Dismiss'),
                         ),
@@ -624,10 +621,8 @@ class DemoWorkspaceView extends StatelessWidget {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                WabButton(
-                                  kind: index == activeShotIndex
-                                      ? WabMaterialKind.seal
-                                      : WabMaterialKind.zhuwen,
+                                KinetoButton(
+                                  primary: index == activeShotIndex,
                                   onPressed: () => onShotChanged(index),
                                   child: Text(shots[index].label),
                                 ),
@@ -666,8 +661,8 @@ class DemoWorkspaceView extends StatelessWidget {
                           'are kept in artifacts.pre-sha256-migration.json.',
                         ),
                         const SizedBox(height: 12),
-                        WabButton(
-                          kind: WabMaterialKind.seal,
+                        KinetoButton(
+                          primary: true,
                           onPressed: working ? null : onMigrate,
                           child: const Text('Migrate with backup'),
                         ),
@@ -695,11 +690,9 @@ class DemoWorkspaceView extends StatelessWidget {
                         runSpacing: 12,
                         children: <Widget>[
                           for (final direction in KinetoShotDirection.values)
-                            WabButton(
+                            KinetoButton(
                               key: ValueKey<String>('direction-${direction.wireName}'),
-                              kind: direction == shotSnapshot.direction
-                                  ? WabMaterialKind.seal
-                                  : WabMaterialKind.zhuwen,
+                              primary: direction == shotSnapshot.direction,
                               onPressed: shotSnapshot.locked || directionPlanned || blocked
                                   ? null
                                   : () => onDirectionChanged(direction),
@@ -727,7 +720,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       if (!imageProvider.ready) ...<Widget>[
                         Text(
                           '${imageProvider.kind.label} is chosen but has no key; save one under Settings, '
-                          'Keys, then reopen the project.',
+                          'Keys.',
                         ),
                         const SizedBox(height: 12),
                       ],
@@ -738,8 +731,7 @@ class DemoWorkspaceView extends StatelessWidget {
                           'generate again only if you accept paying twice.',
                         ),
                         const SizedBox(height: 12),
-                        WabButton(
-                          kind: WabMaterialKind.zhuwen,
+                        KinetoButton(
                           onPressed: blocked || !imageProvider.ready ? null : onResubmitKeyframes,
                           child: Text(
                             'Generate again · may pay twice · ≈ ${imageProvider.generationCostLabel}',
@@ -748,17 +740,19 @@ class DemoWorkspaceView extends StatelessWidget {
                         const SizedBox(height: 12),
                       ],
                       if (!shotSnapshot.generated)
-                        WabElevatedButton(
-                          text: Text(_generateLabel(imageProvider)),
-                          callback: canGenerate ? onGenerate : null,
+                        KinetoButton(
+                          key: const ValueKey<String>('generate'),
+                          primary: true,
+                          expand: true,
+                          onPressed: canGenerate ? onGenerate : null,
+                          child: Text(_generateLabel(imageProvider)),
                         )
                       else
                         Row(
                           children: <Widget>[
                             Expanded(child: Text(_generationStatus(shotSnapshot))),
                             const SizedBox(width: 16),
-                            WabButton(
-                              kind: WabMaterialKind.zhuwen,
+                            KinetoButton(
                               onPressed:
                                   shotSnapshot.locked || !canGenerate ? null : onGenerate,
                               child: Text(
@@ -769,9 +763,8 @@ class DemoWorkspaceView extends StatelessWidget {
                             ),
                             if (onRefine != null) ...<Widget>[
                               const SizedBox(width: 12),
-                              WabButton(
+                              KinetoButton(
                                 key: const ValueKey<String>('refine-shot'),
-                                kind: WabMaterialKind.paper,
                                 onPressed: shotSnapshot.locked || !canGenerate
                                     ? null
                                     : () => _refineDialog(context),
@@ -854,9 +847,9 @@ class DemoWorkspaceView extends StatelessWidget {
                   Row(
                     children: <Widget>[
                       Expanded(
-                        child: WabButton(
+                        child: KinetoButton(
                           key: const ValueKey<String>('lock-selection'),
-                          kind: WabMaterialKind.seal,
+                          primary: true,
                           onPressed: canLock ? onLock : null,
                           expand: true,
                           child: Text(
@@ -870,8 +863,7 @@ class DemoWorkspaceView extends StatelessWidget {
                       ),
                       const SizedBox(width: 16),
                       Expanded(
-                        child: WabButton(
-                          kind: WabMaterialKind.zhuwen,
+                        child: KinetoButton(
                           onPressed: blocked ? null : onReset,
                           expand: true,
                           child: const Text('Reset shot'),
@@ -923,9 +915,8 @@ class DemoWorkspaceView extends StatelessWidget {
                             'these keyframes.',
                           ),
                           const SizedBox(height: 12),
-                          WabButton(
+                          KinetoButton(
                             key: const ValueKey<String>('generate-despite-drift'),
-                            kind: WabMaterialKind.zhuwen,
                             onPressed: blocked ? null : onGenerateDespiteIdentityDrift,
                             child: const Text('Generate anyway'),
                           ),
@@ -1171,15 +1162,14 @@ class _VideoPanelState extends State<_VideoPanel> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
               if (canLock)
-                WabButton(
+                KinetoButton(
                   key: const ValueKey<String>('lock-video'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: widget.onLock,
                   child: Text(chosen.letter.isEmpty ? 'Lock video' : 'Lock take ${chosen.letter}'),
                 ),
               if (_provider.ready && state == KinetoVideoState.unresolved)
-                WabButton(
-                  kind: WabMaterialKind.zhuwen,
+                KinetoButton(
                   onPressed: widget.blocked || !hasFirstFrame ? null : widget.onResubmit,
                   child: Text('Submit again · may pay twice · ${_costFor(1)}'),
                 ),
@@ -1196,9 +1186,8 @@ class _VideoPanelState extends State<_VideoPanel> {
                     onChanged: (count) => setState(() => _count = count ?? _count),
                   ),
                 ),
-                WabButton(
+                KinetoButton(
                   key: const ValueKey<String>('generate-videos'),
-                  kind: WabMaterialKind.zhuwen,
                   onPressed: canGenerate ? () => widget.onGenerate?.call(_count, null, null) : null,
                   child: Text(
                     '${current.isEmpty ? 'Generate' : 'Generate again'} · $takes · '
@@ -1206,9 +1195,8 @@ class _VideoPanelState extends State<_VideoPanel> {
                   ),
                 ),
                 if (current.isNotEmpty)
-                  WabButton(
+                  KinetoButton(
                     key: const ValueKey<String>('refine-video'),
-                    kind: WabMaterialKind.paper,
                     onPressed: canGenerate ? () => _ask(context, null) : null,
                     child: const Text('Refine with a note…'),
                   ),
@@ -1230,16 +1218,14 @@ class _VideoPanelState extends State<_VideoPanel> {
                     Text(_title(take)),
                     if (take.notes.isNotEmpty) Text('Notes: ${take.notes.join('; ')}'),
                     if (take.mediaPath != null && widget.onOpen != null)
-                      WabButton(
-                        kind: WabMaterialKind.paper,
+                      KinetoButton(
                         onPressed: () => widget.onOpen!(take.mediaPath!),
                         child: const Text('Open'),
                       )
                     else if (take.mediaPath == null)
                       const Text('Its clip was let go.'),
-                    WabButton(
+                    KinetoButton(
                       key: ValueKey<String>('branch-${take.id}'),
-                      kind: WabMaterialKind.paper,
                       onPressed: canGenerate ? () => _ask(context, take) : null,
                       child: const Text('Branch from it…'),
                     ),
@@ -1277,16 +1263,15 @@ class _VideoPanelState extends State<_VideoPanel> {
             runSpacing: 8,
             children: <Widget>[
               if (take.mediaPath != null && widget.onOpen != null)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('open-${take.id}'),
-                  kind: WabMaterialKind.seal,
+                  primary: true,
                   onPressed: () => widget.onOpen!(take.mediaPath!),
                   child: const Text('Open video'),
                 ),
               if (!locked && !chosen && takes > 1)
-                WabButton(
+                KinetoButton(
                   key: ValueKey<String>('choose-${take.id}'),
-                  kind: WabMaterialKind.paper,
                   onPressed: widget.blocked ? null : () => widget.onSelect?.call(index),
                   child: const Text('Choose'),
                 ),
