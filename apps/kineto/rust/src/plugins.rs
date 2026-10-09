@@ -39,8 +39,15 @@ pub unsafe extern "C" fn kineto_plugins_load(out_plugins: *mut *mut KinetoPlugin
         let Ok(config) = PluginConfig::load_default() else {
             return PROJECT_ERR_PLUGIN_CONFIG_INVALID;
         };
-        let selected = std::env::var(crate::project_session::IMAGE_PROVIDER_VARIABLE)
+        crate::keys::read_plugin_secrets_from_storage();
+        let selected = crate::settings::Choices::load()
             .ok()
+            .and_then(|choices| {
+                choices
+                    .selection(kineto_plugins::settings::Setting::Image)
+                    .ok()
+                    .flatten()
+            })
             .and_then(|selection| {
                 selection
                     .trim()

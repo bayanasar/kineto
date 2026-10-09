@@ -4,26 +4,33 @@
 //! provider is: no model is asked anything unless it was named.
 //!
 //! - unset, empty or `none`: no model; documents cannot be generated
-//! - `kimi-code`: Kimi Code, driven over ACP under kineto's own data root
-//!   (`KINETO_KIMI_CODE_HOME`, by default `agents/kimi-code` in kineto's
-//!   state directory); the CLI is `KINETO_KIMI_CODE_BIN`, otherwise `kimi`
-//!   on `PATH`
+//! - `claude-code`, `codex`, `kimi-code`, `agy`, `mini-agent`: the agent CLI
+//!   the director already installed and signed in to
+//!   ([`kineto_llm::agents`]), found on the search path or where it is
+//!   usually installed, or at `KINETO_<AGENT>_BIN` (`KINETO_CLAUDE_CODE_BIN`,
+//!   `KINETO_MINI_AGENT_BIN` for the Python that runs Mini-Agent)
 //! - `kimi`: Kimi's API with the key in `KINETO_KIMI_API_KEY`, and the model
 //!   in `KINETO_KIMI_MODEL` when set
-//! - `local`: an OpenAI-compatible server at `KINETO_LOCAL_LLM_URL` serving
-//!   `KINETO_LOCAL_LLM_MODEL`
+//! - `local` (or `openai-compatible`): any server that speaks the OpenAI
+//!   chat-completions protocol, at `KINETO_LOCAL_LLM_URL` serving
+//!   `KINETO_LOCAL_LLM_MODEL`; with `KINETO_LOCAL_LLM_KEY` naming the key it
+//!   takes (`deepseek` reads the key stored as `deepseek`, or
+//!   `KINETO_DEEPSEEK_API_KEY`). HTTPS, or HTTP to a loopback address only.
+//!
+//! Each value is read from the director's provider settings first and the
+//! environment second; the desktop shell decides which.
 
 use std::{
     error::Error,
     fmt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
 
 use kineto_jobs::ErrorClass;
 use kineto_llm::{
     Billing, LlmBackend, LlmBackendInfo, LlmRequest, LlmResponse,
-    acp::{AcpAgent, KIMI_CODE_PROVIDER},
+    agents::{AgentCli, AgentKind, locate},
     openai::{KIMI_PROVIDER, LOCAL_PROVIDER, OpenAiCompatible},
 };
 use kineto_providers::{
@@ -32,18 +39,30 @@ use kineto_providers::{
 };
 
 pub const LLM_PROVIDER_VARIABLE: &str = "KINETO_LLM_PROVIDER";
-pub const KIMI_CODE_BIN_VARIABLE: &str = "KINETO_KIMI_CODE_BIN";
-pub const KIMI_CODE_HOME_VARIABLE: &str = "KINETO_KIMI_CODE_HOME";
 pub const KIMI_MODEL_VARIABLE: &str = "KINETO_KIMI_MODEL";
 pub const LOCAL_URL_VARIABLE: &str = "KINETO_LOCAL_LLM_URL";
 pub const LOCAL_MODEL_VARIABLE: &str = "KINETO_LOCAL_LLM_MODEL";
+/// Names the key an OpenAI-compatible server takes, as it is stored.
+pub const LOCAL_KEY_VARIABLE: &str = "KINETO_LOCAL_LLM_KEY";
+
+/// The variable that names where `agent` is installed, overriding where
+/// kineto would look: `KINETO_CLAUDE_CODE_BIN` for `claude-code`.
+#[must_use]
+pub fn agent_executable_variable(agent: AgentKind) -> String {
+    format!(
+        "KINETO_{}_BIN",
+        agent.name().to_ascii_uppercase().replace('-', "_")
+    )
+}
 
 /// Which kind of model a session has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentModelKind {
     None,
-    KimiCode,
+    /// A signed-in agent CLI.
+    Agent(AgentKind),
     Kimi,
+    /// An OpenAI-compatible server.
     Local,
 }
 
@@ -80,11 +99,12 @@ impl Error for ModelSelectionError {}
 #[derive(Debug)]
 pub enum DocumentModel {
     None,
-    /// Kimi Code; `None` when its CLI was not found.
-    KimiCode(Option<AcpAgent>),
+    /// A signed-in agent CLI; `None` when it is not installed.
+    Agent(AgentKind, Option<AgentCli>),
     /// Kimi's API; `None` without a key.
     Kimi(Option<OpenAiCompatible>),
-    /// A local server; `None` when its address or model is missing.
+    /// An OpenAI-compatible server; `None` when its address or model is
+    /// missing, or the key it names is not stored.
     Local(Option<OpenAiCompatible>),
     #[cfg(any(test, feature = "testing"))]
     Fake(kineto_llm::fake::FakeLlm),
@@ -100,18 +120,16 @@ impl DocumentModel {
         let setting = |name: &str| env(name).filter(|value| !value.trim().is_empty());
         Ok(match selection.map(str::trim) {
             None | Some("" | "none") => Self::None,
-            Some(KIMI_CODE_PROVIDER) => {
-                let executable = setting(KIMI_CODE_BIN_VARIABLE)
+            Some(name) if AgentKind::from_name(name).is_some() => {
+                let agent = AgentKind::from_name(name).expect("checked above");
+                let executable = setting(&agent_executable_variable(agent))
                     .map(PathBuf::from)
-                    .or_else(|| find_on_path("kimi", env("PATH").as_deref()));
-                let home = setting(KIMI_CODE_HOME_VARIABLE)
-                    .map(PathBuf::from)
-                    .or_else(|| state_directory(&env).map(|state| state.join("agents/kimi-code")));
-                Self::KimiCode(
+                    .or_else(|| locate(agent, &env));
+                Self::Agent(
+                    agent,
                     executable
                         .filter(|executable| executable.is_file())
-                        .zip(home)
-                        .map(|(executable, home)| AcpAgent::kimi_code(executable, home)),
+                        .map(|executable| AgentCli::new(agent, executable)),
                 )
             }
             Some(KIMI_PROVIDER) => Self::Kimi(
@@ -122,11 +140,26 @@ impl DocumentModel {
                         OpenAiCompatible::kimi(key, setting(KIMI_MODEL_VARIABLE).as_deref(), None)
                     }),
             ),
-            Some("local") => Self::Local(
-                setting(LOCAL_URL_VARIABLE)
-                    .zip(setting(LOCAL_MODEL_VARIABLE))
-                    .map(|(url, model)| OpenAiCompatible::local(&url, &model)),
-            ),
+            Some("local" | "openai-compatible") => {
+                // A key that is named but not stored leaves the server not
+                // ready, rather than asked without the key it needs.
+                let key = match setting(LOCAL_KEY_VARIABLE) {
+                    Some(name) => secrets
+                        .api_key(name.trim())
+                        .map_err(ModelSelectionError::Secret)?
+                        .map(Some),
+                    None => Some(None),
+                };
+                Self::Local(
+                    setting(LOCAL_URL_VARIABLE)
+                        .zip(setting(LOCAL_MODEL_VARIABLE))
+                        .zip(key)
+                        .map(|((url, model), key)| match key {
+                            Some(key) => OpenAiCompatible::endpoint(&url, &model, key),
+                            None => OpenAiCompatible::local(&url, &model),
+                        }),
+                )
+            }
             Some(other) => return Err(ModelSelectionError::Unknown(other.to_owned())),
         })
     }
@@ -136,7 +169,7 @@ impl DocumentModel {
     #[must_use]
     pub fn cancelled_by(self, cancel: Arc<AtomicBool>) -> Self {
         match self {
-            Self::KimiCode(Some(agent)) => Self::KimiCode(Some(agent.with_cancel(cancel))),
+            Self::Agent(kind, Some(agent)) => Self::Agent(kind, Some(agent.with_cancel(cancel))),
             other => other,
         }
     }
@@ -145,7 +178,7 @@ impl DocumentModel {
     pub fn describe(&self) -> DocumentModelInfo {
         let (kind, ready) = match self {
             Self::None => (DocumentModelKind::None, false),
-            Self::KimiCode(agent) => (DocumentModelKind::KimiCode, agent.is_some()),
+            Self::Agent(kind, agent) => (DocumentModelKind::Agent(*kind), agent.is_some()),
             Self::Kimi(api) => (DocumentModelKind::Kimi, api.is_some()),
             Self::Local(api) => (DocumentModelKind::Local, api.is_some()),
             #[cfg(any(test, feature = "testing"))]
@@ -162,7 +195,7 @@ impl DocumentModel {
 
     fn unavailable(&self) -> LlmBackendInfo {
         let provider = match self {
-            Self::KimiCode(_) => KIMI_CODE_PROVIDER,
+            Self::Agent(kind, _) => kind.name(),
             Self::Kimi(_) => KIMI_PROVIDER,
             Self::Local(_) => LOCAL_PROVIDER,
             _ => "none",
@@ -213,7 +246,7 @@ impl LlmBackend for DocumentModel {
 
     fn info(&self) -> LlmBackendInfo {
         match self {
-            Self::KimiCode(Some(agent)) => agent.info(),
+            Self::Agent(_, Some(agent)) => agent.info(),
             Self::Kimi(Some(api)) | Self::Local(Some(api)) => api.info(),
             #[cfg(any(test, feature = "testing"))]
             Self::Fake(fake) => fake.info(),
@@ -223,7 +256,7 @@ impl LlmBackend for DocumentModel {
 
     fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, ModelError> {
         match self {
-            Self::KimiCode(Some(agent)) => forward(agent, request),
+            Self::Agent(_, Some(agent)) => forward(agent, request),
             Self::Kimi(Some(api)) | Self::Local(Some(api)) => forward(api, request),
             #[cfg(any(test, feature = "testing"))]
             Self::Fake(fake) => forward(fake, request),
@@ -241,31 +274,6 @@ impl LlmBackend for DocumentModel {
 
     fn may_have_lost_an_answer(&self, error: &ModelError) -> bool {
         error.lost_answer
-    }
-}
-
-fn find_on_path(name: &str, path: Option<&str>) -> Option<PathBuf> {
-    let names: &[String] = &if cfg!(windows) {
-        vec![format!("{name}.exe"), format!("{name}.cmd")]
-    } else {
-        vec![name.to_owned()]
-    };
-    std::env::split_paths(path?)
-        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
-        .find(|candidate| candidate.is_file())
-}
-
-/// Kineto's per-user state directory, as the desktop app places it.
-fn state_directory(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let set = |name: &str| env(name).filter(|value| !value.is_empty());
-    if cfg!(windows) {
-        set("LOCALAPPDATA").map(|base| Path::new(&base).join("Kineto"))
-    } else if cfg!(target_os = "macos") {
-        set("HOME").map(|home| Path::new(&home).join("Library/Application Support/Kineto"))
-    } else {
-        set("XDG_STATE_HOME")
-            .map(|state| Path::new(&state).join("kineto"))
-            .or_else(|| set("HOME").map(|home| Path::new(&home).join(".local/state/kineto")))
     }
 }
 
@@ -318,33 +326,91 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_needs_its_cli_and_a_data_root() {
+    fn an_agent_is_the_cli_the_director_installed() {
         let directory =
             std::env::temp_dir().join(format!("kineto-llm-select-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let cli = directory.join("kimi");
+        let cli = directory.join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
         std::fs::write(&cli, "").unwrap();
+        let elsewhere = directory.join("my-codex");
+        std::fs::write(&elsewhere, "").unwrap();
         let keys = Keys(BTreeMap::new());
 
         let path = directory.to_string_lossy().into_owned();
         let found = DocumentModel::select(
-            Some("kimi-code"),
+            Some("claude-code"),
             &keys,
-            env(&[("PATH", &path), ("HOME", "/home/director")]),
+            env(&[("PATH", &path), ("HOME", "/nonexistent")]),
         )
         .unwrap();
         let info = found.describe();
-        assert_eq!((info.kind, info.ready), (DocumentModelKind::KimiCode, true));
+        assert_eq!(
+            (info.kind, info.ready),
+            (DocumentModelKind::Agent(AgentKind::ClaudeCode), true)
+        );
         assert_eq!(
             info.billing,
             Billing::Subscription,
             "an agent's cost is not known"
         );
 
-        let missing =
-            DocumentModel::select(Some("kimi-code"), &keys, env(&[("HOME", "/home/director")]))
-                .unwrap();
-        assert!(!missing.describe().ready);
+        let named = elsewhere.to_string_lossy().into_owned();
+        let codex = DocumentModel::select(
+            Some("codex"),
+            &keys,
+            env(&[("KINETO_CODEX_BIN", &named), ("HOME", "/nonexistent")]),
+        )
+        .unwrap();
+        assert!(
+            codex.describe().ready,
+            "found where the director said it is"
+        );
+
+        for agent in ["kimi-code", "agy", "mini-agent"] {
+            let missing =
+                DocumentModel::select(Some(agent), &keys, env(&[("HOME", "/nonexistent")]))
+                    .unwrap();
+            assert!(!missing.describe().ready, "{agent} is not installed");
+            assert_eq!(missing.info().provider, agent);
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_openai_compatible_server_takes_the_key_it_names() {
+        let keys = Keys(BTreeMap::from([("deepseek", "sk-test")]));
+        let server = [
+            (LOCAL_URL_VARIABLE, "https://api.deepseek.example/v1"),
+            (LOCAL_MODEL_VARIABLE, "deepseek-chat"),
+            (LOCAL_KEY_VARIABLE, "deepseek"),
+        ];
+        let keyed = DocumentModel::select(Some("openai-compatible"), &keys, env(&server)).unwrap();
+        let info = keyed.describe();
+        assert_eq!((info.kind, info.ready), (DocumentModelKind::Local, true));
+        assert_eq!(info.model, "deepseek-chat");
+        assert_eq!(info.billing, Billing::Unpriced, "a keyed server is metered");
+
+        let unstored =
+            DocumentModel::select(Some("local"), &Keys(BTreeMap::new()), env(&server)).unwrap();
+        assert!(
+            !unstored.describe().ready,
+            "a key that is named but not stored is never left out"
+        );
+
+        let keyless = DocumentModel::select(
+            Some("local"),
+            &keys,
+            env(&[
+                (LOCAL_URL_VARIABLE, "http://127.0.0.1:11434/v1"),
+                (LOCAL_MODEL_VARIABLE, "llama"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(keyless.describe().billing, Billing::Free);
         let local = DocumentModel::select(
             Some("local"),
             &keys,
@@ -352,24 +418,5 @@ mod tests {
         )
         .unwrap();
         assert!(!local.describe().ready, "a local model needs a model name");
-        let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    #[test]
-    fn kineto_keeps_its_agent_data_in_its_own_state_directory() {
-        if cfg!(windows) || cfg!(target_os = "macos") {
-            return;
-        }
-        assert_eq!(
-            state_directory(&env(&[("HOME", "/home/director")])),
-            Some(PathBuf::from("/home/director/.local/state/kineto"))
-        );
-        assert_eq!(
-            state_directory(&env(&[
-                ("HOME", "/home/director"),
-                ("XDG_STATE_HOME", "/state")
-            ])),
-            Some(PathBuf::from("/state/kineto"))
-        );
     }
 }

@@ -41,16 +41,14 @@ String? languageModelProblem(KinetoLanguageModel model) {
   if (model.ready) return null;
   return switch (model.kind) {
     KinetoLanguageModelKind.none =>
-      'No language model is configured. Set KINETO_LLM_PROVIDER to kimi-code, kimi or local '
-          'and reopen Kineto.',
-    KinetoLanguageModelKind.kimiCode =>
-      'Kimi Code is selected but its command-line tool was not found; install it or set '
-          'KINETO_KIMI_CODE_BIN, then reopen Kineto.',
+      'No language model is chosen. Choose one under Settings, Providers, then reopen the project.',
     KinetoLanguageModelKind.kimi =>
-      'Kimi API is selected but has no key; set KINETO_KIMI_API_KEY and reopen Kineto.',
+      'The Kimi API is chosen but has no key; save one under Settings, Keys, then reopen the project.',
     KinetoLanguageModelKind.local =>
-      'A local model is selected; set KINETO_LOCAL_LLM_URL and KINETO_LOCAL_LLM_MODEL and '
-          'reopen Kineto.',
+      'An OpenAI-compatible server is chosen, but its address or model is missing, or the key it '
+          'names is not saved; complete it under Settings, then reopen the project.',
+    _ => '${model.kind.label} is chosen but was not found on this computer. Install it and sign in '
+        'with it once, or choose another under Settings, Providers, then reopen the project.',
   };
 }
 

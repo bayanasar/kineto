@@ -782,6 +782,8 @@ pub struct Providers {
     pub model: DocumentModel,
     /// `None` keeps [`SessionOptions::video_provider`].
     pub video: Option<VideoProvider>,
+    /// `None` keeps [`SessionOptions::speech_provider`].
+    pub speech: Option<SpeechProvider>,
 }
 
 /// Chooses a session's providers, on its worker before the open. Choosing
@@ -947,6 +949,7 @@ impl ProjectSession {
                     image: provider,
                     model,
                     video: None,
+                    speech: None,
                 })
             }),
             sink,
@@ -1693,9 +1696,13 @@ fn publish_providers(
         image: provider,
         model,
         video,
+        speech,
     } = providers;
     if video.is_some() {
         options.video_provider = video;
+    }
+    if speech.is_some() {
+        options.speech_provider = speech;
     }
     let video = options
         .video_provider
@@ -3563,6 +3570,7 @@ mod tests {
                 image: ImageProvider::LocalDemo,
                 model: DocumentModel::None,
                 video: None,
+                speech: None,
             })
         });
         (choose, release, choosing)

@@ -4,12 +4,15 @@ import 'package:wabisabi/wabisabi.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
-/// Provider keys, kept in the system's secure storage, and the provider
-/// plugins and MCP servers the user registered, read only: both are
-/// registered in Kineto's configuration folder, never through the app, and
-/// this page never asks for a program to run.
+/// Which providers make each part of a film, the keys they take, kept in
+/// the system's secure storage, and the provider plugins and MCP servers the
+/// user registered, read only: both are registered in Kineto's configuration
+/// folder, never through the app, and this page never asks for a program to
+/// run.
 class SettingsWorkspaceScreen extends StatefulWidget {
   const SettingsWorkspaceScreen({
+    this.loadSettings = loadKinetoProviderSettingsInBackground,
+    this.setSetting = setKinetoProviderSettingInBackground,
     this.loadKeys = loadKinetoKeysInBackground,
     this.storeKey = storeKinetoKeyInBackground,
     this.deleteKey = deleteKinetoKeyInBackground,
@@ -21,11 +24,16 @@ class SettingsWorkspaceScreen extends StatefulWidget {
     super.key,
   });
 
-  /// Reads where each provider's key is; opening the secure storage can
-  /// wait on the user, so these run off the UI thread.
-  final Future<KinetoKeys> Function() loadKeys;
-  final Future<void> Function(KinetoKeyProvider provider, String key) storeKey;
-  final Future<void> Function(KinetoKeyProvider provider) deleteKey;
+  /// Reads the provider choices and looks for agent tools; changes one.
+  /// Both touch files, so they run off the UI thread.
+  final Future<KinetoProviderSettings> Function() loadSettings;
+  final Future<void> Function(KinetoProviderSetting setting, String value) setSetting;
+
+  /// Reads where each named key is; opening the secure storage can wait on
+  /// the user, so these run off the UI thread.
+  final Future<KinetoKeys> Function(List<String> names) loadKeys;
+  final Future<void> Function(String name, String key) storeKey;
+  final Future<void> Function(String name) deleteKey;
 
   /// Reads the plugins; starts each enabled one, so it runs off the UI
   /// thread.
@@ -42,9 +50,13 @@ class SettingsWorkspaceScreen extends StatefulWidget {
 }
 
 class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
+  KinetoProviderSettings? _settings;
+  String? _settingsProblem;
+  bool _settingWorking = false;
+  String? _settingNote;
   KinetoKeys? _keys;
   String? _keysProblem;
-  KinetoKeyProvider? _keyWorking;
+  String? _keyWorking;
   String? _keyNote;
   List<KinetoPlugin>? _plugins;
   List<KinetoMcpServer>? _servers;
@@ -63,6 +75,7 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
       _servers = null;
       _pluginsProblem = null;
       _serversProblem = null;
+      _keys = null;
     });
     String problem(Object error) => error is KinetoProjectException ? error.message : error.toString();
     Future<void> plugins() async {
@@ -81,26 +94,84 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
       }
     }
 
-    await Future.wait(<Future<void>>[_readKeys(), plugins(), servers()]);
+    await Future.wait(<Future<void>>[_readSettings(), plugins(), servers()]);
+    if (mounted) setState(() {});
+    await _readKeys();
     if (mounted) setState(() {});
   }
 
   static String _problem(Object error) => error is KinetoProjectException ? error.message : error.toString();
 
+  Future<void> _readSettings() async {
+    try {
+      _settings = await widget.loadSettings();
+      _settingsProblem = null;
+    } on Object catch (error) {
+      _settingsProblem = _problem(error);
+    }
+  }
+
+  /// The keys settings list: the built-in providers', the one the chosen
+  /// OpenAI-compatible server takes, and every secret a plugin or MCP
+  /// server entry lists.
+  List<KinetoKeySlot> get _slots {
+    final slots = <KinetoKeySlot>[...KinetoKeySlot.builtIn];
+    void add(KinetoKeySlot slot) {
+      if (!slots.contains(slot)) slots.add(slot);
+    }
+
+    final server = _settings?.value(KinetoProviderSetting.endpointKey) ?? '';
+    if (server.isNotEmpty) add(KinetoKeySlot.server(server));
+    for (final plugin in _plugins ?? const <KinetoPlugin>[]) {
+      for (final secret in plugin.secrets) {
+        add(KinetoKeySlot.secret(secret, 'the ${plugin.id} plugin'));
+      }
+    }
+    for (final server in _servers ?? const <KinetoMcpServer>[]) {
+      for (final secret in server.secrets) {
+        add(KinetoKeySlot.secret(secret, 'the ${server.id} MCP server'));
+      }
+    }
+    return slots;
+  }
+
   Future<void> _readKeys() async {
     try {
-      _keys = await widget.loadKeys();
+      _keys = await widget.loadKeys(<String>[for (final slot in _slots) slot.name]);
       _keysProblem = null;
     } on Object catch (error) {
       _keysProblem = _problem(error);
     }
   }
 
+  /// Make one or more choices, then read the settings and keys again.
+  Future<void> _choose(Map<KinetoProviderSetting, String> choices) async {
+    setState(() {
+      _settingWorking = true;
+      _settingNote = null;
+    });
+    String note = 'Saved. Projects opened from now on use it.';
+    try {
+      for (final MapEntry(key: setting, value: value) in choices.entries) {
+        await widget.setSetting(setting, value);
+      }
+    } on Object catch (error) {
+      note = _problem(error);
+    }
+    await _readSettings();
+    await _readKeys();
+    if (!mounted) return;
+    setState(() {
+      _settingWorking = false;
+      _settingNote = note;
+    });
+  }
+
   /// Store or remove a key, then read the keys again. A key goes to the
   /// engine once and is not kept here.
-  Future<void> _changeKey(KinetoKeyProvider provider, Future<void> Function() change, String done) async {
+  Future<void> _changeKey(String name, Future<void> Function() change, String done) async {
     setState(() {
-      _keyWorking = provider;
+      _keyWorking = name;
       _keyNote = null;
     });
     String note;
@@ -120,19 +191,25 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
 
   @override
   Widget build(BuildContext context) => SettingsWorkspaceView(
+        settings: _settings,
+        settingsProblem: _settingsProblem,
+        settingWorking: _settingWorking,
+        settingNote: _settingNote,
+        onChoose: _choose,
+        slots: _slots,
         keys: _keys,
         keysProblem: _keysProblem,
         keyWorking: _keyWorking,
         keyNote: _keyNote,
-        onStoreKey: (provider, key) => _changeKey(
-          provider,
-          () => widget.storeKey(provider, key),
-          '${provider.label} key saved. Projects opened from now on use it.',
+        onStoreKey: (slot, key) => _changeKey(
+          slot.name,
+          () => widget.storeKey(slot.name, key),
+          '${slot.label} key saved. Projects opened from now on use it.',
         ),
-        onDeleteKey: (provider) => _changeKey(
-          provider,
-          () => widget.deleteKey(provider),
-          '${provider.label} key removed. Projects opened from now on do without it.',
+        onDeleteKey: (slot) => _changeKey(
+          slot.name,
+          () => widget.deleteKey(slot.name),
+          '${slot.label} key removed. Projects opened from now on do without it.',
         ),
         plugins: _plugins,
         pluginsProblem: _pluginsProblem,
@@ -147,6 +224,12 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
 
 class SettingsWorkspaceView extends StatelessWidget {
   const SettingsWorkspaceView({
+    this.settings,
+    this.settingsProblem,
+    this.settingWorking = false,
+    this.settingNote,
+    this.onChoose,
+    this.slots = KinetoKeySlot.builtIn,
     this.keys,
     this.keysProblem,
     this.keyWorking,
@@ -164,17 +247,31 @@ class SettingsWorkspaceView extends StatelessWidget {
     super.key,
   });
 
+  /// The provider choices; null while they are read.
+  final KinetoProviderSettings? settings;
+  final String? settingsProblem;
+
+  /// Whether a choice is being saved.
+  final bool settingWorking;
+
+  /// What the last choice came to.
+  final String? settingNote;
+  final void Function(Map<KinetoProviderSetting, String> choices)? onChoose;
+
+  /// The keys to list, in order.
+  final List<KinetoKeySlot> slots;
+
   /// Null while they are read.
   final KinetoKeys? keys;
   final String? keysProblem;
 
-  /// The provider whose key is being stored or removed.
-  final KinetoKeyProvider? keyWorking;
+  /// The name of the key being stored or removed.
+  final String? keyWorking;
 
   /// What the last change of a key came to.
   final String? keyNote;
-  final void Function(KinetoKeyProvider provider, String key)? onStoreKey;
-  final void Function(KinetoKeyProvider provider)? onDeleteKey;
+  final void Function(KinetoKeySlot slot, String key)? onStoreKey;
+  final void Function(KinetoKeySlot slot)? onDeleteKey;
 
   /// Null while they are read.
   final List<KinetoPlugin>? plugins;
@@ -226,6 +323,16 @@ class SettingsWorkspaceView extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 20),
+                  _ProvidersPanel(
+                    key: const ValueKey<String>('providers'),
+                    settings: settings,
+                    problem: settingsProblem,
+                    working: settingWorking,
+                    note: settingNote,
+                    plugins: plugins ?? const <KinetoPlugin>[],
+                    onChoose: onChoose,
+                  ),
+                  const SizedBox(height: 20),
                   _keysPanel(context),
                   const SizedBox(height: 20),
                   _pluginsPanel(context),
@@ -242,7 +349,7 @@ class SettingsWorkspaceView extends StatelessWidget {
     final keys = this.keys;
     return WabPanel(
       key: const ValueKey<String>('keys'),
-      title: 'Provider keys',
+      title: 'Keys',
       trailing: keys == null
           ? WabStatusBadge(keysProblem == null ? 'Reading' : 'Unreadable',
               kind: keysProblem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
@@ -272,18 +379,18 @@ class SettingsWorkspaceView extends StatelessWidget {
             Text(keyNote!, key: const ValueKey<String>('keys-note')),
           ],
           if (keys != null)
-            for (final provider in KinetoKeyProvider.values) ...<Widget>[
+            for (final slot in slots) ...<Widget>[
               const SizedBox(height: 12),
               _KeyRow(
-                key: ValueKey<String>('key-${provider.wireName}'),
-                provider: provider,
-                state: keys.states[provider],
-                problem: keys.problems[provider],
+                key: ValueKey<String>('key-${slot.name}'),
+                slot: slot,
+                state: keys.states[slot.name],
+                problem: keys.problems[slot.name],
                 canStore: keys.available,
-                working: keyWorking == provider,
+                working: keyWorking == slot.name,
                 idle: keyWorking == null,
-                onStore: onStoreKey == null ? null : (key) => onStoreKey!(provider, key),
-                onDelete: onDeleteKey == null ? null : () => onDeleteKey!(provider),
+                onStore: onStoreKey == null ? null : (key) => onStoreKey!(slot, key),
+                onDelete: onDeleteKey == null ? null : () => onDeleteKey!(slot),
               ),
             ],
         ],
@@ -304,8 +411,7 @@ class SettingsWorkspaceView extends StatelessWidget {
         children: <Widget>[
           const Text(
             'A plugin makes images, video or speech as a built-in provider does, under the same '
-            'rules: nothing is paid for twice unasked. Use one with KINETO_IMAGE_PROVIDER=plugin:<id>; '
-            'video and speech follow it when it makes them.',
+            'rules: nothing is paid for twice unasked. Choose one under Providers above.',
           ),
           if (pluginsProblem != null) ...<Widget>[const SizedBox(height: 12), Text(pluginsProblem!)],
           if (plugins != null && plugins.isEmpty) ...<Widget>[
@@ -438,7 +544,7 @@ class SettingsWorkspaceView extends StatelessWidget {
 /// cleared once it is handed on.
 class _KeyRow extends StatefulWidget {
   const _KeyRow({
-    required this.provider,
+    required this.slot,
     required this.state,
     required this.problem,
     required this.canStore,
@@ -449,7 +555,7 @@ class _KeyRow extends StatefulWidget {
     super.key,
   });
 
-  final KinetoKeyProvider provider;
+  final KinetoKeySlot slot;
   final KinetoKeyState? state;
   final String? problem;
   final bool canStore;
@@ -479,7 +585,7 @@ class _KeyRowState extends State<_KeyRow> {
 
   @override
   Widget build(BuildContext context) {
-    final provider = widget.provider;
+    final slot = widget.slot;
     final state = widget.state;
     final (status, kind) = widget.working
         ? ('Working', WabBadgeKind.progress)
@@ -493,35 +599,35 @@ class _KeyRowState extends State<_KeyRow> {
     final stored = state?.stored ?? false;
     final ready = widget.canStore && widget.idle && widget.onStore != null;
     return WabPanel(
-      title: '${provider.label} · ${provider.usedFor}',
+      title: '${slot.label} · ${slot.usedFor}',
       trailing: WabStatusBadge(status, kind: kind),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           if (widget.problem != null) Text(widget.problem!),
           if (!stored && (state?.inEnvironment ?? false))
-            Text('Read from ${provider.variable}, since the secure storage holds none.'),
+            Text('Read from ${slot.variable}, since the secure storage holds none.'),
           if (widget.canStore) ...<Widget>[
             const SizedBox(height: 8),
             Row(
               children: <Widget>[
                 Expanded(
                   child: TextField(
-                    key: ValueKey<String>('key-input-${provider.wireName}'),
+                    key: ValueKey<String>('key-input-${slot.name}'),
                     controller: _key,
                     obscureText: true,
                     enableSuggestions: false,
                     autocorrect: false,
                     enabled: ready,
                     decoration: InputDecoration(
-                      labelText: stored ? 'New ${provider.label} key' : '${provider.label} key',
+                      labelText: stored ? 'New ${slot.label} key' : '${slot.label} key',
                     ),
                     onSubmitted: (_) => _save(),
                   ),
                 ),
                 const SizedBox(width: 12),
                 WabButton(
-                  key: ValueKey<String>('key-save-${provider.wireName}'),
+                  key: ValueKey<String>('key-save-${slot.name}'),
                   kind: WabMaterialKind.seal,
                   onPressed: ready ? _save : null,
                   child: Text(stored ? 'Replace' : 'Save'),
@@ -529,7 +635,7 @@ class _KeyRowState extends State<_KeyRow> {
                 if (stored) ...<Widget>[
                   const SizedBox(width: 12),
                   WabButton(
-                    key: ValueKey<String>('key-delete-${provider.wireName}'),
+                    key: ValueKey<String>('key-delete-${slot.name}'),
                     kind: WabMaterialKind.zhuwen,
                     onPressed: widget.idle && widget.onDelete != null ? widget.onDelete : null,
                     child: const Text('Remove'),
@@ -537,6 +643,272 @@ class _KeyRowState extends State<_KeyRow> {
                 ],
               ],
             ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// One thing a provider setting can be, as the director reads it.
+typedef _Option = ({String value, String label, bool enabled});
+
+/// Which provider makes each part of a film, and the server documents are
+/// written with when it is an OpenAI-compatible one.
+class _ProvidersPanel extends StatefulWidget {
+  const _ProvidersPanel({
+    required this.settings,
+    required this.problem,
+    required this.working,
+    required this.note,
+    required this.plugins,
+    required this.onChoose,
+    super.key,
+  });
+
+  final KinetoProviderSettings? settings;
+  final String? problem;
+  final bool working;
+  final String? note;
+  final List<KinetoPlugin> plugins;
+  final void Function(Map<KinetoProviderSetting, String> choices)? onChoose;
+
+  @override
+  State<_ProvidersPanel> createState() => _ProvidersPanelState();
+}
+
+class _ProvidersPanelState extends State<_ProvidersPanel> {
+  final TextEditingController _url = TextEditingController();
+  final TextEditingController _model = TextEditingController();
+  final TextEditingController _keyName = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _fill();
+  }
+
+  @override
+  void didUpdateWidget(_ProvidersPanel old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.settings, widget.settings)) _fill();
+  }
+
+  void _fill() {
+    final settings = widget.settings;
+    if (settings == null) return;
+    _url.text = settings.value(KinetoProviderSetting.endpointUrl);
+    _model.text = settings.value(KinetoProviderSetting.endpointModel);
+    _keyName.text = settings.value(KinetoProviderSetting.endpointKey);
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _model.dispose();
+    _keyName.dispose();
+    super.dispose();
+  }
+
+  String _agentLabel(KinetoAgent agent) =>
+      '${agent.label} · ${widget.settings?.agents.containsKey(agent) ?? false ? 'installed' : 'not found'}';
+
+  List<_Option> _options(KinetoProviderSetting setting) {
+    final agents = widget.settings?.agents ?? const <KinetoAgent, String>{};
+    final current = widget.settings?.value(setting) ?? '';
+    final plugins = <KinetoPlugin>[
+      for (final plugin in widget.plugins)
+        if (plugin.enabled && plugin.description != null) plugin,
+    ];
+    final options = <_Option>[
+      ...switch (setting) {
+        KinetoProviderSetting.languageModel => <_Option>[
+            (value: '', label: 'None: documents cannot be written', enabled: true),
+            for (final agent in KinetoAgent.values)
+              (
+                value: agent.selection,
+                label: _agentLabel(agent),
+                enabled: agents.containsKey(agent) || current == agent.selection,
+              ),
+            (value: 'kimi', label: 'Kimi API · key', enabled: true),
+            (value: 'openai-compatible', label: 'OpenAI-compatible server', enabled: true),
+          ],
+        KinetoProviderSetting.image => <_Option>[
+            (value: '', label: 'Local demo · free', enabled: true),
+            (value: 'minimax', label: 'MiniMax image-01 · key', enabled: true),
+            for (final agent in KinetoAgent.values)
+              if (agent.makesImages)
+                (
+                  value: agent.selection,
+                  label: _agentLabel(agent),
+                  enabled: agents.containsKey(agent) || current == agent.selection,
+                ),
+            for (final plugin in plugins)
+              if (plugin.description!.makesImages)
+                (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
+          ],
+        KinetoProviderSetting.video => <_Option>[
+            (value: '', label: 'Follows images', enabled: true),
+            (value: 'local-demo', label: 'Local demo · free', enabled: true),
+            (value: 'minimax', label: 'MiniMax Hailuo · key', enabled: true),
+            (value: 'veo', label: 'Veo 3.1 Lite · key', enabled: true),
+            (value: 'veo:fast', label: 'Veo 3.1 Fast · key', enabled: true),
+            (value: 'veo:standard', label: 'Veo 3.1 · key', enabled: true),
+            (value: 'omni', label: 'Gemini Omni Flash · key', enabled: true),
+            for (final plugin in plugins)
+              if (plugin.description!.makesVideos)
+                (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
+          ],
+        KinetoProviderSetting.speech => <_Option>[
+            (value: '', label: 'Follows images', enabled: true),
+            (value: 'local-demo', label: 'Local demo · free', enabled: true),
+            (value: 'minimax', label: 'MiniMax speech · key', enabled: true),
+            for (final plugin in plugins)
+              if (plugin.description!.speaks)
+                (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
+          ],
+        _ => const <_Option>[],
+      },
+    ];
+    if (!options.any((option) => option.value == current)) {
+      options.add((value: current, label: '$current (as set)', enabled: true));
+    }
+    return options;
+  }
+
+  Widget _choice(BuildContext context, KinetoProviderSetting setting, String title) {
+    final settings = widget.settings!;
+    final ready = widget.onChoose != null && !widget.working && settings.problem == null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            SizedBox(width: 160, child: Text(title)),
+            Expanded(
+              child: DropdownButton<String>(
+                key: ValueKey<String>('choose-${setting.wireName}'),
+                value: settings.value(setting),
+                isExpanded: true,
+                items: <DropdownMenuItem<String>>[
+                  for (final option in _options(setting))
+                    DropdownMenuItem<String>(
+                      key: ValueKey<String>('choice-${setting.wireName}-${option.value}'),
+                      value: option.value,
+                      enabled: option.enabled,
+                      child: Text(option.label),
+                    ),
+                ],
+                onChanged: ready
+                    ? (value) {
+                        if (value != null && value != settings.value(setting)) {
+                          widget.onChoose!(<KinetoProviderSetting, String>{setting: value});
+                        }
+                      }
+                    : null,
+              ),
+            ),
+          ],
+        ),
+        if (settings.overridden.contains(setting))
+          Text('${setting.variable} is set for this run and wins over this choice.'),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = widget.settings;
+    final model = settings?.value(KinetoProviderSetting.languageModel) ?? '';
+    final agent = KinetoAgent.values.where((agent) => agent.selection == model).firstOrNull;
+    final server = model == 'openai-compatible' || model == 'local';
+    final ready = widget.onChoose != null && !widget.working && settings?.problem == null;
+    return WabPanel(
+      title: 'Providers',
+      trailing: settings == null
+          ? WabStatusBadge(widget.problem == null ? 'Reading' : 'Unreadable',
+              kind: widget.problem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
+          : widget.working
+              ? const WabStatusBadge('Saving', kind: WabBadgeKind.progress)
+              : settings.problem != null
+                  ? const WabStatusBadge('Unreadable', kind: WabBadgeKind.warning)
+                  : const WabStatusBadge('Chosen here', kind: WabBadgeKind.neutral),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'Choose who makes each part. The agent tools you already use are found on this computer '
+            'and run under your own sign-in: Kineto starts them without tools and never reads their '
+            'sign-in. Projects opened from now on use these choices.',
+          ),
+          if (widget.problem != null) ...<Widget>[const SizedBox(height: 12), Text(widget.problem!)],
+          if (settings?.problem != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Text(
+              '${settings!.problem}. Nothing is changed here until the file can be read.',
+              key: const ValueKey<String>('providers-unreadable'),
+            ),
+          ],
+          if (widget.note != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Text(widget.note!, key: const ValueKey<String>('providers-note')),
+          ],
+          if (settings != null) ...<Widget>[
+            const SizedBox(height: 12),
+            _choice(context, KinetoProviderSetting.languageModel, 'Documents'),
+            if (agent != null && settings.agents[agent] != null)
+              Text('Runs ${settings.agents[agent]}', key: const ValueKey<String>('agent-path')),
+            if (agent?.caveat != null) Text(agent!.caveat!),
+            if (server) ...<Widget>[
+              const SizedBox(height: 8),
+              TextField(
+                key: const ValueKey<String>('server-url'),
+                controller: _url,
+                enabled: ready,
+                decoration: const InputDecoration(labelText: 'Server address, https:// or http://localhost'),
+              ),
+              TextField(
+                key: const ValueKey<String>('server-model'),
+                controller: _model,
+                enabled: ready,
+                decoration: const InputDecoration(labelText: 'Model'),
+              ),
+              TextField(
+                key: const ValueKey<String>('server-key'),
+                controller: _keyName,
+                enabled: ready,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: 'Name of its key, such as deepseek; empty for a server that takes none',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: WabButton(
+                  key: const ValueKey<String>('server-save'),
+                  kind: WabMaterialKind.seal,
+                  onPressed: ready
+                      ? () => widget.onChoose!(<KinetoProviderSetting, String>{
+                            KinetoProviderSetting.endpointUrl: _url.text,
+                            KinetoProviderSetting.endpointModel: _model.text,
+                            KinetoProviderSetting.endpointKey: _keyName.text,
+                          })
+                      : null,
+                  child: const Text('Save the server'),
+                ),
+              ),
+              const Text('Its key is kept under that name below, never here.'),
+            ],
+            const SizedBox(height: 12),
+            _choice(context, KinetoProviderSetting.image, 'Images'),
+            if (settings.value(KinetoProviderSetting.image) == KinetoAgent.agy.selection &&
+                KinetoAgent.agy.caveat != null)
+              Text(KinetoAgent.agy.caveat!),
+            const SizedBox(height: 12),
+            _choice(context, KinetoProviderSetting.video, 'Video'),
+            const SizedBox(height: 12),
+            _choice(context, KinetoProviderSetting.speech, 'Speech'),
           ],
         ],
       ),

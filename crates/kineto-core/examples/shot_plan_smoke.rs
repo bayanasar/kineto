@@ -3,13 +3,13 @@
 //! run by the test suite.
 //!
 //! ```text
-//! cargo run -p kineto-core --example shot_plan_smoke -- <project-dir> <kimi> <kineto-kimi-home>
+//! cargo run -p kineto-core --example shot_plan_smoke -- <project-dir> <kimi>
 //! ```
 
 use std::{path::PathBuf, time::Instant};
 
 use kineto_core::shot_plan;
-use kineto_llm::acp::AcpAgent;
+use kineto_llm::agents::{AgentCli, AgentKind};
 use kineto_project::{
     manifest::CanonicalProject,
     revisions,
@@ -18,12 +18,11 @@ use kineto_project::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: shot_plan_smoke <dir> <kimi> <kineto-kimi-home>";
+    let usage = "usage: shot_plan_smoke <dir> <kimi>";
     let project = CanonicalProject::open(PathBuf::from(args.next().ok_or(usage)?))?;
     let executable = PathBuf::from(args.next().ok_or(usage)?);
-    let home = PathBuf::from(args.next().ok_or(usage)?);
     let started = Instant::now();
-    let record = shot_plan::write(&project, &AcpAgent::kimi_code(executable, home))?;
+    let record = shot_plan::write(&project, &AgentCli::new(AgentKind::KimiCode, executable))?;
     let plan: ShotPlan = revisions::read(&project, &record)?;
     println!(
         "{} by {:?}/{:?} in {} ms, stale: {:?}",

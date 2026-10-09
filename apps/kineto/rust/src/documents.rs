@@ -13,7 +13,7 @@ use kineto_core::{
     llm::DocumentModelKind,
     session::{DocumentCommand, ProjectSession, PublishedDocuments, SubmitError},
 };
-use kineto_llm::Billing;
+use kineto_llm::{Billing, agents::AgentKind};
 use kineto_project::{
     revisions::{Origin, RevisionStatus},
     screenplay::{Block, BlockKind, SceneEdit, Screenplay, Setting},
@@ -607,7 +607,11 @@ pub unsafe extern "C" fn kineto_project_llm_provider(session: *const KinetoProje
             &LLM_PROVIDERS,
             match model.kind {
                 DocumentModelKind::None => "none",
-                DocumentModelKind::KimiCode => "kimi_code",
+                DocumentModelKind::Agent(AgentKind::KimiCode) => "kimi_code",
+                DocumentModelKind::Agent(AgentKind::ClaudeCode) => "claude_code",
+                DocumentModelKind::Agent(AgentKind::Codex) => "codex",
+                DocumentModelKind::Agent(AgentKind::Agy) => "agy",
+                DocumentModelKind::Agent(AgentKind::MiniAgent) => "mini_agent",
                 DocumentModelKind::Kimi => "kimi",
                 DocumentModelKind::Local => "local",
             },

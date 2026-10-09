@@ -14,7 +14,7 @@
 
 use std::{collections::BTreeMap, ffi::CString, path::PathBuf, ptr, slice, str};
 
-use crate::{contract::*, guarded};
+use crate::{contract::*, guarded, settings::Choices};
 use kineto_core::{
     export::ExportError,
     generation::{
@@ -22,16 +22,18 @@ use kineto_core::{
         ProviderSelectionError,
     },
     keyframe_prompt::KeyframePromptError,
-    llm::{DocumentModel, LLM_PROVIDER_VARIABLE, ModelSelectionError},
+    llm::{DocumentModel, ModelSelectionError},
     references::ReferenceCallError,
     session::{
         DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Providers,
         Recovery, SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError,
         SubmitError,
     },
+    speech::SpeechProvider,
     video::{VideoProvider, VideoProviderKind},
 };
 use kineto_jobs::ErrorClass;
+use kineto_plugins::settings::Setting;
 use kineto_project::{
     cast::CastError,
     dubbing::DubbingError,
@@ -344,70 +346,49 @@ unsafe fn spawn<K: SecretSource + 'static>(
 /// The providers the environment names, with keys from `secrets`, read once
 /// for the whole open.
 fn chosen_providers(secrets: &impl SecretSource) -> Result<Providers, SessionError> {
+    let choices = Choices::load()
+        .map_err(|reason| SessionError::Provider(ProviderSelectionError::Settings(reason)))?;
+    let selected = |setting| {
+        choices
+            .selection(setting)
+            .map_err(ProviderSelectionError::Unknown)
+    };
+    let provider = |error| SessionError::Provider(error);
+    let lookup = |name: &str| choices.lookup(name);
     Ok(Providers {
-        image: image_provider_from_environment(secrets).map_err(SessionError::Provider)?,
-        video: video_provider_from_environment(secrets).map_err(SessionError::Provider)?,
-        model: document_model_from_environment(secrets).map_err(SessionError::Model)?,
+        image: selected(Setting::Image)
+            .and_then(|selection| ImageProvider::select_with(selection.as_deref(), secrets, lookup))
+            .map_err(provider)?,
+        video: selected(Setting::Video)
+            .and_then(|selection| VideoProvider::select(selection.as_deref(), secrets))
+            .map_err(provider)?,
+        speech: selected(Setting::Speech)
+            .and_then(|selection| SpeechProvider::select(selection.as_deref(), secrets))
+            .map_err(provider)?,
+        model: choices
+            .selection(Setting::LanguageModel)
+            .map_err(ModelSelectionError::Unknown)
+            .and_then(|selection| DocumentModel::select(selection.as_deref(), secrets, lookup))
+            .map_err(SessionError::Model)?,
     })
 }
 
-/// The environment variable that names the image provider a session uses.
-/// Unset, empty or `local-demo` means the free demo generator; `minimax`
-/// means MiniMax with the key in `KINETO_MINIMAX_API_KEY`; `plugin:<id>` the
-/// plugin registered as `<id>` (ADR-0006), which also speaks when it can. A
-/// paid provider is used only when named here, never because a key happens
-/// to be set.
+/// The environment variable that names the image provider a session uses,
+/// over the director's settings. Unset, empty or `local-demo` means the free
+/// demo generator; `minimax` means MiniMax with its key; `plugin:<id>` the
+/// plugin registered as `<id>` (ADR-0006), which also speaks when it can;
+/// `agy` the agy the director signed in to. A paid provider is used only
+/// when it is named, never because a key happens to be set.
 pub(crate) const IMAGE_PROVIDER_VARIABLE: &str = "KINETO_IMAGE_PROVIDER";
-
-fn image_provider_from_environment(
-    secrets: &impl SecretSource,
-) -> Result<ImageProvider, ProviderSelectionError> {
-    let selection = selection(IMAGE_PROVIDER_VARIABLE).map_err(ProviderSelectionError::Unknown)?;
-    ImageProvider::select(selection.as_deref(), secrets)
-}
-
-/// The environment variable that names the video provider a session uses:
-/// `local-demo` for the free demo clip, `minimax` for MiniMax Hailuo with the
-/// key in `KINETO_MINIMAX_API_KEY`. Unset or empty follows the image
-/// provider. As for images, a paid provider is used only when named.
-const VIDEO_PROVIDER_VARIABLE: &str = "KINETO_VIDEO_PROVIDER";
-
-fn video_provider_from_environment(
-    secrets: &impl SecretSource,
-) -> Result<Option<VideoProvider>, ProviderSelectionError> {
-    let selection = selection(VIDEO_PROVIDER_VARIABLE).map_err(ProviderSelectionError::Unknown)?;
-    VideoProvider::select(selection.as_deref(), secrets)
-}
-
-/// What `variable` names, `None` when it is unset; a value that is not
-/// Unicode, as text, is named nothing this build has.
-fn selection(variable: &str) -> Result<Option<String>, String> {
-    match std::env::var(variable) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(value)) => Err(value.to_string_lossy().into_owned()),
-    }
-}
 
 fn selection_error(error: &ProviderSelectionError) -> i32 {
     match error {
         ProviderSelectionError::Plugin(_) => PROJECT_ERR_PLUGIN_UNAVAILABLE,
+        ProviderSelectionError::Settings(_) => PROJECT_ERR_SETTING_INVALID,
         ProviderSelectionError::Unknown(_) | ProviderSelectionError::Secret(_) => {
             PROJECT_ERR_PROVIDER_UNKNOWN
         }
     }
-}
-
-/// The language model named by `KINETO_LLM_PROVIDER` (see
-/// `kineto_core::llm`). Unset means none: documents are refused rather than
-/// sent to a model nobody chose.
-fn document_model_from_environment(
-    secrets: &impl SecretSource,
-) -> Result<DocumentModel, ModelSelectionError> {
-    let selection = selection(LLM_PROVIDER_VARIABLE).map_err(ModelSelectionError::Unknown)?;
-    DocumentModel::select(selection.as_deref(), secrets, |name| {
-        std::env::var(name).ok()
-    })
 }
 
 /// Start opening an existing canonical Kineto project.
@@ -757,6 +738,7 @@ fn image_provider_code(kind: ImageProviderKind) -> u32 {
         ImageProviderKind::LocalDemo => IMAGE_PROVIDER_LOCAL_DEMO,
         ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
         ImageProviderKind::Plugin => IMAGE_PROVIDER_PLUGIN,
+        ImageProviderKind::Agent => IMAGE_PROVIDER_AGENT,
     }
 }
 

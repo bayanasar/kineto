@@ -560,8 +560,9 @@ pub fn call_tool(
     })
 }
 
-/// A secret the entry names, read from the environment. OS secure storage
-/// is for the desktop shell to add.
+/// A secret the entry names, read from the environment only: the
+/// development source. The desktop shell reads the system's secure storage
+/// first (`kineto_core::plugin::read_secrets_with`).
 #[must_use]
 pub fn environment_secret(name: &str) -> Option<String> {
     env::var(name).ok()

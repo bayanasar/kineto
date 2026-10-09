@@ -3,8 +3,9 @@
 //! Workflow code asks an [`LlmBackend`] to complete a conversation and never
 //! names a vendor. Backends come in two kinds: HTTP APIs that speak the
 //! OpenAI chat-completions protocol (a cloud service with an API key, or a
-//! local endpoint), and agent CLIs such as Kimi Code, driven as configured
-//! local processes that manage their own sign-in.
+//! local endpoint), and the agent CLIs the director already signed in to
+//! (Claude Code, Codex, Kimi Code, agy, Mini-Agent), driven as local
+//! processes without tools.
 //!
 //! Structured output is schema-first: the request carries the JSON Schema the
 //! answer must satisfy, and [`complete_structured`] turns the answer into
@@ -18,10 +19,12 @@ use kineto_providers::LlmCapabilities;
 use serde::de::DeserializeOwned;
 
 pub mod acp;
+pub mod agents;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod http;
 pub mod openai;
+mod process;
 
 /// Who a message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

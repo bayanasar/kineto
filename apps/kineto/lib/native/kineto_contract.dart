@@ -142,6 +142,8 @@ final class KinetoNativeContract {
   static const int _mcpTextKind = 66;
   static const int _keyProviderKind = 67;
   static const int _keyStateKind = 68;
+  static const int _providerSettingKind = 69;
+  static const int _agentKind = 70;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -246,6 +248,12 @@ final class KinetoNativeContract {
   Map<String, int> get mcpTexts => _table(_mcpTextKind);
   Map<String, int> get keyProviders => _table(_keyProviderKind);
   Map<String, int> get keyStates => _table(_keyStateKind);
+
+  /// Provider setting code by name, for example `language_model` → 4.
+  Map<String, int> get providerSettings => _table(_providerSettingKind);
+
+  /// Agent tool code by name, for example `claude_code` → 1.
+  Map<String, int> get agents => _table(_agentKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

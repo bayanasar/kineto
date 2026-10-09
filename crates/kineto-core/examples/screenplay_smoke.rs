@@ -3,14 +3,18 @@
 //! is paid. Never run by the test suite.
 //!
 //! ```text
-//! cargo run -p kineto-core --example screenplay_smoke -- <project-dir> kimi-code <kimi> <kineto-kimi-home> [<scene-id> <direction>]
+//! cargo run -p kineto-core --example screenplay_smoke -- <project-dir> kimi-code <kimi> [<scene-id> <direction>]
 //! KINETO_KIMI_API_KEY=... cargo run -p kineto-core --example screenplay_smoke -- <project-dir> kimi [<scene-id> <direction>]
 //! ```
 
 use std::{path::PathBuf, time::Instant};
 
 use kineto_core::screenplay;
-use kineto_llm::{LlmBackend, acp::AcpAgent, openai::OpenAiCompatible};
+use kineto_llm::{
+    LlmBackend,
+    agents::{AgentCli, AgentKind},
+    openai::OpenAiCompatible,
+};
 use kineto_project::{manifest::CanonicalProject, revisions, screenplay::Screenplay};
 use kineto_providers::secret::{EnvSecretSource, SecretSource};
 
@@ -60,9 +64,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match backend.as_str() {
         "kimi-code" => {
             let executable = PathBuf::from(args.next().ok_or("kimi executable")?);
-            let home = PathBuf::from(args.next().ok_or("kineto Kimi Code data root")?);
             let rewrite = args.next().zip(args.next());
-            run(&project, &AcpAgent::kimi_code(executable, home), rewrite)
+            run(
+                &project,
+                &AgentCli::new(AgentKind::KimiCode, executable),
+                rewrite,
+            )
         }
         "kimi" => {
             let rewrite = args.next().zip(args.next());

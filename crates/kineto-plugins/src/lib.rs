@@ -19,7 +19,8 @@ pub mod fake_mcp;
 pub mod host;
 pub mod mcp;
 pub mod protocol;
+pub mod settings;
 
 pub use config::{ConfigError, PluginConfig, PluginEntry};
 pub use host::{Done, HostError, Input, Limits, OutputFile, run};
-pub use protocol::{Answer, FailureClass, PROTOCOL};
+pub use protocol::{Answer, DeclaredFile, FailureClass, PROTOCOL};

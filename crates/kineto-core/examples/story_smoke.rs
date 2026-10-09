@@ -1,15 +1,20 @@
-//! Manual run of story analysis with a real model. Kimi Code uses its
-//! subscription; Kimi's API is paid. Never run by the test suite.
+//! Manual run of story analysis with a real model. An agent CLI the director
+//! signed in to uses its subscription; Kimi's API is paid. Never run by the
+//! test suite.
 //!
 //! ```text
-//! cargo run -p kineto-core --example story_smoke -- <new-project-dir> kimi-code <kimi> <kineto-kimi-home>
+//! cargo run -p kineto-core --example story_smoke -- <new-project-dir> claude-code [<executable>]
 //! KINETO_KIMI_API_KEY=... cargo run -p kineto-core --example story_smoke -- <new-project-dir> kimi
 //! ```
 
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use kineto_core::story;
-use kineto_llm::{LlmBackend, acp::AcpAgent, openai::OpenAiCompatible};
+use kineto_llm::{
+    LlmBackend,
+    agents::{AgentCli, AgentKind, locate},
+    openai::OpenAiCompatible,
+};
 use kineto_project::{
     manifest::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
@@ -89,10 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         STORY.as_bytes(),
     )?;
     match backend.as_str() {
-        "kimi-code" => {
-            let executable = PathBuf::from(args.next().ok_or("kimi executable")?);
-            let home = PathBuf::from(args.next().ok_or("kineto Kimi Code data root")?);
-            run(&project, &AcpAgent::kimi_code(executable, home))
+        agent if AgentKind::from_name(agent).is_some() => {
+            let kind = AgentKind::from_name(agent).expect("checked above");
+            let executable = args
+                .next()
+                .map(PathBuf::from)
+                .or_else(|| locate(kind, &|name| std::env::var(name).ok()))
+                .ok_or("the agent is not installed")?;
+            run(&project, &AgentCli::new(kind, executable))
         }
         "kimi" => run(
             &project,

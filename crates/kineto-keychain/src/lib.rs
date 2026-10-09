@@ -2,8 +2,11 @@
 //! Keychain, the Windows Credential Manager, or a Secret Service (GNOME
 //! Keyring, KWallet, KeePassXC) on Linux.
 //!
-//! Each key is one credential: service [`SERVICE`], account the provider's
-//! name, as in `minimax` or `gemini`. Nothing is kept anywhere else. Where
+//! Each key is one credential: service [`SERVICE`], account its name: a
+//! provider's, as in `minimax` or `gemini`, a name the director gave the key
+//! an OpenAI-compatible server takes, as in `deepseek`, or the name of a
+//! secret a plugin's entry lists, as in `STUDIO_IMAGES_KEY`. Nothing is kept
+//! anywhere else. Where
 //! the system offers no secure storage, [`Keychain::open`] says why, and
 //! Kineto reads keys from the environment only; it never falls back to a
 //! file.
@@ -19,8 +22,34 @@ use kineto_providers::secret::{SecretError, SecretSource, SecretString, api_key_
 /// The service every Kineto key is stored under.
 pub const SERVICE: &str = "kineto";
 
-/// The providers whose keys Kineto reads, by the name each is stored under.
+/// The built-in providers whose keys Kineto reads, by the name each is
+/// stored under.
 pub const PROVIDERS: [&str; 4] = ["minimax", "gemini", "kimi", "veo"];
+
+/// Whether `name` can name a key: 1 to 64 ASCII letters, digits and `_`,
+/// not starting with a digit.
+#[must_use]
+pub fn secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with(|character: char| character.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Where a key named `name` is read from when the secure storage holds
+/// none: a provider's (lowercase) from `KINETO_<NAME>_API_KEY`, a plugin's
+/// secret from the variable of its own name.
+#[must_use]
+pub fn environment_variable(name: &str) -> Option<String> {
+    if !secret_name(name) {
+        return None;
+    }
+    api_key_variable(name)
+        .ok()
+        .or_else(|| Some(name.to_owned()))
+}
 
 /// Why a key could not be read, stored or removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +59,7 @@ pub enum KeychainError {
     /// The secure storage refused or failed, as when it is locked, and what
     /// it said.
     Failed(String),
-    /// The provider's name is not one a key is stored under.
+    /// The name is not one a key can be stored under.
     InvalidProvider,
 }
 
@@ -102,10 +131,12 @@ impl Keychain {
         }
     }
 
-    fn entry(&self, provider: &str) -> Result<Entry, KeychainError> {
-        api_key_variable(provider).map_err(|_| KeychainError::InvalidProvider)?;
+    fn entry(&self, name: &str) -> Result<Entry, KeychainError> {
+        if !secret_name(name) {
+            return Err(KeychainError::InvalidProvider);
+        }
         self.store
-            .build(SERVICE, provider, None)
+            .build(SERVICE, name, None)
             .map_err(|error| failure(&error))
     }
 }
@@ -129,6 +160,23 @@ impl SecretSource for Keychain {
 pub struct KeychainFirst<F> {
     pub keychain: Option<Keychain>,
     pub fallback: F,
+}
+
+impl<F> KeychainFirst<F> {
+    /// The secret `name` a plugin's entry lists: from the secure storage,
+    /// else from the environment variable of its own name.
+    #[must_use]
+    pub fn secret(&self, name: &str) -> Option<String> {
+        if !secret_name(name) {
+            return None;
+        }
+        if let Some(Ok(Some(key))) = self.keychain.as_ref().map(|keychain| keychain.get(name)) {
+            return Some(key.expose().to_owned());
+        }
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }
 }
 
 impl<F: SecretSource> SecretSource for KeychainFirst<F> {
@@ -217,10 +265,38 @@ mod tests {
         assert!(keychain.delete("minimax").unwrap());
         assert!(!keychain.delete("minimax").unwrap());
         assert_eq!(keychain.get("minimax").unwrap(), None);
-        for name in ["", "MiniMax", "../kineto", "a b"] {
+        for name in ["", "1key", "../kineto", "a b", "sk-live"] {
             assert_eq!(keychain.get(name), Err(KeychainError::InvalidProvider));
         }
         assert!(!format!("{keychain:?}").contains("sk-"));
+    }
+
+    #[test]
+    fn any_named_key_is_kept_and_read_from_its_own_variable_when_absent() {
+        let keychain = memory();
+        keychain.store("deepseek", &key("sk-endpoint")).unwrap();
+        keychain
+            .store("STUDIO_IMAGES_KEY", &key("sk-plugin"))
+            .unwrap();
+        assert_eq!(keychain.get("deepseek").unwrap(), Some(key("sk-endpoint")));
+        let keys = KeychainFirst {
+            keychain: Some(keychain),
+            fallback: EnvSecretSource::with_lookup(|_: &str| None),
+        };
+        assert_eq!(
+            keys.secret("STUDIO_IMAGES_KEY").as_deref(),
+            Some("sk-plugin")
+        );
+        assert_eq!(keys.secret("../x"), None);
+        assert_eq!(
+            environment_variable("deepseek").as_deref(),
+            Some("KINETO_DEEPSEEK_API_KEY")
+        );
+        assert_eq!(
+            environment_variable("STUDIO_IMAGES_KEY").as_deref(),
+            Some("STUDIO_IMAGES_KEY")
+        );
+        assert_eq!(environment_variable("a b"), None);
     }
 
     #[test]

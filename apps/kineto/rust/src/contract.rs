@@ -86,10 +86,12 @@ pub(crate) const PROJECT_ERR_PLANNED_DIRECTION: i32 = 169;
 pub(crate) const PROJECT_ERR_KEYCHAIN_UNAVAILABLE: i32 = 170;
 pub(crate) const PROJECT_ERR_KEYCHAIN_FAILED: i32 = 171;
 pub(crate) const PROJECT_ERR_STYLE_REFERENCE_UNUSABLE: i32 = 172;
+pub(crate) const PROJECT_ERR_SETTING_INVALID: i32 = 173;
+pub(crate) const PROJECT_ERR_SETTINGS_UNWRITABLE: i32 = 174;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 75] = [
+const STATUSES: [(&str, i32); 77] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -179,6 +181,8 @@ const STATUSES: [(&str, i32); 75] = [
         "style_reference_unusable",
         PROJECT_ERR_STYLE_REFERENCE_UNUSABLE,
     ),
+    ("setting_invalid", PROJECT_ERR_SETTING_INVALID),
+    ("settings_unwritable", PROJECT_ERR_SETTINGS_UNWRITABLE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -192,6 +196,7 @@ const DIRECTIONS: [(&str, ShotDirection); 4] = [
 pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
 pub(crate) const IMAGE_PROVIDER_PLUGIN: u32 = 3;
+pub(crate) const IMAGE_PROVIDER_AGENT: u32 = 4;
 
 /// Video state codes in the snapshot's `video_state` field.
 const VIDEO_STATES: [(&str, u8); 6] = [
@@ -204,10 +209,11 @@ const VIDEO_STATES: [(&str, u8); 6] = [
 ];
 
 /// Image provider codes returned by `kineto_project_image_provider`.
-const IMAGE_PROVIDERS: [(&str, u32); 3] = [
+const IMAGE_PROVIDERS: [(&str, u32); 4] = [
     ("local_demo", IMAGE_PROVIDER_LOCAL_DEMO),
     ("minimax", IMAGE_PROVIDER_MINIMAX),
     ("plugin", IMAGE_PROVIDER_PLUGIN),
+    ("agent", IMAGE_PROVIDER_AGENT),
 ];
 
 pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
@@ -216,8 +222,9 @@ pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 pub(crate) const VIDEO_PROVIDER_VEO: u32 = 4;
 pub(crate) const VIDEO_PROVIDER_OMNI: u32 = 5;
 
-/// The providers whose keys settings manage, by the name each key is stored
-/// under; the codes `kineto_keys_*` take.
+/// The built-in providers whose keys settings list, by the name each key is
+/// stored under. Any other key is stored by its own name: one a plugin's
+/// entry names, or the one an OpenAI-compatible server takes.
 pub(crate) const KEY_PROVIDERS: [(&str, u32); 4] =
     [("minimax", 1), ("gemini", 2), ("kimi", 3), ("veo", 4)];
 pub(crate) const KEY_STATE_STORED: u32 = 1;
@@ -226,6 +233,26 @@ pub(crate) const KEY_STATE_ENVIRONMENT: u32 = 2;
 const KEY_STATES: [(&str, u32); 2] = [
     ("stored", KEY_STATE_STORED),
     ("environment", KEY_STATE_ENVIRONMENT),
+];
+
+/// The provider settings `kineto_settings_*` read and change.
+pub(crate) const PROVIDER_SETTINGS: [(&str, u32); 7] = [
+    ("image", 1),
+    ("video", 2),
+    ("speech", 3),
+    ("language_model", 4),
+    ("endpoint_url", 5),
+    ("endpoint_model", 6),
+    ("endpoint_key", 7),
+];
+
+/// The agent CLIs settings look for.
+pub(crate) const AGENTS: [(&str, u32); 5] = [
+    ("claude_code", 1),
+    ("codex", 2),
+    ("kimi_code", 3),
+    ("agy", 4),
+    ("mini_agent", 5),
 ];
 
 /// Video provider codes returned by `kineto_project_video_provider`.
@@ -325,8 +352,16 @@ pub(crate) const EXPORT_TEXTS: [(&str, u32); 4] = [
 ];
 
 /// Language model codes returned by `kineto_project_llm_provider`.
-pub(crate) const LLM_PROVIDERS: [(&str, u32); 4] =
-    [("none", 0), ("kimi_code", 1), ("kimi", 2), ("local", 3)];
+pub(crate) const LLM_PROVIDERS: [(&str, u32); 8] = [
+    ("none", 0),
+    ("kimi_code", 1),
+    ("kimi", 2),
+    ("local", 3),
+    ("claude_code", 4),
+    ("codex", 5),
+    ("agy", 6),
+    ("mini_agent", 7),
+];
 
 /// Source format codes `kineto_project_import_source` takes.
 pub(crate) const SOURCE_FORMATS: [(&str, u32); 2] = [("text", 1), ("markdown", 2)];
@@ -1082,6 +1117,8 @@ const ENTRY_MCP_VALUE: u32 = 65;
 const ENTRY_MCP_TEXT: u32 = 66;
 const ENTRY_KEY_PROVIDER: u32 = 67;
 const ENTRY_KEY_STATE: u32 = 68;
+const ENTRY_PROVIDER_SETTING: u32 = 69;
+const ENTRY_AGENT: u32 = 70;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1189,6 +1226,8 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_MCP_TEXT, &MCP_TEXTS);
         codes(&mut entries, ENTRY_KEY_PROVIDER, &KEY_PROVIDERS);
         codes(&mut entries, ENTRY_KEY_STATE, &KEY_STATES);
+        codes(&mut entries, ENTRY_PROVIDER_SETTING, &PROVIDER_SETTINGS);
+        codes(&mut entries, ENTRY_AGENT, &AGENTS);
         entries
     })
 }
@@ -1388,9 +1427,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_KEY_STATE);
-        assert_eq!(&name[..len as usize], b"environment");
-        assert_eq!((value, extra), (2, 0));
+        assert_eq!(kind, ENTRY_AGENT);
+        assert_eq!(&name[..len as usize], b"mini_agent");
+        assert_eq!((value, extra), (5, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

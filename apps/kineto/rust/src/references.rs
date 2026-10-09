@@ -341,6 +341,7 @@ pub unsafe extern "C" fn kineto_mcp_load(out_servers: *mut *mut KinetoMcpServers
         let Ok(config) = McpConfig::load_default() else {
             return PROJECT_ERR_PLUGIN_CONFIG_INVALID;
         };
+        crate::keys::read_plugin_secrets_from_storage();
         let servers = Box::new(KinetoMcpServers {
             listed: core_references::list_servers(&config),
         });

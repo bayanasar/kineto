@@ -118,7 +118,7 @@ void main() {
       model: KinetoLanguageModel.none,
     );
     expect(find.text('Not analysed yet. The analysis finds the characters, locations and scenes the screenplay is written from.'), findsOneWidget);
-    expect(find.textContaining('Set KINETO_LLM_PROVIDER'), findsOneWidget);
+    expect(find.textContaining('Choose one under Settings, Providers'), findsOneWidget);
     expect(find.text('No model · no model configured'), findsNWidgets(2));
     await _tap(tester, find.byKey(const ValueKey<String>('analyse')));
     await _tap(tester, find.byKey(const ValueKey<String>('write')));

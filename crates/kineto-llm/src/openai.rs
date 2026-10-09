@@ -1,6 +1,7 @@
 //! An `llm.complete` backend for any API that speaks the OpenAI
-//! chat-completions protocol: Kimi's open platform by default, or a local
-//! model server on a loopback address.
+//! chat-completions protocol: Kimi's open platform, any other server the
+//! director names with its key, or a local model server on a loopback
+//! address.
 
 use std::{error::Error, fmt, sync::Arc};
 
@@ -207,6 +208,21 @@ impl OpenAiCompatible {
             Some(api_key),
             KIMI_PROVIDER,
             kimi_billing(model),
+        )
+    }
+
+    /// Any server that speaks the protocol and takes `api_key`, for example
+    /// `https://api.deepseek.com/v1`. Metered at prices this build does not
+    /// know. Recorded under [`LOCAL_PROVIDER`], as a keyless server is.
+    #[must_use]
+    pub fn endpoint(base_url: &str, model: &str, api_key: SecretString) -> Self {
+        Self::with_transport(
+            Arc::new(HttpTransport::new()),
+            base_url,
+            model,
+            Some(api_key),
+            LOCAL_PROVIDER,
+            Billing::Unpriced,
         )
     }
 

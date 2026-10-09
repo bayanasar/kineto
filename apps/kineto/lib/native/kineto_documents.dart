@@ -215,14 +215,21 @@ enum KinetoDocumentKind {
 /// Which language model a session writes documents with.
 enum KinetoLanguageModelKind {
   none('none', 'No model'),
-  kimiCode('kimi_code', 'Kimi Code'),
+  kimiCode('kimi_code', 'Kimi Code', agent: true),
   kimi('kimi', 'Kimi API'),
-  local('local', 'Local model');
+  local('local', 'OpenAI-compatible server'),
+  claudeCode('claude_code', 'Claude Code', agent: true),
+  codex('codex', 'Codex', agent: true),
+  agy('agy', 'Antigravity (agy)', agent: true),
+  miniAgent('mini_agent', 'Mini-Agent', agent: true);
 
-  const KinetoLanguageModelKind(this.wireName, this.label);
+  const KinetoLanguageModelKind(this.wireName, this.label, {this.agent = false});
 
   final String wireName;
   final String label;
+
+  /// Whether it is an agent command-line tool the director signed in to.
+  final bool agent;
 }
 
 /// The session's language model, as the director needs to know it before
@@ -249,7 +256,7 @@ final class KinetoLanguageModel {
   final String model;
 
   /// An agent signs in on its own and is billed by its subscription.
-  bool get isAgent => kind == KinetoLanguageModelKind.kimiCode;
+  bool get isAgent => kind.agent;
 
   String get label =>
       model.isEmpty || isAgent ? kind.label : '${kind.label} · $model';

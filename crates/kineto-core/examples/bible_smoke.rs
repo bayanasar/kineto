@@ -4,14 +4,18 @@
 //! subscription; Kimi's API is paid. Never run by the test suite.
 //!
 //! ```text
-//! cargo run -p kineto-core --example bible_smoke -- <project-dir> [--lock <revision>] kimi-code <kimi> <kineto-kimi-home>
+//! cargo run -p kineto-core --example bible_smoke -- <project-dir> [--lock <revision>] kimi-code <kimi>
 //! KINETO_KIMI_API_KEY=... cargo run -p kineto-core --example bible_smoke -- <project-dir> [--lock <revision>] kimi
 //! ```
 
 use std::{path::PathBuf, time::Instant};
 
 use kineto_core::bible;
-use kineto_llm::{LlmBackend, acp::AcpAgent, openai::OpenAiCompatible};
+use kineto_llm::{
+    LlmBackend,
+    agents::{AgentCli, AgentKind},
+    openai::OpenAiCompatible,
+};
 use kineto_project::{
     bible::{Bible, staleness},
     manifest::CanonicalProject,
@@ -76,8 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match backend.as_str() {
         "kimi-code" => {
             let executable = PathBuf::from(args.next().ok_or("kimi executable")?);
-            let home = PathBuf::from(args.next().ok_or("kineto Kimi Code data root")?);
-            run(&project, &AcpAgent::kimi_code(executable, home))
+            run(&project, &AgentCli::new(AgentKind::KimiCode, executable))
         }
         "kimi" => run(
             &project,

@@ -33,6 +33,7 @@ use kineto_jobs::{
     BackoffPolicy, CostEstimate, CurrencyCode, ErrorClass, FallbackPolicy, IdempotencyKey,
     IntentState, JobId, JobValueError, PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
+use kineto_llm::agents::{AgentKind, agy_images_root, locate};
 use kineto_project::{
     ArtifactId, ContentHash, DependencyImpact, InputHash,
     bible::Bible,
@@ -213,6 +214,8 @@ pub enum ImageProviderKind {
     LocalDemo,
     Minimax,
     Plugin,
+    /// An agent CLI the director signed in to.
+    Agent,
 }
 
 /// What the director needs to know about the session's image provider before
@@ -232,8 +235,11 @@ pub enum ProviderSelectionError {
     Unknown(String),
     Secret(SecretError),
     /// The selection names a plugin that is not registered and enabled, or
-    /// could not describe itself; why, as text.
+    /// could not describe itself, or an agent that is not installed; why,
+    /// as text.
     Plugin(String),
+    /// The director's provider settings cannot be read; why, as text.
+    Settings(String),
 }
 
 impl fmt::Display for ProviderSelectionError {
@@ -242,6 +248,7 @@ impl fmt::Display for ProviderSelectionError {
             Self::Unknown(name) => write!(formatter, "unknown image provider {name:?}"),
             Self::Secret(error) => error.fmt(formatter),
             Self::Plugin(reason) => formatter.write_str(reason),
+            Self::Settings(reason) => write!(formatter, "the provider settings: {reason}"),
         }
     }
 }
@@ -263,15 +270,29 @@ impl Error for ProviderSelectionError {}
 impl ImageProvider {
     /// The provider named by `selection`: none or `local-demo` for the free
     /// demo generator, `minimax` for MiniMax with the key `secrets` holds,
-    /// `plugin:<id>` for the plugin registered as `<id>`. A paid provider is
-    /// used only when it is named, never because a key happens to be
-    /// present.
+    /// `plugin:<id>` for the plugin registered as `<id>`, `agy` for the agy
+    /// the director signed in to. A paid provider is used only when it is
+    /// named, never because a key happens to be present.
     pub fn select(
         selection: Option<&str>,
         secrets: &impl SecretSource,
     ) -> Result<Self, ProviderSelectionError> {
+        Self::select_with(selection, secrets, |name| std::env::var(name).ok())
+    }
+
+    /// As [`Self::select`], with `env` saying where an agent CLI is
+    /// (`KINETO_AGY_BIN`, the search path, the user's home).
+    pub fn select_with(
+        selection: Option<&str>,
+        secrets: &impl SecretSource,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, ProviderSelectionError> {
         match selection.map(str::trim) {
             None | Some("" | DEMO_PROVIDER) => Ok(Self::LocalDemo),
+            Some(name) if AgentKind::from_name(name).is_some_and(AgentKind::makes_images) => {
+                let agent = AgentKind::from_name(name).expect("checked above");
+                agent_images(agent, &env).map(Self::Plugin)
+            }
             Some(MINIMAX_PROVIDER) => Ok(Self::Minimax(
                 secrets
                     .api_key(MINIMAX_PROVIDER)
@@ -333,12 +354,35 @@ impl ImageProvider {
                 generation_cost_micros,
             },
             Self::Plugin(plugin) => ImageProviderInfo {
-                kind: ImageProviderKind::Plugin,
+                kind: if plugin.agent_kind().is_some() {
+                    ImageProviderKind::Agent
+                } else {
+                    ImageProviderKind::Plugin
+                },
                 ready: plugin.image_capabilities().is_some(),
                 generation_cost_micros,
             },
         }
     }
+}
+
+/// `agent` as an image provider, where `env` says it is installed.
+pub(crate) fn agent_images(
+    agent: AgentKind,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<Arc<PluginProvider>, ProviderSelectionError> {
+    let unusable = |why: String| ProviderSelectionError::Plugin(why);
+    let executable = env(&crate::llm::agent_executable_variable(agent))
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| locate(agent, env))
+        .filter(|executable| executable.is_file())
+        .ok_or_else(|| unusable(format!("{} is not installed", agent.label())))?;
+    let images = agy_images_root(env)
+        .ok_or_else(|| unusable(format!("{} has no home to keep images in", agent.label())))?;
+    PluginProvider::agent(agent, executable, images)
+        .map(Arc::new)
+        .map_err(|error| unusable(error.to_string()))
 }
 
 /// The local demo generator: no prompt, no references, an answer at once,

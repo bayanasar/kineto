@@ -344,7 +344,8 @@ external int _kinetoProjectCandidateModelCopy(
 enum KinetoImageProviderKind {
   localDemo(1, 'local_demo', 'Local demo'),
   minimax(2, 'minimax', 'MiniMax image-01'),
-  plugin(3, 'plugin', 'Plugin');
+  plugin(3, 'plugin', 'Plugin'),
+  agent(4, 'agent', 'Local agent');
 
   const KinetoImageProviderKind(this.wireValue, this.wireName, this.label);
 
@@ -1446,6 +1447,8 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'keychain_unavailable': 170,
   'keychain_failed': 171,
   'style_reference_unusable': 172,
+  'setting_invalid': 173,
+  'settings_unwritable': 174,
   'panic': 199,
 };
 
@@ -1527,6 +1530,8 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   170: 'This system offers no secure storage for keys; set them in the environment instead',
   171: 'The system\'s secure storage refused or failed; it may be locked',
   172: 'This image cannot be a style: use a JPEG, PNG or WebP of at most 20 MB that the image provider takes as a style reference',
+  173: 'That choice cannot be saved: a server address must be https:// or http:// to this computer, a key name lowercase letters, digits and _; or the provider settings (providers.toml) cannot be read',
+  174: 'The provider settings could not be written to Kineto\'s configuration folder',
   199: 'Native project call failed unexpectedly',
 };
 

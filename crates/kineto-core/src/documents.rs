@@ -28,6 +28,7 @@ use kineto_jobs::{
     BackoffPolicy, CostEstimate, ErrorClass, FallbackPolicy, IdempotencyKey, IntentState, JobId,
     PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
+use kineto_llm::agents::AgentKind;
 use kineto_llm::{
     Billing, LlmBackend, LlmBackendInfo, LlmRequest, Message, OutputSchema, StructuredError,
     complete_checked,
@@ -627,9 +628,14 @@ pub fn recover(
     Ok((completed, attention))
 }
 
-/// Every provider key a document job may be recorded under.
-pub const DOCUMENT_PROVIDERS: [&str; 3] = [
+/// Every provider key a document job may be recorded under: each API and
+/// each agent CLI.
+pub const DOCUMENT_PROVIDERS: [&str; 7] = [
     kineto_llm::openai::KIMI_PROVIDER,
-    kineto_llm::acp::KIMI_CODE_PROVIDER,
     kineto_llm::openai::LOCAL_PROVIDER,
+    AgentKind::ClaudeCode.name(),
+    AgentKind::Codex.name(),
+    AgentKind::KimiCode.name(),
+    AgentKind::Agy.name(),
+    AgentKind::MiniAgent.name(),
 ];

@@ -24,6 +24,12 @@
 //! proves a call was not charged; anything else leaves it unresolved, made
 //! again only on the director's decision to risk paying twice.
 //!
+//! An agent CLI the director signed in to that makes images (agy) is a
+//! plugin built in: kineto plays the plugin's part itself, in this process,
+//! by asking the agent for one image, so its candidates are kept, recovered
+//! and refused exactly as a plugin's are. Its jobs and records are kept
+//! under `agent.<name>`.
+//!
 //! Speech runs through the same speech jobs and receipts as every speech
 //! provider; the plugin only speaks. Video runs through the same video jobs
 //! as every video provider: the plugin's `invoke` answers a job to follow,
@@ -35,7 +41,8 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU16,
-    sync::{Arc, Mutex},
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -46,8 +53,13 @@ use kineto_jobs::{
     BackoffPolicy, CostEstimate, CurrencyCode, ErrorClass, FallbackPolicy, IdempotencyKey,
     PaidFallback, ProviderExecutionPolicy, ProviderJobId,
 };
+use kineto_llm::{
+    acp::AgentError,
+    agents::{AgentCli, AgentKind},
+};
 use kineto_plugins::{
-    Answer, ConfigError, Done, FailureClass, HostError, Input, Limits, PluginConfig, PluginEntry,
+    Answer, ConfigError, DeclaredFile, Done, FailureClass, HostError, Input, Limits, OutputFile,
+    PluginConfig, PluginEntry,
 };
 use kineto_project::{
     ArtifactDependency, ArtifactId, ContentHash, InputHash, cast,
@@ -243,10 +255,22 @@ pub fn list(config: &PluginConfig) -> Vec<PluginListing> {
         .collect()
 }
 
-/// A registered plugin, as it described itself.
+/// What runs a provider's calls.
+#[derive(Debug, Clone)]
+enum Runner {
+    /// The plugin process the user registered.
+    Process,
+    /// An agent CLI the director signed in to, asked in this process;
+    /// `images` is where it keeps what it makes.
+    Agent { cli: AgentCli, images: PathBuf },
+}
+
+/// A registered plugin, as it described itself, or an agent CLI that makes
+/// images, as kineto describes it.
 #[derive(Debug, Clone)]
 pub struct PluginProvider {
     entry: PluginEntry,
+    runner: Runner,
     key: String,
     name: String,
     version: String,
@@ -257,18 +281,113 @@ pub struct PluginProvider {
     invoke: Limits,
 }
 
-/// A secret the entry names, read from the environment. OS secure storage
-/// is for the desktop shell to add.
-fn environment_secret(name: &str) -> Option<String> {
-    std::env::var(name).ok()
+/// Where the secrets a plugin entry names come from.
+type SecretLookup = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+static SECRETS: OnceLock<Box<SecretLookup>> = OnceLock::new();
+
+/// Read the secrets plugin and MCP server entries name through `lookup`:
+/// the desktop shell gives the system's secure storage first and the
+/// environment second. Set once; until then, and in tests, only the
+/// environment is read.
+pub fn read_secrets_with(lookup: Box<SecretLookup>) {
+    let _ = SECRETS.set(lookup);
+}
+
+/// A secret a plugin or MCP server entry names.
+pub(crate) fn plugin_secret(name: &str) -> Option<String> {
+    match SECRETS.get() {
+        Some(lookup) => lookup(name),
+        None => std::env::var(name).ok(),
+    }
+}
+
+/// The aspect ratios an agent is asked to frame in. It frames by the
+/// words of the prompt, so any common one will do.
+fn agent_frames() -> BTreeSet<AspectRatio> {
+    [(16, 9), (9, 16), (1, 1), (4, 3), (3, 4), (21, 9)]
+        .into_iter()
+        .filter_map(|(width, height)| AspectRatio::new(width, height))
+        .collect()
 }
 
 impl PluginProvider {
+    /// `agent` at `executable` as an image provider, keeping what it makes
+    /// under `images`. Only agents that make images (agy) can be one.
+    pub fn agent(
+        agent: AgentKind,
+        executable: PathBuf,
+        images: PathBuf,
+    ) -> Result<Self, PluginError> {
+        if !agent.makes_images() {
+            return Err(PluginError::Described(format!(
+                "{} makes no images",
+                agent.label()
+            )));
+        }
+        let invoke = Limits {
+            deadline: Duration::from_secs(10 * 60),
+            ..Limits::INVOKE
+        };
+        let image = ImageCapabilities {
+            aspect_ratios: agent_frames(),
+            max_reference_images: 4,
+            reference_roles: [
+                ReferenceRole::Identity,
+                ReferenceRole::Composition,
+                ReferenceRole::Style,
+            ]
+            .into_iter()
+            .collect(),
+            reference_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+                .into_iter()
+                .collect(),
+            max_reference_bytes: Some(20 * 1024 * 1024),
+            output_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+                .into_iter()
+                .collect(),
+            async_jobs: false,
+            // Covered by the director's subscription; what one image costs
+            // is not known.
+            price_per_image: None,
+            ..ImageCapabilities::default()
+        };
+        Ok(Self {
+            key: format!("agent.{}", agent.name()),
+            entry: PluginEntry {
+                id: agent.name().to_owned(),
+                executable: executable.clone(),
+                args: Vec::new(),
+                secrets: Vec::new(),
+                enabled: true,
+            },
+            runner: Runner::Agent {
+                cli: AgentCli::new(agent, executable).with_timeout(invoke.deadline),
+                images,
+            },
+            name: agent.label().to_owned(),
+            version: String::new(),
+            image: Some((image, "agent-default".to_owned())),
+            speech: None,
+            video: None,
+            invoke,
+        })
+    }
+
+    /// The agent it asks, when it is an agent CLI rather than a plugin.
+    #[must_use]
+    pub fn agent_kind(&self) -> Option<AgentKind> {
+        match &self.runner {
+            Runner::Process => None,
+            Runner::Agent { cli, .. } => Some(cli.kind()),
+        }
+    }
+
     /// Start `entry` once to read what it declares.
     pub fn connect(entry: PluginEntry) -> Result<Self, PluginError> {
         let done = kineto_plugins::run(
             &entry,
-            &environment_secret,
+            &plugin_secret,
             "describe",
             json!({}),
             &[],
@@ -311,6 +430,7 @@ impl PluginProvider {
         Ok(Self {
             key: entry.provider_key(),
             entry,
+            runner: Runner::Process,
             name: text("name"),
             version: text("version"),
             image,
@@ -382,15 +502,95 @@ impl PluginProvider {
         inputs: &[Input],
         limits: Limits,
     ) -> Result<Done, PluginError> {
-        kineto_plugins::run(
-            &self.entry,
-            &environment_secret,
-            operation,
-            fields,
-            inputs,
-            limits,
+        match &self.runner {
+            Runner::Process => kineto_plugins::run(
+                &self.entry,
+                &plugin_secret,
+                operation,
+                fields,
+                inputs,
+                limits,
+            )
+            .map_err(PluginError::Host),
+            Runner::Agent { cli, images } => agent_call(cli, images, operation, &fields, inputs),
+        }
+    }
+}
+
+/// Play the plugin's part for an agent: an image for `invoke`, and no
+/// record of any call for `reconcile`, since an agent keeps none kineto can
+/// ask about.
+fn agent_call(
+    cli: &AgentCli,
+    images: &std::path::Path,
+    operation: &str,
+    fields: &Value,
+    inputs: &[Input],
+) -> Result<Done, PluginError> {
+    match operation {
+        "reconcile" => {
+            return Ok(Done {
+                answer: Answer::Unknown,
+                files: Vec::new(),
+            });
+        }
+        "invoke" if fields["capability"] == "image.generate" => {}
+        _ => return Err(PluginError::Unsupported("an agent only makes images")),
+    }
+    let request = &fields["request"];
+    let frame = request["aspect_ratio"].as_str().unwrap_or("16:9");
+    let orientation = match frame.split_once(':').map(|(width, height)| {
+        (
+            width.parse::<u32>().unwrap_or(16),
+            height.parse::<u32>().unwrap_or(9),
         )
-        .map_err(PluginError::Host)
+    }) {
+        Some((width, height)) if width > height => "landscape",
+        Some((width, height)) if width < height => "portrait",
+        _ => "square",
+    };
+    let prompt = format!(
+        "{}\n\nFrame: {frame} {orientation}, exactly this aspect ratio.",
+        request["prompt"].as_str().unwrap_or_default()
+    );
+    let references: Vec<(String, Vec<u8>)> = inputs
+        .iter()
+        .map(|input| (input.name.clone(), input.bytes.clone()))
+        .collect();
+    let bytes = cli
+        .make_image(&prompt, &references, images)
+        .map_err(agent_failure)?;
+    let declared = DeclaredFile {
+        path: "outputs/image".to_owned(),
+        size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sha256: ContentHash::of(&bytes).as_str().to_owned(),
+    };
+    Ok(Done {
+        answer: Answer::Completed {
+            outputs: vec![declared.clone()],
+            metadata: Value::Null,
+        },
+        files: vec![OutputFile { declared, bytes }],
+    })
+}
+
+/// An agent's failure as a plugin's: never taken when it could not start,
+/// was not signed in or was refused before it ran.
+fn agent_failure(error: AgentError) -> PluginError {
+    let accepted = match error {
+        AgentError::Setup(_)
+        | AgentError::Spawn(_)
+        | AgentError::NotSignedIn
+        | AgentError::PromptTooLong => Some(false),
+        _ => None,
+    };
+    PluginError::Failed {
+        class: match error.class() {
+            ErrorClass::Retryable => FailureClass::Retryable,
+            ErrorClass::Terminal => FailureClass::Terminal,
+        },
+        accepted,
+        message: error.to_string(),
     }
 }
 

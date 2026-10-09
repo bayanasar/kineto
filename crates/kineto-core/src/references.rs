@@ -10,9 +10,7 @@
 use std::{error::Error, fmt};
 
 use kineto_jobs::ErrorClass;
-use kineto_plugins::mcp::{
-    self, McpConfig, McpError, McpLimits, McpServerEntry, ToolInfo, environment_secret,
-};
+use kineto_plugins::mcp::{self, McpConfig, McpError, McpLimits, McpServerEntry, ToolInfo};
 use kineto_project::{
     manifest::CanonicalProject,
     references::{self as document, NewReference, Reference},
@@ -83,7 +81,7 @@ pub fn server(id: &str) -> Result<McpServerEntry, GenerationError> {
 
 /// The tools `server` offers that it allows.
 pub fn tools(server: &McpServerEntry) -> Result<Vec<ToolInfo>, GenerationError> {
-    mcp::list_tools(server, &environment_secret, McpLimits::DEFAULT)
+    mcp::list_tools(server, &crate::plugin::plugin_secret, McpLimits::DEFAULT)
         .map_err(|error| failed(ReferenceCallError::Server(error)))
 }
 
@@ -139,7 +137,7 @@ pub fn ask_within(
     }
     let answered = mcp::call_tool(
         server,
-        &environment_secret,
+        &crate::plugin::plugin_secret,
         ask.tool,
         &Value::Object(ask.arguments.clone()),
         limits,
@@ -234,7 +232,7 @@ pub fn list_servers(config: &McpConfig) -> Vec<ServerListing> {
         .map(|entry| ServerListing {
             entry: entry.clone(),
             tools: entry.enabled.then(|| {
-                mcp::list_tools(entry, &environment_secret, McpLimits::DEFAULT)
+                mcp::list_tools(entry, &crate::plugin::plugin_secret, McpLimits::DEFAULT)
                     .map_err(|error| error.to_string())
             }),
         })

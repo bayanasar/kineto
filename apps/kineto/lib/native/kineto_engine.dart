@@ -14,6 +14,7 @@ part 'kineto_plugins.dart';
 part 'kineto_production.dart';
 part 'kineto_project.dart';
 part 'kineto_references.dart';
+part 'kineto_settings.dart';
 part 'kineto_voices.dart';
 
 typedef _DestroyEngineNative = Void Function(Pointer<Void>);
@@ -35,7 +36,7 @@ external int _kinetoEngineAbiVersion();
 /// The bundled Rust library and these bindings are versioned together. Every
 /// fixed-width snapshot layout, status code, and exported symbol belongs to
 /// exactly this revision. A mismatched library is refused before decoding.
-const int kinetoExpectedNativeAbiVersion = 46;
+const int kinetoExpectedNativeAbiVersion = 47;
 
 final class KinetoAbiMismatchException implements Exception {
   const KinetoAbiMismatchException(this.expected, this.actual);

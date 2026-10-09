@@ -69,12 +69,17 @@ void main() {
     );
   });
 
-  test('key providers and states match the native tables', () {
+  test('built-in keys, key states, settings and agents match the native tables', () {
     expect(
-      KinetoKeyProvider.values.map((provider) => provider.wireName).toSet(),
+      KinetoKeySlot.builtIn.map((slot) => slot.name).toSet(),
       contract.keyProviders.keys.toSet(),
     );
     expect(contract.keyStates.keys.toSet(), <String>{'stored', 'environment'});
+    expect(
+      KinetoProviderSetting.values.map((setting) => setting.wireName).toSet(),
+      contract.providerSettings.keys.toSet(),
+    );
+    expect(KinetoAgent.values.map((agent) => agent.wireName).toSet(), contract.agents.keys.toSet());
   });
 
   test('document codes match the native tables name for name', () {
