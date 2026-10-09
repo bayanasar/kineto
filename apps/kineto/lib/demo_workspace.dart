@@ -6,6 +6,7 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
 import 'kineto_work.dart';
+import 'media_frame.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart' show TextPromptDialog;
 
@@ -376,7 +377,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onLockVideo: () => _run(
         () => widget.project.lockShotVideo(_activeShotIndex),
       ),
-      onOpenVideo: openInSystemPlayer,
+      onOpenVideo: openOutsideKineto,
     );
   }
 }
@@ -815,7 +816,12 @@ class DemoWorkspaceView extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: <Widget>[
-                                _Keyframe(path: media),
+                                MediaFrame(
+                                  path: media,
+                                  aspectRatio: 16 / 9,
+                                  gallery: candidateMedia.whereType<String>().toList(),
+                                  unavailable: 'Keyframe unavailable',
+                                ),
                                 const SizedBox(height: 8),
                                 WabCollectionCard(
                                   icon: const Icon(Icons.photo_camera_back_outlined, size: 30),
@@ -990,6 +996,8 @@ class _EarlierTakes extends StatelessWidget {
 
   final List<KinetoTake> takes;
 
+  Iterable<KinetoTake> get _earlier => takes.where((take) => take.status == KinetoTakeStatus.superseded);
+
   @override
   Widget build(BuildContext context) => WabPanel(
         title: 'Earlier takes',
@@ -997,13 +1005,19 @@ class _EarlierTakes extends StatelessWidget {
           spacing: 12,
           runSpacing: 12,
           children: <Widget>[
-            for (final take in takes.where((take) => take.status == KinetoTakeStatus.superseded))
+            for (final take in _earlier)
               SizedBox(
                 width: 200,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    if (take.mediaPath != null) _Keyframe(path: take.mediaPath!),
+                    if (take.mediaPath != null)
+                      MediaFrame(
+                        path: take.mediaPath!,
+                        aspectRatio: 16 / 9,
+                        gallery: _earlier.map((take) => take.mediaPath).whereType<String>().toList(),
+                        unavailable: 'Keyframe unavailable',
+                      ),
                     const SizedBox(height: 4),
                     Text(
                       'Generation ${take.generation}${take.refined ? ' · refined' : ''} · '
@@ -1015,41 +1029,6 @@ class _EarlierTakes extends StatelessWidget {
           ],
         ),
       );
-}
-
-/// One keyframe candidate, as a 16:9 still read from the project directory.
-class _Keyframe extends StatelessWidget {
-  const _Keyframe({required this.path});
-
-  final String path;
-
-  @override
-  Widget build(BuildContext context) => ClipRRect(
-        borderRadius: BorderRadius.circular(2),
-        child: AspectRatio(
-          aspectRatio: 16 / 9,
-          child: Image.file(
-            File(path),
-            fit: BoxFit.cover,
-            // A keyframe that cannot be read says so instead of vanishing.
-            errorBuilder: (context, error, stackTrace) => const ColoredBox(
-              color: Colors.black26,
-              child: Center(child: Text('Keyframe unavailable')),
-            ),
-          ),
-        ),
-      );
-}
-
-/// Open a video in the platform's default player. Kineto has no video
-/// playback of its own yet.
-Future<void> openInSystemPlayer(String path) async {
-  final (executable, arguments) = Platform.isMacOS
-      ? ('open', <String>[path])
-      : Platform.isWindows
-          ? ('cmd', <String>['/c', 'start', '', path])
-          : ('xdg-open', <String>[path]);
-  await Process.start(executable, arguments, mode: ProcessStartMode.detached);
 }
 
 /// The shot's video, once its keyframe is locked: the latest generation's
@@ -1246,7 +1225,7 @@ class _VideoPanelState extends State<_VideoPanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           if (widget.poster != null)
-            _Keyframe(path: widget.poster!)
+            MediaFrame(path: widget.poster!, aspectRatio: 16 / 9, unavailable: 'Keyframe unavailable')
           else
             const AspectRatio(aspectRatio: 16 / 9, child: ColoredBox(color: Colors.black26)),
           const SizedBox(height: 6),

@@ -1,11 +1,10 @@
-import 'dart:io';
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
 import 'kineto_work.dart';
+import 'media_frame.dart';
 import 'native/kineto_engine.dart';
 import 'references_panel.dart';
 import 'screenplay_workspace.dart';
@@ -661,7 +660,14 @@ class ProductionWorkspaceView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Opacity(opacity: rejected ? .45 : 1, child: MediaFrame(path: sample.mediaPath, aspectRatio: 16 / 9)),
+          Opacity(
+            opacity: rejected ? .45 : 1,
+            child: MediaFrame(
+              path: sample.mediaPath,
+              aspectRatio: 16 / 9,
+              gallery: <String>[for (final sample in production.samples.reversed) sample.mediaPath],
+            ),
+          ),
           const SizedBox(height: 8),
           Text(
             '${sample.id} · ${sample.imported ? 'imported' : sample.preset}'
@@ -753,30 +759,6 @@ class ProductionWorkspaceView extends StatelessWidget {
               ),
             ],
           ],
-        ),
-      );
-}
-
-/// An image on disk, or a plain frame saying it cannot be read.
-class MediaFrame extends StatelessWidget {
-  const MediaFrame({required this.path, required this.aspectRatio, super.key});
-
-  final String path;
-  final double aspectRatio;
-
-  @override
-  Widget build(BuildContext context) => ClipRRect(
-        borderRadius: BorderRadius.circular(2),
-        child: AspectRatio(
-          aspectRatio: aspectRatio,
-          child: Image.file(
-            File(path),
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => const ColoredBox(
-              color: Colors.black26,
-              child: Center(child: Text('Image unavailable')),
-            ),
-          ),
         ),
       );
 }
@@ -976,7 +958,8 @@ class _CastingCardState extends State<CastingCard> {
                 spacing: 12,
                 runSpacing: 12,
                 children: <Widget>[
-                  for (final reference in pack.values) _reference(reference),
+                  for (final reference in pack.values)
+                    _reference(reference, <String>[for (final reference in pack.values) reference.mediaPath]),
                 ],
               ),
             const SizedBox(height: 12),
@@ -1017,7 +1000,14 @@ class _CastingCardState extends State<CastingCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Opacity(opacity: rejected ? .45 : 1, child: MediaFrame(path: portrait.mediaPath, aspectRatio: 1)),
+          Opacity(
+            opacity: rejected ? .45 : 1,
+            child: MediaFrame(
+              path: portrait.mediaPath,
+              aspectRatio: 1,
+              gallery: <String>[for (final portrait in widget.character.portraits) portrait.mediaPath],
+            ),
+          ),
           const SizedBox(height: 6),
           Text('${portrait.id}${locked ? ' · cast' : selected ? ' · selected' : rejected ? ' · rejected' : ''}'),
           const SizedBox(height: 6),
@@ -1044,7 +1034,7 @@ class _CastingCardState extends State<CastingCard> {
     );
   }
 
-  Widget _reference(KinetoCastImage reference) => SizedBox(
+  Widget _reference(KinetoCastImage reference, List<String> gallery) => SizedBox(
         width: 140,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1055,6 +1045,7 @@ class _CastingCardState extends State<CastingCard> {
                       reference.kind == KinetoCastImageKind.costume
                   ? 9 / 16
                   : 1,
+              gallery: gallery,
             ),
             const SizedBox(height: 4),
             Text(reference.kind.label),
