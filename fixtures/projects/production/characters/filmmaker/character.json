@@ -5,50 +5,50 @@
   "portrait": {
     "kind": "portrait",
     "artifact_id": "cast.filmmaker.0002",
-    "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
+    "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
     "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg"
   },
   "references": [
     {
       "kind": "front",
       "artifact_id": "cast.filmmaker.0003",
-      "content_hash": "sha256:b6e08d3b1ed168d3c4516c068822509955935a802db936b8367662907971d43c",
+      "content_hash": "sha256:6574859a24d1f529655f0e22c10954d4387c956c76c0ea7b965469b2df71c65e",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0003.jpg"
     },
     {
       "kind": "profile_left",
       "artifact_id": "cast.filmmaker.0004",
-      "content_hash": "sha256:b6bbd1e5b128d437414395261f6d81ff4bd1715e1560fda15e8f3625bd7b3191",
+      "content_hash": "sha256:6f0f30c159c77f0f918a0d3728b90488e043ebd3d7d29f7fb11c412d3cf3f6ab",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0004.jpg"
     },
     {
       "kind": "profile_right",
       "artifact_id": "cast.filmmaker.0005",
-      "content_hash": "sha256:e2a14bb8b53713bf880a6c11d15d57817c39b1a179adc65cb5efb15b598e2e77",
+      "content_hash": "sha256:ac2f9afe7036a820e8fa9a9d7cc032c2416d77e1d7784a842077520e175bde41",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0005.jpg"
     },
     {
       "kind": "full_body",
       "artifact_id": "cast.filmmaker.0006",
-      "content_hash": "sha256:4152121c322dfc1776f336011a48fa6630f32745d7d083477d055cf669188ed7",
+      "content_hash": "sha256:edd54d955224e6f7f4ebf5309bd857723f586271a214ed30fd8fe7064acaab43",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0006.jpg"
     },
     {
       "kind": "costume",
       "artifact_id": "cast.filmmaker.0007",
-      "content_hash": "sha256:37e304c786f521f0e8fe4f0f554d3d0e8c17646369c5bd6c74a9e975fd09da8c",
+      "content_hash": "sha256:94e7fbdecf36e7c3ed85dd9b1fce91593a0a9ab89df177d2e4c26024324c1e3f",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0007.jpg"
     },
     {
       "kind": "expression_smile",
       "artifact_id": "cast.filmmaker.0008",
-      "content_hash": "sha256:1ec2f1736c1ebbad74038b3a6eff98ed27e61bda091d981fd550668f5751ecf4",
+      "content_hash": "sha256:f78352469854a0339c18d5b326976d3da6846ee3f541faff30b5acd8cd987988",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0008.jpg"
     },
     {
       "kind": "expression_tense",
       "artifact_id": "cast.filmmaker.0009",
-      "content_hash": "sha256:8d37fa4be8db332add22de3ddfcb40051a897c2a4c3de3d190cd5a2012bcf2b2",
+      "content_hash": "sha256:5900ceaf8bbc9f207ba9db39395a12e849cb24ba9cd107b751e35e8d55504a00",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0009.jpg"
     }
   ],
@@ -70,7 +70,7 @@
     },
     {
       "artifact_id": "style_s0001",
-      "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+      "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
       "impact": "semantic"
     }
   ]

@@ -12,7 +12,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU8, Ordering},
 };
 
 use base64::Engine as _;
@@ -45,25 +44,26 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/production")
 }
 
-/// MiniMax `image-01`, offline: a distinct tiny JPEG per call.
-#[derive(Default)]
-struct FakeMinimax {
-    calls: AtomicU8,
-}
+/// MiniMax `image-01`, offline: a distinct tiny JPEG per request.
+struct FakeMinimax;
 
 impl Transport for FakeMinimax {
     fn post_json(
         &self,
         _url: &str,
         _api_key: &SecretString,
-        _body: &[u8],
+        body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x50, call];
+        // Images asked for together are called at once, in any order: each
+        // is drawn from its request, never from when it came.
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(body);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0x50];
+        jpeg.extend_from_slice(&digest[..8]);
         Ok(HttpResponse {
             status: 200,
             body: format!(
-                r#"{{"id":"f{call}","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0}}}}"#,
+                r#"{{"id":"f","data":{{"image_base64":["{}"]}},"base_resp":{{"status_code":0}}}}"#,
                 base64::engine::general_purpose::STANDARD.encode(jpeg)
             )
             .into_bytes(),
@@ -115,7 +115,7 @@ fn build(target: &Path) {
     bible::write(&project, &FakeLlm::answering([SAMPLE_BIBLE_JSON])).expect("the bible is written");
 
     let client = MinimaxClient::with_transport(
-        FakeMinimax::default(),
+        FakeMinimax,
         SecretString::new("sk-fixture".to_owned()).expect("a key"),
         "https://example.test",
     );

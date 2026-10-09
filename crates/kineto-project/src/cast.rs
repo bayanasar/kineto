@@ -281,9 +281,19 @@ fn write_json<T: Serialize>(
 }
 
 /// The artifact ID of the `number`th image of `character_id`.
-fn image_id(character_id: &str, number: usize) -> Result<ArtifactId, CastError> {
+fn image_id(character_id: &str, number: u64) -> Result<ArtifactId, CastError> {
     ArtifactId::new(format!("{CAST_PREFIX}{character_id}.{number:04}"))
         .map_err(|_| CastError::InvalidCharacter(character_id.to_owned()))
+}
+
+/// The number of `character_id`'s image `artifact_id`, as 3 for
+/// `cast.mira.0003`.
+fn number_of(character_id: &str, artifact_id: &str) -> Option<u64> {
+    let (character, digits) = artifact_id.strip_prefix(CAST_PREFIX)?.rsplit_once('.')?;
+    if character != character_id {
+        return None;
+    }
+    crate::sequence_number(digits)
 }
 
 fn load(project: &CanonicalProject, character_id: &str) -> Result<CastingLog, CastError> {
@@ -295,9 +305,15 @@ fn load(project: &CanonicalProject, character_id: &str) -> Result<CastingLog, Ca
         });
     };
     let log: CastingLog = serde_json::from_slice(&bytes).map_err(CastError::Json)?;
-    let numbered = log.images.iter().enumerate().all(|(index, image)| {
-        image_id(character_id, index + 1).is_ok_and(|id| id.as_str() == image.artifact_id)
-    });
+    // Numbers rise in the order images are recorded. Images asked for
+    // together are numbered before their calls, so one whose call failed
+    // leaves a gap.
+    let numbered = log
+        .images
+        .iter()
+        .map(|image| number_of(character_id, &image.artifact_id))
+        .collect::<Option<Vec<_>>>()
+        .is_some_and(|numbers| numbers.windows(2).all(|pair| pair[0] < pair[1]));
     let selected = log
         .images
         .iter()
@@ -355,7 +371,26 @@ pub fn next_artifact_id(
     project: &CanonicalProject,
     character_id: &str,
 ) -> Result<ArtifactId, CastError> {
-    image_id(character_id, load(project, character_id)?.images.len() + 1)
+    let mut ids = next_artifact_ids(project, character_id, 1)?;
+    Ok(ids.remove(0))
+}
+
+/// The IDs the next `count` images of `character_id` take, in order: after
+/// the highest number recorded, so a number left by a failed call is not
+/// taken again.
+pub fn next_artifact_ids(
+    project: &CanonicalProject,
+    character_id: &str,
+    count: usize,
+) -> Result<Vec<ArtifactId>, CastError> {
+    let last = load(project, character_id)?
+        .images
+        .last()
+        .and_then(|image| number_of(character_id, &image.artifact_id))
+        .unwrap_or(0);
+    (1..=u64::try_from(count).map_err(|_| CastError::InvalidLog)?)
+        .map(|offset| image_id(character_id, last + offset))
+        .collect()
 }
 
 /// The character an image ID belongs to, as in `mira` for `cast.mira.0003`.
@@ -427,7 +462,12 @@ pub fn attach(
                 })
         }
     };
-    if image_id(character_id, log.images.len() + 1)?.as_str() != image.artifact_id || !shaped {
+    let last = log
+        .images
+        .last()
+        .and_then(|recorded| number_of(character_id, &recorded.artifact_id))
+        .unwrap_or(0);
+    if !number_of(character_id, &image.artifact_id).is_some_and(|number| number > last) || !shaped {
         return Err(CastError::InvalidLog);
     }
     check_media(project, &image)?;
@@ -850,6 +890,44 @@ mod tests {
         let project = CanonicalProject::open(&target).unwrap();
         assert_eq!(locked(&project, "filmmaker").unwrap(), Some(locked_cast));
         assert_eq!(images(&project, "filmmaker").unwrap().len(), 6);
+    }
+
+    #[test]
+    fn numbers_rise_and_one_left_by_a_failed_call_is_not_taken_again() {
+        let temp = TempDir::new();
+        let target = temp.0.join("film");
+        let project = project(&target);
+        let first = add(&project, CastImageKind::Portrait, None, b"\xff\xd8one");
+        let ids = next_artifact_ids(&project, "filmmaker", 3).unwrap();
+        assert_eq!(
+            ids.iter().map(ArtifactId::as_str).collect::<Vec<_>>(),
+            [
+                "cast.filmmaker.0002",
+                "cast.filmmaker.0003",
+                "cast.filmmaker.0004"
+            ]
+        );
+        // Asked for together, the second failed: the third is recorded
+        // after a gap, and a number at or below the last is refused.
+        let third = |id: &ArtifactId, bytes: &[u8]| {
+            let media = media_path("filmmaker", id, CastImageKind::Portrait, "jpg").unwrap();
+            project.root().write_atomic(&media, bytes).unwrap();
+            let mut image = first.clone();
+            image.artifact_id = id.as_str().to_owned();
+            image.media_path = media.as_path().to_string_lossy().into_owned();
+            image.content_hash = ContentHash::of(bytes).as_str().to_owned();
+            image
+        };
+        attach(&project, "filmmaker", third(&ids[1], b"\xff\xd8three")).unwrap();
+        assert!(matches!(
+            attach(&project, "filmmaker", third(&ids[0], b"\xff\xd8two")),
+            Err(CastError::InvalidLog)
+        ));
+        assert_eq!(images(&project, "filmmaker").unwrap().len(), 2);
+        assert_eq!(
+            next_artifact_id(&project, "filmmaker").unwrap().as_str(),
+            "cast.filmmaker.0004"
+        );
     }
 
     #[test]

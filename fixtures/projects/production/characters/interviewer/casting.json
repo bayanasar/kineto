@@ -6,15 +6,15 @@
       "artifact_id": "cast.interviewer.0001",
       "kind": "portrait",
       "status": "candidate",
-      "content_hash": "sha256:7c612e2faa98fbc146bb12e1268806a1faf2751f69f477f41c1792883e263ea1",
-      "input_hash": "sha256:58b711a7e38b4390fb8a716914990a4d0f91e8af1a47fc47fc6a6c016a051535",
+      "content_hash": "sha256:feb712a9171e8079120274486c6acb54c5f3366f46ca1ba379c61f6a99062295",
+      "input_hash": "sha256:b97236741ebab52b0fa903ee0b879f485f8b4e4ca3919de7216d4f69b2d5fe4e",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/interviewer/candidates/cast.interviewer.0001.jpg",
       "provenance": {
         "compiler_version": "cast-portrait/2",
         "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Interviewer: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a guarded, brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and high, sharp cheekbones. A woman in her thirties, short black hair, round glasses. Always: Round glasses. Wardrobe: A grey blazer, a notebook always in hand.",
-        "prompt_hash": "sha256:b37e1da576d816d6737e393634e273414ef73b8691b11bdf15c6d0f9fc9c63c5",
+        "prompt_hash": "sha256:57378d13089a56dcdbd28f66a5682301ce06ceda3fa95fc4ba62281e73f16b38",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
@@ -33,7 +33,7 @@
         },
         {
           "artifact_id": "style_s0001",
-          "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
+          "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
           "impact": "semantic"
         }
       ],

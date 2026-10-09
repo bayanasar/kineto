@@ -22,7 +22,7 @@
 //! director chooses to risk paying twice there. That choice retires only
 //! those images; another numbering's stay guarded.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, thread};
 
 use kineto_job_runtime::{
     DispatchOutcome, InvokePreparedError, JobRuntime, ProviderKey, StartupOutcome,
@@ -297,6 +297,94 @@ impl<'p, L: Ledger, G: CandidateGenerator> Jobs<'p, L, G> {
         index: usize,
         hooks: &mut dyn GenerationHooks,
     ) -> Result<(), GenerationError> {
+        self.generate_all(&[(plan, call)], index, hooks)
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(()))
+    }
+
+    /// Generate the images `batch` asks for at once, as many calls at a time
+    /// as the provider's concurrency allows, and record each as its plan
+    /// says, in order. Every intent is prepared before the first call; an
+    /// image whose call failed is not recorded, and the rest still are, since
+    /// they are paid for. Returns each image's outcome; the hooks count from
+    /// `first`.
+    pub(crate) fn generate_all(
+        &mut self,
+        batch: &[(&L::Plan, &CandidateRequest)],
+        first: usize,
+        hooks: &mut dyn GenerationHooks,
+    ) -> Vec<Result<(), GenerationError>> {
+        let mut prepared = Vec::with_capacity(batch.len());
+        for (offset, (plan, call)) in batch.iter().enumerate() {
+            match self.prepare(plan, call) {
+                Ok(job_id) => prepared.push(job_id),
+                // Those prepared are retired, never called, at the next open.
+                Err(error) => {
+                    let mut outcomes: Vec<_> = (0..batch.len())
+                        .map(|_| Err(GenerationError::Unexpected("an earlier image was refused")))
+                        .collect();
+                    outcomes[offset] = Err(error);
+                    return outcomes;
+                }
+            }
+            hooks.reached(GenerationPoint::Prepared {
+                index: first + offset,
+            });
+        }
+        // Every provider call runs on its own thread, waiting its turn for a
+        // permit.
+        let results = thread::scope(|scope| {
+            let runtime = &self.runtime;
+            let handles = batch
+                .iter()
+                .zip(&prepared)
+                .map(|((_, call), job_id)| {
+                    let mut adapter = self.adapter.clone();
+                    scope.spawn(move || {
+                        match invoke_when_permitted(runtime, job_id, &mut adapter, call) {
+                            Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
+                            Ok(DispatchOutcome::Pending { .. }) => {
+                                Err(GenerationError::Unexpected("an image was left pending"))
+                            }
+                            Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+                            Err(InvokePreparedError::Provider { source, class, .. }) => {
+                                Err(GenerationError::Provider {
+                                    source: Box::new(source),
+                                    class,
+                                })
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
+                })
+                .collect::<Vec<_>>()
+        });
+        hooks.reached(GenerationPoint::Invoked);
+        batch
+            .iter()
+            .zip(prepared)
+            .zip(results)
+            .map(|(((plan, call), job_id), result)| {
+                L::attach(self.project, plan, result?)?;
+                hooks.reached(GenerationPoint::Attached);
+                let _ = self.runtime.acknowledge_result(&job_id)?;
+                self.adapter.release(call);
+                remove_plan::<L>(self.project, L::artifact_id(plan));
+                Ok(())
+            })
+            .collect()
+    }
+
+    /// Write `plan` and prepare the intent of its call.
+    fn prepare(&self, plan: &L::Plan, call: &CandidateRequest) -> Result<JobId, GenerationError> {
         let artifact_id = L::artifact_id(plan);
         if call.artifact_id.as_str() != artifact_id
             || call.input_hash.as_str() != L::input_hash(plan)
@@ -313,27 +401,6 @@ impl<'p, L: Ledger, G: CandidateGenerator> Jobs<'p, L, G> {
             call.input_hash.clone(),
             call.artifact_id.clone(),
         )?;
-        hooks.reached(GenerationPoint::Prepared { index });
-        let generated = match invoke_when_permitted(&self.runtime, &job_id, &mut self.adapter, call)
-        {
-            Ok(DispatchOutcome::Completed { output, .. }) => output,
-            Ok(DispatchOutcome::Pending { .. }) => {
-                return Err(GenerationError::Unexpected("an image was left pending"));
-            }
-            Err(InvokePreparedError::Runtime(error)) => return Err(error.into()),
-            Err(InvokePreparedError::Provider { source, class, .. }) => {
-                return Err(GenerationError::Provider {
-                    source: Box::new(source),
-                    class,
-                });
-            }
-        };
-        hooks.reached(GenerationPoint::Invoked);
-        L::attach(self.project, plan, generated)?;
-        hooks.reached(GenerationPoint::Attached);
-        let _ = self.runtime.acknowledge_result(&job_id)?;
-        self.adapter.release(call);
-        remove_plan::<L>(self.project, artifact_id);
-        Ok(())
+        Ok(job_id)
     }
 }

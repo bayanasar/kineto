@@ -15,7 +15,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
@@ -48,11 +48,15 @@ use kineto_providers::{Price, secret::SecretString};
 const CHILD: &str = "KINETO_CASTING_CRASH";
 
 /// MiniMax `image-01`, offline: a distinct JPEG for every call, and every
-/// request body kept.
+/// request body kept. Each call takes `pause`, and the most calls ever in
+/// flight at once are counted.
 #[derive(Default)]
 struct FakeMinimax {
     calls: Arc<AtomicU32>,
     bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+    pause: Duration,
+    in_flight: Arc<AtomicU32>,
+    most: Arc<AtomicU32>,
 }
 
 impl Transport for FakeMinimax {
@@ -63,6 +67,10 @@ impl Transport for FakeMinimax {
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(self.pause);
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
         self.bodies
             .lock()
             .unwrap()
@@ -91,13 +99,23 @@ struct Minimax {
     client: MinimaxClient<FakeMinimax>,
     calls: Arc<AtomicU32>,
     bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+    most: Arc<AtomicU32>,
 }
 
 impl Minimax {
     fn new() -> Self {
-        let fake = FakeMinimax::default();
+        Self::taking(Duration::ZERO)
+    }
+
+    /// A MiniMax whose every call takes `pause`.
+    fn taking(pause: Duration) -> Self {
+        let fake = FakeMinimax {
+            pause,
+            ..FakeMinimax::default()
+        };
         let calls = Arc::clone(&fake.calls);
         let bodies = Arc::clone(&fake.bodies);
+        let most = Arc::clone(&fake.most);
         Self {
             client: MinimaxClient::with_transport(
                 fake,
@@ -106,6 +124,7 @@ impl Minimax {
             ),
             calls,
             bodies,
+            most,
         }
     }
 
@@ -280,14 +299,26 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
         "data:image/jpeg;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(&portrait_bytes)
     );
-    for (body, image) in minimax.bodies.lock().unwrap()[3..].iter().zip(&pack) {
+    // The pack's calls run at once, so they reach MiniMax in any order.
+    let bodies = minimax.bodies.lock().unwrap()[3..].to_vec();
+    for body in &bodies {
         assert_eq!(body["subject_reference"][0]["type"], "character");
         assert_eq!(
             body["subject_reference"][0]["image_file"],
             identity.as_str()
         );
-        let tall = matches!(image.kind, CastImageKind::FullBody | CastImageKind::Costume);
-        assert_eq!(body["aspect_ratio"], if tall { "9:16" } else { "1:1" });
+    }
+    let tall = |image: &&document::CastImage| {
+        matches!(image.kind, CastImageKind::FullBody | CastImageKind::Costume)
+    };
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["aspect_ratio"] == "9:16")
+            .count(),
+        pack.iter().filter(tall).count()
+    );
+    for image in &pack {
         assert_eq!(
             image.identity_reference.as_deref(),
             Some("cast.filmmaker.0002")
@@ -327,6 +358,45 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
 }
 
 #[test]
+fn an_audition_and_a_pack_ask_for_their_images_at_once() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let minimax = Minimax::taking(Duration::from_millis(400));
+    let portraits = cast::audition_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        3,
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(portraits.len(), 3);
+    assert!(
+        minimax.most.load(Ordering::SeqCst) >= 2,
+        "a portrait does not wait for the one before"
+    );
+
+    document::select(&project, "filmmaker", &portraits[0].artifact_id).unwrap();
+    let minimax = Minimax::taking(Duration::from_millis(100));
+    let pack = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(pack.len(), 7);
+    let most = minimax.most.load(Ordering::SeqCst);
+    assert!(
+        (2..=3).contains(&most),
+        "at once, within MiniMax's limit: {most}"
+    );
+}
+
+#[test]
 fn every_candidate_of_an_audition_is_another_actor() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
@@ -360,8 +430,16 @@ fn every_candidate_of_an_audition_is_another_actor() {
         .map(|body| body["prompt"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(prompts.len(), 3);
-    for (prompt, look) in prompts.iter().zip(&cast::LOOKS) {
-        assert!(prompt.contains(&format!("Played by an actor with {}.", look.features)));
+    // The calls run at once, so they arrive in any order.
+    for look in &cast::LOOKS[..3] {
+        let asked = format!("Played by an actor with {}.", look.features);
+        assert_eq!(
+            prompts
+                .iter()
+                .filter(|prompt| prompt.contains(&asked))
+                .count(),
+            1
+        );
     }
     assert!(prompts[0] != prompts[1] && prompts[1] != prompts[2] && prompts[0] != prompts[2]);
     let hashes: std::collections::BTreeSet<_> = portraits
@@ -609,6 +687,7 @@ fn crash_child() {
         "prepared" => GenerationPoint::Prepared {
             index: usize::try_from(n).unwrap(),
         },
+        "attached" => GenerationPoint::Attached,
         _ => GenerationPoint::Prepared { index: usize::MAX },
     });
     let _ = match action {
@@ -681,15 +760,15 @@ fn references(project: &CanonicalProject) -> Vec<CastImageKind> {
 }
 
 #[test]
-fn a_pack_cut_short_pays_only_for_what_it_had_not_made() {
+fn a_pack_cut_short_before_its_calls_pays_for_each_image_once() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     drop(selected(&target));
-    // Front and both profiles are made; the full-length view is prepared
-    // and never called.
+    // Every image of the pack is prepared before the first call, and the
+    // process dies before any is called.
     crash(&temp, &target, "pack-prepared-3");
     let project = CanonicalProject::open(&target).unwrap();
-    assert_eq!(references(&project).len(), 3);
+    assert!(references(&project).is_empty());
 
     let minimax = Minimax::new();
     let pack = cast::make_pack_with(
@@ -700,7 +779,7 @@ fn a_pack_cut_short_pays_only_for_what_it_had_not_made() {
         &mut NoHooks,
     )
     .unwrap();
-    assert_eq!(minimax.calls(), 4, "only the four the pack lacked");
+    assert_eq!(minimax.calls(), 7, "none was called before");
     assert_eq!(pack.len(), 7);
     let mut made = references(&project);
     assert_eq!(made.len(), 7, "no kind made twice");
@@ -710,15 +789,46 @@ fn a_pack_cut_short_pays_only_for_what_it_had_not_made() {
 }
 
 #[test]
-fn a_pack_cut_short_by_an_unknown_answer_pays_again_only_for_that_one() {
+fn a_pack_cut_short_after_its_calls_keeps_every_paid_image() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     drop(selected(&target));
-    // Three references are made; MiniMax answers the fourth call and the
-    // process dies before it is kept.
+    // Every call was answered and kept; the process dies as the first
+    // image is recorded.
+    crash(&temp, &target, "pack-attached-1");
+    let project = CanonicalProject::open(&target).unwrap();
+    assert_eq!(cast::recover(&project).unwrap().unresolved.len(), 0);
+    assert_eq!(
+        references(&project).len(),
+        7,
+        "recorded from their receipts"
+    );
+    let minimax = Minimax::new();
+    let pack = cast::make_pack_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(pack.len(), 7);
+    assert_eq!(minimax.calls(), 0, "nothing is paid for again");
+}
+
+#[test]
+fn a_pack_cut_short_by_an_unknown_answer_pays_again_only_for_what_it_lacks() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(selected(&target));
+    // MiniMax answers the fourth call and the process dies before it is
+    // kept. The calls run at once, so which others had answered and been
+    // kept by then varies; none of them is paid for again.
     crash(&temp, &target, "pack-answered-4");
     let project = CanonicalProject::open(&target).unwrap();
-    assert_eq!(references(&project).len(), 3);
+    assert!(!cast::recover(&project).unwrap().unresolved.is_empty());
+    let kept = references(&project).len();
+    assert!(kept < 7);
     let minimax = Minimax::new();
     let make = |submission| {
         cast::make_pack_with(
@@ -735,10 +845,14 @@ fn a_pack_cut_short_by_an_unknown_answer_pays_again_only_for_that_one() {
     ));
     assert_eq!(minimax.calls(), 0);
     make(Submission::RiskPayingTwice).unwrap();
-    // Four calls before the crash and four now: the seven the pack holds
-    // and the one call whose answer was lost, resubmitted on purpose.
-    assert_eq!(minimax.calls(), 4);
-    assert_eq!(references(&project).len(), 7);
+    // Only what the pack lacks, the lost answer among it, resubmitted on
+    // the director's decision.
+    assert_eq!(minimax.calls(), u32::try_from(7 - kept).unwrap());
+    let mut made = references(&project);
+    assert_eq!(made.len(), 7);
+    made.sort();
+    made.dedup();
+    assert_eq!(made.len(), 7, "no kind made twice");
 }
 
 #[test]
@@ -746,9 +860,11 @@ fn an_audition_cut_short_makes_only_the_portraits_it_lacked() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     drop(film(&target, true));
+    // Every portrait is prepared before the first call; the process dies
+    // as the last is, before any is called.
     crash(&temp, &target, "audition-prepared-2");
     let project = CanonicalProject::open(&target).unwrap();
-    assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 2);
+    assert!(document::images(&project, "filmmaker").unwrap().is_empty());
     let minimax = Minimax::new();
     let audition = |count| {
         cast::audition_with(
@@ -762,16 +878,37 @@ fn an_audition_cut_short_makes_only_the_portraits_it_lacked() {
         .unwrap()
     };
     assert_eq!(audition(3).len(), 3);
-    assert_eq!(minimax.calls(), 1);
+    assert_eq!(minimax.calls(), 3);
     // Asking again for what is there pays nothing; a rejected portrait is
     // replaced, and more are made only when more are asked for.
     assert_eq!(audition(3).len(), 3);
-    assert_eq!(minimax.calls(), 1);
+    assert_eq!(minimax.calls(), 3);
     document::reject(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
     assert_eq!(audition(3).len(), 3);
-    assert_eq!(minimax.calls(), 2);
-    assert_eq!(audition(5).len(), 5);
     assert_eq!(minimax.calls(), 4);
+    assert_eq!(audition(5).len(), 5);
+    assert_eq!(minimax.calls(), 6);
+}
+
+#[test]
+fn an_audition_cut_short_after_its_calls_keeps_every_paid_portrait() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    drop(film(&target, true));
+    crash(&temp, &target, "audition-attached-1");
+    let project = CanonicalProject::open(&target).unwrap();
+    let minimax = Minimax::new();
+    let portraits = cast::audition_with(
+        &project,
+        minimax.adapter(&project),
+        "filmmaker",
+        3,
+        Submission::Once,
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(portraits.len(), 3, "recorded from their receipts");
+    assert_eq!(minimax.calls(), 0, "nothing is paid for again");
 }
 
 #[test]
@@ -836,12 +973,17 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
 
     crash(&temp, &target, "pack-answered-1");
 
+    // The pack's calls run at once: the first answer is lost, and whatever
+    // else was sent and not kept by then is unresolved with it.
     let project = CanonicalProject::open(&target).unwrap();
-    assert_eq!(
-        cast::recover(&project).unwrap().unresolved,
-        ["cast.filmmaker.0002"]
+    let unresolved = cast::recover(&project).unwrap().unresolved;
+    assert!(!unresolved.is_empty());
+    assert!(
+        unresolved
+            .iter()
+            .all(|id| id.starts_with("cast.filmmaker."))
     );
-    assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 1);
+    let kept = references(&project).len();
     let minimax = Minimax::new();
     let make = |submission| {
         cast::make_pack_with(
@@ -872,8 +1014,8 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
 
     let pack = make(Submission::RiskPayingTwice).unwrap();
     assert_eq!(pack.len(), 7);
-    assert_eq!(pack[0].artifact_id, "cast.filmmaker.0002");
-    assert_eq!(minimax.calls(), 7);
+    assert_eq!(minimax.calls(), u32::try_from(7 - kept).unwrap());
+    assert!(cast::recover(&project).unwrap().unresolved.is_empty());
 }
 
 #[test]
@@ -901,10 +1043,14 @@ fn risking_paying_twice_for_one_character_leaves_anothers_unresolved_image_guard
     let portraits = audition("interviewer", Submission::RiskPayingTwice).unwrap();
     assert_eq!(portraits[0].artifact_id, "cast.interviewer.0001");
     assert_eq!(minimax.calls(), 1);
-    assert_eq!(
-        cast::recover(&project).unwrap().unresolved,
-        ["cast.filmmaker.0002"]
+    let unresolved = cast::recover(&project).unwrap().unresolved;
+    assert!(!unresolved.is_empty());
+    assert!(
+        unresolved
+            .iter()
+            .all(|id| id.starts_with("cast.filmmaker."))
     );
+    let kept = references(&project).len();
     assert!(matches!(
         audition("filmmaker", Submission::Once),
         Err(GenerationError::UnresolvedSubmission)
@@ -920,7 +1066,7 @@ fn risking_paying_twice_for_one_character_leaves_anothers_unresolved_image_guard
         &mut NoHooks,
     )
     .unwrap();
-    assert_eq!(pack[0].artifact_id, "cast.filmmaker.0002");
-    assert_eq!(minimax.calls(), 8);
+    assert_eq!(pack.len(), 7);
+    assert_eq!(minimax.calls(), 1 + u32::try_from(7 - kept).unwrap());
     assert!(cast::recover(&project).unwrap().unresolved.is_empty());
 }

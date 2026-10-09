@@ -678,54 +678,81 @@ fn plan_shot<G: CandidateGenerator>(
     })
 }
 
-/// Generate `shot` as `planned` and record it.
-#[allow(clippy::too_many_arguments)]
-fn make<G: CandidateGenerator>(
+/// Generate each of `images`, a shot as planned, at once, and record them
+/// in order. Each is numbered before any call, so one whose call failed
+/// leaves its number unused, and the others are still recorded, since they
+/// are paid for; its error is returned.
+fn make_all<G: CandidateGenerator>(
     project: &CanonicalProject,
     jobs: &mut Jobs<'_, Casting, G>,
     character_id: &str,
-    shot: &Shot,
+    images: Vec<(Shot, Planned)>,
     identity: Option<&ReferenceImage>,
-    planned: Planned,
-    index: usize,
     hooks: &mut dyn GenerationHooks,
-) -> Result<CastImage, GenerationError> {
-    let artifact_id = document::next_artifact_id(project, character_id).map_err(document_error)?;
-    let plan = CastPlan {
-        schema_version: PLAN_SCHEMA_VERSION,
-        artifact_id: artifact_id.as_str().to_owned(),
-        input_hash: planned.input_hash.as_str().to_owned(),
-        character_id: character_id.to_owned(),
-        kind: shot.kind,
-        identity_reference: identity.map(|identity| identity.artifact_id.as_str().to_owned()),
-        dependencies: planned
-            .dependencies
-            .iter()
-            .map(DependencyRecord::from)
-            .collect(),
-        look: shot.look.map(|look| look.id.to_owned()),
-    };
-    let call = CandidateRequest {
-        artifact_id: artifact_id.clone(),
-        input_hash: planned.input_hash,
-        owner: CandidateOwner::Character {
-            id: character_id.to_owned(),
-            kind: shot.kind,
-        },
-        aspect_ratio: shot.frame,
-        identities: identity.cloned().into_iter().collect(),
-        composition: None,
-        style: None,
-        prompt: Some(Arc::new(planned.prompt)),
-    };
-    jobs.generate(&plan, &call, index, hooks)?;
-    document::images(project, character_id)
-        .map_err(document_error)?
+) -> Result<Vec<CastImage>, GenerationError> {
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids =
+        document::next_artifact_ids(project, character_id, images.len()).map_err(document_error)?;
+    let calls: Vec<(CastPlan, CandidateRequest)> = images
         .into_iter()
-        .find(|image| image.artifact_id == artifact_id.as_str())
-        .ok_or(GenerationError::Unexpected(
-            "a recorded casting image is missing",
-        ))
+        .zip(ids)
+        .map(|((shot, planned), artifact_id)| {
+            let plan = CastPlan {
+                schema_version: PLAN_SCHEMA_VERSION,
+                artifact_id: artifact_id.as_str().to_owned(),
+                input_hash: planned.input_hash.as_str().to_owned(),
+                character_id: character_id.to_owned(),
+                kind: shot.kind,
+                identity_reference: identity
+                    .map(|identity| identity.artifact_id.as_str().to_owned()),
+                dependencies: planned
+                    .dependencies
+                    .iter()
+                    .map(DependencyRecord::from)
+                    .collect(),
+                look: shot.look.map(|look| look.id.to_owned()),
+            };
+            let call = CandidateRequest {
+                artifact_id,
+                input_hash: planned.input_hash,
+                owner: CandidateOwner::Character {
+                    id: character_id.to_owned(),
+                    kind: shot.kind,
+                },
+                aspect_ratio: shot.frame,
+                identities: identity.cloned().into_iter().collect(),
+                composition: None,
+                style: None,
+                prompt: Some(Arc::new(planned.prompt)),
+            };
+            (plan, call)
+        })
+        .collect();
+    let batch: Vec<(&CastPlan, &CandidateRequest)> =
+        calls.iter().map(|(plan, call)| (plan, call)).collect();
+    let outcomes = jobs.generate_all(&batch, 0, hooks);
+    let recorded = document::images(project, character_id).map_err(document_error)?;
+    let mut made = Vec::with_capacity(calls.len());
+    let mut failure = None;
+    for ((plan, _), outcome) in calls.iter().zip(outcomes) {
+        match outcome {
+            Ok(()) => made.push(
+                recorded
+                    .iter()
+                    .find(|image| image.artifact_id == plan.artifact_id)
+                    .cloned()
+                    .ok_or(GenerationError::Unexpected(
+                        "a recorded casting image is missing",
+                    ))?,
+            ),
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    failure.map_or(Ok(made), Err)
 }
 
 /// Have `count` portrait candidates of `character_id` that are not
@@ -848,23 +875,24 @@ pub fn audition_with<G: CandidateGenerator>(
         .iter()
         .filter_map(|image| look_index(image.look.as_deref()))
         .collect();
-    for index in 0..count.saturating_sub(portraits.len()) {
+    let mut wanted = Vec::new();
+    for _ in 0..count.saturating_sub(portraits.len()) {
         let next = (0..LOOKS.len())
             .min_by_key(|look| (kept.contains(look), uses[*look], *look))
             .expect("there are looks");
         uses[next] += 1;
         kept.push(next);
-        portraits.push(make(
-            project,
-            &mut jobs,
-            character_id,
-            &shot(&LOOKS[next]),
-            None,
-            planned[next].clone(),
-            index,
-            hooks,
-        )?);
+        wanted.push((shot(&LOOKS[next]), planned[next].clone()));
     }
+    // The portraits are drawn at once, not one after another.
+    portraits.extend(make_all(
+        project,
+        &mut jobs,
+        character_id,
+        wanted,
+        None,
+        hooks,
+    )?);
     Ok(portraits)
 }
 
@@ -988,8 +1016,8 @@ pub fn remake_pack_with<G: CandidateGenerator>(
     // References an interruption left are recorded first, so they count.
     let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
     let recorded = document::images(project, character_id).map_err(document_error)?;
-    let mut pack = Vec::with_capacity(shots.len());
-    let mut made = 0;
+    let mut pack: Vec<Option<CastImage>> = Vec::with_capacity(shots.len());
+    let mut wanted = Vec::new();
     for (shot, planned) in shots {
         let kept = recorded.iter().rev().find(|image| {
             image.kind == shot.kind
@@ -997,22 +1025,28 @@ pub fn remake_pack_with<G: CandidateGenerator>(
                 && image.input_hash == planned.input_hash.as_str()
         });
         match kept {
-            Some(image) if !remake.contains(&shot.kind) => pack.push(image.clone()),
+            Some(image) if !remake.contains(&shot.kind) => pack.push(Some(image.clone())),
             _ => {
-                pack.push(make(
-                    project,
-                    &mut jobs,
-                    character_id,
-                    &shot,
-                    Some(&identity),
-                    planned,
-                    made,
-                    hooks,
-                )?);
-                made += 1;
+                pack.push(None);
+                wanted.push((shot, planned));
             }
         }
     }
+    // What the pack lacks is drawn at once, in plan order.
+    let mut made = make_all(
+        project,
+        &mut jobs,
+        character_id,
+        wanted,
+        Some(&identity),
+        hooks,
+    )?
+    .into_iter();
+    let pack = pack
+        .into_iter()
+        .map(|image| image.or_else(|| made.next()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or(GenerationError::Unexpected("a made reference is missing"))?;
     Ok(pack)
 }
 
