@@ -47,5 +47,6 @@ This directory contains the product and technical design baseline for Kineto. It
 - [ADR-0005: In-process Rust Engine with Typed Flutter FFI](adr/0005-in-process-rust-ffi.md)
 - [ADR-0006: Provider Plugins as Configured Local Processes](adr/0006-provider-plugins.md)
 - [ADR-0007: MCP Client for Director-Requested References](adr/0007-mcp-client-references.md)
+- [ADR-0008: The Director's Own Agent CLIs, and Provider Choice in Settings](adr/0008-directors-own-agents-and-provider-choice.md)
 
 Accepted ADRs remain immutable records. A changed decision is documented by a superseding ADR rather than rewriting history.
