@@ -502,6 +502,142 @@ fn schema_for_claude(schema: &str) -> String {
     }
 }
 
+/// Keywords OpenAI's strict structured output refuses; kineto checks them
+/// against the whole schema once the answer is back.
+const CODEX_UNSUPPORTED: [&str; 6] = [
+    "$schema",
+    "$id",
+    "minLength",
+    "maxLength",
+    "uniqueItems",
+    "default",
+];
+
+/// The schema as Codex can hold an answer to it. Codex asks for OpenAI's
+/// strict structured output, which takes only closed objects whose every
+/// property is required: a property the schema leaves optional becomes one
+/// that may be null, and [`without_unasked_nulls`] removes those nulls from
+/// the answer. Without a schema Codex answered a long document with JSON
+/// that did not parse.
+fn schema_for_codex(schema: &str) -> String {
+    fn nullable(node: Value) -> Value {
+        match node {
+            Value::Object(mut object) => {
+                match object.get_mut("type") {
+                    Some(Value::String(kind)) => {
+                        let kind = kind.clone();
+                        object.insert("type".to_owned(), json!([kind, "null"]));
+                    }
+                    Some(Value::Array(kinds)) if !kinds.contains(&json!("null")) => {
+                        kinds.push(json!("null"))
+                    }
+                    Some(_) => {}
+                    None => return json!({"anyOf": [Value::Object(object), {"type": "null"}]}),
+                }
+                if let Some(Value::Array(values)) = object.get_mut("enum")
+                    && !values.contains(&Value::Null)
+                {
+                    values.push(Value::Null);
+                }
+                Value::Object(object)
+            }
+            other => other,
+        }
+    }
+
+    fn strict(node: Value) -> Value {
+        match node {
+            Value::Object(mut object) => {
+                for keyword in CODEX_UNSUPPORTED {
+                    object.remove(keyword);
+                }
+                let required: Vec<String> = object
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(Value::Object(properties)) = object.remove("properties") {
+                    let mut all = Vec::new();
+                    let properties: serde_json::Map<String, Value> = properties
+                        .into_iter()
+                        .map(|(name, property)| {
+                            let property = strict(property);
+                            let property = if required.contains(&name) {
+                                property
+                            } else {
+                                nullable(property)
+                            };
+                            all.push(Value::String(name.clone()));
+                            (name, property)
+                        })
+                        .collect();
+                    object.insert("properties".to_owned(), Value::Object(properties));
+                    object.insert("required".to_owned(), Value::Array(all));
+                    object.insert("additionalProperties".to_owned(), Value::Bool(false));
+                }
+                Value::Object(
+                    object
+                        .into_iter()
+                        .map(|(key, value)| (key, strict(value)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.into_iter().map(strict).collect()),
+            other => other,
+        }
+    }
+
+    match serde_json::from_str::<Value>(schema) {
+        Ok(value) => strict(value).to_string(),
+        Err(_) => schema.to_owned(),
+    }
+}
+
+/// `answer` without the nulls [`schema_for_codex`] made Codex give for the
+/// properties `schema` leaves optional. Anything else is left as it came,
+/// for kineto to check.
+fn without_unasked_nulls(answer: &str, schema: &str) -> String {
+    fn walk(value: &mut Value, schema: &Value) {
+        match value {
+            Value::Object(object) => {
+                let required: Vec<&str> = schema["required"]
+                    .as_array()
+                    .map(|names| names.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                object.retain(|name, property| {
+                    !(property.is_null()
+                        && schema["properties"].get(name).is_some()
+                        && !required.contains(&name.as_str()))
+                });
+                for (name, property) in object.iter_mut() {
+                    walk(property, &schema["properties"][name]);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, &schema["items"]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (Ok(mut value), Ok(schema)) = (
+        serde_json::from_str::<Value>(answer),
+        serde_json::from_str::<Value>(schema),
+    ) else {
+        return answer.to_owned();
+    };
+    walk(&mut value, &schema);
+    value.to_string()
+}
+
 /// An agent CLI the director signed in to, as an `llm.complete` backend.
 #[derive(Debug, Clone)]
 pub struct AgentCli {
@@ -627,6 +763,13 @@ impl AgentCli {
                 for feature in CODEX_TOOL_FEATURES {
                     command.args(["--disable", feature]);
                 }
+                if let Some(schema) = &request.schema {
+                    let path = workspace.write(
+                        "schema.json",
+                        schema_for_codex(&schema.schema_json).as_bytes(),
+                    )?;
+                    command.arg("--output-schema").arg(path);
+                }
                 command.arg("-");
                 Some(prompt.into_bytes())
             }
@@ -671,7 +814,10 @@ impl AgentCli {
         )?;
         match self.kind {
             AgentKind::ClaudeCode => claude_answer(&finished),
-            AgentKind::Codex => codex_answer(&finished),
+            AgentKind::Codex => codex_answer(&finished).map(|answer| match &request.schema {
+                Some(schema) => without_unasked_nulls(&answer, &schema.schema_json),
+                None => answer,
+            }),
             AgentKind::KimiCode => kimi_answer(&finished),
             AgentKind::Agy if request.schema.is_none() => {
                 let answer = agy_answer(&finished)?;
@@ -911,6 +1057,71 @@ mod tests {
             Err(AgentError::Agent { message, .. }) if message.contains("--json-schema")
         ));
         assert_eq!(claude_answer(&finished(&[], 1)), Err(AgentError::Exited));
+    }
+
+    #[test]
+    fn codex_gets_a_strict_schema_and_its_answer_loses_the_nulls_it_was_made_to_give() {
+        let schema = r#"{
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://kineto.example/scene.json",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "beats"],
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "pattern": "^[a-z_]+$"},
+                "mood": {"type": "string", "enum": ["calm", "tense"]},
+                "beats": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["text"],
+                        "properties": {
+                            "text": {"type": "string", "maxLength": 400},
+                            "note": {"type": ["string", "null"]}
+                        }
+                    }
+                }
+            }
+        }"#;
+        let strict: Value = serde_json::from_str(&schema_for_codex(schema)).unwrap();
+        assert_eq!(strict.get("$schema"), None);
+        assert_eq!(strict.get("$id"), None);
+        assert_eq!(strict["required"], json!(["beats", "id", "mood"]));
+        assert_eq!(strict["additionalProperties"], json!(false));
+        assert_eq!(
+            strict["properties"]["mood"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            strict["properties"]["mood"]["enum"],
+            json!(["calm", "tense", null])
+        );
+        assert_eq!(
+            strict["properties"]["id"],
+            json!({"type": "string", "pattern": "^[a-z_]+$"})
+        );
+        assert_eq!(strict["properties"]["beats"].get("uniqueItems"), None);
+        let beat = &strict["properties"]["beats"]["items"];
+        assert_eq!(beat["required"], json!(["note", "text"]));
+        assert_eq!(
+            beat["properties"]["note"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(beat["properties"]["text"], json!({"type": "string"}));
+
+        let answer = r#"{"id":"office","mood":null,"beats":[{"text":"waits","note":null}]}"#;
+        let kept: Value = serde_json::from_str(&without_unasked_nulls(answer, schema)).unwrap();
+        assert_eq!(kept, json!({"id": "office", "beats": [{"text": "waits"}]}));
+        let required_null = r#"{"id":null,"beats":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<Value>(&without_unasked_nulls(required_null, schema)).unwrap(),
+            json!({"id": null, "beats": []}),
+            "a required property's null stays, for kineto to refuse"
+        );
+        assert_eq!(without_unasked_nulls("not json", schema), "not json");
     }
 
     #[test]
