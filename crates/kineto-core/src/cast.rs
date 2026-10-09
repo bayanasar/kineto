@@ -45,7 +45,7 @@ use crate::{
 pub const CAST_PROVIDER: &str = "minimax-cast";
 
 /// Version of the portrait prompt.
-pub const PORTRAIT_COMPILER_VERSION: &str = "cast-portrait/1";
+pub const PORTRAIT_COMPILER_VERSION: &str = "cast-portrait/2";
 
 /// Version of the reference prompt.
 pub const REFERENCE_COMPILER_VERSION: &str = "cast-reference/1";
@@ -72,6 +72,76 @@ const TALL: AspectRatio = AspectRatio {
     width: 9,
     height: 16,
 };
+
+/// A casting look: what sets one actor apart from another, in features a
+/// character's description rarely fixes. Never the shape of the face, the
+/// nose, colouring, hair, age or build, which the description and its
+/// forbidden changes keep. Each portrait candidate is asked for its own, so
+/// an audition is of different people to choose between, not one face drawn
+/// several times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Look {
+    pub id: &'static str,
+    pub features: &'static str,
+}
+
+/// The looks an audition draws from, in the order a new character's
+/// candidates take them.
+pub const LOOKS: [Look; 12] = [
+    Look {
+        id: "hooded",
+        features: "a guarded, brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and high, sharp cheekbones",
+    },
+    Look {
+        id: "wide-set",
+        features: "a boyish, open face, large wide-set eyes, fine arched brows, full lips and a soft, rounded chin",
+    },
+    Look {
+        id: "downturned",
+        features: "a melancholy, sensitive face, narrow downturned eyes, thick low brows, a small tight mouth and a pointed chin",
+    },
+    Look {
+        id: "almond",
+        features: "a sly, foxlike face, almond-shaped eyes, faint sparse brows, a wide mouth with a heavy lower lip and a strong, square chin",
+    },
+    Look {
+        id: "heavy-lidded",
+        features: "a languid, sardonic face, heavy-lidded eyes, straight brows set close together, thin lips and a cleft chin",
+    },
+    Look {
+        id: "open",
+        features: "an earnest, plain face, round open eyes, brows that lift at their inner ends, a short upper lip and prominent ears",
+    },
+    Look {
+        id: "close-set",
+        features: "a hard, watchful face, close-set eyes, bushy brows, a broad mouth, flat cheekbones and a long chin",
+    },
+    Look {
+        id: "upturned",
+        features: "a warm, mischievous face, upturned eyes creased at the corners, high curved brows, a bow-shaped mouth and a receding chin",
+    },
+    Look {
+        id: "bright",
+        features: "a nervous, alert face, small bright eyes under a high forehead, thin angled brows, a crooked mouth and a jutting jaw",
+    },
+    Look {
+        id: "hollow",
+        features: "a dreamy, distant face, wide sleepy eyes, a low straight brow line, a full wide mouth and hollow cheeks",
+    },
+    Look {
+        id: "shadowed",
+        features: "a tired, intense face, deep-set eyes shadowed beneath, arched expressive brows, narrow lips and a dimpled chin",
+    },
+    Look {
+        id: "uneven",
+        features: "a homely, likeable face, slightly uneven eyes, soft rounded brows, a small mouth, a broad forehead and ears set close",
+    },
+];
+
+fn look_index(id: Option<&str>) -> Option<usize> {
+    let id = id?;
+    LOOKS.iter().position(|look| look.id == id)
+}
 
 /// One image of a reference pack, as the provider can make it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +365,19 @@ pub fn compile(
     frame: Option<&str>,
     capabilities: &ImageCapabilities,
 ) -> Result<KeyframePrompt, KeyframePromptError> {
+    compile_as(character, kind, None, style, identity, frame, capabilities)
+}
+
+/// [`compile`], asking for the actor's `look` where one is given.
+pub fn compile_as(
+    character: &Character,
+    kind: CastImageKind,
+    look: Option<&Look>,
+    style: &StyleLock,
+    identity: bool,
+    frame: Option<&str>,
+    capabilities: &ImageCapabilities,
+) -> Result<KeyframePrompt, KeyframePromptError> {
     let portrait = kind == CastImageKind::Portrait;
     // The style first: a long description of a person otherwise reads as a
     // photograph, whatever the style says after it.
@@ -305,6 +388,16 @@ pub fn compile(
         REQUIRED,
         DegradationLevel::Cosmetic,
     ));
+    // Who plays the part comes first after the frame: a provider weighs the
+    // start of a prompt most, and without it the candidates are one face.
+    if let Some(look) = look {
+        required.push(part(
+            &format!("cast.look.{}", look.id),
+            sentence(&format!("Played by an actor with {}", look.features)),
+            REQUIRED,
+            DegradationLevel::Cosmetic,
+        ));
+    }
     if identity {
         required.push(part(
             &format!("identity.{}", character.id),
@@ -328,16 +421,8 @@ pub fn compile(
         if costume { REQUIRED } else { 0 },
         DegradationLevel::Cosmetic,
     );
-    let mut optional = Vec::new();
-    for piece in [appearance, clothes] {
-        if piece.rank == REQUIRED {
-            required.push(piece);
-        } else {
-            optional.push(piece);
-        }
-    }
-    if !character.forbidden_changes.is_empty() {
-        optional.push(part(
+    let mut forbidden = (!character.forbidden_changes.is_empty()).then(|| {
+        part(
             "bible.forbidden_changes",
             sentence(&format!(
                 "Always: {}",
@@ -354,8 +439,22 @@ pub fn compile(
             } else {
                 DegradationLevel::Cosmetic
             },
-        ));
+        )
+    });
+    let mut optional = Vec::new();
+    // A portrait's look must not win over what the entry keeps: what may
+    // never change follows the description at once, before the wardrobe.
+    if portrait {
+        optional.extend(forbidden.take());
     }
+    for piece in [appearance, clothes] {
+        if piece.rank == REQUIRED {
+            required.push(piece);
+        } else {
+            optional.push(piece);
+        }
+    }
+    optional.extend(forbidden);
     let mut dropped = Vec::new();
     if let Some(reason) = frame {
         dropped.push(DroppedConstraint {
@@ -374,13 +473,14 @@ pub fn compile(
         } else {
             REFERENCE_COMPILER_VERSION
         },
-        &canonical_intent(character, kind, style, identity),
+        &canonical_intent(character, kind, look, style, identity),
     )
 }
 
 fn canonical_intent(
     character: &Character,
     kind: CastImageKind,
+    look: Option<&Look>,
     style: &StyleLock,
     identity: bool,
 ) -> Vec<u8> {
@@ -398,6 +498,11 @@ fn canonical_intent(
     field(kind.as_str().as_bytes());
     field(&serde_json::to_vec(style).expect("a style lock always encodes"));
     field(&[u8::from(identity)]);
+    // Only a portrait has a look, so a reference's intent is as it was.
+    if let Some(look) = look {
+        field(look.id.as_bytes());
+        field(look.features.as_bytes());
+    }
     hasher.finalize().to_vec()
 }
 
@@ -412,6 +517,8 @@ struct CastPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_reference: Option<String>,
     dependencies: Vec<DependencyRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    look: Option<String>,
 }
 
 fn image_of(plan: &CastPlan, generated: GeneratedCandidate) -> Result<CastImage, GenerationError> {
@@ -443,6 +550,7 @@ fn image_of(plan: &CastPlan, generated: GeneratedCandidate) -> Result<CastImage,
         provenance,
         dependencies: plan.dependencies.clone(),
         media_state: None,
+        look: plan.look.clone(),
     })
 }
 
@@ -508,6 +616,8 @@ struct Shot {
     frame: AspectRatio,
     /// Why the frame differs from the one wanted, when it does.
     degraded: Option<String>,
+    /// The actor a portrait candidate asks for.
+    look: Option<&'static Look>,
 }
 
 /// An image compiled and hashed, before anything is written.
@@ -527,9 +637,10 @@ fn plan_shot<G: CandidateGenerator>(
     generator: &G,
 ) -> Result<Planned, GenerationError> {
     let capabilities = &generator.capabilities();
-    let prompt = compile(
+    let prompt = compile_as(
         &material.character,
         shot.kind,
+        shot.look,
         &material.style,
         identity.is_some(),
         shot.degraded.as_deref(),
@@ -551,6 +662,7 @@ fn plan_shot<G: CandidateGenerator>(
         canonical_intent: &canonical_intent(
             &material.character,
             shot.kind,
+            shot.look,
             &material.style,
             identity.is_some(),
         ),
@@ -591,6 +703,7 @@ fn make<G: CandidateGenerator>(
             .iter()
             .map(DependencyRecord::from)
             .collect(),
+        look: shot.look.map(|look| look.id.to_owned()),
     };
     let call = CandidateRequest {
         artifact_id: artifact_id.clone(),
@@ -677,37 +790,77 @@ pub fn audition_with<G: CandidateGenerator>(
                 .next()
                 .expect("a non-empty set has a first ratio")
         };
-    let shot = Shot {
+    let degraded = (frame != SQUARE).then(|| {
+        format!(
+            "the provider takes no 1:1 frame; made at {}:{}",
+            frame.width, frame.height
+        )
+    });
+    let shot = |look: &'static Look| Shot {
         kind: CastImageKind::Portrait,
         frame,
-        degraded: (frame != SQUARE).then(|| {
-            format!(
-                "the provider takes no 1:1 frame; made at {}:{}",
-                frame.width, frame.height
-            )
-        }),
+        degraded: degraded.clone(),
+        look: Some(look),
     };
-    // A prompt that cannot fit is refused before anything is written.
-    let planned = plan_shot(&material, &shot, None, &adapter)?;
+    // Every look's prompt is compiled, and refused if it cannot fit, before
+    // anything is written.
+    let planned = LOOKS
+        .iter()
+        .map(|look| plan_shot(&material, &shot(look), None, &adapter))
+        .collect::<Result<Vec<_>, _>>()?;
     // Portraits an interruption left are recorded first, so they count.
     let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
-    let mut portraits: Vec<CastImage> = document::images(project, character_id)
+    let images: Vec<CastImage> = document::images(project, character_id)
         .map_err(document_error)?
         .into_iter()
+        .filter(|image| image.kind == CastImageKind::Portrait)
+        .collect();
+    // Any unrejected portrait of this entry in this style counts, whoever
+    // made it and however it was asked for: the director is shown that
+    // count, and pays for what it lacks.
+    let parents: Vec<DependencyRecord> = material
+        .dependencies
+        .iter()
+        .map(DependencyRecord::from)
+        .collect();
+    let mut portraits: Vec<CastImage> = images
+        .iter()
         .filter(|image| {
-            image.kind == CastImageKind::Portrait
-                && image.input_hash == planned.input_hash.as_str()
-                && image.status != Some(PortraitStatus::Rejected)
+            image.status != Some(PortraitStatus::Rejected)
+                && image.dependencies.len() == parents.len()
+                && parents
+                    .iter()
+                    .all(|parent| image.dependencies.contains(parent))
         })
+        .cloned()
+        .collect();
+    // Each new candidate is another actor: a look none of the portraits kept
+    // has, the one this character was least often given first, so neither a
+    // kept face nor a rejected one is asked for again while others are left.
+    let mut uses = [0_usize; LOOKS.len()];
+    for index in images
+        .iter()
+        .filter_map(|image| look_index(image.look.as_deref()))
+    {
+        uses[index] += 1;
+    }
+    let mut kept: Vec<usize> = portraits
+        .iter()
+        .filter_map(|image| look_index(image.look.as_deref()))
         .collect();
     for index in 0..count.saturating_sub(portraits.len()) {
+        let next = (0..LOOKS.len())
+            .min_by_key(|look| (kept.contains(look), uses[*look], *look))
+            .expect("there are looks");
+        uses[next] += 1;
+        kept.push(next);
         portraits.push(make(
             project,
             &mut jobs,
             character_id,
-            &shot,
+            &shot(&LOOKS[next]),
             None,
-            planned.clone(),
+            planned[next].clone(),
             index,
             hooks,
         )?);
@@ -826,6 +979,7 @@ pub fn remake_pack_with<G: CandidateGenerator>(
                 kind: pack_shot.kind,
                 frame: pack_shot.aspect_ratio,
                 degraded: pack_shot.degraded.clone(),
+                look: None,
             };
             let planned = plan_shot(&material, &shot, Some(&identity), &adapter)?;
             Ok((shot, planned))
@@ -986,6 +1140,7 @@ pub fn import_portrait(
             .map(DependencyRecord::from)
             .collect(),
         media_state: None,
+        look: None,
     };
     document::attach(project, character_id, image.clone()).map_err(document_error)?;
     Ok(image)
@@ -1144,8 +1299,8 @@ mod tests {
                 "style.note",
                 "cast.frame.portrait",
                 "bible.appearance",
-                "bible.wardrobe",
-                "bible.forbidden_changes"
+                "bible.forbidden_changes",
+                "bible.wardrobe"
             ]
         );
 
@@ -1174,6 +1329,54 @@ mod tests {
             reference.compiled.compiler_version(),
             REFERENCE_COMPILER_VERSION
         );
+    }
+
+    #[test]
+    fn each_look_asks_for_another_actor_after_the_description() {
+        let prompt = |look| {
+            compile_as(
+                &filmmaker(),
+                CastImageKind::Portrait,
+                Some(look),
+                &noir(),
+                false,
+                None,
+                &minimax(),
+            )
+            .unwrap()
+        };
+        let first = prompt(&LOOKS[0]);
+        let text = first.compiled.prompt();
+        assert!(text.contains(
+            "plain neutral background, soft even light. Played by an actor with a guarded, \
+             brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and \
+             high, sharp cheekbones. A man in his late forties"
+        ));
+        assert!(ids(&first).contains(&"cast.look.hooded"));
+        let mut seen = std::collections::BTreeSet::new();
+        for look in &LOOKS {
+            let made = prompt(look);
+            assert!(
+                seen.insert(made.compiled.prompt().to_owned()),
+                "{}",
+                look.id
+            );
+            assert!(seen.len() <= LOOKS.len());
+        }
+        let ids: std::collections::BTreeSet<_> = LOOKS.iter().map(|look| look.id).collect();
+        assert_eq!(ids.len(), LOOKS.len(), "every look is told apart");
+        // A look never names what a description keeps.
+        for look in &LOOKS {
+            for kept in [
+                "nose", "hair", "skin", "oval", "age", "old", "young", "tall", "scar", "beard",
+            ] {
+                assert!(
+                    !look.features.split([' ', ',']).any(|word| word == kept),
+                    "{} names {kept}",
+                    look.id
+                );
+            }
+        }
     }
 
     #[test]

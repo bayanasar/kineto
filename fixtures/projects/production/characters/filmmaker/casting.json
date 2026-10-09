@@ -7,20 +7,21 @@
       "kind": "portrait",
       "status": "candidate",
       "content_hash": "sha256:19cbfa2739594b32242fcdf5ea207cd4a87b40fd019b3bc0018c1ca29403919d",
-      "input_hash": "sha256:58c8544167d504bbcbe920897cf3b0ee84e3ce9e369a1d8fa5872e757b4b953e",
+      "input_hash": "sha256:275210ef38e9257794edc290c3684562c3c8ade35257d65bffd94553a8485044",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/candidates/cast.filmmaker.0001.jpg",
       "provenance": {
-        "compiler_version": "cast-portrait/1",
-        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
-        "prompt_hash": "sha256:1f373d30749d451963a37a519b53f80334e057b02c6bc52bde0795922fdc3dec",
+        "compiler_version": "cast-portrait/2",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a guarded, brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and high, sharp cheekbones. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat. Wardrobe: A dark wool coat over a black sweater.",
+        "prompt_hash": "sha256:40705f2ab160c21c074eaa7e219c58ed79d7190916d81955e21538fd26a48fef",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
+          "cast.look.hooded",
           "bible.appearance",
-          "bible.wardrobe",
-          "bible.forbidden_changes"
+          "bible.forbidden_changes",
+          "bible.wardrobe"
         ],
         "dropped_constraints": []
       },
@@ -35,27 +36,29 @@
           "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
           "impact": "semantic"
         }
-      ]
+      ],
+      "look": "hooded"
     },
     {
       "artifact_id": "cast.filmmaker.0002",
       "kind": "portrait",
       "status": "selected",
       "content_hash": "sha256:6599345530f5ed8f582bb151136518ca1c7e99d59b84d1cae1779e22bc69bc84",
-      "input_hash": "sha256:58c8544167d504bbcbe920897cf3b0ee84e3ce9e369a1d8fa5872e757b4b953e",
+      "input_hash": "sha256:1a6d90bd2ac3d37f7c1a43a3348c3c11f563535c5b9391f772fa93c51bf5710b",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg",
       "provenance": {
-        "compiler_version": "cast-portrait/1",
-        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
-        "prompt_hash": "sha256:1f373d30749d451963a37a519b53f80334e057b02c6bc52bde0795922fdc3dec",
+        "compiler_version": "cast-portrait/2",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a boyish, open face, large wide-set eyes, fine arched brows, full lips and a soft, rounded chin. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat. Wardrobe: A dark wool coat over a black sweater.",
+        "prompt_hash": "sha256:0090ba55c94a7305a2a728bda06f089ce1a61818c986e808a58ff88c17069ad5",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
+          "cast.look.wide-set",
           "bible.appearance",
-          "bible.wardrobe",
-          "bible.forbidden_changes"
+          "bible.forbidden_changes",
+          "bible.wardrobe"
         ],
         "dropped_constraints": []
       },
@@ -70,7 +73,8 @@
           "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
           "impact": "semantic"
         }
-      ]
+      ],
+      "look": "wide-set"
     },
     {
       "artifact_id": "cast.filmmaker.0003",

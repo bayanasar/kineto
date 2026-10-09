@@ -7,20 +7,21 @@
       "kind": "portrait",
       "status": "candidate",
       "content_hash": "sha256:7c612e2faa98fbc146bb12e1268806a1faf2751f69f477f41c1792883e263ea1",
-      "input_hash": "sha256:12eadd828165555b58a575bbe896f9eab367734d05eb30478c85d73d667864cb",
+      "input_hash": "sha256:58b711a7e38b4390fb8a716914990a4d0f91e8af1a47fc47fc6a6c016a051535",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/interviewer/candidates/cast.interviewer.0001.jpg",
       "provenance": {
-        "compiler_version": "cast-portrait/1",
-        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Interviewer: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A woman in her thirties, short black hair, round glasses. Wardrobe: A grey blazer, a notebook always in hand. Always: Round glasses.",
-        "prompt_hash": "sha256:1490a2a9ac8364bd43abe80e65f7ed86d84163d064deb06c2fbf8370c300a699",
+        "compiler_version": "cast-portrait/2",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Interviewer: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a guarded, brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and high, sharp cheekbones. A woman in her thirties, short black hair, round glasses. Always: Round glasses. Wardrobe: A grey blazer, a notebook always in hand.",
+        "prompt_hash": "sha256:b37e1da576d816d6737e393634e273414ef73b8691b11bdf15c6d0f9fc9c63c5",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
+          "cast.look.hooded",
           "bible.appearance",
-          "bible.wardrobe",
-          "bible.forbidden_changes"
+          "bible.forbidden_changes",
+          "bible.wardrobe"
         ],
         "dropped_constraints": []
       },
@@ -35,7 +36,8 @@
           "content_hash": "sha256:fe8e54f3a6f55bc4af265be3428d092647d26f1c30bd741eab5ef770ad0bd238",
           "impact": "semantic"
         }
-      ]
+      ],
+      "look": "hooded"
     }
   ]
 }

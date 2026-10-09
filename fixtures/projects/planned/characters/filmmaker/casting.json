@@ -6,21 +6,22 @@
       "artifact_id": "cast.filmmaker.0001",
       "kind": "portrait",
       "status": "candidate",
-      "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
-      "input_hash": "sha256:9365a89e099ee46ebf394826597b0d5dd5c258187778deb2e6ed078fa4f5ed5c",
+      "content_hash": "sha256:e2284e071ca1bf1d6d14956a9e8c79a1397b3444aceb0fb3860f50111c2aa89a",
+      "input_hash": "sha256:156b17fa0fb23e468dffddc961fbf534936e0dbe7fe32567623979c9dbc8db2f",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/candidates/cast.filmmaker.0001.jpg",
       "provenance": {
-        "compiler_version": "cast-portrait/1",
-        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
-        "prompt_hash": "sha256:5f7982e381d0886e2b34829f05ccc995c171a67e8e25a0662c97be5e1246c28b",
+        "compiler_version": "cast-portrait/2",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a guarded, brooding face, deep-set hooded eyes, heavy straight brows, a thin wide mouth and high, sharp cheekbones. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat. Wardrobe: A dark wool coat over a black sweater.",
+        "prompt_hash": "sha256:59e350c956f5e07fc8d2bc1ca755ceede9bec013ad0fc573ab7bbea95dfe5692",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
+          "cast.look.hooded",
           "bible.appearance",
-          "bible.wardrobe",
-          "bible.forbidden_changes"
+          "bible.forbidden_changes",
+          "bible.wardrobe"
         ],
         "dropped_constraints": []
       },
@@ -35,27 +36,29 @@
           "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
           "impact": "semantic"
         }
-      ]
+      ],
+      "look": "hooded"
     },
     {
       "artifact_id": "cast.filmmaker.0002",
       "kind": "portrait",
       "status": "selected",
-      "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
-      "input_hash": "sha256:9365a89e099ee46ebf394826597b0d5dd5c258187778deb2e6ed078fa4f5ed5c",
+      "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
+      "input_hash": "sha256:5e13688b0778b81fe89a43b3ecd3cbde5f1f0691498b23da638e4854626cd1a6",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg",
       "provenance": {
-        "compiler_version": "cast-portrait/1",
-        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Wardrobe: A dark wool coat over a black sweater. Always: Grey at the temples; Never without the coat.",
-        "prompt_hash": "sha256:5f7982e381d0886e2b34829f05ccc995c171a67e8e25a0662c97be5e1246c28b",
+        "compiler_version": "cast-portrait/2",
+        "compiled_prompt": "Black-and-white film noir still: hard low-key light from a single source, deep black shadows, high contrast, wet reflective surfaces, 1940s crime-film composition. Close-up casting portrait of The Filmmaker: head and shoulders only, the face filling the upper frame, facing the camera, neutral expression, plain neutral background, soft even light. Played by an actor with a boyish, open face, large wide-set eyes, fine arched brows, full lips and a soft, rounded chin. A man in his late forties, lean, unshaven, grey at the temples, deep-set eyes. Always: Grey at the temples; Never without the coat. Wardrobe: A dark wool coat over a black sweater.",
+        "prompt_hash": "sha256:f4069f4b769cffd868a519e5e9f7618707d55aea71ecd41a81ef520cf8adb9dd",
         "applied_constraints": [
           "style.locked",
           "cast.frame.portrait",
+          "cast.look.wide-set",
           "bible.appearance",
-          "bible.wardrobe",
-          "bible.forbidden_changes"
+          "bible.forbidden_changes",
+          "bible.wardrobe"
         ],
         "dropped_constraints": []
       },
@@ -70,14 +73,15 @@
           "content_hash": "sha256:3fc91555cb3bc6f12d0679688ad26f5a74d7a21271d5c64b0219b02ba7c1bc1c",
           "impact": "semantic"
         }
-      ]
+      ],
+      "look": "wide-set"
     },
     {
       "artifact_id": "cast.filmmaker.0003",
       "kind": "front",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:a1656de1cf711dc2d9a8c6454484536084a1ac1bf017734ec560aefd9ee77af9",
-      "input_hash": "sha256:81b75f44a7de5096a9e66d20242a070db56b81b0c79069b0178bd16dff216941",
+      "content_hash": "sha256:6574859a24d1f529655f0e22c10954d4387c956c76c0ea7b965469b2df71c65e",
+      "input_hash": "sha256:91fea84a083b915a0796e135f8fd7e5051946754a82c6bd0a60ab672a68c1a45",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0003.jpg",
@@ -108,7 +112,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -118,8 +122,8 @@
       "artifact_id": "cast.filmmaker.0004",
       "kind": "profile_left",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:cba61f462ece62ec4a1c52f3b82c787612c091cc12458df944406c670d906608",
-      "input_hash": "sha256:027c917a4bc0915460363f6cf5c4831663fe2859ee60454e76ffd988d759b209",
+      "content_hash": "sha256:6f0f30c159c77f0f918a0d3728b90488e043ebd3d7d29f7fb11c412d3cf3f6ab",
+      "input_hash": "sha256:533f235ddd1e8ad557e5d5a4d6455f3be0d3e69ca0c8f0793eff2e624a534966",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0004.jpg",
@@ -150,7 +154,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -160,8 +164,8 @@
       "artifact_id": "cast.filmmaker.0005",
       "kind": "profile_right",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:f8c3e56e6abe75cba69b5f812906e1ac822ceb8c21c5a293f0084c1437df664a",
-      "input_hash": "sha256:cd980d5a8f30c11bcaa811d3770a4822f5900552120b951368d41bb7b58f4d9a",
+      "content_hash": "sha256:ac2f9afe7036a820e8fa9a9d7cc032c2416d77e1d7784a842077520e175bde41",
+      "input_hash": "sha256:4b7c8c6c44ddbafc2d2f582ddb7bc5aa4f394ded62a333fe138ddc70883cbea4",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0005.jpg",
@@ -192,7 +196,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -202,8 +206,8 @@
       "artifact_id": "cast.filmmaker.0006",
       "kind": "full_body",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:654f26f7957d0a13a697b8b4c69f313591e7008883d1c5a5c787093074821a62",
-      "input_hash": "sha256:003deb7a842f9771d146bb8847d9846e8e879f866707d8fc740a962ff7bc617b",
+      "content_hash": "sha256:edd54d955224e6f7f4ebf5309bd857723f586271a214ed30fd8fe7064acaab43",
+      "input_hash": "sha256:af1546c30e45e101a85dcac86b33a5f9fbfca0e05b53de0cd1b38ea93d90f2e2",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0006.jpg",
@@ -234,7 +238,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -244,8 +248,8 @@
       "artifact_id": "cast.filmmaker.0007",
       "kind": "costume",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:5e7ef45e39d988d65fe332f9e05cbc77caea0f50386eca344db7f2f1dae7a3cf",
-      "input_hash": "sha256:397db648c5ce8efa294bc460bff8704cd1828d8933bd5f3f46c37186e8d5a4e7",
+      "content_hash": "sha256:94e7fbdecf36e7c3ed85dd9b1fce91593a0a9ab89df177d2e4c26024324c1e3f",
+      "input_hash": "sha256:db0767d127dfdd8dbf3cef6069fe4974eb50e7cde9fcfb84bf09b024a49d52b6",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0007.jpg",
@@ -276,7 +280,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -286,8 +290,8 @@
       "artifact_id": "cast.filmmaker.0008",
       "kind": "expression_smile",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:7934a8e6a95ada03192f87d9a4e8d82019cbce252c061f5f3c9e15ece4798758",
-      "input_hash": "sha256:369a12209f39556dc708faee5b0750b9617f40b311aa0968922dcbc0d39a71aa",
+      "content_hash": "sha256:f78352469854a0339c18d5b326976d3da6846ee3f541faff30b5acd8cd987988",
+      "input_hash": "sha256:9771483785c17a4cfbfc28789424966599f9b928cdc28a53104ac9328100310d",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0008.jpg",
@@ -318,7 +322,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }
@@ -328,8 +332,8 @@
       "artifact_id": "cast.filmmaker.0009",
       "kind": "expression_tense",
       "identity_reference": "cast.filmmaker.0002",
-      "content_hash": "sha256:be9b9132003ea3a815bc972c2616859e47bd7a60773179bcdf944e85b221b368",
-      "input_hash": "sha256:1feefc1f82cd49e6807084effd8479c9afe2ef628268df1dad8415c162e75ae9",
+      "content_hash": "sha256:5900ceaf8bbc9f207ba9db39395a12e849cb24ba9cd107b751e35e8d55504a00",
+      "input_hash": "sha256:8890c045ec406630667d6fce06d7299106a323b5bb2e18ac173b60e26a83d528",
       "provider": "minimax",
       "model": "image-01",
       "media_path": "characters/filmmaker/refs/cast.filmmaker.0009.jpg",
@@ -360,7 +364,7 @@
         },
         {
           "artifact_id": "cast.filmmaker.0002",
-          "content_hash": "sha256:7a7b73821f7246627dc6f5cfce0cf18d6c9ec40bdec2ef3779febbd085e4b392",
+          "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
           "impact": "semantic",
           "field": "identity"
         }

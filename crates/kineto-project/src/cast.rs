@@ -105,6 +105,10 @@ pub struct CastImage {
     /// which keeps them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_state: Option<crate::media::MediaState>,
+    /// The casting look a generated portrait was asked for, so that the next
+    /// candidate is asked for another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -737,6 +741,7 @@ mod tests {
             },
             dependencies: vec![parent("bible_character.filmmaker", "entry")],
             media_state: None,
+            look: None,
         };
         assert_eq!(
             attach(project, "filmmaker", image.clone()).unwrap(),

@@ -35,6 +35,7 @@
           "model": {"type": "string", "minLength": 1},
           "media_path": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_./-]+$"},
           "media_state": {"enum": ["present", "evicted"]},
+          "look": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
           "provenance": {
             "type": "object",
             "required": ["compiler_version", "compiled_prompt", "prompt_hash", "applied_constraints", "dropped_constraints"],

@@ -327,6 +327,62 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
 }
 
 #[test]
+fn every_candidate_of_an_audition_is_another_actor() {
+    let temp = TempDir::new();
+    let target = temp.0.join("film");
+    let project = film(&target, true);
+    let minimax = Minimax::new();
+    let audition = |count| {
+        cast::audition_with(
+            &project,
+            minimax.adapter(&project),
+            "filmmaker",
+            count,
+            Submission::Once,
+            &mut NoHooks,
+        )
+        .unwrap()
+    };
+    let looks = |portraits: &[document::CastImage]| {
+        portraits
+            .iter()
+            .map(|image| image.look.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let portraits = audition(3);
+    assert_eq!(looks(&portraits), ["hooded", "wide-set", "downturned"]);
+    let prompts: Vec<String> = minimax
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| body["prompt"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(prompts.len(), 3);
+    for (prompt, look) in prompts.iter().zip(&cast::LOOKS) {
+        assert!(prompt.contains(&format!("Played by an actor with {}.", look.features)));
+    }
+    assert!(prompts[0] != prompts[1] && prompts[1] != prompts[2] && prompts[0] != prompts[2]);
+    let hashes: std::collections::BTreeSet<_> = portraits
+        .iter()
+        .map(|image| image.input_hash.as_str())
+        .collect();
+    assert_eq!(hashes.len(), 3, "each is its own request");
+
+    // A rejected face is not asked for again, and neither is a kept one.
+    document::reject(&project, "filmmaker", "cast.filmmaker.0002").unwrap();
+    let portraits = audition(3);
+    assert_eq!(looks(&portraits), ["hooded", "downturned", "almond"]);
+    let portraits = audition(4);
+    assert_eq!(
+        looks(&portraits),
+        ["hooded", "downturned", "almond", "heavy-lidded"]
+    );
+    assert_eq!(minimax.calls(), 5);
+}
+
+#[test]
 fn an_imported_portrait_is_cast_like_a_generated_one() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
