@@ -216,7 +216,7 @@ void main() {
       ),
     );
     expect(
-      find.textContaining('KINETO_MINIMAX_API_KEY'),
+      find.textContaining('save one under Settings, Keys'),
       findsOneWidget,
     );
     final refused = find.text(r'Generate 3 keyframes · MiniMax image-01 · ≈ $0.0105');

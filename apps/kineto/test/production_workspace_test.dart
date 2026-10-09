@@ -227,7 +227,7 @@ void main() {
     expect(find.text('Never changes: Never without the coat.'), findsOneWidget);
     expect(find.text('· Practical light only.'), findsOneWidget);
     expect(find.text('Revision 2 · edited from revision 1 · draft'), findsOneWidget);
-    expect(find.text('Kimi Code · cost unknown: billed by the Kimi Code subscription'), findsOneWidget);
+    expect(find.text('Kimi Code · cost unknown: covered by your Kimi Code sign-in'), findsOneWidget);
     expect(find.text('Lock a style first; every portrait follows it.'), findsNothing,
         reason: 'no character is worth casting before the bible names one');
 
@@ -290,9 +290,17 @@ void main() {
     expect(calls.log, <String>['select style_s0002', 'reject style_s0002', 'refine style_s0002 Less grain.']);
   });
 
-  testWidgets('without MiniMax nothing paid can be asked for, and the director is told why', (tester) async {
+  testWidgets('an image provider without a price still makes images, at a cost it says is unknown', (tester) async {
+    final calls = await _pump(tester, production: _casting, prices: const ProductionPrices(provides: true));
+    expect(find.textContaining('Style samples need an image provider'), findsNothing);
+    expect(find.text('Sample · cost unknown'), findsOneWidget);
+    await _tap(tester, find.byKey(_key('audition-filmmaker')));
+    expect(calls.log, isNotEmpty, reason: 'an agent on a subscription is asked like any provider');
+  });
+
+  testWidgets('without an image provider nothing can be asked for, and the director is told why', (tester) async {
     final calls = await _pump(tester, production: _casting, prices: const ProductionPrices());
-    expect(find.textContaining('Style samples need MiniMax'), findsOneWidget);
+    expect(find.textContaining('Style samples need an image provider that makes images'), findsOneWidget);
     expect(find.text('Sample · cost unknown'), findsOneWidget);
     for (final key in <String>['sample-style', 'refine-style_s0002', 'audition-filmmaker', 'pack-filmmaker']) {
       await _tap(tester, find.byKey(_key(key)));

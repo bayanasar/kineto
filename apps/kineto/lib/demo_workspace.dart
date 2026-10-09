@@ -726,8 +726,8 @@ class DemoWorkspaceView extends StatelessWidget {
                       const SizedBox(height: 16),
                       if (!imageProvider.ready) ...<Widget>[
                         Text(
-                          '${imageProvider.kind.label} is selected but has no API key; set '
-                          'KINETO_${imageProvider.kind.wireName.toUpperCase()}_API_KEY and reopen Kineto.',
+                          '${imageProvider.kind.label} is chosen but has no key; save one under Settings, '
+                          'Keys, then reopen the project.',
                         ),
                         const SizedBox(height: 12),
                       ],

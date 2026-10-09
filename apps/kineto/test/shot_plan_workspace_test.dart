@@ -138,7 +138,7 @@ void main() {
       tester.widget<Tooltip>(find.ancestor(of: find.byKey(_key('step-casting')), matching: find.byType(Tooltip))).message,
       'Cast every main character.\nSkipped: no main characters',
     );
-    expect(find.text('Kimi Code · cost unknown: billed by the Kimi Code subscription'), findsOneWidget);
+    expect(find.text('Kimi Code · cost unknown: covered by your Kimi Code sign-in'), findsOneWidget);
 
     await _tap(tester, find.byKey(_key('lock-plan')));
     await _tap(tester, find.byKey(_key('edit-scene-office_night')));

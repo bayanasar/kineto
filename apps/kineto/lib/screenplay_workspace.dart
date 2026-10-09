@@ -30,7 +30,7 @@ String formatDollars(int micros) {
 /// What asking [model] for a document costs, in words.
 String documentCostLabel(KinetoLanguageModel model, int? micros) {
   if (!model.ready) return 'no model configured';
-  if (model.isAgent) return 'cost unknown: billed by the Kimi Code subscription';
+  if (model.isAgent) return 'cost unknown: covered by your ${model.kind.label} sign-in';
   if (micros == null) return 'cost unknown';
   if (micros == 0) return 'free';
   return 'at most ${formatDollars(micros)}';

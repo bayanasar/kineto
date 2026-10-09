@@ -127,7 +127,7 @@ void main() {
 
   testWidgets('an agent says its cost is unknown and the screenplay reads as a screenplay', (tester) async {
     final calls = await _pump(tester);
-    expect(find.text('Kimi Code · cost unknown: billed by the Kimi Code subscription'), findsNWidgets(2));
+    expect(find.text('Kimi Code · cost unknown: covered by your Kimi Code sign-in'), findsNWidgets(2));
     expect(find.text('Screenplay · revision 2'), findsOneWidget);
     expect(find.text('Draft'), findsOneWidget);
     expect(find.text('1. INT. SMALL OFFICE - NIGHT'), findsOneWidget);

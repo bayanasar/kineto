@@ -10,11 +10,19 @@ import 'screenplay_workspace.dart';
 
 /// What paid images cost with the session's image provider, as it declares.
 final class ProductionPrices {
-  const ProductionPrices({this.sample, this.portrait, this.pack});
+  const ProductionPrices({this.sample, this.portrait, this.pack, this.provides});
 
   final KinetoImageCost? sample;
   final KinetoImageCost? portrait;
   final KinetoImageCost? pack;
+
+  /// Whether the session's image provider makes images, when known.
+  final bool? provides;
+
+  /// Whether the session's image provider makes images: one without a
+  /// price (an agent on a subscription, a plugin that does not say) still
+  /// does, and says its cost is unknown.
+  bool get makesImages => provides ?? (sample != null || portrait != null || pack != null);
 }
 
 /// What asking for [cost] costs, in words.
@@ -94,10 +102,12 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   void initState() {
     super.initState();
     _model = widget.project.languageModel;
+    final images = widget.project.imageProvider;
     _prices = ProductionPrices(
       sample: widget.project.imageCost(KinetoImageCostKind.sample),
       portrait: widget.project.imageCost(KinetoImageCostKind.portrait),
       pack: widget.project.imageCost(KinetoImageCostKind.pack),
+      provides: images.ready && images.kind != KinetoImageProviderKind.localDemo,
     );
     _read();
   }
@@ -613,12 +623,15 @@ class ProductionWorkspaceView extends StatelessWidget {
           StyleComposer(
             presets: production.presets,
             cost: prices.sample,
-            enabled: _idle && prices.sample != null,
+            enabled: _idle && prices.makesImages,
             onSample: onSample,
           ),
-          if (prices.sample == null) ...<Widget>[
+          if (!prices.makesImages) ...<Widget>[
             const SizedBox(height: 8),
-            const Text('Style samples need MiniMax: set KINETO_IMAGE_PROVIDER=minimax and its key, then reopen Kineto.'),
+            const Text(
+              'Style samples need an image provider that makes images: choose one under Settings, '
+              'Providers, and save its key if it takes one, then reopen the project.',
+            ),
           ],
           const SizedBox(height: 12),
           Wrap(
@@ -703,7 +716,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                 WabButton(
                   key: ValueKey<String>('refine-${sample.id}'),
                   kind: WabMaterialKind.paper,
-                  onPressed: _idle && prices.sample != null ? () => _refineDialog(context, sample) : null,
+                  onPressed: _idle && prices.makesImages ? () => _refineDialog(context, sample) : null,
                   child: const Text('Refine'),
                 ),
             ],
@@ -944,7 +957,7 @@ class _CastingCardState extends State<CastingCard> {
               WabButton(
                 key: ValueKey<String>('audition-$id'),
                 kind: WabMaterialKind.seal,
-                onPressed: enabled && toMake > 0 && widget.prices.portrait != null
+                onPressed: enabled && toMake > 0 && widget.prices.makesImages
                     ? () => widget.onAudition(_have)
                     : null,
                 child: Text(
@@ -993,7 +1006,7 @@ class _CastingCardState extends State<CastingCard> {
                   WabButton(
                     key: ValueKey<String>('pack-$id'),
                     kind: WabMaterialKind.seal,
-                    onPressed: enabled && widget.prices.portrait != null
+                    onPressed: enabled && widget.prices.makesImages
                         ? () => widget.onMakePack(const <KinetoCastImageKind>[])
                         : null,
                     child: Text('Make the pack · ${imageCostLabel(timesImages(widget.prices.portrait, missing))}'),
@@ -1068,7 +1081,7 @@ class _CastingCardState extends State<CastingCard> {
             WabButton(
               key: ValueKey<String>('remake-${widget.character.id}-${reference.kind.wireName}'),
               kind: WabMaterialKind.paper,
-              onPressed: widget.enabled && widget.prices.portrait != null
+              onPressed: widget.enabled && widget.prices.makesImages
                   ? () => _confirmRemake(reference.kind)
                   : null,
               child: const Text('Remake…'),
