@@ -13,7 +13,7 @@ concurrency:
 jobs:
   linux-gate:
     name: linux-gate
-    runs-on: anton
+    runs-on: linux-docker
     timeout-minutes: 60
     defaults:
       run:
