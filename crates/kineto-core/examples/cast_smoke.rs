@@ -1,17 +1,15 @@
 //! Manual run of casting against the live MiniMax API, on a project with a
-//! bible and a locked style. Paid: `<portraits>` portrait calls and one
-//! call per reference the pack holds (seven with MiniMax), 0.0035 USD
-//! each; never run by the test suite.
+//! bible and a locked style. Paid: `<portraits>` portrait calls, 0.0035 USD
+//! each with MiniMax; never run by the test suite.
 //!
 //! ```text
 //! KINETO_IMAGE_PROVIDER=minimax KINETO_MINIMAX_API_KEY=... \
 //!     cargo run -p kineto-core --example cast_smoke -- <project-dir> <character-id> [<portraits>] [--portraits-only]
 //! ```
 //!
-//! Makes the portraits, selects the first, makes its reference pack, locks
-//! the character and prints what was kept; with `--portraits-only`, stops
-//! after the portraits. With `0` portraits, the first portrait already made
-//! is used.
+//! Makes the portraits, casts the character as the first and prints what
+//! was kept; with `--portraits-only`, stops after the portraits. With `0`
+//! portraits, the first portrait already made is used.
 
 use std::{path::PathBuf, time::Instant};
 
@@ -40,13 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project = CanonicalProject::open(&target)?;
     println!("main characters: {:?}", cast::main_characters(&project)?);
     println!("recovered before casting: {:?}", cast::recover(&project)?);
-    if let (Some(audition), Some((count, pack))) = (
-        cast::audition_cost(&provider, portraits),
-        cast::pack_cost(&provider),
-    ) {
+    if let Some(audition) = cast::audition_cost(&provider, portraits) {
         println!(
-            "{portraits} portrait(s) about {} micros, then a pack of {count} about {} micros",
-            audition.amount_micros, pack.amount_micros
+            "{portraits} portrait(s) about {} micros",
+            audition.amount_micros
         );
     }
 
@@ -86,29 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let started = Instant::now();
-    document::select(&project, &character, &made[0].artifact_id)?;
-    let pack = cast::make_pack(
-        &project,
-        &provider,
-        &character,
-        Submission::Once,
-        &mut NoHooks,
-    )?;
-    for image in &pack {
-        println!(
-            "{} {:?} {}",
-            image.artifact_id, image.kind, image.media_path
-        );
-    }
-    println!("pack in {} ms", started.elapsed().as_millis());
-
-    let locked = cast::lock(&project, &provider, &character)?;
+    let locked = cast::cast_portrait(&project, &provider, &character, &made[0].artifact_id)?;
     println!(
-        "locked {} with portrait {} and {} references; stale: {:?}",
+        "cast {} as portrait {}; stale: {:?}",
         locked.character_id,
         locked.portrait.artifact_id,
-        locked.references.len(),
         cast::staleness(&project, &character)?
     );
     Ok(())

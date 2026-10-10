@@ -29,7 +29,7 @@ use std::{
 use kineto_llm::LlmBackend;
 use kineto_project::{
     bible::{self as bible_document, Bible, EntryEdit, StaleCause},
-    cast::{self as cast_document, CastError, CastImage, CastImageKind, CharacterLock},
+    cast::{self as cast_document, CastError, CastImage, CharacterLock},
     dubbing::{self as dubbing_document, DubbingError},
     fs::{ProjectRelativePath, ProjectRoot},
     manifest::{CanonicalProject, ProjectManifest, ProjectStoreError},
@@ -239,12 +239,6 @@ pub enum ProductionCommand {
         character: String,
         count: u32,
     },
-    /// Paid: complete the reference pack of `character`'s selected
-    /// portrait, making `remake` again although the pack holds them.
-    MakePack {
-        character: String,
-        remake: Vec<CastImageKind>,
-    },
     SelectPortrait {
         character: String,
         portrait: String,
@@ -255,6 +249,11 @@ pub enum ProductionCommand {
     },
     LockCharacter {
         character: String,
+    },
+    /// Select `character`'s portrait `portrait` and lock it in one step.
+    CastPortrait {
+        character: String,
+        portrait: String,
     },
     /// Free: import the image at `path`, which the director chose, as a
     /// portrait candidate of `character`. The only read outside the project.
@@ -685,8 +684,6 @@ pub struct PublishedProduction {
 pub struct ImagePrices {
     pub sample: Option<Price>,
     pub portrait: Option<Price>,
-    /// How many images a reference pack takes, and what they cost.
-    pub pack: Option<(usize, Price)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1494,7 +1491,6 @@ fn run(
                             ProductionCommand::SampleStyle { .. }
                                 | ProductionCommand::RefineStyle { .. }
                                 | ProductionCommand::Audition { .. }
-                                | ProductionCommand::MakePack { .. }
                                 | ProductionCommand::AuditionVoices { .. }
                                 | ProductionCommand::DubLine { .. }
                         );
@@ -1719,7 +1715,6 @@ fn publish_providers(
         image_prices: ImagePrices {
             sample: style::sample_cost(&provider),
             portrait: cast::audition_cost(&provider, 1),
-            pack: cast::pack_cost(&provider),
         },
         document_model: model.describe(),
     });
@@ -2332,10 +2327,6 @@ impl Worker {
                 )
                 .map(|_| ()),
             ),
-            ProductionCommand::MakePack { character, remake } => paid(
-                cast::remake_pack(project, provider, character, remake, submission, &mut hooks)
-                    .map(|_| ()),
-            ),
             ProductionCommand::SelectPortrait {
                 character,
                 portrait,
@@ -2349,6 +2340,12 @@ impl Worker {
                     .map(|_| ())
                     .map_err(generation_error)
             }
+            ProductionCommand::CastPortrait {
+                character,
+                portrait,
+            } => cast::cast_portrait(project, provider, character, portrait)
+                .map(|_| ())
+                .map_err(generation_error),
             ProductionCommand::ImportStyle { path, description } => {
                 let unreadable = |error: std::io::Error| {
                     style_error(StyleError::Fs(kineto_project::fs::ProjectFsError::Io(
@@ -2553,9 +2550,7 @@ impl Worker {
             ProductionCommand::SampleStyle { .. } | ProductionCommand::RefineStyle { .. } => {
                 self.note_unresolved_samples();
             }
-            ProductionCommand::Audition { .. } | ProductionCommand::MakePack { .. } => {
-                self.note_unresolved_casting();
-            }
+            ProductionCommand::Audition { .. } => self.note_unresolved_casting(),
             ProductionCommand::AuditionVoices { .. } => self.note_unresolved_voices(),
             ProductionCommand::DubLine { .. } => self.note_unresolved_lines(),
             _ => {}
@@ -5537,7 +5532,6 @@ mod tests {
 
             let prices = session.image_prices().unwrap();
             assert_eq!(prices.sample.unwrap().amount_micros, 3_500);
-            assert_eq!(prices.pack.unwrap().0, 7);
             let production = session.production().unwrap();
             assert_eq!(
                 production
@@ -5614,54 +5608,26 @@ mod tests {
             assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
 
             produce(&session, &events, audition("filmmaker", 2)).unwrap();
+            // Choosing a portrait casts the character: selected and locked
+            // at once, with no further images made.
             produce(
                 &session,
                 &events,
-                ProductionCommand::SelectPortrait {
+                ProductionCommand::CastPortrait {
                     character: "filmmaker".to_owned(),
                     portrait: "cast.filmmaker.0002".to_owned(),
                 },
             )
             .unwrap();
-            assert_eq!(
-                produce(
-                    &session,
-                    &events,
-                    ProductionCommand::LockCharacter {
-                        character: "filmmaker".to_owned()
-                    }
-                ),
-                Err(
-                    "Generation(Provider { source: MissingReference(Front), class: Terminal })"
-                        .to_owned()
-                )
-            );
-            produce(
-                &session,
-                &events,
-                ProductionCommand::MakePack {
-                    character: "filmmaker".to_owned(),
-                    remake: Vec::new(),
-                },
-            )
-            .unwrap();
-            produce(
-                &session,
-                &events,
-                ProductionCommand::LockCharacter {
-                    character: "filmmaker".to_owned(),
-                },
-            )
-            .unwrap();
-            assert_eq!(fake.calls.load(Ordering::SeqCst), 11);
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 4);
             let production = session.production().unwrap();
             let filmmaker = &production.characters[0];
             assert_eq!(filmmaker.name, "The Filmmaker");
-            assert_eq!(filmmaker.images.len(), 9);
+            assert_eq!(filmmaker.images.len(), 2);
             assert_eq!(filmmaker.images[1].0.status, Some(PortraitStatus::Selected));
             let lock = filmmaker.lock.as_ref().unwrap();
             assert_eq!(lock.portrait.artifact_id, "cast.filmmaker.0002");
-            assert_eq!(lock.references.len(), 7);
+            assert!(lock.references.is_empty());
             assert!(filmmaker.stale.is_empty() && !filmmaker.unresolved);
 
             // The cast character's voice: the provider's voices listed free,
@@ -5717,11 +5683,7 @@ mod tests {
                 Some("demo_high")
             );
             assert!(voice.stale.is_empty() && !voice.unresolved);
-            assert_eq!(
-                fake.calls.load(Ordering::SeqCst),
-                11,
-                "speech is the demo's"
-            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 4, "speech is the demo's");
 
             // The screenplay's one line is published for dubbing; its
             // speaker has no voice yet.
@@ -5780,7 +5742,7 @@ mod tests {
                 ShotCommand::GenerateConsenting(Consent::default()),
             )
             .unwrap();
-            assert_eq!(fake.calls.load(Ordering::SeqCst), 14);
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
             on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
 
             // Another style is locked before the keyframe is: it was made in

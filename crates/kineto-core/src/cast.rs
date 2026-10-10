@@ -1,18 +1,16 @@
-//! Casting: portrait candidates of a character, the reference pack made
-//! from the one the director selects, and the lock.
+//! Casting: portrait candidates of a character, and the lock of the one the
+//! director chooses.
 //!
 //! Portraits are written from the character's bible entry in the locked
-//! style. The pack shows the selected portrait's person, sent as the
-//! provider's identity reference, from the angles and in the expressions
-//! later shots need; which kinds and frames the pack holds follows what the
-//! provider declares, and what it cannot hold is reported. Every image is a
-//! paid image (see [`crate::paid_image`]) in its provider's casting
-//! partition (`minimax-cast` for MiniMax).
+//! style, each asked for another actor's look. The portrait chosen is the
+//! character's identity: keyframes send it as the provider's identity
+//! reference. Every portrait is a paid image (see [`crate::paid_image`]) in
+//! its provider's casting partition (`minimax-cast` for MiniMax).
 
 use std::sync::Arc;
 
 use kineto_project::{
-    ArtifactDependency, ArtifactId, DependencyImpact, InputHash, InputHashMaterial,
+    ArtifactDependency, InputHash, InputHashMaterial,
     bible::{self, Bible, Character},
     cast::{
         self as document, CastImage, CastImageKind, CharacterLock, LockRequest, PortraitStatus,
@@ -32,7 +30,7 @@ use crate::{
     documents::document_error,
     generation::{
         CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate, GenerationError,
-        GenerationHooks, ImageProvider, Prerequisite, ReferenceImage, require_synchronous,
+        GenerationHooks, ImageProvider, Prerequisite, require_synchronous,
     },
     keyframe_prompt::{KeyframePrompt, KeyframePromptError},
     minimax::MinimaxKeyframes,
@@ -66,11 +64,6 @@ const PLAN_SCHEMA_VERSION: u32 = 1;
 const SQUARE: AspectRatio = AspectRatio {
     width: 1,
     height: 1,
-};
-
-const TALL: AspectRatio = AspectRatio {
-    width: 9,
-    height: 16,
 };
 
 /// A casting look: what sets one actor apart from another, in features a
@@ -141,99 +134,6 @@ pub const LOOKS: [Look; 12] = [
 fn look_index(id: Option<&str>) -> Option<usize> {
     let id = id?;
     LOOKS.iter().position(|look| look.id == id)
-}
-
-/// One image of a reference pack, as the provider can make it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackShot {
-    pub kind: CastImageKind,
-    pub aspect_ratio: AspectRatio,
-    /// Why it is made otherwise than it should be, when it is.
-    pub degraded: Option<String>,
-}
-
-/// A kind of reference the provider cannot make.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackDrop {
-    pub kind: CastImageKind,
-    pub reason: String,
-    pub degradation: DegradationLevel,
-}
-
-/// What a reference pack holds with a provider.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PackPlan {
-    pub shots: Vec<PackShot>,
-    pub dropped: Vec<PackDrop>,
-}
-
-/// The frame each kind wants: tall for the whole figure, square otherwise.
-const fn wanted_frame(kind: CastImageKind) -> AspectRatio {
-    match kind {
-        CastImageKind::FullBody | CastImageKind::Costume => TALL,
-        _ => SQUARE,
-    }
-}
-
-const fn ratio(frame: AspectRatio) -> (u16, u16) {
-    (frame.width, frame.height)
-}
-
-/// What a reference pack holds with a provider of `capabilities`: every
-/// kind, in the frame it wants or the nearest the provider takes; nothing
-/// when the provider takes no identity reference, since a pack without one
-/// would not show the same person.
-#[must_use]
-pub fn pack_plan(capabilities: &ImageCapabilities) -> PackPlan {
-    if capabilities.reference_limit(ReferenceRole::Identity) == 0 {
-        return PackPlan {
-            shots: Vec::new(),
-            dropped: CastImageKind::PACK
-                .iter()
-                .map(|kind| PackDrop {
-                    kind: *kind,
-                    reason: "the provider takes no identity reference, so it would not show the \
-                             same person"
-                        .to_owned(),
-                    degradation: DegradationLevel::IdentityAffecting,
-                })
-                .collect(),
-        };
-    }
-    let declared = &capabilities.aspect_ratios;
-    let shots = CastImageKind::PACK
-        .iter()
-        .map(|kind| {
-            let wanted = wanted_frame(*kind);
-            if declared.is_empty() || declared.contains(&wanted) {
-                return PackShot {
-                    kind: *kind,
-                    aspect_ratio: wanted,
-                    degraded: None,
-                };
-            }
-            let fallback = [SQUARE, TALL]
-                .into_iter()
-                .find(|frame| declared.contains(frame))
-                .or_else(|| declared.iter().next().copied())
-                .unwrap_or(wanted);
-            PackShot {
-                kind: *kind,
-                aspect_ratio: fallback,
-                degraded: Some(format!(
-                    "the provider takes no {}:{} frame; made at {}:{}",
-                    ratio(wanted).0,
-                    ratio(wanted).1,
-                    ratio(fallback).0,
-                    ratio(fallback).1
-                )),
-            }
-        })
-        .collect();
-    PackPlan {
-        shots,
-        dropped: Vec::new(),
-    }
 }
 
 /// What a request for the next image of a character is made from.
@@ -633,7 +533,6 @@ struct Planned {
 fn plan_shot<G: CandidateGenerator>(
     material: &Material,
     shot: &Shot,
-    identity: Option<&ReferenceImage>,
     generator: &G,
 ) -> Result<Planned, GenerationError> {
     let capabilities = &generator.capabilities();
@@ -642,20 +541,12 @@ fn plan_shot<G: CandidateGenerator>(
         shot.kind,
         shot.look,
         &material.style,
-        identity.is_some(),
+        false,
         shot.degraded.as_deref(),
         capabilities,
     )
     .map_err(GenerationError::Prompt)?;
-    let mut dependencies = material.dependencies.clone();
-    if let Some(identity) = identity {
-        dependencies.push(ArtifactDependency {
-            artifact_id: identity.artifact_id.clone(),
-            content_hash: kineto_project::ContentHash::of(&identity.bytes),
-            impact: DependencyImpact::Semantic,
-            field: Some("identity".to_owned()),
-        });
-    }
+    let dependencies = material.dependencies.clone();
     let params = format!("aspect_ratio={}:{}", shot.frame.width, shot.frame.height);
     let input_hash = InputHash::derive(InputHashMaterial {
         dependencies: &dependencies,
@@ -664,7 +555,7 @@ fn plan_shot<G: CandidateGenerator>(
             shot.kind,
             shot.look,
             &material.style,
-            identity.is_some(),
+            false,
         ),
         provider: generator.provider().as_str(),
         model: &generator.model(),
@@ -687,7 +578,6 @@ fn make_all<G: CandidateGenerator>(
     jobs: &mut Jobs<'_, Casting, G>,
     character_id: &str,
     images: Vec<(Shot, Planned)>,
-    identity: Option<&ReferenceImage>,
     hooks: &mut dyn GenerationHooks,
 ) -> Result<Vec<CastImage>, GenerationError> {
     if images.is_empty() {
@@ -705,8 +595,7 @@ fn make_all<G: CandidateGenerator>(
                 input_hash: planned.input_hash.as_str().to_owned(),
                 character_id: character_id.to_owned(),
                 kind: shot.kind,
-                identity_reference: identity
-                    .map(|identity| identity.artifact_id.as_str().to_owned()),
+                identity_reference: None,
                 dependencies: planned
                     .dependencies
                     .iter()
@@ -722,7 +611,7 @@ fn make_all<G: CandidateGenerator>(
                     kind: shot.kind,
                 },
                 aspect_ratio: shot.frame,
-                identities: identity.cloned().into_iter().collect(),
+                identities: Vec::new(),
                 composition: None,
                 style: None,
                 prompt: Some(Arc::new(planned.prompt)),
@@ -833,7 +722,7 @@ pub fn audition_with<G: CandidateGenerator>(
     // anything is written.
     let planned = LOOKS
         .iter()
-        .map(|look| plan_shot(&material, &shot(look), None, &adapter))
+        .map(|look| plan_shot(&material, &shot(look), &adapter))
         .collect::<Result<Vec<_>, _>>()?;
     // Portraits an interruption left are recorded first, so they count.
     let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
@@ -885,174 +774,12 @@ pub fn audition_with<G: CandidateGenerator>(
         wanted.push((shot(&LOOKS[next]), planned[next].clone()));
     }
     // The portraits are drawn at once, not one after another.
-    portraits.extend(make_all(
-        project,
-        &mut jobs,
-        character_id,
-        wanted,
-        None,
-        hooks,
-    )?);
+    portraits.extend(make_all(project, &mut jobs, character_id, wanted, hooks)?);
     Ok(portraits)
 }
 
-/// Complete the reference pack of `character_id`'s selected portrait, as
-/// [`pack_plan`] says the provider can make it: only the kinds the pack of
-/// that portrait lacks for the current bible entry and style are made, so
-/// asking again after an interruption pays only for what it left undone.
-/// Returns the pack, in plan order.
-pub fn make_pack(
-    project: &CanonicalProject,
-    provider: &ImageProvider,
-    character_id: &str,
-    submission: Submission,
-    hooks: &mut dyn GenerationHooks,
-) -> Result<Vec<CastImage>, GenerationError> {
-    remake_pack(project, provider, character_id, &[], submission, hooks)
-}
-
-/// [`make_pack`] that also makes `remake` again, though the pack holds
-/// them: the director's explicit request for other takes of those kinds.
-pub fn remake_pack(
-    project: &CanonicalProject,
-    provider: &ImageProvider,
-    character_id: &str,
-    remake: &[CastImageKind],
-    submission: Submission,
-    hooks: &mut dyn GenerationHooks,
-) -> Result<Vec<CastImage>, GenerationError> {
-    match provider {
-        ImageProvider::LocalDemo => Err(GenerationError::Prerequisite(
-            Prerequisite::RealImageProvider,
-        )),
-        ImageProvider::Minimax(client) => remake_pack_with(
-            project,
-            MinimaxKeyframes::new(project, client.as_ref()),
-            character_id,
-            remake,
-            submission,
-            hooks,
-        ),
-        ImageProvider::Plugin(plugin) => remake_pack_with(
-            project,
-            PluginImages::new(project, plugin),
-            character_id,
-            remake,
-            submission,
-            hooks,
-        ),
-    }
-}
-
-/// [`make_pack`] with an explicit image generator.
-pub fn make_pack_with<G: CandidateGenerator>(
-    project: &CanonicalProject,
-    adapter: G,
-    character_id: &str,
-    submission: Submission,
-    hooks: &mut dyn GenerationHooks,
-) -> Result<Vec<CastImage>, GenerationError> {
-    remake_pack_with(project, adapter, character_id, &[], submission, hooks)
-}
-
-/// [`remake_pack`] with an explicit image generator.
-pub fn remake_pack_with<G: CandidateGenerator>(
-    project: &CanonicalProject,
-    adapter: G,
-    character_id: &str,
-    remake: &[CastImageKind],
-    submission: Submission,
-    hooks: &mut dyn GenerationHooks,
-) -> Result<Vec<CastImage>, GenerationError> {
-    let material = Material::gather(project, character_id)?;
-    let portrait = document::selected_portrait(project, character_id)
-        .map_err(document_error)?
-        .ok_or(GenerationError::Prerequisite(
-            Prerequisite::SelectedPortrait,
-        ))?;
-    if !adapter.can_invoke() {
-        return Err(GenerationError::NotConfigured);
-    }
-    let capabilities = adapter.capabilities();
-    require_synchronous(&capabilities)?;
-    let plan = pack_plan(&capabilities);
-    if plan.shots.is_empty() {
-        return Err(GenerationError::Prerequisite(
-            Prerequisite::IdentityReference,
-        ));
-    }
-    let bytes = document::read_image(project, &portrait).map_err(document_error)?;
-    let format = kineto_provider_minimax::sniff(&bytes);
-    let fits = format.is_some_and(|format| capabilities.reference_formats.contains(&format))
-        && capabilities
-            .max_reference_bytes
-            .is_none_or(|max| u64::try_from(bytes.len()).is_ok_and(|len| len <= max));
-    if !fits {
-        return Err(GenerationError::Prerequisite(
-            Prerequisite::IdentityReference,
-        ));
-    }
-    let identity = ReferenceImage {
-        artifact_id: ArtifactId::new(portrait.artifact_id.clone())
-            .map_err(|_| GenerationError::Unexpected("a portrait has an invalid ID"))?,
-        bytes: Arc::from(bytes),
-    };
-    // Every prompt is compiled, and refused if it cannot fit, before
-    // anything is written.
-    let shots = plan
-        .shots
-        .iter()
-        .map(|pack_shot| {
-            let shot = Shot {
-                kind: pack_shot.kind,
-                frame: pack_shot.aspect_ratio,
-                degraded: pack_shot.degraded.clone(),
-                look: None,
-            };
-            let planned = plan_shot(&material, &shot, Some(&identity), &adapter)?;
-            Ok((shot, planned))
-        })
-        .collect::<Result<Vec<_>, GenerationError>>()?;
-    // References an interruption left are recorded first, so they count.
-    let mut jobs = Jobs::<Casting, _>::open(project, adapter, numbered(character_id), submission)?;
-    let recorded = document::images(project, character_id).map_err(document_error)?;
-    let mut pack: Vec<Option<CastImage>> = Vec::with_capacity(shots.len());
-    let mut wanted = Vec::new();
-    for (shot, planned) in shots {
-        let kept = recorded.iter().rev().find(|image| {
-            image.kind == shot.kind
-                && image.identity_reference.as_deref() == Some(portrait.artifact_id.as_str())
-                && image.input_hash == planned.input_hash.as_str()
-        });
-        match kept {
-            Some(image) if !remake.contains(&shot.kind) => pack.push(Some(image.clone())),
-            _ => {
-                pack.push(None);
-                wanted.push((shot, planned));
-            }
-        }
-    }
-    // What the pack lacks is drawn at once, in plan order.
-    let mut made = make_all(
-        project,
-        &mut jobs,
-        character_id,
-        wanted,
-        Some(&identity),
-        hooks,
-    )?
-    .into_iter();
-    let pack = pack
-        .into_iter()
-        .map(|image| image.or_else(|| made.next()))
-        .collect::<Option<Vec<_>>>()
-        .ok_or(GenerationError::Unexpected("a made reference is missing"))?;
-    Ok(pack)
-}
-
-/// Lock `character_id` as cast with `provider`: its selected portrait and
-/// that portrait's pack, which must hold every kind [`pack_plan`] says the
-/// provider can make.
+/// Lock `character_id` as cast with `provider`: its selected portrait,
+/// which keyframes then send as the identity reference.
 pub fn lock(
     project: &CanonicalProject,
     provider: &ImageProvider,
@@ -1076,11 +803,6 @@ pub fn lock(
         LockRequest {
             name: material.character.name.clone(),
             forbidden_changes: material.character.forbidden_changes.clone(),
-            pack: pack_plan(&provider.capabilities())
-                .shots
-                .iter()
-                .map(|shot| shot.kind)
-                .collect(),
             provider_reference: document::ProviderReference {
                 provider: provider_name.to_owned(),
                 mechanism: mechanism.to_owned(),
@@ -1092,10 +814,29 @@ pub fn lock(
     .map_err(document_error)
 }
 
+/// Cast `character_id` as its portrait `portrait`: select it and lock it in
+/// one step. Nothing is written when the character cannot be locked with
+/// `provider`, so a refusal never leaves a portrait selected and not cast.
+pub fn cast_portrait(
+    project: &CanonicalProject,
+    provider: &ImageProvider,
+    character_id: &str,
+    portrait: &str,
+) -> Result<CharacterLock, GenerationError> {
+    Material::gather(project, character_id)?;
+    provider
+        .identity_mechanism()
+        .ok_or(GenerationError::Prerequisite(
+            Prerequisite::IdentityReference,
+        ))?;
+    document::select(project, character_id, portrait).map_err(document_error)?;
+    lock(project, provider, character_id)
+}
+
 /// Import `bytes`, an image the director chose, as a portrait candidate of
 /// `character_id`: copied into the project, recorded by its hash with the
-/// bible entry and locked style it was brought in for, and selected,
-/// packed and locked like a generated portrait. Free. The image must be a
+/// bible entry and locked style it was brought in for, and cast like a
+/// generated portrait. Free. The image must be a
 /// format and size `capabilities` takes as an identity reference, when it
 /// declares one; importing the same image again records nothing new.
 pub fn import_portrait(
@@ -1238,14 +979,6 @@ pub fn main_characters(project: &CanonicalProject) -> Result<Vec<String>, Genera
 #[must_use]
 pub fn audition_cost(provider: &ImageProvider, count: usize) -> Option<Price> {
     price_of(provider, count)
-}
-
-/// How many images a reference pack takes with `provider` and what they
-/// cost, as it declares.
-#[must_use]
-pub fn pack_cost(provider: &ImageProvider) -> Option<(usize, Price)> {
-    let count = pack_plan(&provider.capabilities()).shots.len();
-    price_of(provider, count).map(|price| (count, price))
 }
 
 fn price_of(provider: &ImageProvider, count: usize) -> Option<Price> {
@@ -1449,45 +1182,5 @@ mod tests {
             ),
             Err(KeyframePromptError::TooLong { max: 400, .. })
         ));
-    }
-
-    #[test]
-    fn the_pack_follows_what_the_provider_declares() {
-        let plan = pack_plan(&minimax());
-        assert_eq!(plan.shots.len(), 7);
-        assert!(plan.dropped.is_empty());
-        let full_body = plan
-            .shots
-            .iter()
-            .find(|shot| shot.kind == CastImageKind::FullBody)
-            .unwrap();
-        assert_eq!(full_body.aspect_ratio, TALL);
-        assert_eq!(full_body.degraded, None);
-
-        let square_only = ImageCapabilities {
-            aspect_ratios: [SQUARE].into_iter().collect(),
-            ..minimax()
-        };
-        let plan = pack_plan(&square_only);
-        let costume = plan
-            .shots
-            .iter()
-            .find(|shot| shot.kind == CastImageKind::Costume)
-            .unwrap();
-        assert_eq!(costume.aspect_ratio, SQUARE);
-        assert_eq!(
-            costume.degraded.as_deref(),
-            Some("the provider takes no 9:16 frame; made at 1:1")
-        );
-
-        let text_only = pack_plan(&ImageCapabilities::default());
-        assert!(text_only.shots.is_empty());
-        assert_eq!(text_only.dropped.len(), 7);
-        assert!(
-            text_only
-                .dropped
-                .iter()
-                .all(|drop| drop.degradation == DegradationLevel::IdentityAffecting)
-        );
     }
 }

@@ -18,7 +18,7 @@ use kineto_core::{
 };
 use kineto_project::{
     bible::{EntryEdit, EntryKind, StaleCause},
-    cast::{CastImageKind, PortraitStatus},
+    cast::PortraitStatus,
     revisions::{Origin, RevisionStatus},
     style::SampleStatus,
 };
@@ -33,9 +33,6 @@ use crate::{
 
 /// The most forbidden changes one edited entry may list.
 const MAX_LIST: u64 = 1_000;
-
-/// The most kinds one pack request may ask to make again.
-const MAX_REMAKE: u64 = 64;
 
 /// One UTF-8 string, as Dart lays it out.
 #[repr(C)]
@@ -328,57 +325,9 @@ pub unsafe extern "C" fn kineto_project_audition(
     })
 }
 
-/// Queue completing the paid reference pack of `character`'s selected
-/// portrait, making the kinds in `remake` (contract `cast_image_kind` codes)
-/// again although the pack holds them.
-///
-/// # Safety
-/// `session` must be a live project-session handle. A non-empty `character`
-/// must be readable for its length and hold UTF-8. When `remake_count` is
-/// non-zero, `remake` must be readable for that many `u32`s.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kineto_project_make_pack(
-    session: *const KinetoProjectSession,
-    character_ptr: *const u8,
-    character_len: u64,
-    remake: *const u32,
-    remake_count: u64,
-    resubmit: bool,
-    token: u64,
-) -> i32 {
-    guarded(PROJECT_ERR_PANIC, || {
-        // SAFETY: forwarded caller contract.
-        let character = match unsafe { required(character_ptr, character_len) } {
-            Ok(character) => character,
-            Err(code) => return code,
-        };
-        if remake_count > MAX_REMAKE || (remake_count > 0 && remake.is_null()) {
-            return PROJECT_ERR_INVALID_ARGUMENT;
-        }
-        let raw = if remake_count == 0 {
-            &[][..]
-        } else {
-            // SAFETY: the caller guarantees `remake_count` readable codes.
-            unsafe { slice::from_raw_parts(remake, remake_count as usize) }
-        };
-        let mut kinds = Vec::with_capacity(raw.len());
-        for code in raw {
-            match name(&CAST_IMAGE_KINDS, *code).and_then(cast_image_kind) {
-                Some(kind) if kind != CastImageKind::Portrait => kinds.push(kind),
-                _ => return PROJECT_ERR_INVALID_ARGUMENT,
-            }
-        }
-        let command = ProductionCommand::MakePack {
-            character,
-            remake: kinds,
-        };
-        // SAFETY: forwarded caller contract.
-        unsafe { submit_production(session, command, resubmit, token) }
-    })
-}
-
-/// Queue the director's `decision` (select or reject) about `character`'s
-/// portrait `portrait`.
+/// Queue the director's `decision` about `character`'s portrait
+/// `portrait`: select it, reject it, or lock it, which selects it and casts
+/// the character as it in one step.
 ///
 /// # Safety
 /// `session` must be a live project-session handle. Each non-empty input must
@@ -413,6 +362,10 @@ pub unsafe extern "C" fn kineto_project_decide_portrait(
                 character,
                 portrait,
             },
+            Some("lock") => ProductionCommand::CastPortrait {
+                character,
+                portrait,
+            },
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         // SAFETY: forwarded caller contract.
@@ -420,8 +373,7 @@ pub unsafe extern "C" fn kineto_project_decide_portrait(
     })
 }
 
-/// Queue locking `character` as cast: its selected portrait and that
-/// portrait's complete reference pack.
+/// Queue locking `character` as cast: its selected portrait.
 ///
 /// # Safety
 /// `session` must be a live project-session handle. A non-empty `character`
@@ -516,12 +468,6 @@ pub unsafe extern "C" fn kineto_project_import_style(
         // SAFETY: forwarded caller contract.
         unsafe { submit_production(session, command, false, token) }
     })
-}
-
-fn cast_image_kind(name: &str) -> Option<CastImageKind> {
-    std::iter::once(CastImageKind::Portrait)
-        .chain(CastImageKind::PACK)
-        .find(|kind| kind.as_str() == name)
 }
 
 /// What the worker last published: the documents (for the bible) and the
@@ -906,7 +852,6 @@ pub unsafe extern "C" fn kineto_project_image_cost(
         let priced: Option<(usize, Price)> = match name(&IMAGE_COSTS, what) {
             Some("sample") => prices.sample.map(|price| (1, price)),
             Some("portrait") => prices.portrait.map(|price| (1, price)),
-            Some("pack") => prices.pack,
             _ => return PROJECT_ERR_INVALID_ARGUMENT,
         };
         match priced {
@@ -928,11 +873,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_pack_kind_and_the_portrait_cross_by_name() {
-        for (name, _) in CAST_IMAGE_KINDS {
-            assert_eq!(cast_image_kind(name).map(CastImageKind::as_str), Some(name));
-        }
-        assert_eq!(CAST_IMAGE_KINDS.len(), CastImageKind::PACK.len() + 1);
+    fn every_casting_image_kind_has_a_code() {
+        use kineto_project::cast::CastImageKind;
+        let kinds: Vec<_> = std::iter::once(CastImageKind::Portrait)
+            .chain(CastImageKind::PACK)
+            .map(CastImageKind::as_str)
+            .collect();
+        let named: Vec<_> = CAST_IMAGE_KINDS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(named, kinds);
     }
 
     #[test]

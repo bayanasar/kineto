@@ -1539,7 +1539,6 @@ fn cast_error_code(error: &CastError) -> i32 {
         CastError::Rejected(_) => PROJECT_ERR_REJECTED,
         CastError::Locked(_) => PROJECT_ERR_LOCKED,
         CastError::NoSelection => PROJECT_ERR_NEEDS_SELECTED_PORTRAIT,
-        CastError::MissingReference(_) => PROJECT_ERR_PACK_INCOMPLETE,
         CastError::Fs(_) => PROJECT_ERR_IO,
         CastError::Manifest(error) => manifest_error_code(error),
         CastError::InvalidLog

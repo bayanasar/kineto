@@ -88,20 +88,11 @@ The director can also import an image they already have as a style sample, with 
 
 ## Stage 6 — Character casting
 
-Generate candidate appearances per important character.
+Generate candidate appearances per important character, each another actor.
 
-Once selected, create a character reference pack rather than storing only one portrait.
+The director casts the character by choosing one portrait: it is selected and locked in one step. The locked portrait is the character's identity reference for every keyframe; no further images are made. (The baseline asked for a reference pack — front, profiles, full body, costume, expressions — made from the selected portrait. Keyframes only ever sent the portrait, so the pack was seven paid images nothing used; it was dropped in October 2026.)
 
-Recommended references:
-
-- canonical portrait
-- front view
-- left/right profile
-- full body
-- costume
-- expression samples
-
-The selected references become production memory. Selection points to stable candidate IDs; files are not renamed to `selected.*`.
+The locked portrait becomes production memory. Selection points to stable candidate IDs; files are not renamed to `selected.*`.
 
 ## Stage 7 — Voice casting
 

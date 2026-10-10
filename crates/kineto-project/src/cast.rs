@@ -2,17 +2,17 @@
 //!
 //! `characters/<id>/casting.json` (`casting.schema.json`) records every
 //! image made while casting a character. Portrait candidates (under
-//! `candidates/`) are a `candidate`, the one `selected`, or `rejected`; the
-//! reference pack (under `refs/`) is made from the selected portrait, and
-//! each reference names the portrait it shows as its identity reference.
-//! Nothing is deleted.
+//! `candidates/`) are a `candidate`, the one `selected`, or `rejected`.
+//! Projects made before the lock took the portrait alone may also hold
+//! reference images (under `refs/`), each naming the portrait it shows as
+//! its identity reference; they are read, never made. Nothing is deleted.
 //!
 //! `characters/<id>/character.json` (`character.schema.json`) is the lock:
-//! the canonical portrait and the reference pack by stable artifact IDs and
-//! content hashes, how the provider takes the identity reference, the
-//! forbidden changes the bible names, and what the cast was made from (the
-//! character's bible entry and the locked style), so its staleness can be
-//! computed. Every change is one atomic file write.
+//! the canonical portrait by stable artifact ID and content hash, how the
+//! provider takes the identity reference, the forbidden changes the bible
+//! names, and what the cast was made from (the character's bible entry and
+//! the locked style), so its staleness can be computed. Every change is one
+//! atomic file write.
 
 use std::{error::Error, fmt};
 
@@ -48,7 +48,7 @@ pub enum CastImageKind {
 }
 
 impl CastImageKind {
-    /// Every kind a reference pack can hold, in the order it is made.
+    /// Every kind of reference image an earlier lock could name.
     pub const PACK: [Self; 7] = [
         Self::Front,
         Self::ProfileLeft,
@@ -78,7 +78,7 @@ impl CastImageKind {
 #[serde(rename_all = "snake_case")]
 pub enum PortraitStatus {
     Candidate,
-    /// The director's pick, which the reference pack is made from.
+    /// The director's pick, which the lock names.
     Selected,
     Rejected,
 }
@@ -146,6 +146,7 @@ pub struct CharacterLock {
     pub character_id: String,
     pub name: String,
     pub portrait: LockedImage,
+    /// Reference images an earlier lock named; a lock made now names none.
     pub references: Vec<LockedImage>,
     pub provider_reference: ProviderReference,
     pub forbidden_changes: Vec<String>,
@@ -158,9 +159,6 @@ pub struct CharacterLock {
 pub struct LockRequest {
     pub name: String,
     pub forbidden_changes: Vec<String>,
-    /// The reference kinds the pack must hold, as the provider can make
-    /// them.
-    pub pack: Vec<CastImageKind>,
     pub provider_reference: ProviderReference,
 }
 
@@ -184,8 +182,6 @@ pub enum CastError {
     Locked(String),
     /// Locking needs a selected portrait.
     NoSelection,
-    /// The reference pack of the selected portrait lacks this kind.
-    MissingReference(CastImageKind),
     /// An image no longer holds the bytes its record names.
     Mismatch(String),
     /// An image with this ID is already recorded with other content.
@@ -209,11 +205,6 @@ impl fmt::Display for CastError {
                 "portrait {id} is the locked portrait; lock another before rejecting it"
             ),
             Self::NoSelection => formatter.write_str("select a portrait first"),
-            Self::MissingReference(kind) => write!(
-                formatter,
-                "the selected portrait has no {} reference yet",
-                kind.as_str()
-            ),
             Self::Mismatch(path) => write!(formatter, "{path} does not match its recorded hash"),
             Self::Conflict(id) => {
                 write!(
@@ -564,24 +555,6 @@ pub fn selected_portrait(
         .find(|image| image.status == Some(PortraitStatus::Selected)))
 }
 
-/// The newest reference of each kind made from `portrait`.
-pub fn pack(
-    project: &CanonicalProject,
-    character_id: &str,
-    portrait: &str,
-) -> Result<Vec<CastImage>, CastError> {
-    let mut pack: Vec<CastImage> = Vec::new();
-    for image in images(project, character_id)?.into_iter().rev() {
-        if image.identity_reference.as_deref() == Some(portrait)
-            && !pack.iter().any(|kept| kept.kind == image.kind)
-        {
-            pack.push(image);
-        }
-    }
-    pack.sort_by_key(|image| image.kind);
-    Ok(pack)
-}
-
 fn locked_image(image: &CastImage) -> LockedImage {
     LockedImage {
         kind: image.kind,
@@ -591,9 +564,8 @@ fn locked_image(image: &CastImage) -> LockedImage {
     }
 }
 
-/// Lock `character_id` as cast: its selected portrait and that portrait's
-/// reference pack, which must hold every kind `request.pack` names. Every
-/// image must still hold the bytes its record names.
+/// Lock `character_id` as cast: its selected portrait, which must still
+/// hold the bytes its record names.
 pub fn lock(
     project: &CanonicalProject,
     character_id: &str,
@@ -601,22 +573,12 @@ pub fn lock(
 ) -> Result<CharacterLock, CastError> {
     let portrait = selected_portrait(project, character_id)?.ok_or(CastError::NoSelection)?;
     check_media(project, &portrait)?;
-    let made = pack(project, character_id, &portrait.artifact_id)?;
-    let mut references = Vec::new();
-    for kind in request.pack {
-        let reference = made
-            .iter()
-            .find(|image| image.kind == kind)
-            .ok_or(CastError::MissingReference(kind))?;
-        check_media(project, reference)?;
-        references.push(locked_image(reference));
-    }
     let lock = CharacterLock {
         schema_version: SCHEMA_VERSION,
         character_id: character_id.to_owned(),
         name: request.name,
         portrait: locked_image(&portrait),
-        references,
+        references: Vec::new(),
         provider_reference: request.provider_reference,
         forbidden_changes: request.forbidden_changes,
         dependencies: portrait.dependencies,
@@ -627,7 +589,7 @@ pub fn lock(
 
 /// The dependency work showing a cast character records on its lock: the
 /// locked portrait, and the hash of the lock, which changes with the
-/// portrait, the pack and the forbidden changes.
+/// portrait and the forbidden changes.
 #[must_use]
 pub fn lock_dependency(lock: &CharacterLock) -> Option<ArtifactDependency> {
     Some(ArtifactDependency {
@@ -790,11 +752,10 @@ mod tests {
         image
     }
 
-    fn request(pack: Vec<CastImageKind>) -> LockRequest {
+    fn request() -> LockRequest {
         LockRequest {
             name: "The Filmmaker".to_owned(),
             forbidden_changes: vec!["Grey at the temples.".to_owned()],
-            pack,
             provider_reference: ProviderReference {
                 provider: "minimax".to_owned(),
                 mechanism: "subject_reference".to_owned(),
@@ -805,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn portraits_are_selected_and_the_pack_of_the_selection_is_locked() {
+    fn portraits_are_selected_and_the_selection_alone_is_locked() {
         let temp = TempDir::new();
         let target = temp.0.join("film");
         let project = project(&target);
@@ -820,57 +781,25 @@ mod tests {
         assert_eq!(character_of("cast.filmmaker.0001"), Some("filmmaker"));
 
         assert!(matches!(
-            lock(&project, "filmmaker", request(vec![CastImageKind::Front])),
+            lock(&project, "filmmaker", request()),
             Err(CastError::NoSelection)
         ));
         select(&project, "filmmaker", &first.artifact_id).unwrap();
-        // A pack made from the first portrait, then a newer front.
-        add(
+        // A reference an earlier version made from the portrait is read,
+        // and the lock names none.
+        let front = add(
             &project,
             CastImageKind::Front,
             Some(&first.artifact_id),
             b"\xff\xd8f1",
         );
-        let front = add(
-            &project,
-            CastImageKind::Front,
-            Some(&first.artifact_id),
-            b"\xff\xd8f2",
-        );
         assert_eq!(
             front.media_path,
-            "characters/filmmaker/refs/cast.filmmaker.0005.jpg"
+            "characters/filmmaker/refs/cast.filmmaker.0004.jpg"
         );
-        assert!(matches!(
-            lock(
-                &project,
-                "filmmaker",
-                request(vec![CastImageKind::Front, CastImageKind::FullBody])
-            ),
-            Err(CastError::MissingReference(CastImageKind::FullBody))
-        ));
-        let body = add(
-            &project,
-            CastImageKind::FullBody,
-            Some(&first.artifact_id),
-            b"\xff\xd8b",
-        );
-        let locked_cast = lock(
-            &project,
-            "filmmaker",
-            request(vec![CastImageKind::Front, CastImageKind::FullBody]),
-        )
-        .unwrap();
+        let locked_cast = lock(&project, "filmmaker", request()).unwrap();
         assert_eq!(locked_cast.portrait.artifact_id, first.artifact_id);
-        assert_eq!(
-            locked_cast
-                .references
-                .iter()
-                .map(|image| image.artifact_id.as_str())
-                .collect::<Vec<_>>(),
-            [front.artifact_id.as_str(), body.artifact_id.as_str()],
-            "the newest of each kind"
-        );
+        assert!(locked_cast.references.is_empty());
         assert!(matches!(
             reject(&project, "filmmaker", &first.artifact_id),
             Err(CastError::Locked(_))
@@ -889,7 +818,7 @@ mod tests {
         fs::remove_dir_all(target.join(".kineto")).unwrap();
         let project = CanonicalProject::open(&target).unwrap();
         assert_eq!(locked(&project, "filmmaker").unwrap(), Some(locked_cast));
-        assert_eq!(images(&project, "filmmaker").unwrap().len(), 6);
+        assert_eq!(images(&project, "filmmaker").unwrap().len(), 4);
     }
 
     #[test]
@@ -955,7 +884,7 @@ mod tests {
         select(&project, "filmmaker", &portrait.artifact_id).unwrap();
         fs::write(target.join(&portrait.media_path), b"edited").unwrap();
         assert!(matches!(
-            lock(&project, "filmmaker", request(Vec::new())),
+            lock(&project, "filmmaker", request()),
             Err(CastError::Mismatch(_))
         ));
         assert!(locked(&project, "filmmaker").unwrap().is_none());

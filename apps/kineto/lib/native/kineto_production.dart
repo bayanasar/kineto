@@ -122,19 +122,6 @@ external int _kinetoProjectAudition(
   int token,
 );
 
-@Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Uint64, Pointer<Uint32>, Uint64, Bool, Uint64)>(
-  symbol: 'kineto_project_make_pack',
-)
-external int _kinetoProjectMakePack(
-  Pointer<Void> session,
-  Pointer<Uint8> character,
-  int characterLength,
-  Pointer<Uint32> remake,
-  int remakeCount,
-  bool resubmit,
-  int token,
-);
-
 @Native<Int32 Function(Pointer<Void>, Uint32, Pointer<Uint8>, Uint64, Pointer<Uint8>, Uint64, Uint64)>(
   symbol: 'kineto_project_decide_portrait',
 )
@@ -474,17 +461,6 @@ final class KinetoCastCharacter {
     }
     return null;
   }
-
-  /// The references made from the selected portrait, newest of each kind.
-  Map<KinetoCastImageKind, KinetoCastImage> get pack {
-    final selected = selectedPortrait;
-    final found = <KinetoCastImageKind, KinetoCastImage>{};
-    if (selected == null) return found;
-    for (final image in images) {
-      if (image.identityReference == selected.id) found[image.kind] = image;
-    }
-    return found;
-  }
 }
 
 /// The bible, the style and the cast as the engine last published them.
@@ -533,8 +509,7 @@ final class KinetoProduction {
 /// Paid images whose cost is estimated before asking.
 enum KinetoImageCostKind {
   sample('sample'),
-  portrait('portrait'),
-  pack('pack');
+  portrait('portrait');
 
   const KinetoImageCostKind(this.wireName);
 
@@ -709,42 +684,16 @@ extension KinetoProjectProduction on KinetoProjectSession {
         }
       });
 
-  /// Complete the paid reference pack of [characterId]'s selected portrait,
-  /// making the kinds in [remake] again although the pack holds them.
-  Future<void> makePack(
-    String characterId, {
-    List<KinetoCastImageKind> remake = const <KinetoCastImageKind>[],
-    bool resubmit = false,
-  }) {
-    final contract = KinetoNativeContract.instance;
-    return _submitDocument((token) {
-      final arena = Arena();
-      try {
-        final character = _encodeUtf8(arena, characterId);
-        final kinds = arena<Uint32>(remake.isEmpty ? 1 : remake.length);
-        for (var index = 0; index < remake.length; index++) {
-          kinds[index] = contract.code(contract.castImageKinds, remake[index].wireName);
-        }
-        return _kinetoProjectMakePack(
-          _handle,
-          character.pointer,
-          character.length,
-          kinds,
-          remake.length,
-          resubmit,
-          token,
-        );
-      } finally {
-        arena.releaseAll();
-      }
-    });
-  }
-
   Future<void> selectPortrait(String characterId, String portraitId) =>
       _decidePortrait('select', characterId, portraitId);
 
   Future<void> rejectPortrait(String characterId, String portraitId) =>
       _decidePortrait('reject', characterId, portraitId);
+
+  /// Cast [characterId] as its portrait [portraitId]: selected and locked
+  /// in one step, with nothing more paid for.
+  Future<void> castPortrait(String characterId, String portraitId) =>
+      _decidePortrait('lock', characterId, portraitId);
 
   Future<void> _decidePortrait(String decision, String characterId, String portraitId) {
     final contract = KinetoNativeContract.instance;
@@ -768,8 +717,7 @@ extension KinetoProjectProduction on KinetoProjectSession {
     });
   }
 
-  /// Lock [characterId] as cast: its selected portrait and that portrait's
-  /// complete reference pack.
+  /// Lock [characterId] as cast: its selected portrait.
   Future<void> lockCharacter(String characterId) => _submitDocument((token) {
         final arena = Arena();
         try {
@@ -796,8 +744,8 @@ extension KinetoProjectProduction on KinetoProjectSession {
       });
 
   /// Import the image at [path], an absolute path the director chose, as a
-  /// portrait candidate of [characterId]. Free; it is then selected, packed
-  /// and locked like a generated portrait.
+  /// portrait candidate of [characterId]. Free; it is then cast like a
+  /// generated portrait.
   Future<void> importPortrait(String characterId, String path) => _submitDocument((token) {
         final arena = Arena();
         try {

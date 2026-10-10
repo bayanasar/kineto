@@ -42,7 +42,6 @@ use kineto_llm::fake::FakeLlm;
 use kineto_plugins::{PluginConfig, PluginEntry};
 use kineto_project::{
     bible::SAMPLE_BIBLE_JSON,
-    cast as cast_document,
     manifest::{
         CanonicalProject, PROJECT_FORMAT_VERSION, ProjectDefaults, ProjectManifest, ProjectSource,
         ProjectWorkflow,
@@ -478,8 +477,8 @@ fn a_plugin_samples_casts_and_speaks_as_builtins_do() {
     style_document::select(&project, &sample.artifact_id).unwrap();
     style_document::lock(&project, &sample.artifact_id).unwrap();
 
-    // A portrait, its reference pack sent with the portrait as the
-    // identity reference, and the cast locked with the plugin's mechanism.
+    // A portrait, and the character cast as it with the plugin's
+    // mechanism for the identity reference.
     let portraits = cast::audition(
         &project,
         &provider,
@@ -490,25 +489,13 @@ fn a_plugin_samples_casts_and_speaks_as_builtins_do() {
     )
     .unwrap();
     assert_eq!(portraits[0].provider, "plugin.demo");
-    cast_document::select(&project, "interviewer", &portraits[0].artifact_id).unwrap();
-    let pack = cast::make_pack(
+    let locked = cast::cast_portrait(
         &project,
         &provider,
         "interviewer",
-        Submission::Once,
-        &mut NoHooks,
+        &portraits[0].artifact_id,
     )
     .unwrap();
-    assert!(!pack.is_empty());
-    let sent_with_identity = requests(&state)
-        .iter()
-        .filter(|request| {
-            request["operation"] == "invoke"
-                && request["request"]["references"][0]["role"] == "identity"
-        })
-        .count();
-    assert_eq!(sent_with_identity, pack.len());
-    let locked = cast::lock(&project, &provider, "interviewer").unwrap();
     assert_eq!(locked.provider_reference.provider, "plugin.demo");
     assert_eq!(locked.provider_reference.mechanism, "references");
 

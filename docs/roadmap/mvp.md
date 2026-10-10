@@ -113,7 +113,7 @@ Deliverables:
 - style preset system
 - style candidate generation
 - character candidate generation
-- character reference packs
+- character lock from the chosen portrait
 - style and character locking
 - prompt compilation result with applied/dropped constraints and degradation level
 

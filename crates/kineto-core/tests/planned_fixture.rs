@@ -148,14 +148,6 @@ fn build(target: &Path) {
     .expect("portraits are made");
     cast_document::select(&project, "filmmaker", "cast.filmmaker.0002")
         .expect("a portrait is selected");
-    cast::make_pack_with(
-        &project,
-        adapter(),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .expect("the pack is made");
     cast::lock(&project, &ImageProvider::Minimax(None), "filmmaker")
         .expect("the filmmaker is cast");
     cast::audition_with(

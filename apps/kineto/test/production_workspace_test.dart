@@ -102,7 +102,6 @@ final KinetoProduction _casting = KinetoProduction(
 const ProductionPrices _minimax = ProductionPrices(
   sample: KinetoImageCost(micros: 3500, images: 1),
   portrait: KinetoImageCost(micros: 3500, images: 1),
-  pack: KinetoImageCost(micros: 24500, images: 7),
 );
 
 const KinetoLanguageModel _kimiCode =
@@ -154,11 +153,8 @@ Future<_Calls> _pump(
         onRejectStyle: (sample) => calls.log.add('reject $sample'),
         onLockStyle: (sample) => calls.log.add('lock $sample'),
         onAudition: (character, count) => calls.log.add('audition $character $count'),
-        onMakePack: (character, remake) =>
-            calls.log.add('pack $character ${remake.map((kind) => kind.wireName).join(',')}'),
-        onSelectPortrait: (character, portrait) => calls.log.add('select $portrait'),
+        onCastPortrait: (character, portrait) => calls.log.add('cast $character $portrait'),
         onRejectPortrait: (character, portrait) => calls.log.add('reject $portrait'),
-        onLockCast: (character) => calls.log.add('cast $character'),
         references: references,
         servers: servers,
         onLoadTools: withReferences ? () => calls.log.add('load tools') : null,
@@ -302,66 +298,51 @@ void main() {
     final calls = await _pump(tester, production: _casting, prices: const ProductionPrices());
     expect(find.textContaining('Style samples need an image provider that makes images'), findsOneWidget);
     expect(find.text('Sample · cost unknown'), findsOneWidget);
-    for (final key in <String>['sample-style', 'refine-style_s0002', 'audition-filmmaker', 'pack-filmmaker']) {
+    for (final key in <String>['sample-style', 'refine-style_s0002', 'audition-filmmaker']) {
       await _tap(tester, find.byKey(_key(key)));
     }
     expect(calls.log, isEmpty);
   });
 
-  testWidgets('a character is cast from a chosen portrait and its complete pack', (tester) async {
+  testWidgets('choosing a portrait casts the character at once, with nothing more to pay for', (tester) async {
     var calls = await _pump(tester, production: _casting);
-    expect(find.text('Portrait chosen'), findsOneWidget);
+    expect(find.text('Not cast'), findsOneWidget);
     // Three wanted, two kept: one more is made.
     expect(find.text('Audition · 1 image ≈ \$0.0035'), findsOneWidget);
-    expect(find.text('Reference pack of cast.filmmaker.0002'), findsOneWidget);
-    // Seven in a pack, two made: five more.
-    expect(find.text('Make the pack · 5 images ≈ \$0.0175'), findsOneWidget);
-    expect(find.byKey(_key('lock-cast-filmmaker')), findsNothing, reason: 'the pack is not complete');
+    expect(find.textContaining('Reference pack'), findsNothing);
+    expect(find.textContaining('Make the pack'), findsNothing);
     await _tap(tester, find.byKey(_key('audition-filmmaker')));
-    await _tap(tester, find.byKey(_key('select-cast.filmmaker.0001')));
     await _tap(tester, find.byKey(_key('reject-cast.filmmaker.0001')));
-    await _tap(tester, find.byKey(_key('pack-filmmaker')));
-    // A remade reference is paid: its price is shown first, and nothing is
-    // asked for until the director confirms it.
-    await _tap(tester, find.byKey(_key('remake-filmmaker-full_body')));
-    await tester.pumpAndSettle();
-    expect(find.text('Remake the full body reference of Daniel?'), findsOneWidget);
-    expect(find.text('Remake · 1 image ≈ \$0.0035'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    expect(calls.log.last, 'pack filmmaker ');
-    await _tap(tester, find.byKey(_key('remake-filmmaker-full_body')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(_key('remake-confirm')));
-    await tester.pumpAndSettle();
+    await _tap(tester, find.byKey(_key('cast-cast.filmmaker.0002')));
     expect(calls.log, <String>[
       'audition filmmaker 3',
-      'select cast.filmmaker.0001',
       'reject cast.filmmaker.0001',
-      'pack filmmaker ',
-      'pack filmmaker full_body',
+      'cast filmmaker cast.filmmaker.0002',
     ]);
 
-    final selected = _casting.characters.single.images[1];
-    final complete = KinetoProduction(
-      bible: _bible,
-      style: _casting.style,
-      characters: <KinetoCastCharacter>[
-        KinetoCastCharacter(
-          id: 'filmmaker',
-          name: 'Daniel',
-          images: <KinetoCastImage>[
-            selected,
-            for (final kind in KinetoCastImageKind.values.skip(1))
-              _image('ref-${kind.wireName}', kind, from: selected.id),
-          ],
-        ),
-      ],
+    // Cast: the chosen portrait offers neither Cast nor Reject; another
+    // portrait may still be cast in its place.
+    final images = _casting.characters.single.images;
+    calls = await _pump(
+      tester,
+      production: KinetoProduction(
+        bible: _bible,
+        style: _casting.style,
+        characters: <KinetoCastCharacter>[
+          KinetoCastCharacter(
+            id: 'filmmaker',
+            name: 'Daniel',
+            images: images,
+            lockedPortrait: 'cast.filmmaker.0002',
+          ),
+        ],
+      ),
     );
-    calls = await _pump(tester, production: complete);
-    expect(find.byKey(_key('pack-filmmaker')), findsNothing);
-    await _tap(tester, find.byKey(_key('lock-cast-filmmaker')));
-    expect(calls.log, <String>['cast filmmaker']);
+    expect(find.text('Cast'), findsWidgets);
+    expect(find.byKey(_key('cast-cast.filmmaker.0002')), findsNothing);
+    expect(find.byKey(_key('reject-cast.filmmaker.0002')), findsNothing);
+    await _tap(tester, find.byKey(_key('cast-cast.filmmaker.0001')));
+    expect(calls.log, <String>['cast filmmaker cast.filmmaker.0001']);
   });
 
   testWidgets('a cast says when its bible entry or the style changed since', (tester) async {
@@ -397,8 +378,7 @@ void main() {
       'sample-style',
       'select-style_s0002',
       'audition-filmmaker',
-      'select-cast.filmmaker.0001',
-      'pack-filmmaker',
+      'cast-cast.filmmaker.0001',
     ]) {
       await _tap(tester, find.byKey(_key(key)));
     }

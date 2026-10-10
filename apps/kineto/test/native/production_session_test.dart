@@ -5,8 +5,8 @@ import 'package:kineto/native/kineto_engine.dart';
 
 /// A copy of `fixtures/projects/production`: a locked screenplay, a bible not
 /// yet locked, two style samples of which the first is locked, a filmmaker
-/// cast from the second of two portraits and its reference pack, and an
-/// interviewer with one portrait candidate. Written by the engine with a
+/// cast as the second of two portraits, and an interviewer with one
+/// portrait candidate. Written by the engine with a
 /// scripted model and an offline MiniMax.
 Directory _fixtureCopy(Directory sandbox) {
   final source = Directory(
@@ -65,11 +65,10 @@ void main() {
       expect(filmmaker.name, 'The Filmmaker');
       expect(filmmaker.portraits.map((image) => image.id), <String>['cast.filmmaker.0001', 'cast.filmmaker.0002']);
       expect(filmmaker.selectedPortrait!.id, 'cast.filmmaker.0002');
-      expect(filmmaker.pack.keys, hasLength(7));
-      expect(filmmaker.pack[KinetoCastImageKind.front]!.identityReference, 'cast.filmmaker.0002');
-      expect(File(filmmaker.pack[KinetoCastImageKind.fullBody]!.mediaPath).existsSync(), isTrue);
+      expect(filmmaker.images, hasLength(2), reason: 'a cast takes the portrait alone');
+      expect(File(filmmaker.selectedPortrait!.mediaPath).existsSync(), isTrue);
       expect(filmmaker.lockedPortrait, 'cast.filmmaker.0002');
-      expect(filmmaker.lockedReferences, hasLength(7));
+      expect(filmmaker.lockedReferences, isEmpty);
       expect(filmmaker.stale, isEmpty);
       final interviewer = production.characters.last;
       expect(interviewer.portraits.single.status, KinetoChoiceStatus.candidate);
@@ -118,8 +117,14 @@ void main() {
       );
       expect(session.production.samples, hasLength(samples + 1));
       // A cast is locked for the provider that keeps its identity, which
-      // the local demo cannot.
+      // the local demo cannot; casting a portrait is refused before it is
+      // selected.
       await expectLater(session.lockCharacter('interviewer'), _refusedWith(KinetoProjectException.noIdentityReference));
+      await expectLater(
+        session.castPortrait('interviewer', imported.id),
+        _refusedWith(KinetoProjectException.noIdentityReference),
+      );
+      expect(session.production.characters.last.selectedPortrait!.id, 'cast.interviewer.0001');
       await session.rejectPortrait('filmmaker', 'cast.filmmaker.0001');
       await expectLater(
         session.rejectPortrait('filmmaker', 'cast.filmmaker.0002'),

@@ -224,14 +224,6 @@ fn cast_character(project: &CanonicalProject, minimax: &Minimax, character: &str
     )
     .unwrap();
     cast_document::select(project, character, &portraits[0].artifact_id).unwrap();
-    cast::make_pack_with(
-        project,
-        minimax.adapter(project),
-        character,
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
     let provider = kineto_core::generation::ImageProvider::Minimax(Some(MinimaxClient::shared(
         SecretString::new("sk-test".to_owned()).unwrap(),
     )));

@@ -880,14 +880,6 @@ fn casting_records_and_a_locked_character_match_committed_schemas() {
     .expect("portraits should be recorded");
     kineto_project::cast::select(&project, "filmmaker", "cast.filmmaker.0001").expect("select");
     kineto_project::cast::reject(&project, "filmmaker", "cast.filmmaker.0002").expect("reject");
-    kineto_core::cast::make_pack_with(
-        &project,
-        adapter(),
-        "filmmaker",
-        kineto_core::style::Submission::Once,
-        &mut NoHooks,
-    )
-    .expect("the pack should be recorded");
     let provider = ImageProvider::Minimax(Some(kineto_provider_minimax::MinimaxClient::shared(
         kineto_providers::secret::SecretString::new("sk-contract".to_owned())
             .expect("test key is not blank"),

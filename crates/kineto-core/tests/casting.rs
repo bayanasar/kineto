@@ -1,10 +1,9 @@
-//! Casting end to end with MiniMax offline: portrait candidates, the
-//! reference pack made from the selected one with it as identity
-//! reference, the lock, staleness, and a crash while the pack is paid for.
+//! Casting end to end with MiniMax offline: portrait candidates, the lock
+//! of the one chosen, staleness, and a crash while an audition is paid for.
 //!
-//! The crash test re-runs this binary as a child with
-//! `KINETO_CASTING_CRASH` set to the project. The child makes the pack and
-//! calls `std::process::abort()` as soon as MiniMax answers the first call.
+//! The crash tests re-run this binary as a child with
+//! `KINETO_CASTING_CRASH` set to the project. The child auditions and calls
+//! `std::process::abort()` at the point the parent names.
 
 use std::{
     collections::BTreeMap,
@@ -225,7 +224,7 @@ fn provider() -> ImageProvider {
 }
 
 #[test]
-fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
+fn a_character_is_cast_from_the_portrait_chosen() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     let project = film(&target, true);
@@ -270,71 +269,31 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
         .collect();
     assert_eq!(depends_on, ["bible_character.filmmaker", "style_s0001"]);
 
-    assert!(matches!(
-        cast::make_pack_with(
-            &project,
-            minimax.adapter(&project),
-            "filmmaker",
-            Submission::Once,
-            &mut NoHooks
-        ),
-        Err(GenerationError::Prerequisite(
-            Prerequisite::SelectedPortrait
-        ))
-    ));
-    document::select(&project, "filmmaker", "cast.filmmaker.0002").unwrap();
     document::reject(&project, "filmmaker", "cast.filmmaker.0003").unwrap();
-    let pack = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(minimax.calls(), 10);
-    assert_eq!(pack.len(), 7);
-    let portrait_bytes = fs::read(target.join(&portraits[1].media_path)).unwrap();
-    let identity = format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(&portrait_bytes)
+    // A rejected portrait cannot be cast, and nothing is written.
+    assert!(
+        cast::cast_portrait(&project, &provider(), "filmmaker", "cast.filmmaker.0003").is_err()
     );
-    // The pack's calls run at once, so they reach MiniMax in any order.
-    let bodies = minimax.bodies.lock().unwrap()[3..].to_vec();
-    for body in &bodies {
-        assert_eq!(body["subject_reference"][0]["type"], "character");
-        assert_eq!(
-            body["subject_reference"][0]["image_file"],
-            identity.as_str()
-        );
-    }
-    let tall = |image: &&document::CastImage| {
-        matches!(image.kind, CastImageKind::FullBody | CastImageKind::Costume)
-    };
+    assert!(document::locked(&project, "filmmaker").unwrap().is_none());
+    assert!(
+        document::selected_portrait(&project, "filmmaker")
+            .unwrap()
+            .is_none()
+    );
+    // Choosing a portrait casts the character: selected and locked, with no
+    // further image paid for.
+    let locked =
+        cast::cast_portrait(&project, &provider(), "filmmaker", "cast.filmmaker.0002").unwrap();
+    assert_eq!(minimax.calls(), 3);
     assert_eq!(
-        bodies
-            .iter()
-            .filter(|body| body["aspect_ratio"] == "9:16")
-            .count(),
-        pack.iter().filter(tall).count()
+        document::selected_portrait(&project, "filmmaker")
+            .unwrap()
+            .unwrap()
+            .artifact_id,
+        "cast.filmmaker.0002"
     );
-    for image in &pack {
-        assert_eq!(
-            image.identity_reference.as_deref(),
-            Some("cast.filmmaker.0002")
-        );
-        assert!(image.media_path.starts_with("characters/filmmaker/refs/"));
-        assert!(
-            image
-                .provenance
-                .applied_constraints
-                .contains(&"identity.filmmaker".to_owned())
-        );
-    }
-
-    let locked = cast::lock(&project, &provider(), "filmmaker").unwrap();
     assert_eq!(locked.portrait.artifact_id, "cast.filmmaker.0002");
-    assert_eq!(locked.references.len(), 7);
+    assert!(locked.references.is_empty());
     assert_eq!(locked.provider_reference.provider, "minimax");
     assert_eq!(locked.provider_reference.mechanism, "subject_reference");
     assert_eq!(locked.provider_reference.artifact_id, "cast.filmmaker.0002");
@@ -351,14 +310,33 @@ fn a_character_is_cast_from_a_selected_portrait_and_its_reference_pack() {
         document::locked(&project, "filmmaker").unwrap(),
         Some(locked.clone())
     );
-    for image in std::iter::once(&locked.portrait).chain(&locked.references) {
-        let bytes = fs::read(target.join(&image.media_path)).unwrap();
-        assert_eq!(ContentHash::of(&bytes).as_str(), image.content_hash);
-    }
+    let bytes = fs::read(target.join(&locked.portrait.media_path)).unwrap();
+    assert_eq!(
+        ContentHash::of(&bytes).as_str(),
+        locked.portrait.content_hash
+    );
+
+    // Another portrait chosen casts it in place of the first.
+    let recast =
+        cast::cast_portrait(&project, &provider(), "filmmaker", "cast.filmmaker.0001").unwrap();
+    assert_eq!(recast.portrait.artifact_id, "cast.filmmaker.0001");
+    let statuses: Vec<_> = document::images(&project, "filmmaker")
+        .unwrap()
+        .into_iter()
+        .map(|image| image.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            Some(document::PortraitStatus::Selected),
+            Some(document::PortraitStatus::Candidate),
+            Some(document::PortraitStatus::Rejected)
+        ]
+    );
 }
 
 #[test]
-fn an_audition_and_a_pack_ask_for_their_images_at_once() {
+fn an_audition_asks_for_its_portraits_at_once() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
     let project = film(&target, true);
@@ -378,17 +356,6 @@ fn an_audition_and_a_pack_ask_for_their_images_at_once() {
         "a portrait does not wait for the one before"
     );
 
-    document::select(&project, "filmmaker", &portraits[0].artifact_id).unwrap();
-    let minimax = Minimax::taking(Duration::from_millis(100));
-    let pack = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(pack.len(), 7);
     let most = minimax.most.load(Ordering::SeqCst);
     assert!(
         (2..=3).contains(&most),
@@ -519,28 +486,15 @@ fn an_imported_portrait_is_cast_like_a_generated_one() {
     assert_eq!(document::images(&project, "filmmaker").unwrap().len(), 1);
     assert_eq!(minimax.calls(), 0, "importing is free");
 
-    // Selected, its pack made from it, and locked: the pack shows the photo.
-    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
-    cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    let identity = format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(photo)
-    );
-    for body in minimax.bodies.lock().unwrap().iter() {
-        assert_eq!(
-            body["subject_reference"][0]["image_file"],
-            identity.as_str()
-        );
-    }
-    let locked = cast::lock(&project, &provider(), "filmmaker").unwrap();
+    // Chosen, it is cast like a generated portrait, with nothing paid for.
+    let locked =
+        cast::cast_portrait(&project, &provider(), "filmmaker", "cast.filmmaker.0001").unwrap();
     assert_eq!(locked.portrait.artifact_id, "cast.filmmaker.0001");
+    assert_eq!(
+        locked.portrait.content_hash,
+        ContentHash::of(&photo).as_str()
+    );
+    assert_eq!(minimax.calls(), 0);
     assert!(cast::staleness(&project, "filmmaker").unwrap().is_empty());
 }
 
@@ -558,16 +512,7 @@ fn the_cast_goes_stale_when_its_entry_or_the_style_changes_and_only_then() {
         &mut NoHooks,
     )
     .unwrap();
-    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
-    cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    cast::lock(&project, &provider(), "filmmaker").unwrap();
+    cast::cast_portrait(&project, &provider(), "filmmaker", "cast.filmmaker.0001").unwrap();
 
     // Another character's entry changes: still fresh.
     let record = revisions::latest(&project, DocumentKind::Bible)
@@ -649,16 +594,15 @@ fn nothing_is_asked_or_written_without_what_casting_needs() {
         cast::audition_cost(&provider(), 3),
         Some(Price::usd(10_500))
     );
-    assert_eq!(cast::pack_cost(&provider()), Some((7, Price::usd(24_500))));
-    assert_eq!(cast::pack_cost(&ImageProvider::LocalDemo), None);
+    assert_eq!(cast::audition_cost(&ImageProvider::LocalDemo, 3), None);
 }
 
 /// The child half. A no-op unless the parent asked for a crash.
 ///
-/// `KINETO_CASTING_CRASH` is `<action>-<point>-<n>:<project>`: `action` is
-/// `pack` or `audition` (of three portraits); the child dies as MiniMax
-/// answers its `n`th call (`answered`), or as the intent of its `n`th image
-/// is written (`prepared`, counted from zero).
+/// `KINETO_CASTING_CRASH` is `audition-<point>-<n>:<project>`, an audition
+/// of three portraits: the child dies as MiniMax answers its `n`th call
+/// (`answered`), as the intent of its `n`th image is written (`prepared`,
+/// counted from zero), or as the first is recorded (`attached`).
 #[test]
 fn crash_child() {
     let Ok(value) = env::var(CHILD) else {
@@ -666,9 +610,8 @@ fn crash_child() {
     };
     let (mode, path) = value.split_once(':').unwrap();
     let mut parts = mode.split('-');
-    let (action, point, n) = (
-        parts.next().unwrap(),
-        parts.next().unwrap(),
+    let (point, n) = (
+        parts.nth(1).unwrap(),
         parts.next().unwrap().parse::<u32>().unwrap(),
     );
     let project = CanonicalProject::open(path).expect("child opens the project");
@@ -690,19 +633,14 @@ fn crash_child() {
         "attached" => GenerationPoint::Attached,
         _ => GenerationPoint::Prepared { index: usize::MAX },
     });
-    let _ = match action {
-        "pack" => {
-            cast::make_pack_with(&project, adapter, "filmmaker", Submission::Once, &mut hooks)
-        }
-        _ => cast::audition_with(
-            &project,
-            adapter,
-            "filmmaker",
-            3,
-            Submission::Once,
-            &mut hooks,
-        ),
-    };
+    let _ = cast::audition_with(
+        &project,
+        adapter,
+        "filmmaker",
+        3,
+        Submission::Once,
+        &mut hooks,
+    );
     panic!("the child must abort at {mode}");
 }
 
@@ -734,125 +672,13 @@ fn crash(temp: &TempDir, target: &Path, mode: &str) {
     }
 }
 
-/// A styled film whose filmmaker has one selected portrait.
-fn selected(target: &Path) -> CanonicalProject {
-    let project = film(target, true);
-    cast::audition_with(
-        &project,
-        Minimax::new().adapter(&project),
-        "filmmaker",
-        1,
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
-    project
-}
-
-fn references(project: &CanonicalProject) -> Vec<CastImageKind> {
+/// How many portraits of the filmmaker the project holds.
+fn portraits(project: &CanonicalProject) -> usize {
     document::images(project, "filmmaker")
         .unwrap()
         .into_iter()
-        .filter(|image| image.kind != CastImageKind::Portrait)
-        .map(|image| image.kind)
-        .collect()
-}
-
-#[test]
-fn a_pack_cut_short_before_its_calls_pays_for_each_image_once() {
-    let temp = TempDir::new();
-    let target = temp.0.join("film");
-    drop(selected(&target));
-    // Every image of the pack is prepared before the first call, and the
-    // process dies before any is called.
-    crash(&temp, &target, "pack-prepared-3");
-    let project = CanonicalProject::open(&target).unwrap();
-    assert!(references(&project).is_empty());
-
-    let minimax = Minimax::new();
-    let pack = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(minimax.calls(), 7, "none was called before");
-    assert_eq!(pack.len(), 7);
-    let mut made = references(&project);
-    assert_eq!(made.len(), 7, "no kind made twice");
-    made.sort();
-    made.dedup();
-    assert_eq!(made.len(), 7);
-}
-
-#[test]
-fn a_pack_cut_short_after_its_calls_keeps_every_paid_image() {
-    let temp = TempDir::new();
-    let target = temp.0.join("film");
-    drop(selected(&target));
-    // Every call was answered and kept; the process dies as the first
-    // image is recorded.
-    crash(&temp, &target, "pack-attached-1");
-    let project = CanonicalProject::open(&target).unwrap();
-    assert_eq!(cast::recover(&project).unwrap().unresolved.len(), 0);
-    assert_eq!(
-        references(&project).len(),
-        7,
-        "recorded from their receipts"
-    );
-    let minimax = Minimax::new();
-    let pack = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(pack.len(), 7);
-    assert_eq!(minimax.calls(), 0, "nothing is paid for again");
-}
-
-#[test]
-fn a_pack_cut_short_by_an_unknown_answer_pays_again_only_for_what_it_lacks() {
-    let temp = TempDir::new();
-    let target = temp.0.join("film");
-    drop(selected(&target));
-    // MiniMax answers the fourth call and the process dies before it is
-    // kept. The calls run at once, so which others had answered and been
-    // kept by then varies; none of them is paid for again.
-    crash(&temp, &target, "pack-answered-4");
-    let project = CanonicalProject::open(&target).unwrap();
-    assert!(!cast::recover(&project).unwrap().unresolved.is_empty());
-    let kept = references(&project).len();
-    assert!(kept < 7);
-    let minimax = Minimax::new();
-    let make = |submission| {
-        cast::make_pack_with(
-            &project,
-            minimax.adapter(&project),
-            "filmmaker",
-            submission,
-            &mut NoHooks,
-        )
-    };
-    assert!(matches!(
-        make(Submission::Once),
-        Err(GenerationError::UnresolvedSubmission)
-    ));
-    assert_eq!(minimax.calls(), 0);
-    make(Submission::RiskPayingTwice).unwrap();
-    // Only what the pack lacks, the lost answer among it, resubmitted on
-    // the director's decision.
-    assert_eq!(minimax.calls(), u32::try_from(7 - kept).unwrap());
-    let mut made = references(&project);
-    assert_eq!(made.len(), 7);
-    made.sort();
-    made.dedup();
-    assert_eq!(made.len(), 7, "no kind made twice");
+        .filter(|image| image.kind == CastImageKind::Portrait)
+        .count()
 }
 
 #[test]
@@ -912,69 +738,15 @@ fn an_audition_cut_short_after_its_calls_keeps_every_paid_portrait() {
 }
 
 #[test]
-fn a_complete_pack_is_made_again_only_where_the_director_asks() {
+fn killed_as_minimax_answered_a_portrait_the_audition_waits_for_the_director() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
-    let project = selected(&target);
-    let minimax = Minimax::new();
-    let first = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(minimax.calls(), 7);
-    let again = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(again, first);
-    assert_eq!(minimax.calls(), 7, "a complete pack costs nothing");
+    drop(film(&target, true));
+    // MiniMax answers the second call and the process dies before it is
+    // kept. The calls run at once, so which others had answered and been
+    // kept by then varies; none of them is paid for again.
+    crash(&temp, &target, "audition-answered-2");
 
-    let remade = cast::remake_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        &[CastImageKind::Front],
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(minimax.calls(), 8);
-    assert_ne!(remade[0].artifact_id, first[0].artifact_id);
-    assert_eq!(remade[1..], first[1..]);
-    let locked = cast::lock(&project, &provider(), "filmmaker").unwrap();
-    assert_eq!(locked.references[0].artifact_id, remade[0].artifact_id);
-}
-
-#[test]
-fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
-    let temp = TempDir::new();
-    let target = temp.0.join("film");
-    let project = film(&target, true);
-    let minimax = Minimax::new();
-    cast::audition_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        1,
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
-    document::select(&project, "filmmaker", "cast.filmmaker.0001").unwrap();
-    drop(project);
-
-    crash(&temp, &target, "pack-answered-1");
-
-    // The pack's calls run at once: the first answer is lost, and whatever
-    // else was sent and not kept by then is unresolved with it.
     let project = CanonicalProject::open(&target).unwrap();
     let unresolved = cast::recover(&project).unwrap().unresolved;
     assert!(!unresolved.is_empty());
@@ -983,38 +755,29 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
             .iter()
             .all(|id| id.starts_with("cast.filmmaker."))
     );
-    let kept = references(&project).len();
+    let kept = portraits(&project);
+    assert!(kept < 3);
     let minimax = Minimax::new();
-    let make = |submission| {
-        cast::make_pack_with(
+    let audition = |submission| {
+        cast::audition_with(
             &project,
             minimax.adapter(&project),
             "filmmaker",
+            3,
             submission,
             &mut NoHooks,
         )
     };
     assert!(matches!(
-        make(Submission::Once),
-        Err(GenerationError::UnresolvedSubmission)
-    ));
-    // Nor is a portrait paid for while it waits.
-    assert!(matches!(
-        cast::audition_with(
-            &project,
-            minimax.adapter(&project),
-            "filmmaker",
-            1,
-            Submission::Once,
-            &mut NoHooks,
-        ),
+        audition(Submission::Once),
         Err(GenerationError::UnresolvedSubmission)
     ));
     assert_eq!(minimax.calls(), 0, "never paid twice unasked");
 
-    let pack = make(Submission::RiskPayingTwice).unwrap();
-    assert_eq!(pack.len(), 7);
-    assert_eq!(minimax.calls(), u32::try_from(7 - kept).unwrap());
+    // Only what the audition lacks, the lost answer among it, is asked
+    // for again, on the director's decision.
+    assert_eq!(audition(Submission::RiskPayingTwice).unwrap().len(), 3);
+    assert_eq!(minimax.calls(), u32::try_from(3 - kept).unwrap());
     assert!(cast::recover(&project).unwrap().unresolved.is_empty());
 }
 
@@ -1022,26 +785,26 @@ fn killed_as_minimax_answered_a_pack_image_the_pack_waits_for_the_director() {
 fn risking_paying_twice_for_one_character_leaves_anothers_unresolved_image_guarded() {
     let temp = TempDir::new();
     let target = temp.0.join("film");
-    drop(selected(&target));
-    crash(&temp, &target, "pack-answered-1");
+    drop(film(&target, true));
+    crash(&temp, &target, "audition-answered-2");
 
     let project = CanonicalProject::open(&target).unwrap();
     let minimax = Minimax::new();
-    let audition = |character, submission| {
+    let audition = |character, count, submission| {
         cast::audition_with(
             &project,
             minimax.adapter(&project),
             character,
-            1,
+            count,
             submission,
             &mut NoHooks,
         )
     };
     // The filmmaker's unresolved image is not the interviewer's to answer
     // for: it neither stops the interviewer's casting nor is retired by it.
-    audition("interviewer", Submission::Once).unwrap();
-    let portraits = audition("interviewer", Submission::RiskPayingTwice).unwrap();
-    assert_eq!(portraits[0].artifact_id, "cast.interviewer.0001");
+    audition("interviewer", 1, Submission::Once).unwrap();
+    let interviewer = audition("interviewer", 1, Submission::RiskPayingTwice).unwrap();
+    assert_eq!(interviewer[0].artifact_id, "cast.interviewer.0001");
     assert_eq!(minimax.calls(), 1);
     let unresolved = cast::recover(&project).unwrap().unresolved;
     assert!(!unresolved.is_empty());
@@ -1050,23 +813,20 @@ fn risking_paying_twice_for_one_character_leaves_anothers_unresolved_image_guard
             .iter()
             .all(|id| id.starts_with("cast.filmmaker."))
     );
-    let kept = references(&project).len();
+    let kept = portraits(&project);
     assert!(matches!(
-        audition("filmmaker", Submission::Once),
+        audition("filmmaker", 3, Submission::Once),
         Err(GenerationError::UnresolvedSubmission)
     ));
     assert_eq!(minimax.calls(), 1, "never paid twice unasked");
 
     // Only the director's decision for the filmmaker retires it.
-    let pack = cast::make_pack_with(
-        &project,
-        minimax.adapter(&project),
-        "filmmaker",
-        Submission::RiskPayingTwice,
-        &mut NoHooks,
-    )
-    .unwrap();
-    assert_eq!(pack.len(), 7);
-    assert_eq!(minimax.calls(), 1 + u32::try_from(7 - kept).unwrap());
+    assert_eq!(
+        audition("filmmaker", 3, Submission::RiskPayingTwice)
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(minimax.calls(), 1 + u32::try_from(3 - kept).unwrap());
     assert!(cast::recover(&project).unwrap().unresolved.is_empty());
 }

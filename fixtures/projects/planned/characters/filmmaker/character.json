@@ -8,50 +8,7 @@
     "content_hash": "sha256:72912267ad9677164695bc2dbcc3e8a6e02b481064b358cdb5f41c16e21dfc25",
     "media_path": "characters/filmmaker/candidates/cast.filmmaker.0002.jpg"
   },
-  "references": [
-    {
-      "kind": "front",
-      "artifact_id": "cast.filmmaker.0003",
-      "content_hash": "sha256:6574859a24d1f529655f0e22c10954d4387c956c76c0ea7b965469b2df71c65e",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0003.jpg"
-    },
-    {
-      "kind": "profile_left",
-      "artifact_id": "cast.filmmaker.0004",
-      "content_hash": "sha256:6f0f30c159c77f0f918a0d3728b90488e043ebd3d7d29f7fb11c412d3cf3f6ab",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0004.jpg"
-    },
-    {
-      "kind": "profile_right",
-      "artifact_id": "cast.filmmaker.0005",
-      "content_hash": "sha256:ac2f9afe7036a820e8fa9a9d7cc032c2416d77e1d7784a842077520e175bde41",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0005.jpg"
-    },
-    {
-      "kind": "full_body",
-      "artifact_id": "cast.filmmaker.0006",
-      "content_hash": "sha256:edd54d955224e6f7f4ebf5309bd857723f586271a214ed30fd8fe7064acaab43",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0006.jpg"
-    },
-    {
-      "kind": "costume",
-      "artifact_id": "cast.filmmaker.0007",
-      "content_hash": "sha256:94e7fbdecf36e7c3ed85dd9b1fce91593a0a9ab89df177d2e4c26024324c1e3f",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0007.jpg"
-    },
-    {
-      "kind": "expression_smile",
-      "artifact_id": "cast.filmmaker.0008",
-      "content_hash": "sha256:f78352469854a0339c18d5b326976d3da6846ee3f541faff30b5acd8cd987988",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0008.jpg"
-    },
-    {
-      "kind": "expression_tense",
-      "artifact_id": "cast.filmmaker.0009",
-      "content_hash": "sha256:5900ceaf8bbc9f207ba9db39395a12e849cb24ba9cd107b751e35e8d55504a00",
-      "media_path": "characters/filmmaker/refs/cast.filmmaker.0009.jpg"
-    }
-  ],
+  "references": [],
   "provider_reference": {
     "provider": "minimax",
     "mechanism": "subject_reference",

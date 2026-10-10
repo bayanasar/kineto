@@ -11,11 +11,10 @@ import 'screenplay_workspace.dart';
 
 /// What paid images cost with the session's image provider, as it declares.
 final class ProductionPrices {
-  const ProductionPrices({this.sample, this.portrait, this.pack, this.provides});
+  const ProductionPrices({this.sample, this.portrait, this.provides});
 
   final KinetoImageCost? sample;
   final KinetoImageCost? portrait;
-  final KinetoImageCost? pack;
 
   /// Whether the session's image provider makes images, when known.
   final bool? provides;
@@ -23,7 +22,7 @@ final class ProductionPrices {
   /// Whether the session's image provider makes images: one without a
   /// price (an agent on a subscription, a plugin that does not say) still
   /// does, and says its cost is unknown.
-  bool get makesImages => provides ?? (sample != null || portrait != null || pack != null);
+  bool get makesImages => provides ?? (sample != null || portrait != null);
 }
 
 /// What asking for [cost] costs, in words.
@@ -116,7 +115,6 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
     _prices = ProductionPrices(
       sample: widget.project.imageCost(KinetoImageCostKind.sample),
       portrait: widget.project.imageCost(KinetoImageCostKind.portrait),
-      pack: widget.project.imageCost(KinetoImageCostKind.pack),
       provides: images.ready && images.kind != KinetoImageProviderKind.localDemo,
     );
     _read();
@@ -275,16 +273,10 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
         'Casting',
         resubmit: () => project.audition(character, count, resubmit: true),
       ),
-      onMakePack: (character, remake) => _run(
-        () => project.makePack(character, remake: remake),
-        'Making the reference pack',
-        resubmit: () => project.makePack(character, remake: remake, resubmit: true),
-      ),
-      onSelectPortrait: (character, portrait) =>
-          _run(() => project.selectPortrait(character, portrait), 'Selecting'),
+      onCastPortrait: (character, portrait) =>
+          _run(() => project.castPortrait(character, portrait), 'Casting'),
       onRejectPortrait: (character, portrait) =>
           _run(() => project.rejectPortrait(character, portrait), 'Rejecting'),
-      onLockCast: (character) => _run(() => project.lockCharacter(character), 'Locking'),
     );
   }
 }
@@ -303,10 +295,8 @@ class ProductionWorkspaceView extends StatelessWidget {
     required this.onRejectStyle,
     required this.onLockStyle,
     required this.onAudition,
-    required this.onMakePack,
-    required this.onSelectPortrait,
+    required this.onCastPortrait,
     required this.onRejectPortrait,
-    required this.onLockCast,
     this.references = const <KinetoReference>[],
     this.servers,
     this.serversProblem,
@@ -367,10 +357,9 @@ class ProductionWorkspaceView extends StatelessWidget {
   final ValueChanged<String> onRejectStyle;
   final ValueChanged<String> onLockStyle;
   final void Function(String character, int count) onAudition;
-  final void Function(String character, List<KinetoCastImageKind> remake) onMakePack;
-  final void Function(String character, String portrait) onSelectPortrait;
+  /// Select a portrait and lock the character as it, in one step.
+  final void Function(String character, String portrait) onCastPortrait;
   final void Function(String character, String portrait) onRejectPortrait;
-  final ValueChanged<String> onLockCast;
 
   /// References from MCP tools, oldest first.
   final List<KinetoReference> references;
@@ -751,10 +740,8 @@ class ProductionWorkspaceView extends StatelessWidget {
                 prices: prices,
                 enabled: _idle && production.style != null,
                 onAudition: (count) => onAudition(character.id, count),
-                onMakePack: (remake) => onMakePack(character.id, remake),
-                onSelectPortrait: (portrait) => onSelectPortrait(character.id, portrait),
+                onCast: (portrait) => onCastPortrait(character.id, portrait),
                 onRejectPortrait: (portrait) => onRejectPortrait(character.id, portrait),
-                onLock: () => onLockCast(character.id),
                 onImport: onImportPortrait == null ? null : () => onImportPortrait!(character.id),
               ),
             ],
@@ -838,18 +825,16 @@ class _StyleComposerState extends State<StyleComposer> {
   }
 }
 
-/// One character's casting: portrait candidates, the reference pack of the
-/// selected one, and the lock.
+/// One character's casting: portrait candidates and the one chosen, which
+/// casts the character.
 class CastingCard extends StatefulWidget {
   const CastingCard({
     required this.character,
     required this.prices,
     required this.enabled,
     required this.onAudition,
-    required this.onMakePack,
-    required this.onSelectPortrait,
+    required this.onCast,
     required this.onRejectPortrait,
-    required this.onLock,
     this.onImport,
     super.key,
   });
@@ -858,10 +843,10 @@ class CastingCard extends StatefulWidget {
   final ProductionPrices prices;
   final bool enabled;
   final ValueChanged<int> onAudition;
-  final ValueChanged<List<KinetoCastImageKind>> onMakePack;
-  final ValueChanged<String> onSelectPortrait;
+
+  /// Cast the character as this portrait: selected and locked at once.
+  final ValueChanged<String> onCast;
   final ValueChanged<String> onRejectPortrait;
-  final VoidCallback onLock;
 
   /// Import an image the director chooses as a portrait; free.
   final VoidCallback? onImport;
@@ -878,19 +863,13 @@ class _CastingCardState extends State<CastingCard> {
     final character = widget.character;
     final id = character.id;
     final enabled = widget.enabled;
-    final selected = character.selectedPortrait;
-    final pack = character.pack;
-    final packCount = widget.prices.pack?.images ?? KinetoCastImageKind.values.length - 1;
     final kept = character.portraits.where((image) => image.status != KinetoChoiceStatus.rejected).length;
     final toMake = _have > kept ? _have - kept : 0;
-    final missing = packCount - pack.length;
     final (status, kind) = character.locked
         ? character.stale.isEmpty
             ? ('Cast', WabBadgeKind.done)
             : ('Cast · changed since: ${character.stale.join(', ')}', WabBadgeKind.warning)
-        : selected == null
-            ? ('Not cast', WabBadgeKind.neutral)
-            : ('Portrait chosen', WabBadgeKind.progress);
+        : ('Not cast', WabBadgeKind.neutral);
     return WabPanel(
       title: character.name,
       trailing: WabStatusBadge(status, kind: kind),
@@ -941,48 +920,13 @@ class _CastingCardState extends State<CastingCard> {
           ),
           if (character.portraits.isNotEmpty) ...<Widget>[
             const SizedBox(height: 12),
+            if (!character.locked) const Text('Choose the portrait that plays the part; it is cast at once.'),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 12,
               runSpacing: 12,
               children: <Widget>[
                 for (final portrait in character.portraits) _portrait(portrait),
-              ],
-            ),
-          ],
-          if (selected != null) ...<Widget>[
-            const SizedBox(height: 16),
-            Text('Reference pack of ${selected.id}', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            if (pack.isNotEmpty)
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: <Widget>[
-                  for (final reference in pack.values)
-                    _reference(reference, <String>[for (final reference in pack.values) reference.mediaPath]),
-                ],
-              ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: <Widget>[
-                if (missing > 0)
-                  KinetoButton(
-                    key: ValueKey<String>('pack-$id'),
-                    primary: true,
-                    onPressed: enabled && widget.prices.makesImages
-                        ? () => widget.onMakePack(const <KinetoCastImageKind>[])
-                        : null,
-                    child: Text('Make the pack · ${imageCostLabel(timesImages(widget.prices.portrait, missing))}'),
-                  ),
-                if (missing <= 0 && character.lockedPortrait != selected.id)
-                  KinetoButton(
-                    key: ValueKey<String>('lock-cast-$id'),
-                    primary: true,
-                    onPressed: enabled ? widget.onLock : null,
-                    child: Text('Lock ${character.name}'),
-                  ),
               ],
             ),
           ],
@@ -993,7 +937,6 @@ class _CastingCardState extends State<CastingCard> {
 
   Widget _portrait(KinetoCastImage portrait) {
     final rejected = portrait.status == KinetoChoiceStatus.rejected;
-    final selected = portrait.status == KinetoChoiceStatus.selected;
     final locked = widget.character.lockedPortrait == portrait.id;
     return SizedBox(
       width: 180,
@@ -1009,17 +952,18 @@ class _CastingCardState extends State<CastingCard> {
             ),
           ),
           const SizedBox(height: 6),
-          Text('${portrait.id}${locked ? ' · cast' : selected ? ' · selected' : rejected ? ' · rejected' : ''}'),
+          Text('${portrait.id}${locked ? ' · cast' : rejected ? ' · rejected' : ''}'),
           const SizedBox(height: 6),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: <Widget>[
-              if (!selected && !rejected)
+              if (!locked && !rejected)
                 KinetoButton(
-                  key: ValueKey<String>('select-${portrait.id}'),
-                  onPressed: widget.enabled ? () => widget.onSelectPortrait(portrait.id) : null,
-                  child: const Text('Select'),
+                  key: ValueKey<String>('cast-${portrait.id}'),
+                  primary: true,
+                  onPressed: widget.enabled ? () => widget.onCast(portrait.id) : null,
+                  child: const Text('Cast'),
                 ),
               if (!rejected && !locked)
                 KinetoButton(
@@ -1032,54 +976,6 @@ class _CastingCardState extends State<CastingCard> {
         ],
       ),
     );
-  }
-
-  Widget _reference(KinetoCastImage reference, List<String> gallery) => SizedBox(
-        width: 140,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            MediaFrame(
-              path: reference.mediaPath,
-              aspectRatio: reference.kind == KinetoCastImageKind.fullBody ||
-                      reference.kind == KinetoCastImageKind.costume
-                  ? 9 / 16
-                  : 1,
-              gallery: gallery,
-            ),
-            const SizedBox(height: 4),
-            Text(reference.kind.label),
-            KinetoButton(
-              key: ValueKey<String>('remake-${widget.character.id}-${reference.kind.wireName}'),
-              onPressed: widget.enabled && widget.prices.makesImages
-                  ? () => _confirmRemake(reference.kind)
-                  : null,
-              child: const Text('Remake…'),
-            ),
-          ],
-        ),
-      );
-
-  /// A remade reference is a paid image: its price is shown before it is
-  /// asked for.
-  Future<void> _confirmRemake(KinetoCastImageKind kind) async {
-    final cost = imageCostLabel(timesImages(widget.prices.portrait, 1));
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Remake the ${kind.label.toLowerCase()} reference of ${widget.character.name}?'),
-        content: Text('The image is made again from the chosen portrait: $cost.'),
-        actions: <Widget>[
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            key: const ValueKey<String>('remake-confirm'),
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Remake · $cost'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed ?? false) widget.onMakePack(<KinetoCastImageKind>[kind]);
   }
 }
 

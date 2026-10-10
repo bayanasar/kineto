@@ -169,14 +169,6 @@ fn dubbed_lines_and_the_package_that_carries_them_match_committed_schemas() {
     )
     .unwrap();
     cast_document::select(&project, "interviewer", "cast.interviewer.0001").unwrap();
-    cast::make_pack_with(
-        &project,
-        adapter(),
-        "interviewer",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
     cast::lock(
         &project,
         &ImageProvider::Minimax(Some(MinimaxClient::shared(

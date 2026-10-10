@@ -780,7 +780,7 @@ pub enum Prerequisite {
     Character,
     /// Casting follows the locked style.
     LockedStyle,
-    /// A reference pack is made from the selected portrait.
+    /// A cast is locked with the selected portrait.
     SelectedPortrait,
     /// The image provider takes no identity reference, or not this portrait.
     IdentityReference,

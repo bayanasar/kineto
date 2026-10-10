@@ -164,14 +164,6 @@ fn film(target: &Path, cast_characters: &[&str]) -> CanonicalProject {
         )
         .unwrap();
         cast_document::select(&project, character, &portraits[0].artifact_id).unwrap();
-        cast::make_pack_with(
-            &project,
-            adapter(),
-            character,
-            Submission::Once,
-            &mut NoHooks,
-        )
-        .unwrap();
         cast::lock(&project, &provider, character).unwrap();
     }
     project

@@ -169,14 +169,6 @@ fn film(target: &Path, voiced: bool) -> CanonicalProject {
     )
     .unwrap();
     cast_document::select(&project, "interviewer", &portraits[0].artifact_id).unwrap();
-    cast::make_pack_with(
-        &project,
-        adapter(),
-        "interviewer",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .unwrap();
     cast::lock(
         &project,
         &ImageProvider::Minimax(Some(MinimaxClient::shared(

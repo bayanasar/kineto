@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kineto.local/schemas/character.schema.json",
   "title": "Kineto Locked Character",
-  "description": "A cast character production follows: the canonical portrait and its reference pack by stable artifact IDs and content hashes, how the provider takes the identity reference, the forbidden changes the bible names, and what the portrait was made from (the character's bible entry and the locked style), from which staleness is computed.",
+  "description": "A cast character production follows: the canonical portrait by stable artifact ID and content hash (references holds the reference pack an earlier lock named, and is empty for a lock made now), how the provider takes the identity reference, the forbidden changes the bible names, and what the portrait was made from (the character's bible entry and the locked style), from which staleness is computed.",
   "type": "object",
   "required": ["schema_version", "character_id", "name", "portrait", "references", "provider_reference", "forbidden_changes", "dependencies"],
   "properties": {

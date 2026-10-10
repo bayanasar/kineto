@@ -66,7 +66,7 @@ pub(crate) const PROJECT_ERR_NEEDS_LOCKED_STYLE: i32 = 149;
 pub(crate) const PROJECT_ERR_NEEDS_SELECTED_PORTRAIT: i32 = 150;
 pub(crate) const PROJECT_ERR_NO_IDENTITY_REFERENCE: i32 = 151;
 pub(crate) const PROJECT_ERR_REJECTED: i32 = 152;
-pub(crate) const PROJECT_ERR_PACK_INCOMPLETE: i32 = 153;
+// 153 was `pack_incomplete`, retired with the reference pack.
 pub(crate) const PROJECT_ERR_NEEDS_LOCKED_BIBLE: i32 = 154;
 pub(crate) const PROJECT_ERR_NEEDS_SHOT_PLAN: i32 = 155;
 pub(crate) const PROJECT_ERR_PROVIDER_INCAPABLE: i32 = 156;
@@ -91,7 +91,7 @@ pub(crate) const PROJECT_ERR_SETTINGS_UNWRITABLE: i32 = 174;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 77] = [
+const STATUSES: [(&str, i32); 76] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -158,7 +158,6 @@ const STATUSES: [(&str, i32); 77] = [
     ),
     ("no_identity_reference", PROJECT_ERR_NO_IDENTITY_REFERENCE),
     ("rejected", PROJECT_ERR_REJECTED),
-    ("pack_incomplete", PROJECT_ERR_PACK_INCOMPLETE),
     ("needs_locked_bible", PROJECT_ERR_NEEDS_LOCKED_BIBLE),
     ("needs_shot_plan", PROJECT_ERR_NEEDS_SHOT_PLAN),
     ("provider_incapable", PROJECT_ERR_PROVIDER_INCAPABLE),
@@ -549,7 +548,7 @@ pub(crate) const ENTRY_KINDS: [(&str, u32); 3] = [("character", 1), ("location",
 pub(crate) const DECISIONS: [(&str, u32); 3] = [("select", 1), ("reject", 2), ("lock", 3)];
 
 /// Paid images whose cost `kineto_project_image_cost` gives.
-pub(crate) const IMAGE_COSTS: [(&str, u32); 3] = [("sample", 1), ("portrait", 2), ("pack", 3)];
+pub(crate) const IMAGE_COSTS: [(&str, u32); 2] = [("sample", 1), ("portrait", 2)];
 
 /// What `kineto_project_plan_count` counts; `group` selects the scene (or
 /// the step), `item` the shot.

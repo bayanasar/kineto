@@ -152,7 +152,6 @@ void main() {
       KinetoProjectException.needsSelectedPortrait: 'needs_selected_portrait',
       KinetoProjectException.noIdentityReference: 'no_identity_reference',
       KinetoProjectException.rejected: 'rejected',
-      KinetoProjectException.packIncomplete: 'pack_incomplete',
       KinetoProjectException.needsLockedBible: 'needs_locked_bible',
       KinetoProjectException.needsShotPlan: 'needs_shot_plan',
       KinetoProjectException.providerIncapable: 'provider_incapable',

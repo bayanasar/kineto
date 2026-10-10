@@ -107,11 +107,11 @@ fn the_catalog_names_every_kept_file_and_reports_what_is_gone_or_changed() {
     );
     assert_eq!(by_kind[&MediaKind::StyleSample].len(), 2);
     assert_eq!(count(MediaKind::StyleSample, Standing::Locked), 1);
-    assert_eq!(by_kind[&MediaKind::Cast].len(), 10);
+    assert_eq!(by_kind[&MediaKind::Cast].len(), 3);
     assert_eq!(
         count(MediaKind::Cast, Standing::Locked),
-        8,
-        "the filmmaker's portrait and pack"
+        1,
+        "the filmmaker's portrait"
     );
     assert!(!by_kind.contains_key(&MediaKind::Video));
     assert!(records.iter().any(|record| record.owner

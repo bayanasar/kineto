@@ -1,8 +1,7 @@
 //! `fixtures/projects/production` is a project as the desktop app leaves it
 //! once production memory is underway: a locked screenplay, a bible not yet
 //! locked, two style samples of which the first is locked, a filmmaker cast
-//! from the second of two portraits and its reference pack, and an
-//! interviewer with one portrait candidate. A scripted model and an offline
+//! as the second of two portraits, and an interviewer with one portrait candidate. A scripted model and an offline
 //! MiniMax wrote it. Tests outside Rust open copies of it and make only the
 //! free decisions. This
 //! test rebuilds it and fails if the committed files differ;
@@ -146,14 +145,6 @@ fn build(target: &Path) {
     .expect("portraits are made");
     cast_document::select(&project, "filmmaker", "cast.filmmaker.0002")
         .expect("a portrait is selected");
-    cast::make_pack_with(
-        &project,
-        adapter(),
-        "filmmaker",
-        Submission::Once,
-        &mut NoHooks,
-    )
-    .expect("the pack is made");
     cast::lock(&project, &ImageProvider::Minimax(None), "filmmaker")
         .expect("the filmmaker is cast");
     cast::audition_with(
