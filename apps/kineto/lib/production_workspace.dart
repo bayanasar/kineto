@@ -94,8 +94,8 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
 
   // The project's requests outlive this page: what is under way, and how
   // the last one asked for here ended, come from them.
-  bool get _working => widget.work.busy;
-  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  // The bible, the style, each character's casting and the references are
+  // each changed one request at a time; different ones at once.
   String? get _error => widget.work.problemOn(_page);
   VoidCallback? get _resubmit => widget.work.retryOn(_page);
 
@@ -149,10 +149,11 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   Future<void> _run(
     Future<void> Function() action,
     String label, {
+    required String target,
     VoidCallback? onDone,
     Future<void> Function()? resubmit,
   }) async {
-    final done = await widget.work.run(_page, label, action, retry: resubmit);
+    final done = await widget.work.run(_page, label, action, target: target, retry: resubmit);
     if (done && mounted) onDone?.call();
   }
 
@@ -181,7 +182,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   /// Ask for an image, then for the director's description of its style,
   /// which prompts follow; the image goes to a provider that takes it.
   Future<void> _importStyle() async {
-    if (_working) return;
+    if (widget.work.busyWith('style')) return;
     final path = await widget.pickImage();
     if (path == null || !mounted) return;
     final description = await showDialog<String>(
@@ -198,14 +199,18 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       ),
     );
     if (description == null || description.trim().isEmpty || !mounted) return;
-    await _run(() => widget.project.importStyle(path, description.trim()), 'Importing the style');
+    await _run(() => widget.project.importStyle(path, description.trim()), 'Importing the style', target: 'style');
   }
 
   Future<void> _importPortrait(String character) async {
-    if (_working) return;
+    if (widget.work.busyWith('character:$character')) return;
     final path = await widget.pickImage();
     if (path == null || !mounted) return;
-    await _run(() => widget.project.importPortrait(character, path), 'Importing the portrait');
+    await _run(
+      () => widget.project.importPortrait(character, path),
+      'Importing the portrait',
+      target: 'character:$character',
+    );
   }
 
   @override
@@ -220,11 +225,17 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       onAskReference: (server, tool, arguments, targets) => _run(
         () => project.askReference(server: server, tool: tool, arguments: arguments, attachedTo: targets),
         'Asking $server for $tool',
+        target: 'references',
       ),
-      onEditReference: (reference, text) => _run(() => project.editReference(reference, text), 'Saving'),
-      onAttachReference: (reference, target, attach) =>
-          _run(() => project.attachReference(reference, target, attach: attach), 'Saving'),
-      onRemoveReference: (reference) => _run(() => project.removeReference(reference), 'Removing'),
+      onEditReference: (reference, text) =>
+          _run(() => project.editReference(reference, text), 'Saving', target: 'references'),
+      onAttachReference: (reference, target, attach) => _run(
+        () => project.attachReference(reference, target, attach: attach),
+        'Saving',
+        target: 'references',
+      ),
+      onRemoveReference: (reference) =>
+          _run(() => project.removeReference(reference), 'Removing', target: 'references'),
       onImportPortrait: _importPortrait,
       onImportStyle: _importStyle,
       production: _production,
@@ -232,8 +243,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       prices: _prices,
       screenplayLocked: _screenplayLocked,
       bibleCostMicros: _bibleCost,
-      working: _working,
-      workingLabel: _workingLabel,
+      busy: widget.work.targets,
       error: _error,
       onResubmit: _resubmit,
       editingEntry: _editingEntry,
@@ -243,40 +253,45 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       onWriteBible: () => _run(
         project.writeBible,
         'Writing the bible with ${_model.kind.label}',
+        target: 'bible',
         resubmit: () => project.writeBible(resubmit: true),
       ),
       onEditEntry: (key) => setState(() {
         _editingEntry = key;
-        widget.work.dismiss();
+        widget.work.dismiss(_page);
       }),
       onSaveEntry: (edit) => _run(
         () => project.saveBibleEntry(_production.bible!.revision, edit),
         'Saving',
+        target: 'bible',
         onDone: () => _editingEntry = null,
       ),
-      onLockBible: (revision) => _run(() => project.lockBible(revision), 'Locking'),
+      onLockBible: (revision) => _run(() => project.lockBible(revision), 'Locking', target: 'bible'),
       onSample: (preset, note) => _run(
         () => project.sampleStyle(preset, note: note),
         'Sampling the style',
+        target: 'style',
         resubmit: () => project.sampleStyle(preset, note: note, resubmit: true),
       ),
       onRefine: (sample, note) => _run(
         () => project.refineStyle(sample, note),
         'Refining the style',
+        target: 'style',
         resubmit: () => project.refineStyle(sample, note, resubmit: true),
       ),
-      onSelectStyle: (sample) => _run(() => project.selectStyle(sample), 'Selecting'),
-      onRejectStyle: (sample) => _run(() => project.rejectStyle(sample), 'Rejecting'),
-      onLockStyle: (sample) => _run(() => project.lockStyle(sample), 'Locking'),
+      onSelectStyle: (sample) => _run(() => project.selectStyle(sample), 'Selecting', target: 'style'),
+      onRejectStyle: (sample) => _run(() => project.rejectStyle(sample), 'Rejecting', target: 'style'),
+      onLockStyle: (sample) => _run(() => project.lockStyle(sample), 'Locking', target: 'style'),
       onAudition: (character, count) => _run(
         () => project.audition(character, count),
         'Casting',
+        target: 'character:$character',
         resubmit: () => project.audition(character, count, resubmit: true),
       ),
       onCastPortrait: (character, portrait) =>
-          _run(() => project.castPortrait(character, portrait), 'Casting'),
+          _run(() => project.castPortrait(character, portrait), 'Casting', target: 'character:$character'),
       onRejectPortrait: (character, portrait) =>
-          _run(() => project.rejectPortrait(character, portrait), 'Rejecting'),
+          _run(() => project.rejectPortrait(character, portrait), 'Rejecting', target: 'character:$character'),
     );
   }
 }
@@ -311,8 +326,7 @@ class ProductionWorkspaceView extends StatelessWidget {
     this.prices = const ProductionPrices(),
     this.screenplayLocked = false,
     this.bibleCostMicros,
-    this.working = false,
-    this.workingLabel = 'Working',
+    this.busy = const <String>{},
     this.error,
     this.onResubmit,
     this.editingEntry,
@@ -331,8 +345,9 @@ class ProductionWorkspaceView extends StatelessWidget {
   final int? bibleCostMicros;
 
   /// A command is running on the project's worker; changes wait for it.
-  final bool working;
-  final String workingLabel;
+  /// What requests under way work on, such as `bible`, `style` or
+  /// `character:mira`: the controls for those wait.
+  final Set<String> busy;
   final String? error;
 
   /// Asks again at the risk of paying twice; set only when [error] says the
@@ -382,7 +397,9 @@ class ProductionWorkspaceView extends StatelessWidget {
   /// look, as a style sample.
   final VoidCallback? onImportStyle;
 
-  bool get _idle => !working && editingEntry == null;
+  /// Whether the controls for [target] may be used: no request about it is
+  /// under way, and no bible entry is being edited.
+  bool _free(String target) => !busy.contains(target) && editingEntry == null;
 
   @override
   Widget build(BuildContext context) => WabScaffold(
@@ -418,7 +435,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                     ReferencesPanel(
                       references: references,
                       targets: referenceTargets(production.bible),
-                      enabled: _idle,
+                      enabled: _free('references'),
                       servers: servers,
                       serversProblem: serversProblem,
                       loadingTools: loadingTools,
@@ -455,7 +472,7 @@ class ProductionWorkspaceView extends StatelessWidget {
               const SizedBox(height: 12),
               KinetoButton(
                 key: const ValueKey<String>('resubmit-paid'),
-                onPressed: working ? null : onResubmit,
+                onPressed: onResubmit,
                 child: const Text('Ask again · may pay twice'),
               ),
             ],
@@ -505,7 +522,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                   ? BibleEntryEditor(
                       key: ValueKey<String>('entry-editor-${bible.revision}-${_entryKey(entry)}'),
                       entry: entry,
-                      working: working,
+                      working: busy.contains('bible'),
                       onCancel: () => onEditEntry(null),
                       onSave: onSaveEntry,
                     )
@@ -521,14 +538,14 @@ class ProductionWorkspaceView extends StatelessWidget {
               KinetoButton(
                 key: const ValueKey<String>('write-bible'),
                 primary: true,
-                onPressed: _idle && model.ready && screenplayLocked ? onWriteBible : null,
+                onPressed: _free('bible') && model.ready && screenplayLocked ? onWriteBible : null,
                 child: Text(bible == null ? 'Write the bible' : 'Write it again'),
               ),
               if (bible != null && !production.bibleIsLocked)
                 KinetoButton(
                   key: const ValueKey<String>('lock-bible'),
                   primary: true,
-                  onPressed: _idle ? () => onLockBible(bible.revision) : null,
+                  onPressed: _free('bible') ? () => onLockBible(bible.revision) : null,
                   child: Text('Lock revision ${bible.revision}'),
                 ),
               Text('${model.kind.label} · ${documentCostLabel(model, bibleCostMicros)}'),
@@ -560,7 +577,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                 ),
                 KinetoButton(
                   key: ValueKey<String>('edit-${_entryKey(entry)}'),
-                  onPressed: _idle ? () => onEditEntry(_entryKey(entry)) : null,
+                  onPressed: _free('bible') ? () => onEditEntry(_entryKey(entry)) : null,
                   child: const Text('Edit'),
                 ),
               ],
@@ -598,7 +615,7 @@ class ProductionWorkspaceView extends StatelessWidget {
           StyleComposer(
             presets: production.presets,
             cost: prices.sample,
-            enabled: _idle && prices.makesImages,
+            enabled: _free('style') && prices.makesImages,
             onSample: onSample,
           ),
           if (!prices.makesImages) ...<Widget>[
@@ -616,7 +633,7 @@ class ProductionWorkspaceView extends StatelessWidget {
             children: <Widget>[
               KinetoButton(
                 key: const ValueKey<String>('import-style'),
-                onPressed: _idle ? onImportStyle : null,
+                onPressed: _free('style') ? onImportStyle : null,
                 child: const Text('Import an image as a style'),
               ),
               const Text(
@@ -674,27 +691,27 @@ class ProductionWorkspaceView extends StatelessWidget {
               if (!selected && !rejected)
                 KinetoButton(
                   key: ValueKey<String>('select-${sample.id}'),
-                  onPressed: _idle ? () => onSelectStyle(sample.id) : null,
+                  onPressed: _free('style') ? () => onSelectStyle(sample.id) : null,
                   child: const Text('Select'),
                 ),
               if (selected && !locked)
                 KinetoButton(
                   key: ValueKey<String>('lock-${sample.id}'),
                   primary: true,
-                  onPressed: _idle ? () => onLockStyle(sample.id) : null,
+                  onPressed: _free('style') ? () => onLockStyle(sample.id) : null,
                   child: const Text('Lock style'),
                 ),
               if (!rejected && !locked)
                 KinetoButton(
                   key: ValueKey<String>('reject-${sample.id}'),
-                  onPressed: _idle ? () => onRejectStyle(sample.id) : null,
+                  onPressed: _free('style') ? () => onRejectStyle(sample.id) : null,
                   child: const Text('Reject'),
                 ),
               // An imported image has no preset to sample again from.
               if (!sample.imported)
                 KinetoButton(
                   key: ValueKey<String>('refine-${sample.id}'),
-                  onPressed: _idle && prices.makesImages ? () => _refineDialog(context, sample) : null,
+                  onPressed: _free('style') && prices.makesImages ? () => _refineDialog(context, sample) : null,
                   child: const Text('Refine'),
                 ),
             ],
@@ -738,7 +755,7 @@ class ProductionWorkspaceView extends StatelessWidget {
               CastingCard(
                 character: character,
                 prices: prices,
-                enabled: _idle && production.style != null,
+                enabled: _free('character:${character.id}') && production.style != null,
                 onAudition: (count) => onAudition(character.id, count),
                 onCast: (portrait) => onCastPortrait(character.id, portrait),
                 onRejectPortrait: (portrait) => onRejectPortrait(character.id, portrait),

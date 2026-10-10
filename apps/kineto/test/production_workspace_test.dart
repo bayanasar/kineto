@@ -118,6 +118,7 @@ Future<_Calls> _pump(
   ProductionPrices prices = _minimax,
   bool screenplayLocked = true,
   bool working = false,
+  Set<String>? busy,
   String? editing,
   String? error,
   bool offerResubmit = false,
@@ -138,8 +139,7 @@ Future<_Calls> _pump(
         model: _kimiCode,
         prices: prices,
         screenplayLocked: screenplayLocked,
-        working: working,
-        workingLabel: 'Casting',
+        busy: busy ?? (working ? const <String>{'bible', 'style', 'character:filmmaker', 'references'} : const <String>{}),
         editingEntry: editing,
         error: error,
         onResubmit: offerResubmit ? () => calls.log.add('resubmit') : null,
@@ -383,6 +383,16 @@ void main() {
       await _tap(tester, find.byKey(_key(key)));
     }
     expect(calls.log, isEmpty);
+  });
+
+  testWidgets("a character's casting under way holds up only that character", (tester) async {
+    final calls = await _pump(tester, production: _casting, busy: const <String>{'character:filmmaker'});
+    await _tap(tester, find.byKey(_key('audition-filmmaker')));
+    await _tap(tester, find.byKey(_key('cast-cast.filmmaker.0001')));
+    expect(calls.log, isEmpty, reason: 'the filmmaker waits for the casting under way');
+    await _tap(tester, find.byKey(_key('select-style_s0002')));
+    await _tap(tester, find.byKey(_key('write-bible')));
+    expect(calls.log, <String>['select style_s0002', 'write']);
   });
 
   testWidgets('asking again at the risk of paying twice is offered only after that refusal', (tester) async {

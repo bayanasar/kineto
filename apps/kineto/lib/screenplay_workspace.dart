@@ -88,8 +88,10 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
 
   // The project's requests outlive this page: what is under way, and how
   // the last one asked for here ended, come from them.
-  bool get _working => widget.work.busy;
-  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  // Requests asked for here change what this page shows, one after another
+  // in the engine; requests asked for elsewhere do not hold it up.
+  bool get _working => widget.work.busyOn(_page);
+  String get _workingLabel => widget.work.latestOn(_page)?.label ?? 'Working';
   String? get _error => widget.work.problemOn(_page);
   VoidCallback? get _resubmit => widget.work.retryOn(_page);
 

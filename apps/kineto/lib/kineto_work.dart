@@ -5,11 +5,11 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'native/kineto_engine.dart';
 
-/// A request under way: what it is, where it was asked for, and the button
-/// that asked.
+/// A request under way: what it is, where it was asked for, what it works
+/// on, and the button that asked.
 @immutable
 class KinetoTask {
-  const KinetoTask({required this.page, required this.label, required this.started, this.button});
+  const KinetoTask({required this.page, required this.label, required this.started, this.button, this.target});
 
   /// The workspace it was asked for in.
   final String page;
@@ -21,11 +21,15 @@ class KinetoTask {
   /// The key of the button that asked, which shows the work on itself.
   final Key? button;
 
+  /// What it works on, such as `shot:2` or `character:mira`: controls for
+  /// that wait while it runs. Requests for different things run at once.
+  final String? target;
+
   /// The label's first word, for the button: “Analysing”.
   String get short => label.split(' ').first;
 }
 
-/// How the last request ended.
+/// How a request ended.
 @immutable
 class KinetoOutcome {
   const KinetoOutcome({required this.task, this.problem, this.retry});
@@ -40,46 +44,91 @@ class KinetoOutcome {
   final Future<void> Function()? retry;
 }
 
-/// The project's requests, one at a time as its worker takes them. They
-/// belong to the project, not to the page that asked: a director who moves
-/// to another workspace still sees the work in the status bar and on the
-/// button, and finds the result when they come back.
+/// The project's requests. Several run at once: the engine runs a few that
+/// wait on a provider together, and those about the same thing one after
+/// another, so a request may wait before it starts. They belong to the
+/// project, not to the page that asked: a director who moves to another
+/// workspace still sees the work in the status bar and on the button, and
+/// finds the result when they come back.
 class KinetoWork extends ChangeNotifier {
-  KinetoTask? _running;
+  final List<KinetoTask> _running = <KinetoTask>[];
+  final Set<KinetoTask> _waiting = <KinetoTask>{};
+  final Map<String, KinetoOutcome> _outcomes = <String, KinetoOutcome>{};
   KinetoOutcome? _last;
   int _finished = 0;
   Key? _armed;
 
-  KinetoTask? get running => _running;
+  /// The requests under way, oldest first, waiting ones included.
+  List<KinetoTask> get running => List<KinetoTask>.unmodifiable(_running);
+
+  /// How the most recent request ended, until it is dismissed.
   KinetoOutcome? get last => _last;
-  bool get busy => _running != null;
+  bool get busy => _running.isNotEmpty;
 
   /// Counts finished requests; a page reads the project again when it moves.
   int get finished => _finished;
+
+  /// Whether [task] waits to start.
+  bool isWaiting(KinetoTask task) => _waiting.contains(task);
+
+  /// The request under way that the button keyed [button] asked for; with
+  /// [target], only one about it, since the same button of another shot
+  /// may have asked.
+  KinetoTask? startedBy(Key? button, {String? target}) {
+    if (button == null) return null;
+    for (final task in _running.reversed) {
+      if (task.button == button && (target == null || task.target == null || task.target == target)) return task;
+    }
+    return null;
+  }
+
+  /// What the requests under way work on.
+  Set<String> get targets => <String>{
+        for (final task in _running)
+          if (task.target != null) task.target!,
+      };
+
+  /// Whether a request for [target] is under way.
+  bool busyWith(String target) => _running.any((task) => task.target == target);
+
+  /// Whether a request asked for in [page] is under way.
+  bool busyOn(String page) => _running.any((task) => task.page == page);
+
+  /// The newest request under way asked for in [page].
+  KinetoTask? latestOn(String page) {
+    for (final task in _running.reversed) {
+      if (task.page == page) return task;
+    }
+    return null;
+  }
 
   /// Called by a button around its press, so the request it starts shows on
   /// it.
   void arm(Key? button) => _armed = button;
 
-  /// Run [action] as the project's request, unless one is under way.
-  /// Returns whether it succeeded. A refusal with [retryCode] offers
+  /// Run [action] as one of the project's requests, about [target] when
+  /// given. Returns whether it succeeded. A refusal with [retryCode] offers
   /// [retry].
   Future<bool> run(
     String page,
     String label,
     Future<void> Function() action, {
+    String? target,
     Future<void> Function()? retry,
     int retryCode = KinetoProjectException.paidCallUnresolved,
   }) async {
-    if (_running != null) return false;
-    final task = KinetoTask(page: page, label: label, started: DateTime.now(), button: _armed);
-    _running = task;
-    _last = null;
+    final task = KinetoTask(page: page, label: label, started: DateTime.now(), button: _armed, target: target);
+    _armed = null;
+    _running.add(task);
+    _outcomes.remove(page);
+    if (_last?.task.page == page) _last = null;
     notifyListeners();
     String? problem;
     Future<void> Function()? offer;
     try {
-      await action();
+      await runReportingWaits((waiting) {
+        if (waiting ? _waiting.add(task) : _waiting.remove(task)) notifyListeners();
+      }, action);
     } on KinetoProjectException catch (failure) {
       // The status says what kind of failure; the reason, when there is
       // one, says what the provider or the engine actually said.
@@ -88,29 +137,47 @@ class KinetoWork extends ChangeNotifier {
     } on Object catch (failure) {
       problem = failure.toString();
     }
-    _running = null;
-    _last = KinetoOutcome(task: task, problem: problem, retry: offer);
+    _running.remove(task);
+    _waiting.remove(task);
+    final outcome = KinetoOutcome(task: task, problem: problem, retry: offer);
+    _outcomes[page] = outcome;
+    _last = outcome;
     _finished++;
     notifyListeners();
     return problem == null;
   }
 
   /// Why the last request asked for in [page] failed, if it did.
-  String? problemOn(String page) => _last?.task.page == page ? _last?.problem : null;
+  String? problemOn(String page) => _outcomes[page]?.problem;
 
   /// Asks again for the last request in [page], when that is offered.
   VoidCallback? retryOn(String page) {
-    final last = _last;
-    if (last == null || last.task.page != page || last.retry == null) return null;
-    return () => run(page, last.task.label, last.retry!, retry: last.retry);
+    final last = _outcomes[page];
+    if (last == null || last.retry == null) return null;
+    return () => run(page, last.task.label, last.retry!, target: last.task.target, retry: last.retry);
   }
 
-  /// Forget how the last request ended.
-  void dismiss() {
-    if (_last == null) return;
-    _last = null;
-    notifyListeners();
+  /// Forget how the requests asked for in [page] ended, or how the most
+  /// recent one did.
+  void dismiss([String? page]) {
+    final changed = page == null ? _last != null : _outcomes.remove(page) != null;
+    if (page == null || _last?.task.page == page) _last = null;
+    if (changed) notifyListeners();
   }
+}
+
+/// Says what the controls below work on, such as `shot:2`, so a button
+/// shows only the work asked for about that.
+class KinetoTargetScope extends InheritedWidget {
+  const KinetoTargetScope({required this.target, required super.child, super.key});
+
+  final String target;
+
+  static String? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<KinetoTargetScope>()?.target;
+
+  @override
+  bool updateShouldNotify(KinetoTargetScope old) => old.target != target;
 }
 
 /// Makes the project's [KinetoWork] reachable from any button, dialogs
@@ -122,8 +189,8 @@ class KinetoWorkScope extends InheritedNotifier<KinetoWork> {
       context.dependOnInheritedWidgetOfExactType<KinetoWorkScope>()?.notifier;
 }
 
-/// The strip along the bottom of the window: the request under way and how
-/// long it has run, or how the last one ended, whatever workspace is open.
+/// The strip along the bottom of the window: the requests under way and how
+/// long each has run, or how the last one ended, whatever workspace is open.
 class KinetoStatusBar extends StatefulWidget {
   const KinetoStatusBar({required this.work, this.pageLabel, this.onShow, super.key});
 
@@ -141,6 +208,9 @@ class KinetoStatusBar extends StatefulWidget {
 
 class _KinetoStatusBarState extends State<KinetoStatusBar> {
   Timer? _clock;
+
+  /// How many requests the bar names; the rest are counted.
+  static const int _shown = 3;
 
   @override
   void initState() {
@@ -167,7 +237,7 @@ class _KinetoStatusBarState extends State<KinetoStatusBar> {
   }
 
   void _changed() {
-    final running = widget.work?.running != null;
+    final running = widget.work?.busy ?? false;
     if (running && _clock == null) {
       _clock = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
     } else if (!running) {
@@ -188,32 +258,63 @@ class _KinetoStatusBarState extends State<KinetoStatusBar> {
     // the theme redraws this when the director switches it.
     Theme.of(context);
     final work = widget.work;
-    final running = work?.running;
+    final running = work?.running ?? const <KinetoTask>[];
     final last = work?.last;
     final style = TextStyle(color: WabTheme.mutedColor, fontSize: 13, fontFamilyFallback: kWabKaiFallback);
     String where(String page) => widget.pageLabel?.call(page) ?? page;
 
     final children = <Widget>[];
-    if (running != null) {
+    if (running.isNotEmpty) {
       children.addAll(<Widget>[
         SizedBox.square(dimension: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: WabTheme.accentColor)),
         const SizedBox(width: 10),
-        Flexible(
-          child: KinetoWorkingText(
-            running.label,
-            style: style.copyWith(color: WabTheme.textColor),
-            overflow: TextOverflow.ellipsis,
+      ]);
+      for (final (index, task) in running.take(_shown).indexed) {
+        final waiting = work!.isWaiting(task);
+        children.add(
+          Flexible(
+            child: InkWell(
+              key: ValueKey<String>('status-task-$index'),
+              onTap: widget.onShow == null ? null : () => widget.onShow!(task.page),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Flexible(
+                      child: KinetoWorkingText(
+                        waiting ? 'Waiting · ${task.label}' : task.label,
+                        style: style.copyWith(color: waiting ? WabTheme.mutedColor : WabTheme.textColor),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Flexible(
+                      child: Text(
+                        '  ${_elapsed(DateTime.now().difference(task.started))} · ${where(task.page)}',
+                        style: style,
+                        overflow: TextOverflow.ellipsis,
+                        softWrap: false,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
-        ),
-        Text('  ${_elapsed(DateTime.now().difference(running.started))} · ${where(running.page)}', style: style),
-        const Spacer(),
-        if (widget.onShow != null)
+        );
+        if (index < running.length - 1) children.add(Text('  |  ', style: style));
+      }
+      if (running.length > _shown) children.add(Text('and ${running.length - _shown} more', style: style));
+      children.add(const Spacer());
+      if (widget.onShow != null) {
+        children.add(
           TextButton(
             key: const ValueKey<String>('status-show'),
-            onPressed: () => widget.onShow!(running.page),
-            child: Text('Open ${where(running.page)}', style: style.copyWith(color: WabTheme.accentColor)),
+            onPressed: () => widget.onShow!(running.first.page),
+            child: Text('Open ${where(running.first.page)}', style: style.copyWith(color: WabTheme.accentColor)),
           ),
-      ]);
+        );
+      }
     } else if (last != null) {
       final failed = last.problem != null;
       children.addAll(<Widget>[

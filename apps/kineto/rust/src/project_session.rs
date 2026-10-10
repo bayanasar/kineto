@@ -61,6 +61,10 @@ const MESSAGE_RECOVERED: i64 = 3;
 /// `[VIDEO, video revision, status, shot]`, posted when a video generated in
 /// the background was attached, or failed and was retired.
 const MESSAGE_VIDEO: i64 = 4;
+/// `[WAITING, token, 1 or 0, -1]`: a command waits for what it works on to
+/// be free, or for a place among the requests under way (1); or it waited
+/// and starts now (0). A command that never waits is not reported.
+const MESSAGE_WAITING: i64 = 5;
 /// The `shot` of a `RECOVERED` message for unplaced job records, and of a
 /// `COMPLETED` message for a document command.
 const NO_SHOT: i64 = -1;
@@ -310,6 +314,18 @@ impl SessionSink for DartPort {
                 NO_SHOT,
             ],
             result.as_ref().err(),
+        );
+    }
+
+    fn waiting(&self, token: u64, waiting: bool) {
+        self.post(
+            [
+                MESSAGE_WAITING,
+                i64::from_ne_bytes(token.to_ne_bytes()),
+                i64::from(waiting),
+                NO_SHOT,
+            ],
+            None,
         );
     }
 }
@@ -1785,11 +1801,18 @@ mod tests {
             i32::try_from(status).unwrap()
         }
 
+        /// The next completion, which must be `token`'s. A command that
+        /// waits for an earlier one on the same shot says so first.
         fn completed(&self, token: u64) -> i32 {
-            let [kind, actual, status, _] = self.next();
-            assert_eq!(kind, MESSAGE_COMPLETED);
-            assert_eq!(actual, i64::try_from(token).unwrap());
-            i32::try_from(status).unwrap()
+            loop {
+                let [kind, actual, status, _] = self.next();
+                if kind == MESSAGE_WAITING {
+                    continue;
+                }
+                assert_eq!(kind, MESSAGE_COMPLETED);
+                assert_eq!(actual, i64::try_from(token).unwrap());
+                return i32::try_from(status).unwrap();
+            }
         }
 
         fn pending(&self) -> VecDeque<[i64; 4]> {

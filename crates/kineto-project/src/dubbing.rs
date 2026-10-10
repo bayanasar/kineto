@@ -277,6 +277,12 @@ fn address(artifact_id: &str) -> Option<Address<'_>> {
         .flatten()
 }
 
+/// The scene and line number a take's ID names, if it names a take.
+#[must_use]
+pub fn take_line(artifact_id: &str) -> Option<(&str, u32)> {
+    address(artifact_id).map(|found| (found.scene, found.line))
+}
+
 /// Whether `artifact_id` names a take of line `line` of `scene_id` saying
 /// words whose hash is `text_hash`. An ID of schema version 1 does not say
 /// which words its take said, so it counts for any words in that place.

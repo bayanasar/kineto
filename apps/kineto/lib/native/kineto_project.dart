@@ -1106,6 +1106,25 @@ final class KinetoProjectSession implements Finalizable {
   }
 }
 
+/// Told `true` when a request waits for what it works on to be free, or for
+/// a place among the requests under way, and `false` when it starts.
+typedef KinetoWaitListener = void Function(bool waiting);
+
+final Object _waitListenerKey = Object();
+
+/// Run [body]; every request it makes of a project session tells
+/// [listener] whether it waits. The engine runs a few requests that wait on
+/// a provider at once, and requests about the same thing one after another.
+R runReportingWaits<R>(KinetoWaitListener listener, R Function() body) =>
+    runZoned(body, zoneValues: <Object, Object>{_waitListenerKey: listener});
+
+/// Tell whoever hears the requests made here whether one waits, as the
+/// engine does; a fake engine in tests calls it.
+void reportWaiting(bool waiting) {
+  final listener = Zone.current[_waitListenerKey];
+  if (listener is KinetoWaitListener) listener(waiting);
+}
+
 /// Receives one session's `[kind, token, status, shot, reason]` messages
 /// from the native worker and completes the matching futures. `reason` is
 /// what a provider said when it refused or failed, or null.
@@ -1119,6 +1138,7 @@ final class _SessionPort {
   static const int _completed = 2;
   static const int _recovered = 3;
   static const int _video = 4;
+  static const int _waiting = 5;
 
   final StreamController<KinetoVideoEvent> _videoEvents =
       StreamController<KinetoVideoEvent>.broadcast(sync: false);
@@ -1135,6 +1155,9 @@ final class _SessionPort {
   Object? _owner;
   final Map<int, Completer<void>> _pending = <int, Completer<void>>{};
 
+  /// Who hears whether a request waits, by token.
+  final Map<int, KinetoWaitListener> _waitListeners = <int, KinetoWaitListener>{};
+
   /// An answer is still owed for a command.
   bool get owing => _pending.isNotEmpty;
   final List<KinetoRecovery> recoveries = <KinetoRecovery>[];
@@ -1149,12 +1172,15 @@ final class _SessionPort {
     final token = _nextToken++;
     final completer = Completer<void>();
     _pending[token] = completer;
+    final listener = Zone.current[_waitListenerKey];
+    if (listener is KinetoWaitListener) _waitListeners[token] = listener;
     _owner = owner;
     _updateKeepAlive();
     return (token, completer.future);
   }
 
   void fail(int token, Object error) {
+    _waitListeners.remove(token);
     _pending.remove(token)?.completeError(error);
     _updateKeepAlive();
   }
@@ -1171,6 +1197,7 @@ final class _SessionPort {
       completer.completeError(error);
     }
     _pending.clear();
+    _waitListeners.clear();
   }
 
   void _onMessage(Object? message) {
@@ -1221,7 +1248,10 @@ final class _SessionPort {
             reason: reason,
           ),
         );
+      case _waiting:
+        _waitListeners[values[1]]?.call(status != 0);
       case _completed:
+        _waitListeners.remove(values[1]);
         final completer = _pending.remove(values[1]);
         if (completer == null) break;
         if (status == 0) {

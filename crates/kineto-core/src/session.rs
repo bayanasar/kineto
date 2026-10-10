@@ -26,6 +26,8 @@ use std::{
     thread,
 };
 
+use std::collections::VecDeque;
+
 use kineto_llm::LlmBackend;
 use kineto_project::{
     bible::{self as bible_document, Bible, EntryEdit, StaleCause},
@@ -68,6 +70,7 @@ use crate::{
     speech::{LocalDemoVoices, SpeechGenerator, SpeechProvider, SpeechProviderInfo, Voice},
     story,
     style::{self, SampleRequest},
+    turn::{self, Turn},
     video::{
         self, LocalDemoVideos, VideoAsk, VideoDone, VideoEstimate, VideoGenerator, VideoJob,
         VideoProvider, VideoProviderInfo,
@@ -527,6 +530,11 @@ pub trait SessionSink: Send + 'static {
     /// A document command finished. The documents are published before this
     /// is called.
     fn document_completed(&self, token: u64, result: &Result<(), SessionError>);
+
+    /// A command waits (`true`) for what it works on to be free, or for a
+    /// place among the requests under way; or it waited, and starts now
+    /// (`false`). A command that never waits is not reported.
+    fn waiting(&self, _token: u64, _waiting: bool) {}
 }
 
 /// The analysis the director's documents build on.
@@ -880,6 +888,9 @@ enum Work {
     },
     Storage(StorageCommand),
     Export(export::ExportRequest),
+    /// A request that ran on its own thread finished; the worker takes in
+    /// what it left.
+    Finished(Box<Finished>),
 }
 
 /// Work on the project's stored media.
@@ -966,6 +977,9 @@ impl ProjectSession {
         options: SessionOptions,
     ) -> std::io::Result<Self> {
         let (commands, inbox) = mpsc::channel();
+        // Requests that run on their own threads report back through the
+        // worker's own inbox.
+        let back = commands.clone();
         let view = Arc::new(View::default());
         let gate = Arc::new(Gate {
             closed: Arc::new(AtomicBool::new(false)),
@@ -976,7 +990,7 @@ impl ProjectSession {
             .spawn({
                 let view = Arc::clone(&view);
                 let gate = Arc::clone(&gate);
-                move || run(request, choose, options, &inbox, &view, &gate)
+                move || run(request, choose, options, &inbox, &back, &view, &gate)
             })?;
         Ok(Self {
             commands: Some(commands),
@@ -1316,8 +1330,8 @@ impl Drop for ProjectSession {
         self.gate.close();
         self.commands.take();
         if let Some(worker) = self.worker.take() {
-            // The worker finishes at most the command already running, then
-            // drops the project and its writer lock.
+            // The worker waits for the requests under way to finish their
+            // calls, then drops the project and its writer lock.
             let _ = worker.join();
         }
     }
@@ -1328,6 +1342,7 @@ fn run(
     choose: ChooseProviders,
     options: SessionOptions,
     inbox: &mpsc::Receiver<Envelope>,
+    back: &mpsc::Sender<Envelope>,
     view: &View,
     gate: &Arc<Gate>,
 ) {
@@ -1398,6 +1413,7 @@ fn run(
         }
     };
 
+    let mut dispatch = Dispatch::default();
     loop {
         // Wake regularly so videos that finished in the background are
         // attached even while no command arrives.
@@ -1409,160 +1425,262 @@ fn run(
         if gate.is_closed() {
             break;
         }
-        match envelope {
-            None => {}
-            Some(Envelope {
-                token,
-                work:
-                    Work::Shot {
-                        shot_index,
-                        command,
-                    },
-            }) => {
-                let result = match worker.as_mut() {
-                    None => Err(SessionError::NotOpen),
-                    Some(worker) => {
-                        let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
-                        let makes_media = matches!(
-                            command,
-                            ShotCommand::Generate
-                                | ShotCommand::ResubmitKeyframes
-                                | ShotCommand::GenerateConsenting(_)
-                                | ShotCommand::Refine { .. }
-                        );
-                        // A keyframe locked or released may be the frame
-                        // another shot's video closes on.
-                        let keyframe_changed =
-                            matches!(command, ShotCommand::Lock | ShotCommand::Reset);
-                        let result = worker.apply(index, command);
-                        if keyframe_changed {
-                            worker.publish_shots(view);
-                        } else {
-                            worker.publish(view, index);
-                        }
-                        // A choice among takes counts toward suggestions.
-                        worker.publish_documents(view);
-                        worker.publish_workflow(view);
-                        if makes_media {
-                            worker.tend_media(view, true);
-                        }
-                        result
-                    }
-                };
-                gate.deliver(|sink| sink.completed(token, shot_index, &result));
+        let Some(worker) = worker.as_mut() else {
+            if let Some(Envelope { token, work }) = envelope {
+                refuse(gate, token, &work, &Err(SessionError::NotOpen));
             }
-            Some(Envelope {
-                token,
-                work: Work::Document { command, resubmit },
-            }) => {
-                let result = match worker.as_mut() {
-                    None => Err(SessionError::NotOpen),
-                    Some(worker) => {
-                        // Locking a plan rewrites its shots' intent and may
-                        // change which shots are in play.
-                        let rewrites = matches!(command, DocumentCommand::LockShotPlan { .. });
-                        let result = worker.apply_document(command, resubmit);
-                        if worker.find_shots(false) || (rewrites && result.is_ok()) {
-                            worker.shots.clear();
-                            worker.publish_shots(view);
-                        }
-                        worker.publish_documents(view);
-                        // The bible says who is cast.
-                        worker.publish_production(view);
-                        worker.publish_workflow(view);
-                        result
-                    }
-                };
-                gate.deliver(|sink| sink.document_completed(token, &result));
-            }
-            Some(Envelope {
-                token,
-                work:
-                    Work::Production {
-                        command,
-                        submission,
-                    },
-            }) => {
-                let result = match worker.as_mut() {
-                    None => Err(SessionError::NotOpen),
-                    Some(worker) => {
-                        let makes_media = matches!(
-                            command,
-                            ProductionCommand::SampleStyle { .. }
-                                | ProductionCommand::RefineStyle { .. }
-                                | ProductionCommand::Audition { .. }
-                                | ProductionCommand::AuditionVoices { .. }
-                                | ProductionCommand::DubLine { .. }
-                        );
-                        let result = worker.apply_production(command, submission);
-                        worker.publish_production(view);
-                        // Choices and listed voices bear on suggestions and
-                        // recommendations.
-                        worker.publish_documents(view);
-                        worker.publish_workflow(view);
-                        if makes_media {
-                            worker.tend_media(view, true);
-                        }
-                        result
-                    }
-                };
-                gate.deliver(|sink| sink.document_completed(token, &result));
-            }
-            Some(Envelope {
-                token,
-                work: Work::Export(request),
-            }) => {
-                let result = match worker.as_mut() {
-                    None => Err(SessionError::NotOpen),
-                    Some(worker) => {
-                        let result = worker.export(&request);
-                        worker.publish_workflow(view);
-                        result
-                    }
-                };
-                gate.deliver(|sink| sink.document_completed(token, &result));
-            }
-            Some(Envelope {
-                token,
-                work: Work::Storage(command),
-            }) => {
-                let result = match worker.as_mut() {
-                    None => Err(SessionError::NotOpen),
-                    Some(worker) => {
-                        let result = worker.apply_storage(command);
-                        if command == StorageCommand::Collect {
-                            worker.shots.clear();
-                            worker.publish_shots(view);
-                            worker.publish_production(view);
-                        }
-                        worker.tend_media(view, false);
-                        result
-                    }
-                };
-                gate.deliver(|sink| sink.document_completed(token, &result));
-            }
-        }
-        if let Some(worker) = worker.as_mut() {
-            for (key, revision, result) in worker.finish_videos() {
-                // A shot no longer in play keeps its video; no one is told.
-                let Some(index) = worker.index_of(&key) else {
-                    continue;
-                };
-                worker.publish(view, index);
-                worker.publish_workflow(view);
-                if result.is_ok() {
-                    worker.tend_media(view, true);
+            continue;
+        };
+        // The project is read and written only with the turn.
+        let _turn = turn::hold(&worker.turn);
+        if let Some(Envelope { token, work }) = envelope {
+            match work {
+                Work::Finished(finished) => {
+                    dispatch.finished(token);
+                    worker.take_in(token, *finished, view, gate);
                 }
-                let shot_index = u32::try_from(index).expect("shot index fits in u32");
-                gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
+                work => dispatch.arrive(Envelope { token, work }, worker, view, gate, back),
             }
+            dispatch.start_waiting(worker, view, gate, back);
+        }
+        for (key, revision, result) in worker.finish_videos() {
+            // A shot no longer in play keeps its video; no one is told.
+            let Some(index) = worker.index_of(&key) else {
+                continue;
+            };
+            worker.publish(view, index);
+            worker.publish_workflow(view);
+            if result.is_ok() {
+                worker.tend_media(view, true);
+            }
+            let shot_index = u32::try_from(index).expect("shot index fits in u32");
+            gate.deliver(|sink| sink.video_finished(shot_index, revision, &result));
         }
     }
+    // Requests under way finish their calls and record what was paid for,
+    // and the project and its writer lock outlive them; no one is told.
+    dispatch.join();
     if let Some(worker) = worker {
         // Watchers see the closed gate within their wake interval; the
         // project and its writer lock outlive every one of them.
         worker.videos.join();
     }
+}
+
+/// Tell whoever asked that `work` was refused with `result`.
+fn refuse(gate: &Gate, token: u64, work: &Work, result: &Result<(), SessionError>) {
+    match work {
+        Work::Shot { shot_index, .. } => {
+            gate.deliver(|sink| sink.completed(token, *shot_index, result));
+        }
+        _ => gate.deliver(|sink| sink.document_completed(token, result)),
+    }
+}
+
+/// How many requests that wait on a provider run at once in one project.
+/// More wait their turn in the order they came, and each provider's own
+/// limit on calls at once still holds among those running.
+pub const MAX_PARALLEL_REQUESTS: usize = 4;
+
+/// What a request works on. Two requests that work on the same thing never
+/// run at once; one that works on everything runs alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scope {
+    /// Nothing another request works on, such as a shot not in play.
+    Nothing,
+    Shot(ShotKey),
+    /// A character's casting.
+    Character(String),
+    /// A character's voice.
+    Voice(String),
+    /// One line of a scene, by number.
+    Line(String, u32),
+    Style,
+    Source,
+    Document(DocumentKind),
+    References,
+    /// The speech provider's list of voices.
+    Catalog,
+    /// Everything: the shots in play change, or all media is read or let go.
+    Global,
+}
+
+impl Scope {
+    fn overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Nothing, _) | (_, Self::Nothing) => false,
+            (Self::Global, _) | (_, Self::Global) => true,
+            _ => self == other,
+        }
+    }
+}
+
+/// Whether `work` waits on a provider: a paid image, speech or video call,
+/// a model, or an MCP server. Such a request runs on its own thread.
+fn is_slow(work: &Work) -> bool {
+    match work {
+        Work::Shot { command, .. } => matches!(
+            command,
+            ShotCommand::Generate
+                | ShotCommand::ResubmitKeyframes
+                | ShotCommand::GenerateConsenting(_)
+                | ShotCommand::Refine { .. }
+                | ShotCommand::GenerateVideo
+                | ShotCommand::ResubmitVideo
+                | ShotCommand::GenerateVideos(_)
+                | ShotCommand::ResubmitVideos(_)
+        ),
+        Work::Document { command, .. } => matches!(
+            command,
+            DocumentCommand::AnalyzeStory
+                | DocumentCommand::WriteScreenplay
+                | DocumentCommand::RewriteScene { .. }
+                | DocumentCommand::WriteBible
+                | DocumentCommand::PlanShots
+                | DocumentCommand::ReplanScene { .. }
+                | DocumentCommand::SuggestPreferences
+                | DocumentCommand::RecommendVoices
+        ),
+        Work::Production { command, .. } => matches!(
+            command,
+            ProductionCommand::SampleStyle { .. }
+                | ProductionCommand::RefineStyle { .. }
+                | ProductionCommand::Audition { .. }
+                | ProductionCommand::LoadVoices
+                | ProductionCommand::AuditionVoices { .. }
+                | ProductionCommand::DubLine { .. }
+                | ProductionCommand::AskReference { .. }
+        ),
+        Work::Storage(_) | Work::Export(_) | Work::Finished(_) => false,
+    }
+}
+
+/// The requests of a session: those under way on their own threads, and
+/// those waiting for what they work on, or for a place among them.
+#[derive(Default)]
+struct Dispatch {
+    /// Under way on their own threads, by token, with what each works on.
+    running: Vec<(u64, Scope)>,
+    /// Waiting, in the order they came.
+    waiting: VecDeque<Envelope>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl Dispatch {
+    fn arrive(
+        &mut self,
+        envelope: Envelope,
+        worker: &mut Worker,
+        view: &View,
+        gate: &Arc<Gate>,
+        back: &mpsc::Sender<Envelope>,
+    ) {
+        if self.must_wait(&envelope, self.waiting.len(), worker) {
+            gate.deliver(|sink| sink.waiting(envelope.token, true));
+            self.waiting.push_back(envelope);
+        } else {
+            self.begin(envelope, worker, view, gate, back);
+        }
+    }
+
+    /// Whether `envelope`, behind the first `ahead` waiting requests, must
+    /// wait: one under way or ahead of it works on what it would, or it
+    /// waits on a provider and as many such requests as may run are under
+    /// way.
+    fn must_wait(&self, envelope: &Envelope, ahead: usize, worker: &Worker) -> bool {
+        let scope = worker.scope_of(&envelope.work);
+        self.running
+            .iter()
+            .any(|(_, running)| running.overlaps(&scope))
+            || self
+                .waiting
+                .iter()
+                .take(ahead)
+                .any(|waiting| worker.scope_of(&waiting.work).overlaps(&scope))
+            || (is_slow(&envelope.work) && self.running.len() >= worker.max_parallel)
+    }
+
+    fn begin(
+        &mut self,
+        envelope: Envelope,
+        worker: &mut Worker,
+        view: &View,
+        gate: &Arc<Gate>,
+        back: &mpsc::Sender<Envelope>,
+    ) {
+        if !is_slow(&envelope.work) {
+            worker.run_now(envelope, view, gate);
+            return;
+        }
+        let token = envelope.token;
+        let scope = worker.scope_of(&envelope.work);
+        if let Some(thread) = worker.start(envelope, back, gate) {
+            self.running.push((token, scope));
+            self.threads.push(thread);
+        }
+    }
+
+    fn finished(&mut self, token: u64) {
+        self.running.retain(|(running, _)| *running != token);
+        self.threads.retain(|thread| !thread.is_finished());
+    }
+
+    /// Begin every waiting request that need wait no longer, in order.
+    fn start_waiting(
+        &mut self,
+        worker: &mut Worker,
+        view: &View,
+        gate: &Arc<Gate>,
+        back: &mpsc::Sender<Envelope>,
+    ) {
+        let mut index = 0;
+        while index < self.waiting.len() {
+            if self.must_wait(&self.waiting[index], index, worker) {
+                index += 1;
+                continue;
+            }
+            let envelope = self
+                .waiting
+                .remove(index)
+                .expect("the index is within the queue");
+            gate.deliver(|sink| sink.waiting(envelope.token, false));
+            self.begin(envelope, worker, view, gate, back);
+            // What it did may change what the others work on.
+            index = 0;
+        }
+    }
+
+    fn join(&mut self) {
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What a request that ran on its own thread left for the worker.
+enum Finished {
+    Keyframes {
+        shot_index: u32,
+        key: ShotKey,
+        /// The shot as the request left it; `None` if it panicked.
+        shot: Option<ShotWorkflow>,
+        generated: Result<AttachOutcome, GenerationError>,
+    },
+    Videos {
+        shot_index: u32,
+        key: ShotKey,
+        shot: Option<ShotWorkflow>,
+        started: Result<video::Started, GenerationError>,
+    },
+    Document {
+        result: Result<(), SessionError>,
+        voices: Option<Result<Vec<Voice>, String>>,
+    },
+    Production {
+        command: ProductionCommand,
+        result: Result<(), SessionError>,
+        voices: Option<Result<Vec<Voice>, String>>,
+    },
 }
 
 /// Timing and video provider a session runs with.
@@ -1576,6 +1694,8 @@ pub struct SessionOptions {
     /// The provider lines are spoken with. `None` follows the image
     /// provider: MiniMax with its key, otherwise the local demo.
     pub speech_provider: Option<SpeechProvider>,
+    /// How many requests that wait on a provider run at once; at least one.
+    pub max_parallel_requests: usize,
 }
 
 impl Default for SessionOptions {
@@ -1584,6 +1704,7 @@ impl Default for SessionOptions {
             video_poll_interval: video::POLL_INTERVAL,
             video_provider: None,
             speech_provider: None,
+            max_parallel_requests: MAX_PARALLEL_REQUESTS,
         }
     }
 }
@@ -1741,9 +1862,13 @@ fn open(request: OpenRequest) -> Result<CanonicalProject, SessionError> {
 }
 
 struct Worker {
-    project: CanonicalProject,
-    provider: ImageProvider,
-    model: DocumentModel,
+    project: Arc<CanonicalProject>,
+    provider: Arc<ImageProvider>,
+    model: Arc<DocumentModel>,
+    /// Held while the project is read or written; see [`crate::turn`].
+    turn: Arc<Turn>,
+    /// How many requests that wait on a provider run at once.
+    max_parallel: usize,
     videos: Videos,
     /// The last dry run of a collection, which [`StorageCommand::Collect`]
     /// carries out.
@@ -1795,9 +1920,11 @@ impl Worker {
             .clone()
             .unwrap_or_else(|| speech_provider_for(&provider));
         Self {
-            project,
-            provider,
-            model,
+            project: Arc::new(project),
+            provider: Arc::new(provider),
+            model: Arc::new(model),
+            turn: Arc::new(Turn::default()),
+            max_parallel: options.max_parallel_requests.max(1),
             videos: Videos {
                 provider: video_provider,
                 gate,
@@ -1856,17 +1983,10 @@ impl Worker {
             return Err(SessionError::Shot(ShotWorkflowError::InvalidShotNumber));
         };
         let key = &key;
+        // Generating keyframes or videos waits on a provider and runs on its
+        // own thread (see `Worker::start`); every other command is a single
+        // canonical update.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
-            // Generation runs as write-ahead jobs so an interruption is
-            // recoverable; every other command is a single canonical update.
-            ShotCommand::Generate => self.generate(key, Consent::default()),
-            ShotCommand::ResubmitKeyframes => self.generate(key, Consent::RISK_PAYING_TWICE),
-            ShotCommand::GenerateConsenting(consent) => self.generate(key, consent),
-            ShotCommand::Refine { note, consent } => self.refine(key, consent, &note),
-            ShotCommand::GenerateVideo => self.start_video(key, &VideoAsk::default(), false),
-            ShotCommand::ResubmitVideo => self.start_video(key, &VideoAsk::default(), true),
-            ShotCommand::GenerateVideos(ask) => self.start_video(key, &ask, false),
-            ShotCommand::ResubmitVideos(ask) => self.start_video(key, &ask, true),
             // A keyframe of a style or cast since moved on from is not locked.
             ShotCommand::Lock => self
                 .with_shot(key, |project, _, shot| generation::lock(project, shot))
@@ -1890,7 +2010,7 @@ impl Worker {
                     | ShotCommand::ResubmitVideo
                     | ShotCommand::GenerateVideos(_)
                     | ShotCommand::ResubmitVideos(_) => {
-                        unreachable!("handled above")
+                        unreachable!("a request that waits on a provider runs on its own thread")
                     }
                 })
                 .map_err(SessionError::Shot),
@@ -1906,58 +2026,14 @@ impl Worker {
         }
     }
 
-    fn start_video(
+    /// Follow the videos a request submitted for the shot `key`, and note
+    /// whether the next one's submission is unresolved.
+    fn watch_started(
         &mut self,
         key: &ShotKey,
-        ask: &VideoAsk,
-        risk_paying_twice: bool,
+        started: Result<video::Started, GenerationError>,
     ) -> Result<(), SessionError> {
-        if self.videos.follows(key) {
-            return Err(SessionError::VideoInFlight);
-        }
-        let started = match self.videos.provider.clone() {
-            VideoProvider::LocalDemo => self.with_shot(key, |project, _, shot| {
-                video::start_videos(
-                    project,
-                    shot,
-                    &LocalDemoVideos,
-                    ask,
-                    &mut NoHooks,
-                    risk_paying_twice,
-                )
-            }),
-            VideoProvider::Minimax(Some(client)) => self.with_shot(key, |project, _, shot| {
-                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
-            }),
-            VideoProvider::Veo {
-                client: Some(client),
-                ..
-            } => self.with_shot(key, |project, _, shot| {
-                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
-            }),
-            VideoProvider::Omni(Some(client)) => self.with_shot(key, |project, _, shot| {
-                video::start_videos(project, shot, &client, ask, &mut NoHooks, risk_paying_twice)
-            }),
-            VideoProvider::Minimax(None)
-            | VideoProvider::Veo { client: None, .. }
-            | VideoProvider::Omni(None) => {
-                return Err(SessionError::Generation(GenerationError::NotConfigured));
-            }
-            VideoProvider::Plugin(plugin) => {
-                let videos = PluginVideos::new(plugin);
-                self.with_shot(key, |project, _, shot| {
-                    video::start_videos(
-                        project,
-                        shot,
-                        &videos,
-                        ask,
-                        &mut NoHooks,
-                        risk_paying_twice,
-                    )
-                })
-            }
-        }
-        .map_err(generation_error)?;
+        let started = started.map_err(generation_error)?;
         // Candidates submitted before one could not be are followed whatever
         // happened to it.
         let root = self.project.root().clone();
@@ -2015,20 +2091,6 @@ impl Worker {
         needs_attention
     }
 
-    fn generate(&mut self, key: &ShotKey, consent: Consent) -> Result<(), SessionError> {
-        let generated = self.with_shot(key, |project, provider, shot| {
-            generation::generate_with_consent(project, shot, provider, &mut NoHooks, consent)
-        });
-        self.note_keyframes(key, generated)
-    }
-
-    fn refine(&mut self, key: &ShotKey, consent: Consent, note: &str) -> Result<(), SessionError> {
-        let refined = self.with_shot(key, |project, provider, shot| {
-            generation::refine(project, shot, provider, &mut NoHooks, consent, note)
-        });
-        self.note_keyframes(key, refined)
-    }
-
     fn note_keyframes(
         &mut self,
         key: &ShotKey,
@@ -2067,10 +2129,11 @@ impl Worker {
             keyframes_unresolved,
             ..
         } = self;
+        let provider: &ImageProvider = provider;
         let (minimax, plugin) = match provider {
-            ImageProvider::Minimax(_) => (&*provider, None),
+            ImageProvider::Minimax(_) => (provider, None),
             ImageProvider::LocalDemo => (&keyless, None),
-            ImageProvider::Plugin(_) => (&keyless, Some(&*provider)),
+            ImageProvider::Plugin(_) => (&keyless, Some(provider)),
         };
         let mut recoveries = Vec::new();
         let mut unplaced = 0;
@@ -2129,421 +2192,26 @@ impl Worker {
         recoveries
     }
 
-    fn apply_document(
-        &mut self,
-        command: DocumentCommand,
-        resubmit: bool,
-    ) -> Result<(), SessionError> {
-        // Recommendations read the provider's voices, listed now if they
-        // have not been.
-        let catalog = match (&command, &self.voices) {
-            (DocumentCommand::RecommendVoices, Some(Ok(voices))) => voices.clone(),
-            (DocumentCommand::RecommendVoices, _) => {
-                self.apply_production(ProductionCommand::LoadVoices, Submission::Once)?;
-                match &self.voices {
-                    Some(Ok(voices)) => voices.clone(),
-                    _ => Vec::new(),
-                }
-            }
-            _ => Vec::new(),
-        };
-        let ready = self.model.describe().ready;
-        let project = &self.project;
-        let model = &self.model;
-        let ask =
-            |kind: DocumentKind, generate: &dyn Fn() -> Result<RevisionRecord, GenerationError>| {
-                if !ready {
-                    return Err(SessionError::Generation(
-                        GenerationError::ModelNotConfigured,
-                    ));
-                }
-                if resubmit {
-                    documents::risk_paying_twice(project, &model.info().provider, kind)
-                        .map_err(generation_error)?;
-                }
-                generate().map(|_| ()).map_err(generation_error)
-            };
-        let revision_error = |error| SessionError::Document(DocumentError::Revision(error));
-        panic::catch_unwind(AssertUnwindSafe(|| match command {
-            DocumentCommand::ImportSource {
-                text,
-                format,
-                original_name,
-            } => source::import(project, text.as_bytes(), format, original_name.as_deref())
-                .map(|_| ())
-                .map_err(|error| SessionError::Document(DocumentError::Source(error))),
-            DocumentCommand::AnalyzeStory => ask(DocumentKind::StoryAnalysis, &|| {
-                story::analyze(project, model)
-            }),
-            DocumentCommand::WriteScreenplay => ask(DocumentKind::Screenplay, &|| {
-                screenplay::write(project, model)
-            }),
-            DocumentCommand::RewriteScene {
-                scene_id,
-                direction,
-            } => ask(DocumentKind::Screenplay, &|| {
-                screenplay::rewrite_scene(project, model, &scene_id, direction.as_deref())
-            }),
-            DocumentCommand::SaveScene { based_on, edit } => {
-                let latest = revisions::latest(project, DocumentKind::Screenplay)
-                    .map_err(revision_error)?
-                    .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
-                if latest.revision != based_on {
-                    return Err(revision_error(RevisionError::NotLatest {
-                        based_on,
-                        latest: latest.revision,
-                    }));
-                }
-                let base: Screenplay = revisions::read(project, &latest).map_err(revision_error)?;
-                let edited = base
-                    .with_scene_edit(edit)
-                    .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
-                screenplay_document::edit(project, based_on, &edited)
-                    .map(|_| ())
-                    .map_err(revision_error)
-            }
-            DocumentCommand::LockScreenplay { revision } => {
-                screenplay_document::lock(project, revision).map_err(revision_error)
-            }
-            DocumentCommand::WriteBible => {
-                ask(DocumentKind::Bible, &|| bible::write(project, model))
-            }
-            DocumentCommand::SaveBibleEntry { based_on, edit } => {
-                let latest = revisions::latest(project, DocumentKind::Bible)
-                    .map_err(revision_error)?
-                    .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
-                if latest.revision != based_on {
-                    return Err(revision_error(RevisionError::NotLatest {
-                        based_on,
-                        latest: latest.revision,
-                    }));
-                }
-                let base: Bible = revisions::read(project, &latest).map_err(revision_error)?;
-                let edited = base
-                    .with_entry_edit(edit)
-                    .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
-                bible_document::edit(project, based_on, &edited)
-                    .map(|_| ())
-                    .map_err(revision_error)
-            }
-            DocumentCommand::LockBible { revision } => {
-                bible_document::lock(project, revision).map_err(revision_error)
-            }
-            DocumentCommand::PlanShots => {
-                ask(DocumentKind::ShotPlan, &|| shot_plan::write(project, model))
-            }
-            DocumentCommand::ReplanScene {
-                scene_id,
-                direction,
-            } => ask(DocumentKind::ShotPlan, &|| {
-                shot_plan::replan_scene(project, model, &scene_id, direction.as_deref())
-            }),
-            DocumentCommand::SaveScenePlan {
-                based_on,
-                scene,
-                added,
-            } => shot_plan_document::edit_scene(project, based_on, scene, &added)
-                .map(|_| ())
-                .map_err(revision_error),
-            DocumentCommand::LockShotPlan { revision } => {
-                shot_plan_document::lock(project, revision).map_err(revision_error)
-            }
-            DocumentCommand::SavePreferences {
-                based_on,
-                preferences,
-            } => preferences_document::save(project, based_on, &preferences)
-                .map(|_| ())
-                .map_err(revision_error),
-            DocumentCommand::SuggestPreferences => {
-                ask(DocumentKind::PreferenceSuggestions, &|| {
-                    learning::suggest(project, model)
-                })
-            }
-            DocumentCommand::AcceptSuggestion {
-                batch,
-                index,
-                value,
-            } => learning::accept(project, batch, index, value.as_deref())
-                .map(|_| ())
-                .map_err(generation_error),
-            DocumentCommand::RejectSuggestion { batch, index } => {
-                learning::reject(project, batch, index).map_err(generation_error)
-            }
-            DocumentCommand::RecommendVoices => ask(DocumentKind::VoiceRecommendations, &|| {
-                voice::recommend(project, model, &catalog)
-            }),
-        }))
-        .unwrap_or(Err(SessionError::Panicked))
-    }
-
     fn apply_production(
         &mut self,
         command: ProductionCommand,
         submission: Submission,
     ) -> Result<(), SessionError> {
-        let project = &self.project;
-        let provider = &self.provider;
-        let style_error = |error| SessionError::Production(ProductionError::Style(error));
-        let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
-        let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
-        let dubbing_error = |error| SessionError::Production(ProductionError::Dubbing(error));
-        let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
-        let mut hooks = NoHooks;
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match &command {
-            ProductionCommand::SampleStyle { preset, note } => paid(
-                style::sample(
-                    project,
-                    provider,
-                    SampleRequest {
-                        preset,
-                        note: note.as_deref(),
-                        scene_id: None,
-                    },
-                    submission,
-                    &mut hooks,
-                )
-                .map(|_| ()),
-            ),
-            ProductionCommand::RefineStyle { sample, note } => paid(
-                style::refine(project, provider, sample, note, submission, &mut hooks).map(|_| ()),
-            ),
-            ProductionCommand::SelectStyle(sample) => {
-                style_document::select(project, sample).map_err(style_error)
-            }
-            ProductionCommand::RejectStyle(sample) => {
-                style_document::reject(project, sample).map_err(style_error)
-            }
-            ProductionCommand::LockStyle(sample) => style_document::lock(project, sample)
-                .map(|_| ())
-                .map_err(style_error),
-            ProductionCommand::Audition { character, count } => paid(
-                cast::audition(
-                    project,
-                    provider,
-                    character,
-                    usize::try_from(*count).unwrap_or(usize::MAX),
-                    submission,
-                    &mut hooks,
-                )
-                .map(|_| ()),
-            ),
-            ProductionCommand::SelectPortrait {
-                character,
-                portrait,
-            } => cast_document::select(project, character, portrait).map_err(cast_error),
-            ProductionCommand::RejectPortrait {
-                character,
-                portrait,
-            } => cast_document::reject(project, character, portrait).map_err(cast_error),
-            ProductionCommand::LockCharacter { character } => {
-                cast::lock(project, provider, character)
-                    .map(|_| ())
-                    .map_err(generation_error)
-            }
-            ProductionCommand::CastPortrait {
-                character,
-                portrait,
-            } => cast::cast_portrait(project, provider, character, portrait)
-                .map(|_| ())
-                .map_err(generation_error),
-            ProductionCommand::ImportStyle { path, description } => {
-                let unreadable = |error: std::io::Error| {
-                    style_error(StyleError::Fs(kineto_project::fs::ProjectFsError::Io(
-                        error,
-                    )))
-                };
-                std::fs::metadata(path)
-                    .map_err(unreadable)
-                    .and_then(|metadata| {
-                        if metadata.len() > style::MAX_IMPORT_BYTES {
-                            Err(generation_error(GenerationError::Prerequisite(
-                                crate::generation::Prerequisite::StyleReference,
-                            )))
-                        } else {
-                            std::fs::read(path).map_err(unreadable)
-                        }
-                    })
-                    .and_then(|bytes| {
-                        style::import_sample(project, &provider.capabilities(), &bytes, description)
-                            .map(|_| ())
-                            .map_err(generation_error)
-                    })
-            }
-            ProductionCommand::ImportPortrait { character, path } => {
-                let unreadable = |error: std::io::Error| {
-                    cast_error(cast_document::CastError::Fs(
-                        kineto_project::fs::ProjectFsError::Io(error),
-                    ))
-                };
-                std::fs::metadata(path)
-                    .map_err(unreadable)
-                    .and_then(|metadata| {
-                        if metadata.len() > cast::MAX_IMPORT_BYTES {
-                            Err(generation_error(GenerationError::Prerequisite(
-                                crate::generation::Prerequisite::IdentityReference,
-                            )))
-                        } else {
-                            std::fs::read(path).map_err(unreadable)
-                        }
-                    })
-                    .and_then(|bytes| {
-                        cast::import_portrait(project, &provider.capabilities(), character, &bytes)
-                            .map(|_| ())
-                            .map_err(generation_error)
-                    })
-            }
-            ProductionCommand::LoadVoices => {
-                let listed = match &self.speech {
-                    SpeechProvider::LocalDemo => {
-                        LocalDemoVoices.voices().map_err(|error| match error {})
-                    }
-                    SpeechProvider::Minimax(Some(client)) => {
-                        client.voices().map_err(|error| GenerationError::Provider {
-                            class: error.class(),
-                            source: Box::new(error),
-                        })
-                    }
-                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
-                    SpeechProvider::Plugin(plugin) => {
-                        let speech = PluginSpeech::new(plugin);
-                        speech.voices().map_err(|error| GenerationError::Provider {
-                            class: speech.class(&error),
-                            source: Box::new(error),
-                        })
-                    }
-                };
-                self.voices = Some(
-                    listed
-                        .as_ref()
-                        .map(Clone::clone)
-                        .map_err(ToString::to_string),
-                );
-                listed.map(|_| ()).map_err(generation_error)
-            }
-            ProductionCommand::AuditionVoices {
-                character,
-                choices,
-                line,
-            } => {
-                let line = line.as_deref();
-                paid(
-                    match &self.speech {
-                        SpeechProvider::LocalDemo => voice::audition(
-                            project,
-                            &LocalDemoVoices,
-                            character,
-                            choices,
-                            line,
-                            submission,
-                            &mut hooks,
-                        ),
-                        SpeechProvider::Minimax(Some(client)) => voice::audition(
-                            project, client, character, choices, line, submission, &mut hooks,
-                        ),
-                        SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
-                        SpeechProvider::Plugin(plugin) => voice::audition(
-                            project,
-                            &PluginSpeech::new(plugin),
-                            character,
-                            choices,
-                            line,
-                            submission,
-                            &mut hooks,
-                        ),
-                    }
-                    .map(|_| ()),
-                )
-            }
-            ProductionCommand::SelectVoice {
-                character,
-                audition,
-            } => voice_document::select(project, character, audition).map_err(voice_error),
-            ProductionCommand::RejectVoice {
-                character,
-                audition,
-            } => voice_document::reject(project, character, audition).map_err(voice_error),
-            ProductionCommand::LockVoice { character } => voice::lock(project, character)
-                .map(|_| ())
-                .map_err(generation_error),
-            ProductionCommand::DubLine {
-                scene,
-                line,
-                request,
-            } => paid(
-                match &self.speech {
-                    SpeechProvider::LocalDemo => dubbing::dub(
-                        project,
-                        &LocalDemoVoices,
-                        scene,
-                        *line,
-                        request,
-                        submission,
-                        &mut hooks,
-                    ),
-                    SpeechProvider::Minimax(Some(client)) => dubbing::dub(
-                        project, client, scene, *line, request, submission, &mut hooks,
-                    ),
-                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
-                    SpeechProvider::Plugin(plugin) => dubbing::dub(
-                        project,
-                        &PluginSpeech::new(plugin),
-                        scene,
-                        *line,
-                        request,
-                        submission,
-                        &mut hooks,
-                    ),
-                }
-                .map(|_| ()),
-            ),
-            ProductionCommand::SelectTake { scene, take } => {
-                dubbing_document::select(project, scene, take).map_err(dubbing_error)
-            }
-            ProductionCommand::RejectTake { scene, take } => {
-                dubbing_document::reject(project, scene, take).map_err(dubbing_error)
-            }
-            ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
-                .map(|_| ())
-                .map_err(generation_error),
-            ProductionCommand::AskReference {
-                server,
-                tool,
-                arguments,
-                attached_to,
-            } => references::server(server)
-                .and_then(|server| {
-                    references::ask(
-                        project,
-                        &server,
-                        Ask {
-                            tool,
-                            arguments: arguments.clone(),
-                            attached_to: attached_to.clone(),
-                        },
-                    )
-                })
-                .map(|_| ())
-                .map_err(generation_error),
-            ProductionCommand::EditReference { reference, text } => {
-                reference_document::edit(project, reference, text)
-                    .map(|_| ())
-                    .map_err(reference_error)
-            }
-            ProductionCommand::AttachReference { reference, target } => {
-                reference_document::attach(project, reference, target)
-                    .map(|_| ())
-                    .map_err(reference_error)
-            }
-            ProductionCommand::DetachReference { reference, target } => {
-                reference_document::detach(project, reference, target)
-                    .map(|_| ())
-                    .map_err(reference_error)
-            }
-            ProductionCommand::RemoveReference { reference } => {
-                reference_document::remove(project, reference).map_err(reference_error)
-            }
-        }))
-        .unwrap_or(Err(SessionError::Panicked));
+        let (outcome, voices) = production_work(&self.shared(), &command, submission);
+        self.took_in_production(&command, voices);
+        outcome
+    }
+
+    /// Take in what a production command left: the voices it listed, and
+    /// which of its paid calls may have been charged without their result.
+    fn took_in_production(
+        &mut self,
+        command: &ProductionCommand,
+        voices: Option<Result<Vec<Voice>, String>>,
+    ) {
+        if voices.is_some() {
+            self.voices = voices;
+        }
         // A paid call cut short may have been charged without its result;
         // what the partitions now hold says so, whichever way it ended.
         match command {
@@ -2555,7 +2223,432 @@ impl Worker {
             ProductionCommand::DubLine { .. } => self.note_unresolved_lines(),
             _ => {}
         }
-        outcome
+    }
+
+    /// What `work` works on.
+    fn scope_of(&self, work: &Work) -> Scope {
+        match work {
+            Work::Shot { shot_index, .. } => usize::try_from(*shot_index)
+                .ok()
+                .and_then(|index| self.keys.get(index))
+                .map_or(Scope::Nothing, |key| Scope::Shot(key.clone())),
+            Work::Document { command, .. } => match command {
+                DocumentCommand::ImportSource { .. } => Scope::Source,
+                DocumentCommand::AnalyzeStory => Scope::Document(DocumentKind::StoryAnalysis),
+                DocumentCommand::WriteScreenplay
+                | DocumentCommand::RewriteScene { .. }
+                | DocumentCommand::SaveScene { .. }
+                | DocumentCommand::LockScreenplay { .. } => {
+                    Scope::Document(DocumentKind::Screenplay)
+                }
+                DocumentCommand::WriteBible
+                | DocumentCommand::SaveBibleEntry { .. }
+                | DocumentCommand::LockBible { .. } => Scope::Document(DocumentKind::Bible),
+                DocumentCommand::PlanShots
+                | DocumentCommand::ReplanScene { .. }
+                | DocumentCommand::SaveScenePlan { .. } => Scope::Document(DocumentKind::ShotPlan),
+                // A locked plan rewrites its shots' intent and may change
+                // which shots are in play.
+                DocumentCommand::LockShotPlan { .. } => Scope::Global,
+                DocumentCommand::SavePreferences { .. }
+                | DocumentCommand::SuggestPreferences
+                | DocumentCommand::AcceptSuggestion { .. }
+                | DocumentCommand::RejectSuggestion { .. } => {
+                    Scope::Document(DocumentKind::Preferences)
+                }
+                DocumentCommand::RecommendVoices => {
+                    Scope::Document(DocumentKind::VoiceRecommendations)
+                }
+            },
+            Work::Production { command, .. } => match command {
+                ProductionCommand::SampleStyle { .. }
+                | ProductionCommand::RefineStyle { .. }
+                | ProductionCommand::SelectStyle(_)
+                | ProductionCommand::RejectStyle(_)
+                | ProductionCommand::LockStyle(_)
+                | ProductionCommand::ImportStyle { .. } => Scope::Style,
+                ProductionCommand::Audition { character, .. }
+                | ProductionCommand::SelectPortrait { character, .. }
+                | ProductionCommand::RejectPortrait { character, .. }
+                | ProductionCommand::LockCharacter { character }
+                | ProductionCommand::CastPortrait { character, .. }
+                | ProductionCommand::ImportPortrait { character, .. } => {
+                    Scope::Character(character.clone())
+                }
+                ProductionCommand::LoadVoices => Scope::Catalog,
+                ProductionCommand::AuditionVoices { character, .. }
+                | ProductionCommand::SelectVoice { character, .. }
+                | ProductionCommand::RejectVoice { character, .. }
+                | ProductionCommand::LockVoice { character } => Scope::Voice(character.clone()),
+                ProductionCommand::DubLine { scene, line, .. }
+                | ProductionCommand::LockLine { scene, line } => Scope::Line(scene.clone(), *line),
+                ProductionCommand::SelectTake { scene, take }
+                | ProductionCommand::RejectTake { scene, take } => {
+                    dubbing_document::take_line(take)
+                        .map_or(Scope::Nothing, |(_, line)| Scope::Line(scene.clone(), line))
+                }
+                ProductionCommand::AskReference { .. }
+                | ProductionCommand::EditReference { .. }
+                | ProductionCommand::AttachReference { .. }
+                | ProductionCommand::DetachReference { .. }
+                | ProductionCommand::RemoveReference { .. } => Scope::References,
+            },
+            Work::Storage(_) | Work::Export(_) => Scope::Global,
+            Work::Finished(_) => Scope::Nothing,
+        }
+    }
+
+    /// Run a request that waits on no provider, here and now, and tell
+    /// whoever asked.
+    fn run_now(&mut self, envelope: Envelope, view: &View, gate: &Gate) {
+        let Envelope { token, work } = envelope;
+        match work {
+            Work::Shot {
+                shot_index,
+                command,
+            } => {
+                let index = usize::try_from(shot_index).unwrap_or(usize::MAX);
+                // A keyframe locked or released may be the frame another
+                // shot's video closes on.
+                let keyframe_changed = matches!(command, ShotCommand::Lock | ShotCommand::Reset);
+                let result = self.apply(index, command);
+                if keyframe_changed {
+                    self.publish_shots(view);
+                } else {
+                    self.publish(view, index);
+                }
+                // A choice among takes counts toward suggestions.
+                self.publish_documents(view);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.completed(token, shot_index, &result));
+            }
+            Work::Document { command, resubmit } => {
+                // Locking a plan rewrites its shots' intent and may change
+                // which shots are in play.
+                let rewrites = matches!(command, DocumentCommand::LockShotPlan { .. });
+                let result = document_work(&self.shared(), command, resubmit, &[]);
+                if self.find_shots(false) || (rewrites && result.is_ok()) {
+                    self.shots.clear();
+                    self.publish_shots(view);
+                }
+                self.publish_documents(view);
+                // The bible says who is cast.
+                self.publish_production(view);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Work::Production {
+                command,
+                submission,
+            } => {
+                let result = self.apply_production(command, submission);
+                self.publish_production(view);
+                // Choices and listed voices bear on suggestions and
+                // recommendations.
+                self.publish_documents(view);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Work::Export(request) => {
+                let result = self.export(&request);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Work::Storage(command) => {
+                let result = self.apply_storage(command);
+                if command == StorageCommand::Collect {
+                    self.shots.clear();
+                    self.publish_shots(view);
+                    self.publish_production(view);
+                }
+                self.tend_media(view, false);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Work::Finished(_) => {}
+        }
+    }
+
+    /// Start a request that waits on a provider on its own thread, which
+    /// holds the turn except while the provider answers and reports back
+    /// through `back`. A shot's workflow goes with it and comes back when
+    /// it finishes. Returns `None` when it was refused at once, and says so.
+    fn start(
+        &mut self,
+        envelope: Envelope,
+        back: &mpsc::Sender<Envelope>,
+        gate: &Gate,
+    ) -> Option<thread::JoinHandle<()>> {
+        let Envelope { token, work } = envelope;
+        let shared = self.shared();
+        let refused = |gate: &Gate, shot: Option<u32>, error: SessionError| {
+            let result = Err(error);
+            match shot {
+                Some(shot_index) => gate.deliver(|sink| sink.completed(token, shot_index, &result)),
+                None => gate.deliver(|sink| sink.document_completed(token, &result)),
+            }
+        };
+        let asked_for = match &work {
+            Work::Shot { shot_index, .. } => Some(*shot_index),
+            _ => None,
+        };
+        let job: Box<dyn FnOnce() -> Finished + Send> = match work {
+            Work::Shot {
+                shot_index,
+                command,
+            } => {
+                let Some(key) = usize::try_from(shot_index)
+                    .ok()
+                    .and_then(|index| self.keys.get(index))
+                    .cloned()
+                else {
+                    refused(
+                        gate,
+                        asked_for,
+                        SessionError::Shot(ShotWorkflowError::InvalidShotNumber),
+                    );
+                    return None;
+                };
+                let video = match command {
+                    ShotCommand::GenerateVideo => Some((VideoAsk::default(), false)),
+                    ShotCommand::ResubmitVideo => Some((VideoAsk::default(), true)),
+                    ShotCommand::GenerateVideos(ref ask) => Some((ask.clone(), false)),
+                    ShotCommand::ResubmitVideos(ref ask) => Some((ask.clone(), true)),
+                    _ => None,
+                };
+                if video.is_some() && self.videos.follows(&key) {
+                    refused(gate, asked_for, SessionError::VideoInFlight);
+                    return None;
+                }
+                let shot = match self.shots.remove(&key) {
+                    Some(shot) => shot,
+                    None => match ShotWorkflow::load(&self.project, &key) {
+                        Ok(shot) => shot,
+                        Err(error) => {
+                            refused(gate, asked_for, SessionError::Shot(error));
+                            return None;
+                        }
+                    },
+                };
+                match video {
+                    Some((ask, risk_paying_twice)) => Box::new(move || {
+                        let shot = shot;
+                        match panic::catch_unwind(AssertUnwindSafe(|| {
+                            video_work(&shared, &shot, &ask, risk_paying_twice)
+                        })) {
+                            Ok(started) => Finished::Videos {
+                                shot_index,
+                                key,
+                                shot: Some(shot),
+                                started,
+                            },
+                            Err(_) => Finished::Videos {
+                                shot_index,
+                                key,
+                                shot: None,
+                                started: Err(GenerationError::Unexpected(
+                                    "a video request panicked",
+                                )),
+                            },
+                        }
+                    }),
+                    None => {
+                        let (consent, note) = match command {
+                            ShotCommand::ResubmitKeyframes => (Consent::RISK_PAYING_TWICE, None),
+                            ShotCommand::GenerateConsenting(consent) => (consent, None),
+                            ShotCommand::Refine { note, consent } => (consent, Some(note)),
+                            _ => (Consent::default(), None),
+                        };
+                        Box::new(move || {
+                            let mut shot = shot;
+                            match panic::catch_unwind(AssertUnwindSafe(|| {
+                                keyframe_work(&shared, &mut shot, consent, note.as_deref())
+                            })) {
+                                Ok(generated) => Finished::Keyframes {
+                                    shot_index,
+                                    key,
+                                    shot: Some(shot),
+                                    generated,
+                                },
+                                Err(_) => Finished::Keyframes {
+                                    shot_index,
+                                    key,
+                                    shot: None,
+                                    generated: Err(GenerationError::Unexpected(
+                                        "a keyframe request panicked",
+                                    )),
+                                },
+                            }
+                        })
+                    }
+                }
+            }
+            Work::Document { command, resubmit } => {
+                // Recommendations read the provider's voices, listed first
+                // if they have not been.
+                let known = match (&command, &self.voices) {
+                    (DocumentCommand::RecommendVoices, Some(Ok(voices))) => Some(voices.clone()),
+                    _ => None,
+                };
+                let lists = matches!(command, DocumentCommand::RecommendVoices) && known.is_none();
+                Box::new(move || {
+                    let mut catalog = known.unwrap_or_default();
+                    let mut voices = None;
+                    if lists {
+                        let (listed, found) = production_work(
+                            &shared,
+                            &ProductionCommand::LoadVoices,
+                            Submission::Once,
+                        );
+                        if let Err(error) = listed {
+                            return Finished::Document {
+                                result: Err(error),
+                                voices: found,
+                            };
+                        }
+                        if let Some(Ok(found)) = &found {
+                            catalog.clone_from(found);
+                        }
+                        voices = found;
+                    }
+                    let result = document_work(&shared, command, resubmit, &catalog);
+                    Finished::Document { result, voices }
+                })
+            }
+            Work::Production {
+                command,
+                submission,
+            } => Box::new(move || {
+                let (result, voices) = production_work(&shared, &command, submission);
+                Finished::Production {
+                    command,
+                    result,
+                    voices,
+                }
+            }),
+            Work::Storage(_) | Work::Export(_) | Work::Finished(_) => {
+                unreachable!("only a request that waits on a provider runs on its own thread")
+            }
+        };
+        let turn = Arc::clone(&self.turn);
+        let back = back.clone();
+        let spawned = thread::Builder::new()
+            .name("kineto-request".to_owned())
+            .spawn(move || {
+                let finished = {
+                    let _turn = turn::hold(&turn);
+                    job()
+                };
+                let _ = back.send(Envelope {
+                    token,
+                    work: Work::Finished(Box::new(finished)),
+                });
+            });
+        match spawned {
+            Ok(thread) => Some(thread),
+            Err(_) => {
+                refused(
+                    gate,
+                    asked_for,
+                    SessionError::Generation(GenerationError::Unexpected(
+                        "a request could not start",
+                    )),
+                );
+                None
+            }
+        }
+    }
+
+    /// Take in what a request that ran on its own thread left, publish it,
+    /// and tell whoever asked.
+    fn take_in(&mut self, token: u64, finished: Finished, view: &View, gate: &Gate) {
+        match finished {
+            Finished::Keyframes {
+                shot_index,
+                key,
+                shot,
+                generated,
+            } => {
+                // The request's workflow is the shot as it now stands;
+                // without one, the shot is read again from its files.
+                match shot {
+                    Some(shot) => {
+                        self.shots.insert(key.clone(), shot);
+                    }
+                    None => {
+                        self.shots.remove(&key);
+                    }
+                }
+                let result = self.note_keyframes(&key, generated);
+                self.published_shot(view, &key);
+                self.publish_documents(view);
+                self.publish_workflow(view);
+                self.tend_media(view, true);
+                gate.deliver(|sink| sink.completed(token, shot_index, &result));
+            }
+            Finished::Videos {
+                shot_index,
+                key,
+                shot,
+                started,
+            } => {
+                match shot {
+                    Some(shot) => {
+                        self.shots.insert(key.clone(), shot);
+                    }
+                    None => {
+                        self.shots.remove(&key);
+                    }
+                }
+                let result = self.watch_started(&key, started);
+                self.published_shot(view, &key);
+                self.publish_documents(view);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.completed(token, shot_index, &result));
+            }
+            Finished::Document { result, voices } => {
+                if voices.is_some() {
+                    self.voices = voices;
+                }
+                if self.find_shots(false) {
+                    self.shots.clear();
+                    self.publish_shots(view);
+                }
+                self.publish_documents(view);
+                self.publish_production(view);
+                self.publish_workflow(view);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+            Finished::Production {
+                command,
+                result,
+                voices,
+            } => {
+                self.took_in_production(&command, voices);
+                self.publish_production(view);
+                self.publish_documents(view);
+                self.publish_workflow(view);
+                self.tend_media(view, true);
+                gate.deliver(|sink| sink.document_completed(token, &result));
+            }
+        }
+    }
+
+    /// Publish the shot `key` names, if it is still in play.
+    fn published_shot(&mut self, view: &View, key: &ShotKey) {
+        if let Some(index) = self.index_of(key) {
+            self.publish(view, index);
+        }
+    }
+
+    /// What a request needs off the worker: the project and the providers.
+    fn shared(&self) -> Shared {
+        Shared {
+            project: Arc::clone(&self.project),
+            provider: Arc::clone(&self.provider),
+            model: Arc::clone(&self.model),
+            speech: self.speech.clone(),
+            video: self.videos.provider.clone(),
+        }
     }
 
     /// Record style samples and casting images MiniMax answered before an
@@ -3260,6 +3353,494 @@ impl Worker {
     }
 }
 
+/// The speech provider's voices as a request listed them, or why they could
+/// not be listed.
+type Listed = Result<Vec<Voice>, String>;
+
+/// What a request needs off the worker: the project and its providers. A
+/// request that waits on a provider runs on its own thread with it.
+#[derive(Clone)]
+struct Shared {
+    project: Arc<CanonicalProject>,
+    provider: Arc<ImageProvider>,
+    model: Arc<DocumentModel>,
+    speech: SpeechProvider,
+    video: VideoProvider,
+}
+
+/// Generate a shot's keyframes, or refine them as `note` asks.
+fn keyframe_work(
+    shared: &Shared,
+    shot: &mut ShotWorkflow,
+    consent: Consent,
+    note: Option<&str>,
+) -> Result<AttachOutcome, GenerationError> {
+    match note {
+        None => generation::generate_with_consent(
+            &shared.project,
+            shot,
+            &shared.provider,
+            &mut NoHooks,
+            consent,
+        ),
+        Some(note) => generation::refine(
+            &shared.project,
+            shot,
+            &shared.provider,
+            &mut NoHooks,
+            consent,
+            note,
+        ),
+    }
+}
+
+/// Submit a shot's next videos as `ask` says.
+fn video_work(
+    shared: &Shared,
+    shot: &ShotWorkflow,
+    ask: &VideoAsk,
+    risk_paying_twice: bool,
+) -> Result<video::Started, GenerationError> {
+    let project = &*shared.project;
+    match &shared.video {
+        VideoProvider::LocalDemo => video::start_videos(
+            project,
+            shot,
+            &LocalDemoVideos,
+            ask,
+            &mut NoHooks,
+            risk_paying_twice,
+        ),
+        VideoProvider::Minimax(Some(client)) => {
+            video::start_videos(project, shot, client, ask, &mut NoHooks, risk_paying_twice)
+        }
+        VideoProvider::Veo {
+            client: Some(client),
+            ..
+        } => video::start_videos(project, shot, client, ask, &mut NoHooks, risk_paying_twice),
+        VideoProvider::Omni(Some(client)) => {
+            video::start_videos(project, shot, client, ask, &mut NoHooks, risk_paying_twice)
+        }
+        VideoProvider::Minimax(None)
+        | VideoProvider::Veo { client: None, .. }
+        | VideoProvider::Omni(None) => Err(GenerationError::NotConfigured),
+        VideoProvider::Plugin(plugin) => video::start_videos(
+            project,
+            shot,
+            &PluginVideos::new(Arc::clone(plugin)),
+            ask,
+            &mut NoHooks,
+            risk_paying_twice,
+        ),
+    }
+}
+
+/// Run a document command with `shared`'s project and model. `catalog` is
+/// the speech provider's voices, which recommendations read.
+fn document_work(
+    shared: &Shared,
+    command: DocumentCommand,
+    resubmit: bool,
+    catalog: &[Voice],
+) -> Result<(), SessionError> {
+    let ready = shared.model.describe().ready;
+    let project = &*shared.project;
+    let model = &*shared.model;
+    let ask = |kind: DocumentKind,
+               generate: &dyn Fn() -> Result<RevisionRecord, GenerationError>| {
+        if !ready {
+            return Err(SessionError::Generation(
+                GenerationError::ModelNotConfigured,
+            ));
+        }
+        if resubmit {
+            documents::risk_paying_twice(project, &model.info().provider, kind)
+                .map_err(generation_error)?;
+        }
+        generate().map(|_| ()).map_err(generation_error)
+    };
+    let revision_error = |error| SessionError::Document(DocumentError::Revision(error));
+    panic::catch_unwind(AssertUnwindSafe(|| match command {
+        DocumentCommand::ImportSource {
+            text,
+            format,
+            original_name,
+        } => source::import(project, text.as_bytes(), format, original_name.as_deref())
+            .map(|_| ())
+            .map_err(|error| SessionError::Document(DocumentError::Source(error))),
+        DocumentCommand::AnalyzeStory => ask(DocumentKind::StoryAnalysis, &|| {
+            story::analyze(project, model)
+        }),
+        DocumentCommand::WriteScreenplay => ask(DocumentKind::Screenplay, &|| {
+            screenplay::write(project, model)
+        }),
+        DocumentCommand::RewriteScene {
+            scene_id,
+            direction,
+        } => ask(DocumentKind::Screenplay, &|| {
+            screenplay::rewrite_scene(project, model, &scene_id, direction.as_deref())
+        }),
+        DocumentCommand::SaveScene { based_on, edit } => {
+            let latest = revisions::latest(project, DocumentKind::Screenplay)
+                .map_err(revision_error)?
+                .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
+            if latest.revision != based_on {
+                return Err(revision_error(RevisionError::NotLatest {
+                    based_on,
+                    latest: latest.revision,
+                }));
+            }
+            let base: Screenplay = revisions::read(project, &latest).map_err(revision_error)?;
+            let edited = base
+                .with_scene_edit(edit)
+                .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
+            screenplay_document::edit(project, based_on, &edited)
+                .map(|_| ())
+                .map_err(revision_error)
+        }
+        DocumentCommand::LockScreenplay { revision } => {
+            screenplay_document::lock(project, revision).map_err(revision_error)
+        }
+        DocumentCommand::WriteBible => ask(DocumentKind::Bible, &|| bible::write(project, model)),
+        DocumentCommand::SaveBibleEntry { based_on, edit } => {
+            let latest = revisions::latest(project, DocumentKind::Bible)
+                .map_err(revision_error)?
+                .ok_or(revision_error(RevisionError::NoSuchRevision(based_on)))?;
+            if latest.revision != based_on {
+                return Err(revision_error(RevisionError::NotLatest {
+                    based_on,
+                    latest: latest.revision,
+                }));
+            }
+            let base: Bible = revisions::read(project, &latest).map_err(revision_error)?;
+            let edited = base
+                .with_entry_edit(edit)
+                .map_err(|reason| revision_error(RevisionError::InvalidDocument(reason)))?;
+            bible_document::edit(project, based_on, &edited)
+                .map(|_| ())
+                .map_err(revision_error)
+        }
+        DocumentCommand::LockBible { revision } => {
+            bible_document::lock(project, revision).map_err(revision_error)
+        }
+        DocumentCommand::PlanShots => {
+            ask(DocumentKind::ShotPlan, &|| shot_plan::write(project, model))
+        }
+        DocumentCommand::ReplanScene {
+            scene_id,
+            direction,
+        } => ask(DocumentKind::ShotPlan, &|| {
+            shot_plan::replan_scene(project, model, &scene_id, direction.as_deref())
+        }),
+        DocumentCommand::SaveScenePlan {
+            based_on,
+            scene,
+            added,
+        } => shot_plan_document::edit_scene(project, based_on, scene, &added)
+            .map(|_| ())
+            .map_err(revision_error),
+        DocumentCommand::LockShotPlan { revision } => {
+            shot_plan_document::lock(project, revision).map_err(revision_error)
+        }
+        DocumentCommand::SavePreferences {
+            based_on,
+            preferences,
+        } => preferences_document::save(project, based_on, &preferences)
+            .map(|_| ())
+            .map_err(revision_error),
+        DocumentCommand::SuggestPreferences => ask(DocumentKind::PreferenceSuggestions, &|| {
+            learning::suggest(project, model)
+        }),
+        DocumentCommand::AcceptSuggestion {
+            batch,
+            index,
+            value,
+        } => learning::accept(project, batch, index, value.as_deref())
+            .map(|_| ())
+            .map_err(generation_error),
+        DocumentCommand::RejectSuggestion { batch, index } => {
+            learning::reject(project, batch, index).map_err(generation_error)
+        }
+        DocumentCommand::RecommendVoices => ask(DocumentKind::VoiceRecommendations, &|| {
+            voice::recommend(project, model, catalog)
+        }),
+    }))
+    .unwrap_or(Err(SessionError::Panicked))
+}
+
+/// Run a style, casting, voice, dubbing or reference command with
+/// `shared`'s project and providers. Returns its outcome and, when it listed
+/// the speech provider's voices, what the listing found.
+fn production_work(
+    shared: &Shared,
+    command: &ProductionCommand,
+    submission: Submission,
+) -> (Result<(), SessionError>, Option<Listed>) {
+    let project = &*shared.project;
+    let provider = &*shared.provider;
+    let mut voices = None;
+    let style_error = |error| SessionError::Production(ProductionError::Style(error));
+    let cast_error = |error| SessionError::Production(ProductionError::Cast(error));
+    let voice_error = |error| SessionError::Production(ProductionError::Voice(error));
+    let dubbing_error = |error| SessionError::Production(ProductionError::Dubbing(error));
+    let paid = |result: Result<(), GenerationError>| result.map_err(generation_error);
+    let mut hooks = NoHooks;
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| match command {
+        ProductionCommand::SampleStyle { preset, note } => paid(
+            style::sample(
+                project,
+                provider,
+                SampleRequest {
+                    preset,
+                    note: note.as_deref(),
+                    scene_id: None,
+                },
+                submission,
+                &mut hooks,
+            )
+            .map(|_| ()),
+        ),
+        ProductionCommand::RefineStyle { sample, note } => {
+            paid(style::refine(project, provider, sample, note, submission, &mut hooks).map(|_| ()))
+        }
+        ProductionCommand::SelectStyle(sample) => {
+            style_document::select(project, sample).map_err(style_error)
+        }
+        ProductionCommand::RejectStyle(sample) => {
+            style_document::reject(project, sample).map_err(style_error)
+        }
+        ProductionCommand::LockStyle(sample) => style_document::lock(project, sample)
+            .map(|_| ())
+            .map_err(style_error),
+        ProductionCommand::Audition { character, count } => paid(
+            cast::audition(
+                project,
+                provider,
+                character,
+                usize::try_from(*count).unwrap_or(usize::MAX),
+                submission,
+                &mut hooks,
+            )
+            .map(|_| ()),
+        ),
+        ProductionCommand::SelectPortrait {
+            character,
+            portrait,
+        } => cast_document::select(project, character, portrait).map_err(cast_error),
+        ProductionCommand::RejectPortrait {
+            character,
+            portrait,
+        } => cast_document::reject(project, character, portrait).map_err(cast_error),
+        ProductionCommand::LockCharacter { character } => cast::lock(project, provider, character)
+            .map(|_| ())
+            .map_err(generation_error),
+        ProductionCommand::CastPortrait {
+            character,
+            portrait,
+        } => cast::cast_portrait(project, provider, character, portrait)
+            .map(|_| ())
+            .map_err(generation_error),
+        ProductionCommand::ImportStyle { path, description } => {
+            let unreadable = |error: std::io::Error| {
+                style_error(StyleError::Fs(kineto_project::fs::ProjectFsError::Io(
+                    error,
+                )))
+            };
+            std::fs::metadata(path)
+                .map_err(unreadable)
+                .and_then(|metadata| {
+                    if metadata.len() > style::MAX_IMPORT_BYTES {
+                        Err(generation_error(GenerationError::Prerequisite(
+                            crate::generation::Prerequisite::StyleReference,
+                        )))
+                    } else {
+                        std::fs::read(path).map_err(unreadable)
+                    }
+                })
+                .and_then(|bytes| {
+                    style::import_sample(project, &provider.capabilities(), &bytes, description)
+                        .map(|_| ())
+                        .map_err(generation_error)
+                })
+        }
+        ProductionCommand::ImportPortrait { character, path } => {
+            let unreadable = |error: std::io::Error| {
+                cast_error(cast_document::CastError::Fs(
+                    kineto_project::fs::ProjectFsError::Io(error),
+                ))
+            };
+            std::fs::metadata(path)
+                .map_err(unreadable)
+                .and_then(|metadata| {
+                    if metadata.len() > cast::MAX_IMPORT_BYTES {
+                        Err(generation_error(GenerationError::Prerequisite(
+                            crate::generation::Prerequisite::IdentityReference,
+                        )))
+                    } else {
+                        std::fs::read(path).map_err(unreadable)
+                    }
+                })
+                .and_then(|bytes| {
+                    cast::import_portrait(project, &provider.capabilities(), character, &bytes)
+                        .map(|_| ())
+                        .map_err(generation_error)
+                })
+        }
+        ProductionCommand::LoadVoices => {
+            let listed = match &shared.speech {
+                SpeechProvider::LocalDemo => {
+                    LocalDemoVoices.voices().map_err(|error| match error {})
+                }
+                SpeechProvider::Minimax(Some(client)) => {
+                    client.voices().map_err(|error| GenerationError::Provider {
+                        class: error.class(),
+                        source: Box::new(error),
+                    })
+                }
+                SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                SpeechProvider::Plugin(plugin) => {
+                    let speech = PluginSpeech::new(plugin);
+                    speech.voices().map_err(|error| GenerationError::Provider {
+                        class: speech.class(&error),
+                        source: Box::new(error),
+                    })
+                }
+            };
+            voices = Some(
+                listed
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(ToString::to_string),
+            );
+            listed.map(|_| ()).map_err(generation_error)
+        }
+        ProductionCommand::AuditionVoices {
+            character,
+            choices,
+            line,
+        } => {
+            let line = line.as_deref();
+            paid(
+                match &shared.speech {
+                    SpeechProvider::LocalDemo => voice::audition(
+                        project,
+                        &LocalDemoVoices,
+                        character,
+                        choices,
+                        line,
+                        submission,
+                        &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(Some(client)) => voice::audition(
+                        project, client, character, choices, line, submission, &mut hooks,
+                    ),
+                    SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                    SpeechProvider::Plugin(plugin) => voice::audition(
+                        project,
+                        &PluginSpeech::new(plugin),
+                        character,
+                        choices,
+                        line,
+                        submission,
+                        &mut hooks,
+                    ),
+                }
+                .map(|_| ()),
+            )
+        }
+        ProductionCommand::SelectVoice {
+            character,
+            audition,
+        } => voice_document::select(project, character, audition).map_err(voice_error),
+        ProductionCommand::RejectVoice {
+            character,
+            audition,
+        } => voice_document::reject(project, character, audition).map_err(voice_error),
+        ProductionCommand::LockVoice { character } => voice::lock(project, character)
+            .map(|_| ())
+            .map_err(generation_error),
+        ProductionCommand::DubLine {
+            scene,
+            line,
+            request,
+        } => paid(
+            match &shared.speech {
+                SpeechProvider::LocalDemo => dubbing::dub(
+                    project,
+                    &LocalDemoVoices,
+                    scene,
+                    *line,
+                    request,
+                    submission,
+                    &mut hooks,
+                ),
+                SpeechProvider::Minimax(Some(client)) => dubbing::dub(
+                    project, client, scene, *line, request, submission, &mut hooks,
+                ),
+                SpeechProvider::Minimax(None) => Err(GenerationError::NotConfigured),
+                SpeechProvider::Plugin(plugin) => dubbing::dub(
+                    project,
+                    &PluginSpeech::new(plugin),
+                    scene,
+                    *line,
+                    request,
+                    submission,
+                    &mut hooks,
+                ),
+            }
+            .map(|_| ()),
+        ),
+        ProductionCommand::SelectTake { scene, take } => {
+            dubbing_document::select(project, scene, take).map_err(dubbing_error)
+        }
+        ProductionCommand::RejectTake { scene, take } => {
+            dubbing_document::reject(project, scene, take).map_err(dubbing_error)
+        }
+        ProductionCommand::LockLine { scene, line } => dubbing::lock(project, scene, *line)
+            .map(|_| ())
+            .map_err(generation_error),
+        ProductionCommand::AskReference {
+            server,
+            tool,
+            arguments,
+            attached_to,
+        } => references::server(server)
+            .and_then(|server| {
+                references::ask(
+                    project,
+                    &server,
+                    Ask {
+                        tool,
+                        arguments: arguments.clone(),
+                        attached_to: attached_to.clone(),
+                    },
+                )
+            })
+            .map(|_| ())
+            .map_err(generation_error),
+        ProductionCommand::EditReference { reference, text } => {
+            reference_document::edit(project, reference, text)
+                .map(|_| ())
+                .map_err(reference_error)
+        }
+        ProductionCommand::AttachReference { reference, target } => {
+            reference_document::attach(project, reference, target)
+                .map(|_| ())
+                .map_err(reference_error)
+        }
+        ProductionCommand::DetachReference { reference, target } => {
+            reference_document::detach(project, reference, target)
+                .map(|_| ())
+                .map_err(reference_error)
+        }
+        ProductionCommand::RemoveReference { reference } => {
+            reference_document::remove(project, reference).map_err(reference_error)
+        }
+    }))
+    .unwrap_or(Err(SessionError::Panicked));
+    (outcome, voices)
+}
+
 /// The video provider a session follows its image provider with: MiniMax
 /// with the same key, the same plugin when it makes video, otherwise the
 /// local demo.
@@ -3394,6 +3975,10 @@ mod tests {
             token: u64,
             result: Result<(), String>,
         },
+        Waiting {
+            token: u64,
+            waiting: bool,
+        },
     }
 
     struct ChannelSink(Mutex<mpsc::Sender<Event>>);
@@ -3442,6 +4027,10 @@ mod tests {
                 result: describe(result),
             });
         }
+
+        fn waiting(&self, token: u64, waiting: bool) {
+            let _ = lock(&self.0).send(Event::Waiting { token, waiting });
+        }
     }
 
     fn sink() -> (Box<dyn SessionSink>, Receiver<Event>) {
@@ -3489,19 +4078,24 @@ mod tests {
         (session, events)
     }
 
+    /// The next completion, which must be `token`'s. A command for a shot
+    /// whose keyframes are being made waits for them, and says so first.
     fn completion(events: &Receiver<Event>, token: u64) -> Result<(), String> {
-        match events.recv_timeout(WAIT).unwrap() {
-            Event::Completed {
-                token: actual,
-                result,
-                thread,
-                ..
-            } => {
-                assert_eq!(actual, token);
-                assert_eq!(thread, "kineto-project-session");
-                result
+        loop {
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Waiting { .. } => {}
+                Event::Completed {
+                    token: actual,
+                    result,
+                    thread,
+                    ..
+                } => {
+                    assert_eq!(actual, token);
+                    assert_eq!(thread, "kineto-project-session");
+                    return result;
+                }
+                other => panic!("expected completion {token}, got {other:?}"),
             }
-            other => panic!("expected completion {token}, got {other:?}"),
         }
     }
 
@@ -5293,12 +5887,37 @@ mod tests {
         use kineto_providers::secret::SecretString;
         use std::sync::atomic::AtomicU32;
 
-        /// MiniMax `image-01`, offline: a distinct JPEG per call.
+        /// MiniMax `image-01`, offline: a distinct JPEG per call. While
+        /// `held`, calls wait to be answered; how many wait at once is
+        /// counted.
         #[derive(Default)]
         struct FakeImages {
             calls: AtomicU32,
             /// Calls to time out after sending, leaving them unresolved.
             time_out: AtomicU32,
+            held: Mutex<bool>,
+            released: std::sync::Condvar,
+            in_flight: AtomicU32,
+            most: AtomicU32,
+        }
+
+        impl FakeImages {
+            fn hold(&self, held: bool) {
+                *lock(&self.held) = held;
+                self.released.notify_all();
+            }
+
+            /// Wait until `count` calls are held at once.
+            fn await_in_flight(&self, count: u32) {
+                let deadline = std::time::Instant::now() + WAIT;
+                while self.in_flight.load(Ordering::SeqCst) < count {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{count} calls never ran at once"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
 
         impl Transport for FakeImages {
@@ -5308,6 +5927,17 @@ mod tests {
                 _api_key: &SecretString,
                 _body: &[u8],
             ) -> Result<HttpResponse, TransportFailure> {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                let mut held = lock(&self.held);
+                while *held {
+                    held = self
+                        .released
+                        .wait(held)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                drop(held);
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 if self
                     .time_out
@@ -5342,6 +5972,17 @@ mod tests {
             fake: &Arc<FakeImages>,
             model: DocumentModel,
         ) -> (ProjectSession, Receiver<Event>) {
+            spawn_running(request, fake, model, MAX_PARALLEL_REQUESTS)
+        }
+
+        /// [`spawn`], running at most `parallel` requests that wait on a
+        /// provider at once.
+        fn spawn_running(
+            request: OpenRequest,
+            fake: &Arc<FakeImages>,
+            model: DocumentModel,
+            parallel: usize,
+        ) -> (ProjectSession, Receiver<Event>) {
             let transport: SharedTransport = Arc::clone(fake) as SharedTransport;
             let provider = ImageProvider::Minimax(Some(MinimaxClient::with_transport(
                 transport,
@@ -5357,6 +5998,7 @@ mod tests {
                 // Lines are spoken by the demo; the fake answers images only.
                 SessionOptions {
                     speech_provider: Some(SpeechProvider::LocalDemo),
+                    max_parallel_requests: parallel,
                     ..SessionOptions::default()
                 },
             )
@@ -5424,12 +6066,22 @@ mod tests {
             target: &std::path::Path,
             fake: &Arc<FakeImages>,
         ) -> (ProjectSession, Receiver<Event>) {
+            written_running(target, fake, MAX_PARALLEL_REQUESTS)
+        }
+
+        /// [`written`], running at most `parallel` requests that wait on a
+        /// provider at once.
+        fn written_running(
+            target: &std::path::Path,
+            fake: &Arc<FakeImages>,
+            parallel: usize,
+        ) -> (ProjectSession, Receiver<Event>) {
             let model = DocumentModel::Fake(FakeLlm::answering([
                 SAMPLE_ANALYSIS_JSON,
                 SAMPLE_SCREENPLAY_JSON,
                 SAMPLE_BIBLE_JSON,
             ]));
-            let (session, events) = spawn(
+            let (session, events) = spawn_running(
                 OpenRequest::CreateText {
                     path: target.to_path_buf(),
                     manifest: Box::new(manifest()),
@@ -5437,6 +6089,7 @@ mod tests {
                 },
                 fake,
                 model,
+                parallel,
             );
             assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
             document(&session, &events, DocumentCommand::AnalyzeStory).unwrap();
@@ -5773,6 +6426,218 @@ mod tests {
             on_shot(&session, &events, ShotCommand::Select(0)).unwrap();
             on_shot(&session, &events, ShotCommand::Lock).unwrap();
             assert!(session.snapshot(0).unwrap().locked);
+        }
+
+        /// A styled film whose bible is locked, run with at most `parallel`
+        /// requests that wait on a provider at once.
+        fn styled(
+            target: &std::path::Path,
+            fake: &Arc<FakeImages>,
+            parallel: usize,
+        ) -> (ProjectSession, Receiver<Event>) {
+            let (session, events) = written_running(target, fake, parallel);
+            document(
+                &session,
+                &events,
+                DocumentCommand::LockBible { revision: 1 },
+            )
+            .unwrap();
+            produce(
+                &session,
+                &events,
+                ProductionCommand::SampleStyle {
+                    preset: "film_noir".to_owned(),
+                    note: None,
+                },
+            )
+            .unwrap();
+            for command in [
+                ProductionCommand::SelectStyle("style_s0001".to_owned()),
+                ProductionCommand::LockStyle("style_s0001".to_owned()),
+            ] {
+                produce(&session, &events, command).unwrap();
+            }
+            (session, events)
+        }
+
+        /// Events until `done` tokens have finished, in order.
+        fn until_finished(events: &Receiver<Event>, done: usize) -> Vec<Event> {
+            let mut seen = Vec::new();
+            let mut finished = 0;
+            while finished < done {
+                let event = events.recv_timeout(WAIT).unwrap();
+                if matches!(
+                    event,
+                    Event::DocumentCompleted { .. } | Event::Completed { .. }
+                ) {
+                    finished += 1;
+                }
+                seen.push(event);
+            }
+            seen
+        }
+
+        fn position(events: &[Event], wanted: &Event) -> usize {
+            events
+                .iter()
+                .position(|event| event == wanted)
+                .unwrap_or_else(|| panic!("{wanted:?} never came: {events:?}"))
+        }
+
+        #[test]
+        fn requests_for_different_things_run_at_once_and_the_same_thing_waits() {
+            let temp = TempDir::new();
+            let fake = Arc::new(FakeImages::default());
+            let (session, events) = styled(&temp.0.join("film"), &fake, MAX_PARALLEL_REQUESTS);
+            fake.hold(true);
+
+            let (filmmaker, interviewer, again) = (token(), token(), token());
+            session
+                .submit_production(audition("filmmaker", 1), filmmaker)
+                .unwrap();
+            session
+                .submit_production(audition("interviewer", 1), interviewer)
+                .unwrap();
+            // The filmmaker's casting is under way: more of it waits.
+            session
+                .submit_production(audition("filmmaker", 2), again)
+                .unwrap();
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::Waiting {
+                    token: again,
+                    waiting: true
+                }
+            );
+            // Both auditions call the provider at once.
+            fake.await_in_flight(2);
+            // A change to something else is made while they wait on it.
+            assert_eq!(
+                document(
+                    &session,
+                    &events,
+                    DocumentCommand::SavePreferences {
+                        based_on: None,
+                        preferences: Preferences::default(),
+                    },
+                ),
+                Ok(())
+            );
+
+            fake.hold(false);
+            let seen = until_finished(&events, 3);
+            let ok = |token| Event::DocumentCompleted {
+                token,
+                result: Ok(()),
+            };
+            assert!(position(&seen, &ok(interviewer)) < seen.len());
+            let first = position(&seen, &ok(filmmaker));
+            let started = position(
+                &seen,
+                &Event::Waiting {
+                    token: again,
+                    waiting: false,
+                },
+            );
+            assert!(
+                first < started,
+                "the same character's casting waits its turn: {seen:?}"
+            );
+            assert!(started < position(&seen, &ok(again)));
+            let filmmaker_portraits = session.production().unwrap().characters[0].images.len();
+            assert_eq!(
+                filmmaker_portraits, 2,
+                "the second audition counted the first"
+            );
+            assert!(fake.most.load(Ordering::SeqCst) >= 2);
+        }
+
+        #[test]
+        fn beyond_the_requests_that_may_run_at_once_one_waits_its_turn() {
+            let temp = TempDir::new();
+            let fake = Arc::new(FakeImages::default());
+            let (session, events) = styled(&temp.0.join("film"), &fake, 1);
+            fake.hold(true);
+
+            let (filmmaker, interviewer) = (token(), token());
+            session
+                .submit_production(audition("filmmaker", 1), filmmaker)
+                .unwrap();
+            session
+                .submit_production(audition("interviewer", 1), interviewer)
+                .unwrap();
+            assert_eq!(
+                events.recv_timeout(WAIT).unwrap(),
+                Event::Waiting {
+                    token: interviewer,
+                    waiting: true
+                }
+            );
+            fake.await_in_flight(1);
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(fake.in_flight.load(Ordering::SeqCst), 1, "one at a time");
+            fake.hold(false);
+            let seen = until_finished(&events, 2);
+            assert!(
+                position(
+                    &seen,
+                    &Event::DocumentCompleted {
+                        token: filmmaker,
+                        result: Ok(())
+                    }
+                ) < position(
+                    &seen,
+                    &Event::Waiting {
+                        token: interviewer,
+                        waiting: false
+                    }
+                )
+            );
+            assert_eq!(fake.most.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_session_closed_while_requests_wait_on_a_provider_keeps_what_they_paid_for() {
+            let temp = TempDir::new();
+            let target = temp.0.join("film");
+            let fake = Arc::new(FakeImages::default());
+            let (session, events) = styled(&target, &fake, MAX_PARALLEL_REQUESTS);
+            fake.hold(true);
+            session
+                .submit_production(audition("filmmaker", 1), token())
+                .unwrap();
+            session
+                .submit_production(audition("interviewer", 1), token())
+                .unwrap();
+            fake.await_in_flight(2);
+            // Closing waits for the calls under way; their images are kept.
+            let releaser = {
+                let fake = Arc::clone(&fake);
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(200));
+                    fake.hold(false);
+                })
+            };
+            drop(session);
+            releaser.join().unwrap();
+            assert!(
+                events
+                    .try_iter()
+                    .all(|event| !matches!(event, Event::DocumentCompleted { .. })),
+                "no one is told after closing"
+            );
+
+            let (session, events) = spawn(
+                OpenRequest::Open { path: target },
+                &fake,
+                DocumentModel::None,
+            );
+            assert_eq!(events.recv_timeout(WAIT).unwrap(), Event::Opened(Ok(())));
+            let production = session.production().unwrap();
+            for character in &production.characters {
+                assert_eq!(character.images.len(), 1, "{}", character.id);
+                assert!(!character.unresolved, "{}", character.id);
+            }
         }
 
         /// Submit `command` to the first shot and wait for its result.

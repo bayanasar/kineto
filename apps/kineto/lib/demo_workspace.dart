@@ -171,8 +171,15 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
 
   // The project's requests outlive this page: what is under way, and how
   // the last one asked for here ended, come from them.
-  bool get _working => widget.work.busy;
-  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  // A shot's requests run one after another, and other shots' at once.
+  String get _target => 'shot:$_activeShotIndex';
+  bool get _working => widget.work.busyWith(_target);
+  String get _workingLabel {
+    for (final task in widget.work.running.reversed) {
+      if (task.target == _target) return task.label;
+    }
+    return 'Working';
+  }
   String? get _error => widget.work.problemOn(_page);
   VoidCallback? get _identityDriftConsent => widget.work.retryOn(_page);
 
@@ -238,13 +245,12 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   void _switchShot(int index) {
     setState(() {
       _activeShotIndex = index;
-      widget.work.dismiss();
+      widget.work.dismiss(_page);
     });
   }
 
-  // Native work runs on the project's worker thread; this isolate only waits
-  // for the answer. One command at a time keeps the UI honest about which
-  // state the director is looking at.
+  // Native work runs off this isolate, which only waits for the answer. A
+  // shot's requests run one after another and other shots' at once.
   //
   // [consenting] generates despite identity drift; it is offered when
   // [action] is refused because the project's policy blocks that.
@@ -267,6 +273,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       _page,
       label,
       action,
+      target: _target,
       retry: consenting,
       retryCode: KinetoProjectException.identityDrift,
     );
@@ -289,7 +296,9 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   @override
   Widget build(BuildContext context) {
     final snapshot = _shotSnapshots[_activeShotIndex];
-    return DemoWorkspaceView(
+    return KinetoTargetScope(
+      target: _target,
+      child: DemoWorkspaceView(
       shots: _shots(),
       takes: widget.project.takes(_activeShotIndex),
       staleReasons: widget.project.staleReasons(_activeShotIndex),
@@ -378,6 +387,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
         () => widget.project.lockShotVideo(_activeShotIndex),
       ),
       onOpenVideo: openOutsideKineto,
+      ),
     );
   }
 }

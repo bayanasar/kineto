@@ -1567,52 +1567,57 @@ fn complete_inner<G: CandidateGenerator>(
     }
 
     // Every provider call runs on its own thread; recovering a finished call
-    // reads only local state.
-    let results = thread::scope(|scope| {
-        let runtime = &runtime;
-        let handles = requests
-            .iter()
-            .zip(&states)
-            .map(|((job_id, request), state)| {
-                let mut generator = generator.clone();
-                let invoke = *state == Some(IntentState::Prepared);
-                scope.spawn(move || {
-                    if !invoke {
-                        return generator
-                            .recover(request)
-                            .map_err(|source| provider_error(&generator, source));
-                    }
-                    match invoke_when_permitted(runtime, job_id, &mut generator, request) {
-                        Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
-                        Ok(DispatchOutcome::Pending { .. }) => Err(GenerationError::Unexpected(
-                            "an image provider returned a pending job",
-                        )),
-                        Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
-                        // A failure that may have reached the provider may
-                        // have been charged.
-                        Err(InvokePreparedError::Provider { source, .. })
-                            if !generator.certainly_not_charged(&source) =>
-                        {
-                            Err(GenerationError::UnresolvedSubmission)
+    // reads only local state. The project is free for other requests while
+    // they run.
+    let results = crate::turn::outside(|| {
+        thread::scope(|scope| {
+            let runtime = &runtime;
+            let handles = requests
+                .iter()
+                .zip(&states)
+                .map(|((job_id, request), state)| {
+                    let mut generator = generator.clone();
+                    let invoke = *state == Some(IntentState::Prepared);
+                    scope.spawn(move || {
+                        if !invoke {
+                            return generator
+                                .recover(request)
+                                .map_err(|source| provider_error(&generator, source));
                         }
-                        Err(InvokePreparedError::Provider { source, class, .. }) => {
-                            Err(GenerationError::Provider {
-                                source: Box::new(source),
-                                class,
-                            })
+                        match invoke_when_permitted(runtime, job_id, &mut generator, request) {
+                            Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
+                            Ok(DispatchOutcome::Pending { .. }) => {
+                                Err(GenerationError::Unexpected(
+                                    "an image provider returned a pending job",
+                                ))
+                            }
+                            Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+                            // A failure that may have reached the provider may
+                            // have been charged.
+                            Err(InvokePreparedError::Provider { source, .. })
+                                if !generator.certainly_not_charged(&source) =>
+                            {
+                                Err(GenerationError::UnresolvedSubmission)
+                            }
+                            Err(InvokePreparedError::Provider { source, class, .. }) => {
+                                Err(GenerationError::Provider {
+                                    source: Box::new(source),
+                                    class,
+                                })
+                            }
                         }
-                    }
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
-            })
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
+                })
+                .collect::<Vec<_>>()
+        })
     });
     // Candidates that finished stay invoked with their results kept; the
     // next open completes the generation without paying for them again.
@@ -1643,23 +1648,28 @@ const PERMIT_POLL: Duration = Duration::from_millis(200);
 /// Invoke a prepared candidate, waiting while the provider's process-wide
 /// concurrency ceiling is reached. The runtime refuses rather than queues, and
 /// a refusal spends no attempt, so waiting here is the scheduler.
+///
+/// The project is free for other requests while it waits and while the
+/// provider answers.
 pub(crate) fn invoke_when_permitted<A: PaidJobAdapter>(
     runtime: &JobRuntime<'_>,
     job_id: &JobId,
     adapter: &mut A,
     request: &A::Request,
 ) -> Result<DispatchOutcome<A::Output>, InvokePreparedError<A::Error>> {
-    let deadline = Instant::now() + PERMIT_WAIT;
-    loop {
-        match runtime.invoke_prepared(job_id, adapter, request) {
-            Err(InvokePreparedError::Runtime(JobRuntimeError::ConcurrencyLimitReached))
-                if Instant::now() < deadline =>
-            {
-                thread::sleep(PERMIT_POLL);
+    crate::turn::outside(|| {
+        let deadline = Instant::now() + PERMIT_WAIT;
+        loop {
+            match runtime.invoke_prepared(job_id, adapter, request) {
+                Err(InvokePreparedError::Runtime(JobRuntimeError::ConcurrencyLimitReached))
+                    if Instant::now() < deadline =>
+                {
+                    thread::sleep(PERMIT_POLL);
+                }
+                outcome => return outcome,
             }
-            outcome => return outcome,
         }
-    }
+    })
 }
 
 /// Acknowledge every candidate whose intent is invoked, now that the

@@ -295,12 +295,18 @@ pub enum DryRunError<E> {
 /// Construction registers this provider's concurrency ceiling in a process-wide
 /// registry. The strictest ceiling across all live runtimes for the same
 /// `ProviderKey` is enforced until those runtimes are dropped.
+///
+/// A runtime claims every job it prepares or invokes until it is dropped.
+/// Another runtime's [`JobRuntime::reconcile_startup`] leaves claimed jobs
+/// alone: in the same process, a prepared or invoked intent may be a call
+/// still under way, not one an interrupted session left.
 pub struct JobRuntime<'project> {
     project: &'project CanonicalProject,
     provider: ProviderKey,
     policy: JobRuntimePolicy,
     retention: IntentRetentionPolicy,
     limiter: ProviderLimiter,
+    claims: Claims,
 }
 
 impl<'project> JobRuntime<'project> {
@@ -317,6 +323,7 @@ impl<'project> JobRuntime<'project> {
             policy,
             retention: IntentRetentionPolicy::default(),
             limiter,
+            claims: Claims::new(),
         }
     }
 
@@ -357,6 +364,7 @@ impl<'project> JobRuntime<'project> {
         let _guard = lock_intent_store();
 
         if let Some(existing) = store.find_by_idempotency(&self.provider, &idempotency_key)? {
+            self.claims.claim(self.project, existing.intent.job_id());
             return Ok(PrepareOutcome::Existing(existing));
         }
 
@@ -379,6 +387,7 @@ impl<'project> JobRuntime<'project> {
             extra: BTreeMap::new(),
         };
         store.create_with_reservation(&record)?;
+        self.claims.claim(self.project, record.intent.job_id());
         Ok(PrepareOutcome::Created(record))
     }
 
@@ -390,6 +399,7 @@ impl<'project> JobRuntime<'project> {
     ) -> Result<DispatchOutcome<A::Output>, InvokePreparedError<A::Error>> {
         self.ensure_writable()
             .map_err(InvokePreparedError::Runtime)?;
+        self.claims.claim(self.project, job_id);
         let operation_lock = job_operation_lock(self.project, job_id);
         let _operation_guard = lock_unpoisoned(&operation_lock);
         let _permit = self
@@ -640,7 +650,11 @@ impl<'project> JobRuntime<'project> {
             .collect::<Vec<_>>();
 
         for snapshot in scan.records.into_iter().filter(|record| {
-            record.provider == self.provider && record.intent.state() != IntentState::Reconciled
+            record.provider == self.provider
+                && record.intent.state() != IntentState::Reconciled
+                && !self
+                    .claims
+                    .claimed_elsewhere(self.project, record.intent.job_id())
         }) {
             let job_id = snapshot.intent.job_id().clone();
             let operation_lock = job_operation_lock(self.project, &job_id);
@@ -909,6 +923,67 @@ fn job_operation_lock(project: &CanonicalProject, job_id: &JobId) -> Arc<Mutex<(
     let lock = Arc::new(Mutex::new(()));
     registry.insert(key, Arc::downgrade(&lock));
     lock
+}
+
+/// Jobs live runtimes in this process work on, each by the runtime that
+/// claimed it.
+static LIVE_JOBS: OnceLock<Mutex<BTreeMap<JobOperationKey, u64>>> = OnceLock::new();
+
+fn live_jobs() -> &'static Mutex<BTreeMap<JobOperationKey, u64>> {
+    LIVE_JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn live_key(project: &CanonicalProject, job_id: &JobId) -> JobOperationKey {
+    JobOperationKey {
+        project_root: project.root().root().to_path_buf(),
+        job_id: job_id.as_str().to_owned(),
+    }
+}
+
+/// The jobs one runtime claimed, released when it is dropped.
+struct Claims {
+    id: u64,
+    held: Mutex<Vec<JobOperationKey>>,
+}
+
+impl Claims {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            held: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Claim `job_id` unless another live runtime holds it.
+    fn claim(&self, project: &CanonicalProject, job_id: &JobId) {
+        let key = live_key(project, job_id);
+        let mut live = lock_unpoisoned(live_jobs());
+        if live.contains_key(&key) {
+            return;
+        }
+        live.insert(key.clone(), self.id);
+        lock_unpoisoned(&self.held).push(key);
+    }
+
+    /// Whether another live runtime in this process claims `job_id`.
+    fn claimed_elsewhere(&self, project: &CanonicalProject, job_id: &JobId) -> bool {
+        lock_unpoisoned(live_jobs())
+            .get(&live_key(project, job_id))
+            .is_some_and(|owner| *owner != self.id)
+    }
+}
+
+impl Drop for Claims {
+    fn drop(&mut self) {
+        let held = std::mem::take(&mut *lock_unpoisoned(&self.held));
+        let mut live = lock_unpoisoned(live_jobs());
+        for key in held {
+            if live.get(&key) == Some(&self.id) {
+                live.remove(&key);
+            }
+        }
+    }
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2181,6 +2256,44 @@ mod tests {
         ));
         let persisted = IntentStore::new(&project).load(&job_id).unwrap();
         assert_eq!(persisted.intent().state(), IntentState::Invoked);
+    }
+
+    #[test]
+    fn a_live_runtimes_jobs_are_left_to_it_by_another_runtimes_reconciliation() {
+        let temp = TempDir::new();
+        let project = project(&temp);
+        let provider = ProviderKey::new("fake-image-live").unwrap();
+        let working = JobRuntime::new(&project, provider.clone(), policy(2, 3));
+        let job_id = JobId::new("job_live").unwrap();
+        created(
+            working
+                .prepare(
+                    job_id.clone(),
+                    "image.generate",
+                    input_hash('d'),
+                    artifact("image_candidate_live"),
+                )
+                .unwrap(),
+        );
+
+        // Another request in the same process opens the partition while the
+        // first is still under way: its call is not a call cut short.
+        let other = JobRuntime::new(&project, provider.clone(), policy(2, 3));
+        let mut recovery = FakeAdapter::completed(temp.0.clone());
+        assert!(other.reconcile_startup(&mut recovery).unwrap().is_empty());
+        assert_eq!(recovery.reconcile_count, 0);
+        // Its own runtime still sees it.
+        let mut own = FakeAdapter::completed(temp.0.clone());
+        assert_eq!(working.reconcile_startup(&mut own).unwrap().len(), 1);
+
+        // Once the first runtime is gone, what it left is reconciled.
+        drop(working);
+        let outcomes = other.reconcile_startup(&mut recovery).unwrap();
+        assert_eq!(recovery.reconcile_count, 1);
+        assert!(matches!(
+            outcomes.as_slice(),
+            [StartupOutcome::RetryPrepared { .. }]
+        ));
     }
 
     #[test]

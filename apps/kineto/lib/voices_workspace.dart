@@ -56,8 +56,8 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
 
   // The project's requests outlive this page: what is under way, and how
   // the last one asked for here ended, come from them.
-  bool get _working => widget.work.busy;
-  String get _workingLabel => widget.work.running?.label ?? 'Working';
+  // Each character's voice and each line is changed one request at a time;
+  // different ones at once.
   String? get _error => widget.work.problemOn(_page);
   VoidCallback? get _resubmit => widget.work.retryOn(_page);
 
@@ -94,8 +94,13 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
     super.dispose();
   }
 
-  Future<void> _run(Future<void> Function() action, String label, {Future<void> Function()? resubmit}) async {
-    await widget.work.run(_page, label, action, retry: resubmit);
+  Future<void> _run(
+    Future<void> Function() action,
+    String label, {
+    required String target,
+    Future<void> Function()? resubmit,
+  }) async {
+    await widget.work.run(_page, label, action, target: target, retry: resubmit);
   }
 
   @override
@@ -106,28 +111,31 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
       model: _model,
       recommendCostMicros: _recommendCost,
       speechCost: (text, count) => project.speechCostMicros(text, count: count),
-      working: _working,
-      workingLabel: _workingLabel,
+      busy: widget.work.targets,
       error: _error,
       onResubmit: _resubmit,
       navigation: widget.navigation,
       isDarkMode: widget.isDarkMode,
       onThemeToggle: widget.onThemeToggle,
       onPlay: openInSystem,
-      onLoadVoices: () => _run(project.loadVoices, 'Listing voices'),
+      onLoadVoices: () => _run(project.loadVoices, 'Listing voices', target: 'catalog'),
       onRecommend: () => _run(
         project.recommendVoices,
         'Asking ${_model.kind.label} for voices',
+        target: 'recommendations',
         resubmit: () => project.recommendVoices(resubmit: true),
       ),
       onAudition: (character, choices, line) => _run(
         () => project.auditionVoices(character, choices, line: line),
         'Auditioning',
+        target: 'voice:$character',
         resubmit: () => project.auditionVoices(character, choices, line: line, resubmit: true),
       ),
-      onSelectVoice: (character, audition) => _run(() => project.selectVoice(character, audition), 'Selecting'),
-      onRejectVoice: (character, audition) => _run(() => project.rejectVoice(character, audition), 'Rejecting'),
-      onLockVoice: (character) => _run(() => project.lockVoice(character), 'Locking'),
+      onSelectVoice: (character, audition) =>
+          _run(() => project.selectVoice(character, audition), 'Selecting', target: 'voice:$character'),
+      onRejectVoice: (character, audition) =>
+          _run(() => project.rejectVoice(character, audition), 'Rejecting', target: 'voice:$character'),
+      onLockVoice: (character) => _run(() => project.lockVoice(character), 'Locking', target: 'voice:$character'),
       onDub: (line, request) => _run(
         () => project.dubLine(
           line.sceneId,
@@ -137,6 +145,7 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
           note: request.note,
         ),
         'Dubbing',
+        target: lineTarget(line),
         resubmit: () => project.dubLine(
           line.sceneId,
           line.number,
@@ -146,12 +155,18 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
           resubmit: true,
         ),
       ),
-      onSelectTake: (line, take) => _run(() => project.selectTake(line.sceneId, take), 'Selecting'),
-      onRejectTake: (line, take) => _run(() => project.rejectTake(line.sceneId, take), 'Rejecting'),
-      onLockLine: (line) => _run(() => project.lockLine(line.sceneId, line.number), 'Locking'),
+      onSelectTake: (line, take) =>
+          _run(() => project.selectTake(line.sceneId, take), 'Selecting', target: lineTarget(line)),
+      onRejectTake: (line, take) =>
+          _run(() => project.rejectTake(line.sceneId, take), 'Rejecting', target: lineTarget(line)),
+      onLockLine: (line) =>
+          _run(() => project.lockLine(line.sceneId, line.number), 'Locking', target: lineTarget(line)),
     );
   }
 }
+
+/// What requests about [line] work on.
+String lineTarget(KinetoLine line) => 'line:${line.sceneId}:${line.number}';
 
 /// What the director asks of a line's takes.
 final class DubRequest {
@@ -181,7 +196,7 @@ class VoicesWorkspaceView extends StatelessWidget {
     required this.onRejectTake,
     required this.onLockLine,
     this.recommendCostMicros,
-    this.working = false,
+    this.busy = const <String>{},
     this.workingLabel = 'Working',
     this.error,
     this.onResubmit,
@@ -197,7 +212,9 @@ class VoicesWorkspaceView extends StatelessWidget {
   final int? recommendCostMicros;
 
   /// A command is running on the project's worker; changes wait for it.
-  final bool working;
+  /// What requests under way work on, such as `voice:mira` or
+  /// `line:office:3`: the controls for those wait.
+  final Set<String> busy;
   final String workingLabel;
   final String? error;
 
@@ -221,7 +238,7 @@ class VoicesWorkspaceView extends StatelessWidget {
   final void Function(KinetoLine line, String take) onRejectTake;
   final ValueChanged<KinetoLine> onLockLine;
 
-  bool get _idle => !working;
+  bool _free(String target) => !busy.contains(target);
 
   String _speakerName(String? characterId) {
     if (characterId == null) return 'No one';
@@ -316,12 +333,12 @@ class VoicesWorkspaceView extends StatelessWidget {
             children: <Widget>[
               KinetoButton(
                 key: const ValueKey<String>('load-voices'),
-                onPressed: _idle && voices.speechReady ? onLoadVoices : null,
+                onPressed: _free('catalog') && voices.speechReady ? onLoadVoices : null,
                 child: Text(voices.voices.isEmpty ? 'List voices · free' : 'List again · free'),
               ),
               KinetoButton(
                 key: const ValueKey<String>('recommend-voices'),
-                onPressed: _idle && model.ready && voices.characters.isNotEmpty ? onRecommend : null,
+                onPressed: _free('recommendations') && model.ready && voices.characters.isNotEmpty ? onRecommend : null,
                 child: Text('Recommend voices · ${documentCostLabel(model, recommendCostMicros)}'),
               ),
             ],
@@ -344,7 +361,7 @@ class VoicesWorkspaceView extends StatelessWidget {
                 character: character,
                 catalog: voices.voices,
                 speechCost: speechCost,
-                enabled: _idle && voices.speechReady,
+                enabled: _free('voice:${character.characterId}') && voices.speechReady,
                 onPlay: onPlay,
                 onAudition: (choices, line) => onAudition(character.characterId, choices, line),
                 onSelect: (audition) => onSelectVoice(character.characterId, audition),
@@ -378,7 +395,7 @@ class VoicesWorkspaceView extends StatelessWidget {
                 speaker: _speakerName(line.characterId),
                 voiceLocked: line.characterId != null && (voices.character(line.characterId!)?.locked ?? false),
                 speechCost: speechCost,
-                enabled: _idle && voices.speechReady,
+                enabled: _free(lineTarget(line)) && voices.speechReady,
                 onPlay: onPlay,
                 onDub: (request) => onDub(line, request),
                 onSelect: (take) => onSelectTake(line, take),

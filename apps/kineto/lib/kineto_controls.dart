@@ -53,8 +53,8 @@ class _KinetoButtonState extends State<KinetoButton> {
     Theme.of(context);
     final dark = WabTheme.isDark;
     final work = KinetoWorkScope.maybeOf(context);
-    final task = work?.running;
-    final busy = task != null && widget.key != null && task.button == widget.key;
+    final task = work?.startedBy(widget.key, target: KinetoTargetScope.of(context));
+    final busy = task != null;
     final enabled = widget.onPressed != null && !busy;
 
     final base = widget.primary ? WabTheme.accentColor : WabTheme.secondaryColor;
@@ -99,7 +99,9 @@ class _KinetoButtonState extends State<KinetoButton> {
       decoration: TextDecoration.none,
     );
 
-    Widget label = busy ? KinetoWorkingText(task.short) : widget.child;
+    // A request that waits for another about the same thing, or for a
+    // place among those under way, says so until it starts.
+    Widget label = busy ? KinetoWorkingText(work!.isWaiting(task) ? 'Waiting' : task.short) : widget.child;
     label = DefaultTextStyle(
       style: style,
       textAlign: TextAlign.center,

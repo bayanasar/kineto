@@ -135,13 +135,16 @@ pub fn ask_within(
             server.id, ask.tool
         ))));
     }
-    let answered = mcp::call_tool(
-        server,
-        &crate::plugin::plugin_secret,
-        ask.tool,
-        &Value::Object(ask.arguments.clone()),
-        limits,
-    )
+    // The project is free for other requests while the server answers.
+    let answered = crate::turn::outside(|| {
+        mcp::call_tool(
+            server,
+            &crate::plugin::plugin_secret,
+            ask.tool,
+            &Value::Object(ask.arguments.clone()),
+            limits,
+        )
+    })
     .map_err(|error| failed(ReferenceCallError::Server(error)))?;
     let text = answered.text.join("\n\n");
     if answered.is_error {

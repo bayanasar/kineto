@@ -333,39 +333,41 @@ impl<'p, L: Ledger, G: CandidateGenerator> Jobs<'p, L, G> {
             });
         }
         // Every provider call runs on its own thread, waiting its turn for a
-        // permit.
-        let results = thread::scope(|scope| {
-            let runtime = &self.runtime;
-            let handles = batch
-                .iter()
-                .zip(&prepared)
-                .map(|((_, call), job_id)| {
-                    let mut adapter = self.adapter.clone();
-                    scope.spawn(move || {
-                        match invoke_when_permitted(runtime, job_id, &mut adapter, call) {
-                            Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
-                            Ok(DispatchOutcome::Pending { .. }) => {
-                                Err(GenerationError::Unexpected("an image was left pending"))
+        // permit; the project is free for other requests meanwhile.
+        let results = crate::turn::outside(|| {
+            thread::scope(|scope| {
+                let runtime = &self.runtime;
+                let handles = batch
+                    .iter()
+                    .zip(&prepared)
+                    .map(|((_, call), job_id)| {
+                        let mut adapter = self.adapter.clone();
+                        scope.spawn(move || {
+                            match invoke_when_permitted(runtime, job_id, &mut adapter, call) {
+                                Ok(DispatchOutcome::Completed { output, .. }) => Ok(output),
+                                Ok(DispatchOutcome::Pending { .. }) => {
+                                    Err(GenerationError::Unexpected("an image was left pending"))
+                                }
+                                Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
+                                Err(InvokePreparedError::Provider { source, class, .. }) => {
+                                    Err(GenerationError::Provider {
+                                        source: Box::new(source),
+                                        class,
+                                    })
+                                }
                             }
-                            Err(InvokePreparedError::Runtime(error)) => Err(error.into()),
-                            Err(InvokePreparedError::Provider { source, class, .. }) => {
-                                Err(GenerationError::Provider {
-                                    source: Box::new(source),
-                                    class,
-                                })
-                            }
-                        }
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
-                })
-                .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or(Err(GenerationError::Unexpected("a provider call panicked")))
+                    })
+                    .collect::<Vec<_>>()
+            })
         });
         hooks.reached(GenerationPoint::Invoked);
         batch
