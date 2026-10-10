@@ -92,7 +92,7 @@ class _PreferencesWorkspaceScreenState extends State<PreferencesWorkspaceScreen>
       onSave: (entries) => _run(() => project.savePreferences(_voices.preferencesRevision, entries), 'Saving'),
       onSuggest: () => _run(
         project.suggestPreferences,
-        'Asking ${_model.kind.label} what your choices show',
+        'Asking ${_model.writer} what your choices show',
         resubmit: () => project.suggestPreferences(resubmit: true),
       ),
       onAccept: (suggestion, value) => _run(() => project.acceptSuggestion(suggestion, value: value), 'Accepting'),

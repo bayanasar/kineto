@@ -144,6 +144,8 @@ final class KinetoNativeContract {
   static const int _keyStateKind = 68;
   static const int _providerSettingKind = 69;
   static const int _agentKind = 70;
+  static const int _connectionFieldKind = 71;
+  static const int _connectionProtocolKind = 72;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -254,6 +256,12 @@ final class KinetoNativeContract {
 
   /// Agent tool code by name, for example `claude_code` → 1.
   Map<String, int> get agents => _table(_agentKind);
+
+  /// The fields of a connection, by name.
+  Map<String, int> get connectionFields => _table(_connectionFieldKind);
+
+  /// The protocols a connection may speak, by name with `_` for `-`.
+  Map<String, int> get connectionProtocols => _table(_connectionProtocolKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

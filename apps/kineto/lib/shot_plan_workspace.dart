@@ -129,7 +129,7 @@ class _ShotPlanWorkspaceScreenState extends State<ShotPlanWorkspaceScreen> {
   @override
   Widget build(BuildContext context) {
     final project = widget.project;
-    final asking = 'with ${_model.kind.label}';
+    final asking = 'with ${_model.writer}';
     return ShotPlanWorkspaceView(
       planning: _planning,
       model: _model,
@@ -311,7 +311,7 @@ class ShotPlanWorkspaceView extends StatelessWidget {
                   onPressed: _idle ? () => onLock(planning.revision!) : null,
                   child: Text('Lock revision ${planning.revision}'),
                 ),
-              Text('${model.kind.label} · ${documentCostLabel(model, costMicros)}'),
+              Text('${model.writer} · ${documentCostLabel(model, costMicros)}'),
             ],
           ),
           if (planning.revisions.isNotEmpty) ...<Widget>[

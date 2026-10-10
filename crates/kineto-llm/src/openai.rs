@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Billing, LlmBackend, LlmBackendInfo, LlmRequest, LlmResponse, TokenUsage,
-    http::{HttpTransport, SharedTransport, Transport, TransportFailure},
+    http::{Auth, HttpTransport, SharedTransport, Transport, TransportFailure},
 };
 
 /// The provider key Kimi API jobs are recorded under, and the name its key
@@ -23,6 +23,13 @@ pub const KIMI_BASE_URL: &str = "https://api.moonshot.ai/v1";
 pub const KIMI_DEFAULT_MODEL: &str = "kimi-k3";
 /// The provider key local model servers are recorded under.
 pub const LOCAL_PROVIDER: &str = "local-llm";
+
+/// The provider key a connection's calls are recorded under:
+/// `connection.<name>`.
+#[must_use]
+pub fn connection_provider(name: &str) -> String {
+    format!("connection.{name}")
+}
 const MAX_ERROR_MESSAGE_CHARS: usize = 200;
 
 /// Published Kimi prices, USD micros per million tokens (input on a cache
@@ -177,12 +184,34 @@ struct WireErrorBody {
     error: WireError,
 }
 
+/// An error answer: one error, or, as Google's compatibility address
+/// answers, a list holding one. The list is tried first: serde reads a
+/// struct from a list too, and would find no error in it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireErrorAnswer {
+    List(Vec<WireErrorBody>),
+    One(WireErrorBody),
+}
+
+impl WireErrorAnswer {
+    fn error(self) -> Option<WireError> {
+        match self {
+            Self::One(body) => Some(body.error),
+            Self::List(bodies) => bodies.into_iter().next().map(|body| body.error),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct WireError {
     #[serde(default)]
     message: String,
     #[serde(default, rename = "type")]
     kind: Option<String>,
+    /// Google's name for the kind of error.
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// A chat-completions backend.
@@ -223,6 +252,27 @@ impl OpenAiCompatible {
             Some(api_key),
             LOCAL_PROVIDER,
             Billing::Unpriced,
+        )
+    }
+
+    /// The connection `name` the director added (`connection.<name>` keeps
+    /// its records), at `base_url` serving `model`, with its key if it takes
+    /// one, at the price the director gave.
+    #[must_use]
+    pub fn connection(
+        name: &str,
+        base_url: &str,
+        model: &str,
+        api_key: Option<SecretString>,
+        billing: Billing,
+    ) -> Self {
+        Self::with_transport(
+            Arc::new(HttpTransport::new()),
+            base_url,
+            model,
+            api_key,
+            &connection_provider(name),
+            billing,
         )
     }
 
@@ -269,6 +319,19 @@ impl<T> fmt::Debug for OpenAiCompatible<T> {
             .field("api_key", &self.api_key)
             .finish_non_exhaustive()
     }
+}
+
+/// The answer without the reasoning some models write before it, inside
+/// the content, in `<think>` tags (MiniMax M2, and Qwen3 or DeepSeek R1
+/// behind many servers). Reasoning left open is all there is: no answer.
+fn without_reasoning(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    for (open, close) in [("<think>", "</think>"), ("<thinking>", "</thinking>")] {
+        if let Some(rest) = trimmed.strip_prefix(open) {
+            return rest.split_once(close).map_or("", |(_, answer)| answer.trim_start());
+        }
+    }
+    text
 }
 
 fn schema_instruction(name: &str, schema: &str) -> String {
@@ -325,18 +388,23 @@ impl<T: Transport> LlmBackend for OpenAiCompatible<T> {
             .transport
             .post_json(
                 &format!("{}/chat/completions", self.base_url),
-                self.api_key.as_ref(),
+                self.api_key.as_ref().map(Auth::Bearer),
+                &[],
                 &body,
             )
             .map_err(ApiError::Transport)?;
 
         if !(200..300).contains(&response.status) {
-            let error = serde_json::from_slice::<WireErrorBody>(&response.body).ok();
+            let error = serde_json::from_slice::<WireErrorAnswer>(&response.body)
+                .ok()
+                .and_then(WireErrorAnswer::error);
             return Err(ApiError::Http {
                 status: response.status,
-                kind: error.as_ref().and_then(|body| body.error.kind.clone()),
-                message: error.map_or_else(String::new, |body| {
-                    body.error
+                kind: error
+                    .as_ref()
+                    .and_then(|error| error.kind.clone().or_else(|| error.status.clone())),
+                message: error.map_or_else(String::new, |error| {
+                    error
                         .message
                         .chars()
                         .filter(|character| !character.is_control())
@@ -360,6 +428,7 @@ impl<T: Transport> LlmBackend for OpenAiCompatible<T> {
         let text = choice
             .message
             .content
+            .map(|text| without_reasoning(&text).to_owned())
             .filter(|text| !text.trim().is_empty())
             .ok_or(ApiError::Malformed("the answer is empty"))?;
         Ok(LlmResponse {
@@ -401,12 +470,17 @@ mod tests {
         fn post_json(
             &self,
             url: &str,
-            bearer: Option<&SecretString>,
+            auth: Option<Auth<'_>>,
+            _headers: &[(&str, &str)],
             body: &[u8],
         ) -> Result<HttpResponse, TransportFailure> {
+            assert!(
+                matches!(auth, None | Some(Auth::Bearer(_))),
+                "the OpenAI protocol sends its key as a bearer"
+            );
             self.sent.lock().unwrap().push((
                 url.to_owned(),
-                bearer.map(|key| key.expose().to_owned()),
+                auth.map(|auth| auth.key().expose().to_owned()),
                 body.to_vec(),
             ));
             self.answer.clone()
@@ -515,6 +589,43 @@ mod tests {
                 .contains("`analysis`")
         );
         assert!(!String::from_utf8_lossy(&sent[0].2).contains(KEY));
+    }
+
+    #[test]
+    fn reasoning_written_before_the_answer_is_not_the_answer() {
+        let backend = backend(json(
+            200,
+            r#"{"choices":[{"message":{"content":"<think>\nThe user wants JSON.\n</think>\n\n{\"ok\":true}"},"finish_reason":"stop"}]}"#,
+        ));
+        assert_eq!(backend.complete(&request()).unwrap().text, r#"{"ok":true}"#);
+        assert_eq!(without_reasoning("<thinking>a</thinking>b"), "b");
+        assert_eq!(without_reasoning("  plain <think> text"), "  plain <think> text");
+        let open = backend_answering_open_reasoning();
+        assert!(matches!(
+            open.complete(&request()),
+            Err(ApiError::Malformed("the answer is empty"))
+        ));
+    }
+
+    #[test]
+    fn an_error_listed_as_google_lists_it_keeps_its_words() {
+        let error = backend(json(
+            404,
+            r#"[{"error":{"code":404,"message":"models/gemini-2.5-flash is not found","status":"NOT_FOUND"}}]"#,
+        ))
+        .complete(&request())
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "LLM API answered HTTP 404 (NOT_FOUND): models/gemini-2.5-flash is not found"
+        );
+    }
+
+    fn backend_answering_open_reasoning() -> OpenAiCompatible<Recorded> {
+        backend(json(
+            200,
+            r#"{"choices":[{"message":{"content":"<think>still thinking"},"finish_reason":"stop"}]}"#,
+        ))
     }
 
     #[test]

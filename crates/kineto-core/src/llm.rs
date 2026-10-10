@@ -16,6 +16,9 @@
 //!   `KINETO_LOCAL_LLM_MODEL`; with `KINETO_LOCAL_LLM_KEY` naming the key it
 //!   takes (`deepseek` reads the key stored as `deepseek`, or
 //!   `KINETO_DEEPSEEK_API_KEY`). HTTPS, or HTTP to a loopback address only.
+//!   For development; the director adds a connection instead.
+//! - `connection:<name>`: a connection the director added in settings, by
+//!   the protocol it speaks ([`DocumentModel::connection`]).
 //!
 //! Each value is read from the director's provider settings first and the
 //! environment second; the desktop shell decides which.
@@ -31,8 +34,11 @@ use kineto_jobs::ErrorClass;
 use kineto_llm::{
     Billing, LlmBackend, LlmBackendInfo, LlmRequest, LlmResponse,
     agents::{AgentCli, AgentKind, locate},
-    openai::{KIMI_PROVIDER, LOCAL_PROVIDER, OpenAiCompatible},
+    anthropic::AnthropicMessages,
+    http::is_permitted,
+    openai::{KIMI_PROVIDER, LOCAL_PROVIDER, OpenAiCompatible, connection_provider},
 };
+use kineto_plugins::settings::{Connection, Modality, Protocol, micros};
 use kineto_providers::{
     LlmCapabilities,
     secret::{SecretError, SecretSource},
@@ -64,6 +70,8 @@ pub enum DocumentModelKind {
     Kimi,
     /// An OpenAI-compatible server.
     Local,
+    /// A connection the director added.
+    Connection,
 }
 
 /// What the director is told about the session's model.
@@ -82,6 +90,8 @@ pub enum ModelSelectionError {
     /// The selection names no model this build has.
     Unknown(String),
     Secret(SecretError),
+    /// The connection chosen cannot write documents; why, as text.
+    Connection(String),
 }
 
 impl fmt::Display for ModelSelectionError {
@@ -89,7 +99,37 @@ impl fmt::Display for ModelSelectionError {
         match self {
             Self::Unknown(name) => write!(formatter, "unknown language model provider {name:?}"),
             Self::Secret(error) => error.fmt(formatter),
+            Self::Connection(reason) => write!(formatter, "the connection chosen: {reason}"),
         }
+    }
+}
+
+/// A connection's model, by the protocol it speaks.
+#[derive(Debug)]
+pub enum ConnectionModel {
+    OpenAiChat(OpenAiCompatible),
+    AnthropicMessages(AnthropicMessages),
+}
+
+/// What the director said a connection costs: per token when both prices
+/// are given, free when it is a keyless server on this computer, otherwise
+/// unknown.
+fn connection_billing(connection: &Connection) -> Billing {
+    match (
+        connection.price_per_million_input,
+        connection.price_per_million_output,
+    ) {
+        (Some(input), Some(output)) => Billing::PerToken {
+            input_micros_per_million: micros(input),
+            output_micros_per_million: micros(output),
+        },
+        _ if connection.key.is_none()
+            && !connection.url.starts_with("https://")
+            && is_permitted(&connection.url) =>
+        {
+            Billing::Free
+        }
+        _ => Billing::Unpriced,
     }
 }
 
@@ -106,6 +146,9 @@ pub enum DocumentModel {
     /// An OpenAI-compatible server; `None` when its address or model is
     /// missing, or the key it names is not stored.
     Local(Option<OpenAiCompatible>),
+    /// A connection the director added, by name; `None` when the key it
+    /// names is not stored.
+    Connection(String, Option<ConnectionModel>),
     #[cfg(any(test, feature = "testing"))]
     Fake(kineto_llm::fake::FakeLlm),
 }
@@ -164,6 +207,52 @@ impl DocumentModel {
         })
     }
 
+    /// The model `connection` serves, by the protocol it speaks, with the
+    /// key it names from `secrets`. A connection that makes no text, or that
+    /// this build cannot use, is refused; one whose key is not stored is not
+    /// ready, rather than asked without the key it needs.
+    pub fn connection(
+        connection: &Connection,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, ModelSelectionError> {
+        let protocol = connection
+            .check()
+            .map_err(|error| ModelSelectionError::Connection(error.to_string()))?;
+        if protocol.modality() != Modality::Text {
+            return Err(ModelSelectionError::Connection(format!(
+                "{} makes no text",
+                connection.name
+            )));
+        }
+        let key = match connection.key_name() {
+            Some(name) => secrets
+                .api_key(name)
+                .map_err(ModelSelectionError::Secret)?
+                .map(Some),
+            None => Some(None),
+        };
+        let billing = connection_billing(connection);
+        let model = key.map(|key| match protocol {
+            Protocol::AnthropicMessages => {
+                ConnectionModel::AnthropicMessages(AnthropicMessages::connection(
+                    &connection.name,
+                    &connection.url,
+                    &connection.model,
+                    key,
+                    billing,
+                ))
+            }
+            _ => ConnectionModel::OpenAiChat(OpenAiCompatible::connection(
+                &connection.name,
+                &connection.url,
+                &connection.model,
+                key,
+                billing,
+            )),
+        });
+        Ok(Self::Connection(connection.name.clone(), model))
+    }
+
     /// Stop an agent call in progress once `cancel` is set, so closing a
     /// project does not wait for a long answer.
     #[must_use]
@@ -181,6 +270,7 @@ impl DocumentModel {
             Self::Agent(kind, agent) => (DocumentModelKind::Agent(*kind), agent.is_some()),
             Self::Kimi(api) => (DocumentModelKind::Kimi, api.is_some()),
             Self::Local(api) => (DocumentModelKind::Local, api.is_some()),
+            Self::Connection(_, model) => (DocumentModelKind::Connection, model.is_some()),
             #[cfg(any(test, feature = "testing"))]
             Self::Fake(_) => (DocumentModelKind::Local, true),
         };
@@ -195,13 +285,14 @@ impl DocumentModel {
 
     fn unavailable(&self) -> LlmBackendInfo {
         let provider = match self {
-            Self::Agent(kind, _) => kind.name(),
-            Self::Kimi(_) => KIMI_PROVIDER,
-            Self::Local(_) => LOCAL_PROVIDER,
-            _ => "none",
+            Self::Agent(kind, _) => kind.name().to_owned(),
+            Self::Kimi(_) => KIMI_PROVIDER.to_owned(),
+            Self::Local(_) => LOCAL_PROVIDER.to_owned(),
+            Self::Connection(name, _) => connection_provider(name),
+            _ => "none".to_owned(),
         };
         LlmBackendInfo {
-            provider: provider.to_owned(),
+            provider,
             model: String::new(),
             capabilities: LlmCapabilities {
                 context_window_tokens: None,
@@ -248,6 +339,8 @@ impl LlmBackend for DocumentModel {
         match self {
             Self::Agent(_, Some(agent)) => agent.info(),
             Self::Kimi(Some(api)) | Self::Local(Some(api)) => api.info(),
+            Self::Connection(_, Some(ConnectionModel::OpenAiChat(api))) => api.info(),
+            Self::Connection(_, Some(ConnectionModel::AnthropicMessages(api))) => api.info(),
             #[cfg(any(test, feature = "testing"))]
             Self::Fake(fake) => fake.info(),
             _ => self.unavailable(),
@@ -258,6 +351,10 @@ impl LlmBackend for DocumentModel {
         match self {
             Self::Agent(_, Some(agent)) => forward(agent, request),
             Self::Kimi(Some(api)) | Self::Local(Some(api)) => forward(api, request),
+            Self::Connection(_, Some(ConnectionModel::OpenAiChat(api))) => forward(api, request),
+            Self::Connection(_, Some(ConnectionModel::AnthropicMessages(api))) => {
+                forward(api, request)
+            }
             #[cfg(any(test, feature = "testing"))]
             Self::Fake(fake) => forward(fake, request),
             _ => Err(ModelError {
@@ -378,6 +475,101 @@ mod tests {
             assert_eq!(missing.info().provider, agent);
         }
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    fn connection(name: &str, protocol: Protocol, url: &str, key: Option<&str>) -> Connection {
+        let mut connection = Connection::new(name, protocol, url, "a-model");
+        connection.key = key.map(str::to_owned);
+        connection
+    }
+
+    #[test]
+    fn a_connection_speaks_its_protocol_with_the_key_it_names() {
+        let keys = Keys(BTreeMap::from([
+            ("deepseek", "sk-test"),
+            ("claude", "sk-ant"),
+        ]));
+        let mut deepseek = connection(
+            "deepseek",
+            Protocol::OpenAiChat,
+            "https://api.deepseek.example/v1",
+            Some("deepseek"),
+        );
+        deepseek.price_per_million_input = Some(0.28);
+        deepseek.price_per_million_output = Some(0.42);
+        let model = DocumentModel::connection(&deepseek, &keys).unwrap();
+        let info = model.describe();
+        assert_eq!(
+            (info.kind, info.ready),
+            (DocumentModelKind::Connection, true)
+        );
+        assert_eq!(info.model, "a-model");
+        assert_eq!(
+            info.billing,
+            Billing::PerToken {
+                input_micros_per_million: 280_000,
+                output_micros_per_million: 420_000
+            }
+        );
+        assert_eq!(model.info().provider, "connection.deepseek");
+        assert!(matches!(
+            model,
+            DocumentModel::Connection(_, Some(ConnectionModel::OpenAiChat(_)))
+        ));
+
+        let claude = connection(
+            "claude",
+            Protocol::AnthropicMessages,
+            "https://api.anthropic.example",
+            Some("claude"),
+        );
+        let model = DocumentModel::connection(&claude, &keys).unwrap();
+        assert!(matches!(
+            model,
+            DocumentModel::Connection(_, Some(ConnectionModel::AnthropicMessages(_)))
+        ));
+        assert_eq!(
+            model.describe().billing,
+            Billing::Unpriced,
+            "no price given is not free"
+        );
+
+        let unstored = connection(
+            "glm",
+            Protocol::OpenAiChat,
+            "https://glm.example/v4",
+            Some("glm"),
+        );
+        let model = DocumentModel::connection(&unstored, &keys).unwrap();
+        assert!(
+            !model.describe().ready,
+            "a key that is named but not stored is never left out"
+        );
+        assert_eq!(model.info().provider, "connection.glm");
+
+        let ollama = connection(
+            "ollama",
+            Protocol::OpenAiChat,
+            "http://localhost:11434/v1",
+            None,
+        );
+        let model = DocumentModel::connection(&ollama, &keys).unwrap();
+        assert!(model.describe().ready);
+        assert_eq!(model.describe().billing, Billing::Free);
+
+        let images = connection(
+            "seedream",
+            Protocol::OpenAiImages,
+            "https://ark.example/api/v3",
+            None,
+        );
+        assert!(matches!(
+            DocumentModel::connection(&images, &keys),
+            Err(ModelSelectionError::Connection(_))
+        ));
+        let mut broken = ollama;
+        broken.protocol = "telepathy".to_owned();
+        assert!(DocumentModel::connection(&broken, &keys).is_err());
     }
 
     #[test]

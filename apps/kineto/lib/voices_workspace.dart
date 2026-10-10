@@ -112,7 +112,7 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
       onLoadVoices: () => _run(project.loadVoices, 'Listing voices', target: 'catalog'),
       onRecommend: () => _run(
         project.recommendVoices,
-        'Asking ${_model.kind.label} for voices',
+        'Asking ${_model.writer} for voices',
         target: 'recommendations',
         resubmit: () => project.recommendVoices(resubmit: true),
       ),

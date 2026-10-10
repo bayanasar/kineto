@@ -6,8 +6,9 @@ import 'kineto_layout.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
-/// Which providers make each part of a film, the keys they take, kept in
-/// the system's secure storage, and the provider plugins and MCP servers the
+/// Which providers make each part of a film, the services the director
+/// added by the protocol they speak, the keys they take, kept in the
+/// system's secure storage, and the provider plugins and MCP servers the
 /// user registered, read only: both are registered in Kineto's configuration
 /// folder, never through the app, and this page never asks for a program to
 /// run.
@@ -15,6 +16,8 @@ class SettingsWorkspaceScreen extends StatefulWidget {
   const SettingsWorkspaceScreen({
     this.loadSettings = loadKinetoProviderSettingsInBackground,
     this.setSetting = setKinetoProviderSettingInBackground,
+    this.putConnection = putKinetoConnectionInBackground,
+    this.removeConnection = removeKinetoConnectionInBackground,
     this.loadKeys = loadKinetoKeysInBackground,
     this.storeKey = storeKinetoKeyInBackground,
     this.deleteKey = deleteKinetoKeyInBackground,
@@ -28,6 +31,11 @@ class SettingsWorkspaceScreen extends StatefulWidget {
   /// Both touch files, so they run off the UI thread.
   final Future<KinetoProviderSettings> Function() loadSettings;
   final Future<void> Function(KinetoProviderSetting setting, String value) setSetting;
+
+  /// Adds a connection or puts it in place of the one named `previous`;
+  /// removes one. Both write the settings file.
+  final Future<void> Function(KinetoConnection connection, {String previous}) putConnection;
+  final Future<void> Function(String name) removeConnection;
 
   /// Reads where each named key is; opening the secure storage can wait on
   /// the user, so these run off the UI thread.
@@ -112,17 +120,21 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
     }
   }
 
-  /// The keys settings list: the built-in providers', the one the chosen
-  /// OpenAI-compatible server takes, and every secret a plugin or MCP
-  /// server entry lists.
+  /// The keys settings list: the built-in providers', each one a
+  /// connection takes, and every secret a plugin or MCP server entry lists.
   List<KinetoKeySlot> get _slots {
     final slots = <KinetoKeySlot>[...KinetoKeySlot.builtIn];
     void add(KinetoKeySlot slot) {
       if (!slots.contains(slot)) slots.add(slot);
     }
 
-    final server = _settings?.value(KinetoProviderSetting.endpointKey) ?? '';
-    if (server.isNotEmpty) add(KinetoKeySlot.server(server));
+    final users = <String, List<String>>{};
+    for (final connection in _settings?.connections ?? const <KinetoConnection>[]) {
+      if (connection.key.isNotEmpty) (users[connection.key] ??= <String>[]).add(connection.name);
+    }
+    for (final MapEntry(key: name, value: connections) in users.entries) {
+      add(KinetoKeySlot.connection(name, connections));
+    }
     for (final plugin in _plugins ?? const <KinetoPlugin>[]) {
       for (final secret in plugin.secrets) {
         add(KinetoKeySlot.secret(secret, 'the ${plugin.id} plugin'));
@@ -169,6 +181,42 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
     });
   }
 
+  /// Add or change a connection, keeping [key] under its key's name when
+  /// one is given; or remove one. Then read the settings and keys again.
+  Future<void> _changeConnection(Future<void> Function() change, String done) async {
+    setState(() {
+      _settingWorking = true;
+      _settingNote = null;
+    });
+    String note = done;
+    try {
+      await change();
+      widget.onChanged?.call();
+    } on Object catch (error) {
+      note = _problem(error);
+    }
+    await _readSettings();
+    await _readKeys();
+    if (!mounted) return;
+    setState(() {
+      _settingWorking = false;
+      _settingNote = note;
+    });
+  }
+
+  Future<void> _putConnection(KinetoConnection connection, String previous, String key) => _changeConnection(
+        () async {
+          await widget.putConnection(connection, previous: previous);
+          if (key.isNotEmpty && connection.key.isNotEmpty) await widget.storeKey(connection.key, key);
+        },
+        'The ${connection.name} connection is saved. Your project uses it as soon as you go back to it.',
+      );
+
+  Future<void> _removeConnection(KinetoConnection connection) => _changeConnection(
+        () => widget.removeConnection(connection.name),
+        'The ${connection.name} connection is removed. Its key stays under Keys until you remove it.',
+      );
+
   /// Store or remove a key, then read the keys again. A key goes to the
   /// engine once and is not kept here.
   Future<void> _changeKey(String name, Future<void> Function() change, String done) async {
@@ -199,6 +247,8 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
         settingWorking: _settingWorking,
         settingNote: _settingNote,
         onChoose: _choose,
+        onPutConnection: _putConnection,
+        onRemoveConnection: _removeConnection,
         slots: _slots,
         keys: _keys,
         keysProblem: _keysProblem,
@@ -226,6 +276,9 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
       );
 }
 
+/// What a connection can be added for.
+const List<KinetoModality> _connectable = <KinetoModality>[KinetoModality.text];
+
 class SettingsWorkspaceView extends StatelessWidget {
   const SettingsWorkspaceView({
     this.settings,
@@ -233,6 +286,8 @@ class SettingsWorkspaceView extends StatelessWidget {
     this.settingWorking = false,
     this.settingNote,
     this.onChoose,
+    this.onPutConnection,
+    this.onRemoveConnection,
     this.slots = KinetoKeySlot.builtIn,
     this.keys,
     this.keysProblem,
@@ -258,6 +313,11 @@ class SettingsWorkspaceView extends StatelessWidget {
   /// What the last choice came to.
   final String? settingNote;
   final void Function(Map<KinetoProviderSetting, String> choices)? onChoose;
+
+  /// Saves a connection, in place of the one named by the second argument
+  /// when it is not empty, with the key typed for it, if any.
+  final void Function(KinetoConnection connection, String previous, String key)? onPutConnection;
+  final void Function(KinetoConnection connection)? onRemoveConnection;
 
   /// The keys to list, in order.
   final List<KinetoKeySlot> slots;
@@ -296,6 +356,16 @@ class SettingsWorkspaceView extends StatelessWidget {
             plugins: plugins ?? const <KinetoPlugin>[],
             onChoose: onChoose,
           ),
+          for (final modality in _connectable)
+            _ConnectionsPanel(
+              key: ValueKey<String>('connections-${modality.name}'),
+              modality: modality,
+              settings: settings,
+              working: settingWorking,
+              keys: keys,
+              onPut: onPutConnection,
+              onRemove: onRemoveConnection,
+            ),
           _keysPanel(context),
         ],
         // The programs the director registered.
@@ -627,9 +697,8 @@ class _KeyRowState extends State<_KeyRow> {
 /// One thing a provider setting can be, as the director reads it.
 typedef _Option = ({String value, String label, bool enabled});
 
-/// Which provider makes each part of a film, and the server documents are
-/// written with when it is an OpenAI-compatible one.
-class _ProvidersPanel extends StatefulWidget {
+/// Which provider makes each part of a film.
+class _ProvidersPanel extends StatelessWidget {
   const _ProvidersPanel({
     required this.settings,
     required this.problem,
@@ -647,51 +716,19 @@ class _ProvidersPanel extends StatefulWidget {
   final List<KinetoPlugin> plugins;
   final void Function(Map<KinetoProviderSetting, String> choices)? onChoose;
 
-  @override
-  State<_ProvidersPanel> createState() => _ProvidersPanelState();
-}
-
-class _ProvidersPanelState extends State<_ProvidersPanel> {
-  final TextEditingController _url = TextEditingController();
-  final TextEditingController _model = TextEditingController();
-  final TextEditingController _keyName = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    _fill();
-  }
-
-  @override
-  void didUpdateWidget(_ProvidersPanel old) {
-    super.didUpdateWidget(old);
-    if (!identical(old.settings, widget.settings)) _fill();
-  }
-
-  void _fill() {
-    final settings = widget.settings;
-    if (settings == null) return;
-    _url.text = settings.value(KinetoProviderSetting.endpointUrl);
-    _model.text = settings.value(KinetoProviderSetting.endpointModel);
-    _keyName.text = settings.value(KinetoProviderSetting.endpointKey);
-  }
-
-  @override
-  void dispose() {
-    _url.dispose();
-    _model.dispose();
-    _keyName.dispose();
-    super.dispose();
-  }
-
   String _agentLabel(KinetoAgent agent) =>
-      '${agent.label} · ${widget.settings?.agents.containsKey(agent) ?? false ? 'installed' : 'not found'}';
+      '${agent.label} · ${settings?.agents.containsKey(agent) ?? false ? 'installed' : 'not found'}';
+
+  _Option _connectionOption(KinetoConnection connection) =>
+      (value: connection.selection, label: '${connection.name} · ${connection.model}', enabled: true);
 
   List<_Option> _options(KinetoProviderSetting setting) {
-    final agents = widget.settings?.agents ?? const <KinetoAgent, String>{};
-    final current = widget.settings?.value(setting) ?? '';
-    final plugins = <KinetoPlugin>[
-      for (final plugin in widget.plugins)
+    final agents = settings?.agents ?? const <KinetoAgent, String>{};
+    List<KinetoConnection> connections(KinetoModality modality) =>
+        settings?.connectionsFor(modality) ?? const <KinetoConnection>[];
+    final current = settings?.value(setting) ?? '';
+    final described = <KinetoPlugin>[
+      for (final plugin in plugins)
         if (plugin.enabled && plugin.description != null) plugin,
     ];
     final options = <_Option>[
@@ -705,7 +742,7 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
                 enabled: agents.containsKey(agent) || current == agent.selection,
               ),
             (value: 'kimi', label: 'Kimi API · key', enabled: true),
-            (value: 'openai-compatible', label: 'OpenAI-compatible server', enabled: true),
+            for (final connection in connections(KinetoModality.text)) _connectionOption(connection),
           ],
         KinetoProviderSetting.image => <_Option>[
             (value: '', label: 'Local demo · free', enabled: true),
@@ -717,7 +754,7 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
                   label: _agentLabel(agent),
                   enabled: agents.containsKey(agent) || current == agent.selection,
                 ),
-            for (final plugin in plugins)
+            for (final plugin in described)
               if (plugin.description!.makesImages)
                 (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
           ],
@@ -729,7 +766,7 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
             (value: 'veo:fast', label: 'Veo 3.1 Fast · key', enabled: true),
             (value: 'veo:standard', label: 'Veo 3.1 · key', enabled: true),
             (value: 'omni', label: 'Gemini Omni Flash · key', enabled: true),
-            for (final plugin in plugins)
+            for (final plugin in described)
               if (plugin.description!.makesVideos)
                 (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
           ],
@@ -737,11 +774,10 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
             (value: '', label: 'Follows images', enabled: true),
             (value: 'local-demo', label: 'Local demo · free', enabled: true),
             (value: 'minimax', label: 'MiniMax speech · key', enabled: true),
-            for (final plugin in plugins)
+            for (final plugin in described)
               if (plugin.description!.speaks)
                 (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
           ],
-        _ => const <_Option>[],
       },
     ];
     if (!options.any((option) => option.value == current)) {
@@ -751,8 +787,8 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
   }
 
   Widget _choice(BuildContext context, KinetoProviderSetting setting, String title) {
-    final settings = widget.settings!;
-    final ready = widget.onChoose != null && !widget.working && settings.problem == null;
+    final settings = this.settings!;
+    final ready = onChoose != null && !working && settings.problem == null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -776,7 +812,7 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
                 onChanged: ready
                     ? (value) {
                         if (value != null && value != settings.value(setting)) {
-                          widget.onChoose!(<KinetoProviderSetting, String>{setting: value});
+                          onChoose!(<KinetoProviderSetting, String>{setting: value});
                         }
                       }
                     : null,
@@ -792,17 +828,15 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final settings = widget.settings;
+    final settings = this.settings;
     final model = settings?.value(KinetoProviderSetting.languageModel) ?? '';
     final agent = KinetoAgent.values.where((agent) => agent.selection == model).firstOrNull;
-    final server = model == 'openai-compatible' || model == 'local';
-    final ready = widget.onChoose != null && !widget.working && settings?.problem == null;
     return WabPanel(
       title: 'Providers',
       trailing: settings == null
-          ? WabStatusBadge(widget.problem == null ? 'Reading' : 'Unreadable',
-              kind: widget.problem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
-          : widget.working
+          ? WabStatusBadge(problem == null ? 'Reading' : 'Unreadable',
+              kind: problem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
+          : working
               ? const WabStatusBadge('Saving', kind: WabBadgeKind.progress)
               : settings.problem != null
                   ? const WabStatusBadge('Unreadable', kind: WabBadgeKind.warning)
@@ -813,9 +847,10 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
           const Text(
             'Choose who makes each part. The agent tools you already use are found on this computer '
             'and run under your own sign-in: Kineto starts them without tools and never reads their '
-            'sign-in. Your project uses these choices as soon as you go back to it.',
+            'sign-in. Any other service is added below as a connection, by the protocol it speaks. '
+            'Your project uses these choices as soon as you go back to it.',
           ),
-          if (widget.problem != null) ...<Widget>[const SizedBox(height: 12), Text(widget.problem!)],
+          if (problem != null) ...<Widget>[const SizedBox(height: 12), Text(problem!)],
           if (settings?.problem != null) ...<Widget>[
             const SizedBox(height: 12),
             Text(
@@ -823,9 +858,9 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
               key: const ValueKey<String>('providers-unreadable'),
             ),
           ],
-          if (widget.note != null) ...<Widget>[
+          if (note != null) ...<Widget>[
             const SizedBox(height: 12),
-            Text(widget.note!, key: const ValueKey<String>('providers-note')),
+            Text(note!, key: const ValueKey<String>('providers-note')),
           ],
           if (settings != null) ...<Widget>[
             const SizedBox(height: 12),
@@ -833,47 +868,6 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
             if (agent != null && settings.agents[agent] != null)
               Text('Runs ${settings.agents[agent]}', key: const ValueKey<String>('agent-path')),
             if (agent?.caveat != null) Text(agent!.caveat!),
-            if (server) ...<Widget>[
-              const SizedBox(height: 8),
-              TextField(
-                key: const ValueKey<String>('server-url'),
-                controller: _url,
-                enabled: ready,
-                decoration: const InputDecoration(labelText: 'Server address, https:// or http://localhost'),
-              ),
-              TextField(
-                key: const ValueKey<String>('server-model'),
-                controller: _model,
-                enabled: ready,
-                decoration: const InputDecoration(labelText: 'Model'),
-              ),
-              TextField(
-                key: const ValueKey<String>('server-key'),
-                controller: _keyName,
-                enabled: ready,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: 'Name of its key, such as deepseek; empty for a server that takes none',
-                ),
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: KinetoButton(
-                  key: const ValueKey<String>('server-save'),
-                  primary: true,
-                  onPressed: ready
-                      ? () => widget.onChoose!(<KinetoProviderSetting, String>{
-                            KinetoProviderSetting.endpointUrl: _url.text,
-                            KinetoProviderSetting.endpointModel: _model.text,
-                            KinetoProviderSetting.endpointKey: _keyName.text,
-                          })
-                      : null,
-                  child: const Text('Save the server'),
-                ),
-              ),
-              const Text('Its key is kept under that name below, never here.'),
-            ],
             const SizedBox(height: 12),
             _choice(context, KinetoProviderSetting.image, 'Images'),
             if (settings.value(KinetoProviderSetting.image) == KinetoAgent.agy.selection &&
@@ -884,6 +878,383 @@ class _ProvidersPanelState extends State<_ProvidersPanel> {
             const SizedBox(height: 12),
             _choice(context, KinetoProviderSetting.speech, 'Speech'),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// What a connection costs, in words.
+String _priceLabel(KinetoConnection connection) {
+  final modality = connection.protocol?.modality;
+  if (modality == KinetoModality.image) {
+    return connection.pricePerImage.isEmpty
+        ? 'No price given: costs show as unknown'
+        : '\$${connection.pricePerImage} an image';
+  }
+  if (connection.pricePerMillionInput.isEmpty || connection.pricePerMillionOutput.isEmpty) {
+    return 'No price given: costs show as unknown';
+  }
+  return '\$${connection.pricePerMillionInput} in, \$${connection.pricePerMillionOutput} out, '
+      'per million tokens';
+}
+
+/// Why [connection] cannot be saved as typed, in words; null when it can be
+/// sent for the engine to check.
+String? _connectionProblem(KinetoConnection connection) {
+  final name = RegExp(r'^[a-z_][a-z0-9_]{0,63}$');
+  if (!name.hasMatch(connection.name)) {
+    return 'A name is lowercase letters, digits and _, such as deepseek.';
+  }
+  final url = connection.url;
+  final local = RegExp(r'^http://(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?(/|$)');
+  if (!(url.startsWith('https://') && url.length > 'https://'.length) && !local.hasMatch(url)) {
+    return 'An address starts with https://, or http:// to this computer.';
+  }
+  if (connection.model.isEmpty || connection.model.contains(RegExp(r'\s'))) {
+    return 'Name the model in one word, such as deepseek-chat.';
+  }
+  if (connection.key.isNotEmpty && !name.hasMatch(connection.key)) {
+    return 'A key name is lowercase letters, digits and _, such as deepseek.';
+  }
+  for (final price in <String>[
+    connection.pricePerMillionInput,
+    connection.pricePerMillionOutput,
+    connection.pricePerImage,
+  ]) {
+    final dollars = double.tryParse(price);
+    if (price.isNotEmpty && (dollars == null || dollars < 0 || dollars > 10000)) {
+      return 'A price is a number of US dollars, such as 0.28.';
+    }
+  }
+  if (connection.references < 0 || connection.references > 16) {
+    return 'A connection takes at most 16 reference images.';
+  }
+  return null;
+}
+
+/// The connections that make one thing: each as it is, with where its key
+/// is, and one form to add a connection or change one.
+class _ConnectionsPanel extends StatefulWidget {
+  const _ConnectionsPanel({
+    required this.modality,
+    required this.settings,
+    required this.working,
+    required this.keys,
+    required this.onPut,
+    required this.onRemove,
+    super.key,
+  });
+
+  final KinetoModality modality;
+
+  /// Null while they are read.
+  final KinetoProviderSettings? settings;
+  final bool working;
+
+  /// Where each key is; null while they are read.
+  final KinetoKeys? keys;
+  final void Function(KinetoConnection connection, String previous, String key)? onPut;
+  final void Function(KinetoConnection connection)? onRemove;
+
+  @override
+  State<_ConnectionsPanel> createState() => _ConnectionsPanelState();
+}
+
+class _ConnectionsPanelState extends State<_ConnectionsPanel> {
+  /// The name of the connection being changed, empty while one is added;
+  /// null when the form is closed.
+  String? _editing;
+  late KinetoProtocol _protocol = _protocols.first;
+
+  /// Whether the key's name still follows the connection's.
+  bool _keyFollows = false;
+
+  /// Whether the form was sent and its outcome is not yet read back.
+  bool _sent = false;
+  String? _problem;
+  final TextEditingController _name = TextEditingController();
+  final TextEditingController _url = TextEditingController();
+  final TextEditingController _model = TextEditingController();
+  final TextEditingController _keyName = TextEditingController();
+  final TextEditingController _key = TextEditingController();
+  final TextEditingController _input = TextEditingController();
+  final TextEditingController _output = TextEditingController();
+  final TextEditingController _image = TextEditingController();
+  final TextEditingController _references = TextEditingController();
+
+  List<KinetoProtocol> get _protocols =>
+      KinetoProtocol.values.where((protocol) => protocol.modality == widget.modality).toList();
+
+  @override
+  void initState() {
+    super.initState();
+    _name.addListener(() {
+      if (_keyFollows && _keyName.text != _name.text) _keyName.text = _name.text;
+    });
+  }
+
+  @override
+  void didUpdateWidget(_ConnectionsPanel old) {
+    super.didUpdateWidget(old);
+    // Once the settings are read back, the form closes if the connection
+    // is there as it was sent, and stays open to be corrected if not.
+    if (_sent && !widget.working) {
+      _sent = false;
+      final saved = widget.settings?.connections.where((connection) => connection.name == _name.text.trim());
+      if (saved != null && saved.isNotEmpty && saved.first.url == _url.text.trim()) {
+        _key.clear();
+        _editing = null;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in <TextEditingController>[
+      _name,
+      _url,
+      _model,
+      _keyName,
+      _key,
+      _input,
+      _output,
+      _image,
+      _references,
+    ]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  void _open(KinetoConnection? connection) {
+    setState(() {
+      _editing = connection?.name ?? '';
+      _protocol = connection?.protocol ?? _protocols.first;
+      _keyFollows = connection == null;
+      _name.text = connection?.name ?? '';
+      _url.text = connection?.url ?? '';
+      _model.text = connection?.model ?? '';
+      _keyName.text = connection?.key ?? '';
+      _key.clear();
+      _input.text = connection?.pricePerMillionInput ?? '';
+      _output.text = connection?.pricePerMillionOutput ?? '';
+      _image.text = connection?.pricePerImage ?? '';
+      final references = connection?.references ?? 0;
+      _references.text = references == 0 ? '' : '$references';
+      _problem = null;
+    });
+  }
+
+  void _save() {
+    final text = widget.modality == KinetoModality.text;
+    final references = _references.text.trim();
+    final connection = KinetoConnection(
+      name: _name.text.trim(),
+      protocolName: _protocol.wireName,
+      url: _url.text.trim(),
+      model: _model.text.trim(),
+      key: _keyName.text.trim(),
+      pricePerMillionInput: text ? _input.text.trim() : '',
+      pricePerMillionOutput: text ? _output.text.trim() : '',
+      pricePerImage: text ? '' : _image.text.trim(),
+      references: text || references.isEmpty ? 0 : int.tryParse(references) ?? -1,
+    );
+    final problem = _connectionProblem(connection);
+    setState(() {
+      _problem = problem;
+      _sent = problem == null && widget.onPut != null;
+    });
+    if (problem == null) widget.onPut?.call(connection, _editing ?? '', _key.text.trim());
+  }
+
+  String _keyLabel(KinetoConnection connection) {
+    if (connection.key.isEmpty) return 'Takes no key';
+    final state = widget.keys?.states[connection.key];
+    if (state == null) return 'Key ${connection.key}';
+    if (state.stored) return 'Key ${connection.key} · saved';
+    if (state.inEnvironment) return 'Key ${connection.key} · from the environment';
+    return 'Key ${connection.key} · not saved';
+  }
+
+  Widget _row(KinetoConnection connection, bool ready) {
+    final protocol = connection.protocol;
+    return WabPanel(
+      key: ValueKey<String>('connection-${connection.name}'),
+      title: '${connection.name} · ${protocol?.label ?? connection.protocolName}',
+      trailing: protocol == null
+          ? const WabStatusBadge('Newer version', kind: WabBadgeKind.warning)
+          : WabStatusBadge(
+              _keyLabel(connection).endsWith('not saved') ? 'Needs its key' : 'Ready',
+              kind: _keyLabel(connection).endsWith('not saved') ? WabBadgeKind.warning : WabBadgeKind.neutral,
+            ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SelectableText('${connection.model} at ${connection.url}'),
+          Text(_keyLabel(connection)),
+          Text(_priceLabel(connection)),
+          if (connection.references > 0) Text('Takes ${connection.references} reference images'),
+          if (protocol == null) Text('A newer version of Kineto added it; this one cannot use it.'),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              KinetoButton(
+                key: ValueKey<String>('connection-edit-${connection.name}'),
+                onPressed: ready && protocol != null ? () => _open(connection) : null,
+                child: const Text('Change'),
+              ),
+              KinetoButton(
+                key: ValueKey<String>('connection-remove-${connection.name}'),
+                onPressed: ready && widget.onRemove != null ? () => widget.onRemove!(connection) : null,
+                child: const Text('Remove'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(String key, TextEditingController controller, String label,
+          {bool enabled = true, bool secret = false, ValueChanged<String>? onChanged}) =>
+      TextField(
+        key: ValueKey<String>('connection-$key'),
+        controller: controller,
+        enabled: enabled,
+        obscureText: secret,
+        enableSuggestions: !secret,
+        autocorrect: false,
+        onChanged: onChanged,
+        decoration: InputDecoration(labelText: label),
+      );
+
+  Widget _form(bool ready) {
+    final text = widget.modality == KinetoModality.text;
+    final canKeep = widget.keys?.available ?? false;
+    return WabPanel(
+      key: const ValueKey<String>('connection-form'),
+      title: _editing!.isEmpty ? 'New ${widget.modality.label.toLowerCase()} connection' : 'Change $_editing',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _field('name', _name, 'Name, such as deepseek: lowercase letters, digits and _', enabled: ready),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              const SizedBox(width: 120, child: Text('Protocol')),
+              Expanded(
+                child: DropdownButton<KinetoProtocol>(
+                  key: const ValueKey<String>('connection-protocol'),
+                  value: _protocol,
+                  isExpanded: true,
+                  items: <DropdownMenuItem<KinetoProtocol>>[
+                    for (final protocol in _protocols)
+                      DropdownMenuItem<KinetoProtocol>(
+                        key: ValueKey<String>('connection-protocol-${protocol.wireName}'),
+                        value: protocol,
+                        child: Text(protocol.label),
+                      ),
+                  ],
+                  onChanged: ready ? (protocol) => setState(() => _protocol = protocol ?? _protocol) : null,
+                ),
+              ),
+            ],
+          ),
+          Text('Spoken by ${_protocol.spokenBy}.'),
+          _field('url', _url, 'Address, such as ${_protocol.exampleUrl}', enabled: ready),
+          _field('model', _model, 'Model, as the service names it', enabled: ready),
+          _field(
+            'key-name',
+            _keyName,
+            'Name its key is kept under; empty for a service that takes none',
+            enabled: ready,
+            onChanged: (_) => _keyFollows = false,
+          ),
+          if (canKeep)
+            _field(
+              'key',
+              _key,
+              _editing!.isEmpty ? 'Its key, kept in secure storage' : 'A new key; empty keeps the saved one',
+              enabled: ready,
+              secret: true,
+            ),
+          if (text) ...<Widget>[
+            _field('price-input', _input, 'US dollars per million tokens read; empty if you do not know',
+                enabled: ready),
+            _field('price-output', _output, 'US dollars per million tokens written; empty if you do not know',
+                enabled: ready),
+          ] else ...<Widget>[
+            _field('price-image', _image, 'US dollars an image; empty if you do not know', enabled: ready),
+            _field('references', _references, 'Reference images it takes, 0 to 16; empty for none',
+                enabled: ready),
+          ],
+          if (_problem != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(_problem!, key: const ValueKey<String>('connection-problem')),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              KinetoButton(
+                key: const ValueKey<String>('connection-save'),
+                primary: true,
+                onPressed: ready ? _save : null,
+                child: const Text('Save the connection'),
+              ),
+              KinetoButton(
+                key: const ValueKey<String>('connection-cancel'),
+                onPressed: widget.working ? null : () => setState(() => _editing = null),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = widget.settings;
+    final connections = settings?.connectionsFor(widget.modality) ?? const <KinetoConnection>[];
+    final unknown = widget.modality == KinetoModality.text
+        ? <KinetoConnection>[
+            for (final connection in settings?.connections ?? const <KinetoConnection>[])
+              if (connection.protocol == null) connection,
+          ]
+        : const <KinetoConnection>[];
+    final ready = settings != null && settings.problem == null && !widget.working && widget.onPut != null;
+    return WabPanel(
+      title: '${widget.modality.label} connections',
+      trailing: WabStatusBadge('${connections.length}', kind: WabBadgeKind.neutral),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text(
+            'Any service for ${widget.modality.usedFor}, added by the protocol it speaks: its address, '
+            'its model and its key. Choose it above once it is saved.',
+          ),
+          for (final connection in <KinetoConnection>[...connections, ...unknown]) ...<Widget>[
+            const SizedBox(height: 12),
+            _row(connection, ready && _editing == null),
+          ],
+          const SizedBox(height: 12),
+          if (_editing != null)
+            _form(ready)
+          else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: KinetoButton(
+                key: ValueKey<String>('connection-add-${widget.modality.name}'),
+                onPressed: ready ? () => _open(null) : null,
+                child: Text('Add a ${widget.modality.label.toLowerCase()} connection'),
+              ),
+            ),
         ],
       ),
     );

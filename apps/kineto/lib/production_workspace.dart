@@ -244,7 +244,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       editingEntry: _editingEntry,
       onWriteBible: () => _run(
         project.writeBible,
-        'Writing the bible with ${_model.kind.label}',
+        'Writing the bible with ${_model.writer}',
         target: 'bible',
         resubmit: () => project.writeBible(resubmit: true),
       ),
@@ -518,7 +518,7 @@ class ProductionWorkspaceView extends StatelessWidget {
                   onPressed: _free('bible') ? () => onLockBible(bible.revision) : null,
                   child: Text('Lock revision ${bible.revision}'),
                 ),
-              Text('${model.kind.label} · ${documentCostLabel(model, bibleCostMicros)}'),
+              Text('${model.writer} · ${documentCostLabel(model, bibleCostMicros)}'),
             ],
           ),
           if (production.bibleRevisions.isNotEmpty) ...<Widget>[

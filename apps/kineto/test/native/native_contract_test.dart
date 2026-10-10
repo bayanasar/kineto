@@ -80,6 +80,21 @@ void main() {
       contract.providerSettings.keys.toSet(),
     );
     expect(KinetoAgent.values.map((agent) => agent.wireName).toSet(), contract.agents.keys.toSet());
+    expect(
+      KinetoProtocol.values.map((protocol) => protocol.contractName).toSet(),
+      contract.connectionProtocols.keys.toSet(),
+    );
+    expect(contract.connectionFields.keys.toSet(), <String>{
+      'name',
+      'protocol',
+      'url',
+      'model',
+      'key',
+      'price_per_million_input',
+      'price_per_million_output',
+      'price_per_image',
+      'references',
+    });
   });
 
   test('document codes match the native tables name for name', () {

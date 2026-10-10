@@ -391,7 +391,15 @@ fn chosen_providers(secrets: &impl SecretSource) -> Result<Providers, SessionErr
         model: choices
             .selection(Setting::LanguageModel)
             .map_err(ModelSelectionError::Unknown)
-            .and_then(|selection| DocumentModel::select(selection.as_deref(), secrets, lookup))
+            .and_then(|selection| {
+                match choices
+                    .connection(selection.as_deref())
+                    .map_err(ModelSelectionError::Connection)?
+                {
+                    Some(connection) => DocumentModel::connection(connection, secrets),
+                    None => DocumentModel::select(selection.as_deref(), secrets, lookup),
+                }
+            })
             .map_err(SessionError::Model)?,
     })
 }

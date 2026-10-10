@@ -33,13 +33,35 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// How a request carries its key.
+#[derive(Debug, Clone, Copy)]
+pub enum Auth<'a> {
+    /// `Authorization: Bearer <key>`, as OpenAI's protocol takes it.
+    Bearer(&'a SecretString),
+    /// `x-api-key: <key>`, as Anthropic's protocol takes it.
+    ApiKey(&'a SecretString),
+}
+
+impl Auth<'_> {
+    /// The key it carries.
+    #[must_use]
+    pub const fn key(&self) -> &SecretString {
+        match self {
+            Self::Bearer(key) | Self::ApiKey(key) => key,
+        }
+    }
+}
+
 /// Sends one JSON POST. Production uses [`HttpTransport`]; tests replay
 /// recorded answers.
 pub trait Transport {
+    /// POST `body` to `url` with the key `auth` carries, if any, and the
+    /// protocol's own `headers`.
     fn post_json(
         &self,
         url: &str,
-        bearer: Option<&SecretString>,
+        auth: Option<Auth<'_>>,
+        headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure>;
 }
@@ -51,10 +73,11 @@ impl Transport for SharedTransport {
     fn post_json(
         &self,
         url: &str,
-        bearer: Option<&SecretString>,
+        auth: Option<Auth<'_>>,
+        headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
-        self.as_ref().post_json(url, bearer, body)
+        self.as_ref().post_json(url, auth, headers, body)
     }
 }
 
@@ -125,7 +148,8 @@ impl Transport for HttpTransport {
     fn post_json(
         &self,
         url: &str,
-        bearer: Option<&SecretString>,
+        auth: Option<Auth<'_>>,
+        headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<HttpResponse, TransportFailure> {
         if !is_permitted(url) {
@@ -135,8 +159,15 @@ impl Transport for HttpTransport {
             .agent
             .post(url)
             .header("Content-Type", "application/json");
-        if let Some(bearer) = bearer {
-            request = request.header("Authorization", format!("Bearer {}", bearer.expose()));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        match auth {
+            Some(Auth::Bearer(key)) => {
+                request = request.header("Authorization", format!("Bearer {}", key.expose()));
+            }
+            Some(Auth::ApiKey(key)) => request = request.header("x-api-key", key.expose()),
+            None => {}
         }
         let mut response = request.send(body).map_err(failure)?;
         let status = response.status().as_u16();
@@ -192,7 +223,7 @@ mod tests {
             assert!(!is_permitted(refused), "{refused}");
         }
         assert_eq!(
-            HttpTransport::new().post_json("http://example.test/v1", None, b"{}"),
+            HttpTransport::new().post_json("http://example.test/v1", None, &[], b"{}"),
             Err(TransportFailure::Insecure)
         );
     }

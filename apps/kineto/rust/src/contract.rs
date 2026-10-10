@@ -235,14 +235,34 @@ const KEY_STATES: [(&str, u32); 2] = [
 ];
 
 /// The provider settings `kineto_settings_*` read and change.
-pub(crate) const PROVIDER_SETTINGS: [(&str, u32); 7] = [
+pub(crate) const PROVIDER_SETTINGS: [(&str, u32); 4] = [
     ("image", 1),
     ("video", 2),
     ("speech", 3),
     ("language_model", 4),
-    ("endpoint_url", 5),
-    ("endpoint_model", 6),
-    ("endpoint_key", 7),
+];
+
+/// The fields of a connection `kineto_settings_connection_*` read and put,
+/// each as text.
+pub(crate) const CONNECTION_FIELDS: [(&str, u32); 9] = [
+    ("name", 1),
+    ("protocol", 2),
+    ("url", 3),
+    ("model", 4),
+    ("key", 5),
+    ("price_per_million_input", 6),
+    ("price_per_million_output", 7),
+    ("price_per_image", 8),
+    ("references", 9),
+];
+
+/// The protocols a connection may speak, by their names in the settings
+/// file with `_` for `-`.
+pub(crate) const CONNECTION_PROTOCOLS: [(&str, u32); 4] = [
+    ("openai_chat", 1),
+    ("anthropic_messages", 2),
+    ("openai_images", 3),
+    ("gemini_images", 4),
 ];
 
 /// The agent CLIs settings look for.
@@ -351,7 +371,7 @@ pub(crate) const EXPORT_TEXTS: [(&str, u32); 4] = [
 ];
 
 /// Language model codes returned by `kineto_project_llm_provider`.
-pub(crate) const LLM_PROVIDERS: [(&str, u32); 8] = [
+pub(crate) const LLM_PROVIDERS: [(&str, u32); 9] = [
     ("none", 0),
     ("kimi_code", 1),
     ("kimi", 2),
@@ -360,6 +380,7 @@ pub(crate) const LLM_PROVIDERS: [(&str, u32); 8] = [
     ("codex", 5),
     ("agy", 6),
     ("mini_agent", 7),
+    ("connection", 8),
 ];
 
 /// Source format codes `kineto_project_import_source` takes.
@@ -1118,6 +1139,8 @@ const ENTRY_KEY_PROVIDER: u32 = 67;
 const ENTRY_KEY_STATE: u32 = 68;
 const ENTRY_PROVIDER_SETTING: u32 = 69;
 const ENTRY_AGENT: u32 = 70;
+const ENTRY_CONNECTION_FIELD: u32 = 71;
+const ENTRY_CONNECTION_PROTOCOL: u32 = 72;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1227,6 +1250,12 @@ fn entries() -> &'static [Entry] {
         codes(&mut entries, ENTRY_KEY_STATE, &KEY_STATES);
         codes(&mut entries, ENTRY_PROVIDER_SETTING, &PROVIDER_SETTINGS);
         codes(&mut entries, ENTRY_AGENT, &AGENTS);
+        codes(&mut entries, ENTRY_CONNECTION_FIELD, &CONNECTION_FIELDS);
+        codes(
+            &mut entries,
+            ENTRY_CONNECTION_PROTOCOL,
+            &CONNECTION_PROTOCOLS,
+        );
         entries
     })
 }
@@ -1426,9 +1455,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_AGENT);
-        assert_eq!(&name[..len as usize], b"mini_agent");
-        assert_eq!((value, extra), (5, 0));
+        assert_eq!(kind, ENTRY_CONNECTION_PROTOCOL);
+        assert_eq!(&name[..len as usize], b"gemini_images");
+        assert_eq!((value, extra), (4, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

@@ -221,7 +221,8 @@ enum KinetoLanguageModelKind {
   claudeCode('claude_code', 'Claude Code', agent: true),
   codex('codex', 'Codex', agent: true),
   agy('agy', 'Antigravity (agy)', agent: true),
-  miniAgent('mini_agent', 'Mini-Agent', agent: true);
+  miniAgent('mini_agent', 'Mini-Agent', agent: true),
+  connection('connection', 'Connection');
 
   const KinetoLanguageModelKind(this.wireName, this.label, {this.agent = false});
 
@@ -257,6 +258,10 @@ final class KinetoLanguageModel {
 
   /// An agent signs in on its own and is billed by its subscription.
   bool get isAgent => kind.agent;
+
+  /// Who writes, in a sentence: a connection by the model it serves, any
+  /// other by its kind.
+  String get writer => kind == KinetoLanguageModelKind.connection && model.isNotEmpty ? model : kind.label;
 
   String get label =>
       model.isEmpty || isAgent ? kind.label : '${kind.label} · $model';

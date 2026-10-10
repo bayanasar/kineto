@@ -18,11 +18,11 @@ external int _kinetoKeysDelete(Pointer<Uint8> name, int nameLength);
 final class KinetoKeySlot {
   const KinetoKeySlot({required this.name, required this.label, required this.usedFor});
 
-  /// The key the OpenAI-compatible server in the provider settings takes,
-  /// under the name the director gave it.
-  const KinetoKeySlot.server(this.name)
+  /// The key a connection the director added takes, under the name its
+  /// connection gives; [users] names the connections that take it.
+  KinetoKeySlot.connection(this.name, Iterable<String> users)
       : label = name,
-        usedFor = 'The OpenAI-compatible server chosen for documents';
+        usedFor = users.length == 1 ? 'The ${users.first} connection' : 'The ${users.join(', ')} connections';
 
   /// A secret the entry of [owner] (a plugin or MCP server) lists.
   KinetoKeySlot.secret(this.name, String owner)

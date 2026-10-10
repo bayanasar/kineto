@@ -614,6 +614,7 @@ pub unsafe extern "C" fn kineto_project_llm_provider(session: *const KinetoProje
                 DocumentModelKind::Agent(AgentKind::MiniAgent) => "mini_agent",
                 DocumentModelKind::Kimi => "kimi",
                 DocumentModelKind::Local => "local",
+                DocumentModelKind::Connection => "connection",
             },
         )
     })

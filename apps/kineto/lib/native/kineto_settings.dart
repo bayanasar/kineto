@@ -44,15 +44,48 @@ external void _kinetoSettingsDestroy(Pointer<Void> settings);
 @Native<Int32 Function(Uint32, Pointer<Uint8>, Uint64)>(symbol: 'kineto_settings_set')
 external int _kinetoSettingsSet(int field, Pointer<Uint8> value, int length);
 
+@Native<Uint64 Function(Pointer<Void>)>(symbol: 'kineto_settings_connection_count')
+external int _kinetoSettingsConnectionCount(Pointer<Void> settings);
+
+@Native<Int32 Function(Pointer<Void>, Uint64, Uint32, Pointer<Uint8>, Uint64, Pointer<Uint64>)>(
+  symbol: 'kineto_settings_connection_text_copy',
+)
+external int _kinetoSettingsConnectionTextCopy(
+  Pointer<Void> settings,
+  int index,
+  int field,
+  Pointer<Uint8> buffer,
+  int capacity,
+  Pointer<Uint64> length,
+);
+
+/// One field of a connection, laid out as `KinetoConnectionField`.
+final class _NativeConnectionField extends Struct {
+  @Uint32()
+  external int field;
+
+  external _NativeText value;
+}
+
+@Native<Int32 Function(Pointer<Uint8>, Uint64, Pointer<_NativeConnectionField>, Uint64)>(
+  symbol: 'kineto_settings_connection_put',
+)
+external int _kinetoSettingsConnectionPut(
+  Pointer<Uint8> previous,
+  int previousLength,
+  Pointer<_NativeConnectionField> fields,
+  int fieldCount,
+);
+
+@Native<Int32 Function(Pointer<Uint8>, Uint64)>(symbol: 'kineto_settings_connection_remove')
+external int _kinetoSettingsConnectionRemove(Pointer<Uint8> name, int length);
+
 /// One of the director's provider choices.
 enum KinetoProviderSetting {
   image('image', 'KINETO_IMAGE_PROVIDER'),
   video('video', 'KINETO_VIDEO_PROVIDER'),
   speech('speech', 'KINETO_SPEECH_PROVIDER'),
-  languageModel('language_model', 'KINETO_LLM_PROVIDER'),
-  endpointUrl('endpoint_url', 'KINETO_LOCAL_LLM_URL'),
-  endpointModel('endpoint_model', 'KINETO_LOCAL_LLM_MODEL'),
-  endpointKey('endpoint_key', 'KINETO_LOCAL_LLM_KEY');
+  languageModel('language_model', 'KINETO_LLM_PROVIDER');
 
   const KinetoProviderSetting(this.wireName, this.variable);
 
@@ -60,6 +93,118 @@ enum KinetoProviderSetting {
 
   /// The environment variable that makes this choice for a run instead.
   final String variable;
+}
+
+/// What a connection makes.
+enum KinetoModality {
+  text('Text', 'documents'),
+  image('Images', 'keyframes, style samples and portraits');
+
+  const KinetoModality(this.label, this.usedFor);
+
+  final String label;
+  final String usedFor;
+}
+
+/// A protocol a connection may speak: how its requests and answers are
+/// shaped, which many services share. Never a vendor.
+enum KinetoProtocol {
+  openAiChat(
+    'openai-chat',
+    KinetoModality.text,
+    'OpenAI chat completions',
+    'GPT, Grok, Muse, GLM, Qwen, DeepSeek, Kimi, Doubao, MiniMax, Gemini, OpenRouter, Ollama and most others',
+    'https://api.deepseek.com/v1',
+  ),
+  anthropicMessages(
+    'anthropic-messages',
+    KinetoModality.text,
+    'Anthropic messages',
+    "Claude's API, and the Anthropic-compatible addresses other services give",
+    'https://api.anthropic.com',
+  ),
+  openAiImages(
+    'openai-images',
+    KinetoModality.image,
+    'OpenAI images',
+    'GPT Image, Grok Imagine, Seedream, CogView and others that take /images/generations',
+    'https://api.openai.com/v1',
+  ),
+  geminiImages(
+    'gemini-images',
+    KinetoModality.image,
+    'Gemini image generation',
+    "Gemini's image models, by generateContent",
+    'https://generativelanguage.googleapis.com/v1beta',
+  );
+
+  const KinetoProtocol(this.wireName, this.modality, this.label, this.spokenBy, this.exampleUrl);
+
+  /// Its name in the settings file.
+  final String wireName;
+  final KinetoModality modality;
+  final String label;
+
+  /// Who speaks it, as examples.
+  final String spokenBy;
+  final String exampleUrl;
+
+  /// Its name in the native contract table.
+  String get contractName => wireName.replaceAll('-', '_');
+
+  static KinetoProtocol? byWireName(String name) =>
+      KinetoProtocol.values.where((protocol) => protocol.wireName == name).firstOrNull;
+}
+
+/// A service the director added by the protocol it speaks.
+final class KinetoConnection {
+  const KinetoConnection({
+    required this.name,
+    required this.protocolName,
+    required this.url,
+    required this.model,
+    this.key = '',
+    this.pricePerMillionInput = '',
+    this.pricePerMillionOutput = '',
+    this.pricePerImage = '',
+    this.references = 0,
+  });
+
+  /// How it is chosen, and the key's name unless it names another.
+  final String name;
+
+  /// Its protocol's name; one a newer build added has no [protocol].
+  final String protocolName;
+  final String url;
+  final String model;
+
+  /// The name its key is kept under; empty for a service that takes none.
+  final String key;
+
+  /// Prices in US dollars, as written; empty when not given.
+  final String pricePerMillionInput;
+  final String pricePerMillionOutput;
+  final String pricePerImage;
+
+  /// How many reference images an image connection takes.
+  final int references;
+
+  KinetoProtocol? get protocol => KinetoProtocol.byWireName(protocolName);
+
+  /// How the provider settings choose it.
+  String get selection => 'connection:$name';
+
+  Map<String, String> get _fields => <String, String>{
+        'name': name,
+        'protocol': protocolName,
+        'url': url,
+        'model': model,
+        'key': key,
+        'price_per_million_input': pricePerMillionInput,
+        'price_per_million_output': pricePerMillionOutput,
+        'price_per_image': pricePerImage,
+        'references': references == 0 ? '' : '$references',
+      };
 }
 
 /// An agent command-line tool the director may have installed and signed in
@@ -107,6 +252,7 @@ final class KinetoProviderSettings {
     this.values = const <KinetoProviderSetting, String>{},
     this.overridden = const <KinetoProviderSetting>{},
     this.agents = const <KinetoAgent, String>{},
+    this.connections = const <KinetoConnection>[],
     this.problem,
   });
 
@@ -119,10 +265,19 @@ final class KinetoProviderSettings {
   /// Where each installed agent was found; a missing one was not.
   final Map<KinetoAgent, String> agents;
 
+  /// The services the director added, in the order they were added.
+  final List<KinetoConnection> connections;
+
   /// Why the settings file cannot be read; null when it can.
   final String? problem;
 
   String value(KinetoProviderSetting setting) => values[setting] ?? '';
+
+  /// The connections that make [modality].
+  List<KinetoConnection> connectionsFor(KinetoModality modality) => <KinetoConnection>[
+        for (final connection in connections)
+          if (connection.protocol?.modality == modality) connection,
+      ];
 }
 
 /// Read the provider settings and look for each agent tool. Reads a file and
@@ -159,11 +314,36 @@ KinetoProviderSettings loadKinetoProviderSettings() {
         );
         if (path.isNotEmpty) agents[agent] = path;
       }
+      final connections = <KinetoConnection>[];
+      for (var index = 0; index < _kinetoSettingsConnectionCount(handle); index++) {
+        String field(String name) {
+          final code = contract.code(contract.connectionFields, name);
+          return _copyProjectUtf8(
+            handle,
+            (settings, buffer, capacity, length) =>
+                _kinetoSettingsConnectionTextCopy(settings, index, code, buffer, capacity, length),
+            'connection $name',
+          );
+        }
+
+        connections.add(KinetoConnection(
+          name: field('name'),
+          protocolName: field('protocol'),
+          url: field('url'),
+          model: field('model'),
+          key: field('key'),
+          pricePerMillionInput: field('price_per_million_input'),
+          pricePerMillionOutput: field('price_per_million_output'),
+          pricePerImage: field('price_per_image'),
+          references: int.tryParse(field('references')) ?? 0,
+        ));
+      }
       final problem = _copyProjectUtf8(handle, _kinetoSettingsProblemCopy, 'settings problem');
       return KinetoProviderSettings(
         values: values,
         overridden: overridden,
         agents: agents,
+        connections: connections,
         problem: problem.isEmpty ? null : problem,
       );
     } finally {
@@ -182,6 +362,47 @@ void setKinetoProviderSetting(KinetoProviderSetting setting, String value) {
   final code = contract.code(contract.providerSettings, setting.wireName);
   _withUtf8(value.trim(), (bytes, length) => _checkProjectResult(_kinetoSettingsSet(code, bytes, length)));
 }
+
+/// Add [connection], or put it in place of the one named [previous], and
+/// save the settings; a choice of the one replaced follows it. Projects
+/// opened after it use it. Refused when the connection cannot be used as it
+/// is.
+void putKinetoConnection(KinetoConnection connection, {String previous = ''}) {
+  _assertAbiCompatible();
+  final contract = KinetoNativeContract.instance;
+  final arena = Arena();
+  try {
+    final fields = connection._fields;
+    final native = arena<_NativeConnectionField>(fields.length);
+    var index = 0;
+    for (final MapEntry(key: name, :value) in fields.entries) {
+      final text = _encodeUtf8(arena, value.trim());
+      native[index]
+        ..field = contract.code(contract.connectionFields, name)
+        ..value.pointer = text.pointer
+        ..value.length = text.length;
+      index++;
+    }
+    final replaced = _encodeUtf8(arena, previous);
+    _checkProjectResult(_kinetoSettingsConnectionPut(replaced.pointer, replaced.length, native, fields.length));
+  } finally {
+    arena.releaseAll();
+  }
+}
+
+/// Remove the connection named [name] and any choice of it, and save the
+/// settings. Its key stays where it is kept.
+void removeKinetoConnection(String name) {
+  _assertAbiCompatible();
+  _withUtf8(name.trim(), (bytes, length) => _checkProjectResult(_kinetoSettingsConnectionRemove(bytes, length)));
+}
+
+/// [putKinetoConnection] on another isolate.
+Future<void> putKinetoConnectionInBackground(KinetoConnection connection, {String previous = ''}) =>
+    Isolate.run(() => putKinetoConnection(connection, previous: previous));
+
+/// [removeKinetoConnection] on another isolate.
+Future<void> removeKinetoConnectionInBackground(String name) => Isolate.run(() => removeKinetoConnection(name));
 
 /// [loadKinetoProviderSettings] on another isolate.
 Future<KinetoProviderSettings> loadKinetoProviderSettingsInBackground() => Isolate.run(loadKinetoProviderSettings);

@@ -20,6 +20,7 @@ use serde::de::DeserializeOwned;
 
 pub mod acp;
 pub mod agents;
+pub mod anthropic;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod http;

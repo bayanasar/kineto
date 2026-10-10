@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:kineto/settings_workspace.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -194,7 +195,7 @@ void main() {
     expect(find.text('From the environment'), findsOneWidget);
   });
 
-  testWidgets('providers are chosen here: the agents on this computer, a server, and what the environment overrides',
+  testWidgets('providers are chosen here: the agents on this computer, a connection, and what the environment overrides',
       (tester) async {
     var settings = const KinetoProviderSettings(
       values: <KinetoProviderSetting, String>{KinetoProviderSetting.languageModel: 'claude-code'},
@@ -203,6 +204,8 @@ void main() {
     );
     final chosen = <Map<KinetoProviderSetting, String>>[];
     final asked = <List<String>>[];
+    final put = <(KinetoConnection, String)>[];
+    final stored = <String, String>{};
     await _pump(
       tester,
       SettingsWorkspaceScreen(
@@ -212,12 +215,31 @@ void main() {
           settings = KinetoProviderSettings(
             values: <KinetoProviderSetting, String>{...settings.values, setting: value},
             agents: settings.agents,
+            connections: settings.connections,
+          );
+        },
+        putConnection: (connection, {previous = ''}) async {
+          put.add((connection, previous));
+          settings = KinetoProviderSettings(
+            values: settings.values,
+            agents: settings.agents,
+            connections: <KinetoConnection>[
+              for (final kept in settings.connections)
+                if (kept.name != previous) kept,
+              connection,
+            ],
           );
         },
         loadKeys: (names) async {
           asked.add(names);
-          return const KinetoKeys(unavailable: null, states: <String, KinetoKeyState>{});
+          return KinetoKeys(
+            unavailable: null,
+            states: <String, KinetoKeyState>{
+              for (final name in stored.keys) name: const KinetoKeyState(stored: true, inEnvironment: false),
+            },
+          );
         },
+        storeKey: (name, key) async => stored[name] = key,
         loadPlugins: () async => _plugins,
         loadServers: () async => _servers.toList(),
       ),
@@ -237,23 +259,75 @@ void main() {
       isFalse,
       reason: 'an agent that is not installed is not offered',
     );
-    final server = find.text('OpenAI-compatible server').last;
-    await tester.ensureVisible(server);
+    await tester.tapAt(Offset.zero);
     await tester.pumpAndSettle();
-    await tester.tap(server);
-    await tester.pumpAndSettle();
-    expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.languageModel: 'openai-compatible'});
 
-    await tester.enterText(find.byKey(const ValueKey<String>('server-url')), 'https://api.deepseek.example/v1');
-    await tester.enterText(find.byKey(const ValueKey<String>('server-model')), 'deepseek-chat');
-    await tester.enterText(find.byKey(const ValueKey<String>('server-key')), 'deepseek');
-    await tester.tap(find.byKey(const ValueKey<String>('server-save')));
+    // Any service, added by the protocol it speaks, its key typed once.
+    final add = find.byKey(const ValueKey<String>('connection-add-text'));
+    await tester.ensureVisible(add);
+    await tester.tap(add);
     await tester.pumpAndSettle();
-    expect(settings.value(KinetoProviderSetting.endpointUrl), 'https://api.deepseek.example/v1');
-    expect(settings.value(KinetoProviderSetting.endpointKey), 'deepseek');
-    expect(asked.last, contains('deepseek'), reason: "the server's key is listed under the name it was given");
-    expect(find.text('deepseek · The OpenAI-compatible server chosen for documents'), findsOneWidget);
-    expect(find.text('Saved. Your project uses it as soon as you go back to it.'), findsOneWidget);
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-name')), 'deepseek');
+    expect(
+      tester.widget<TextField>(find.byKey(const ValueKey<String>('connection-key-name'))).controller!.text,
+      'deepseek',
+      reason: "the key is named after the connection unless the director names it",
+    );
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-url')), 'http://api.deepseek.example/v1');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-model')), 'deepseek-chat');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-key')), 'sk-deepseek-test');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-price-input')), '0.28');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-price-output')), '0.42');
+    final save = find.byKey(const ValueKey<String>('connection-save'));
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(put, isEmpty, reason: 'a plain-HTTP address elsewhere is refused before it is sent');
+    expect(find.text('An address starts with https://, or http:// to this computer.'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-url')), 'https://api.deepseek.example/v1');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    final (connection, previous) = put.single;
+    expect(previous, '');
+    expect(
+      (connection.name, connection.protocol, connection.url, connection.model, connection.key),
+      ('deepseek', KinetoProtocol.openAiChat, 'https://api.deepseek.example/v1', 'deepseek-chat', 'deepseek'),
+    );
+    expect((connection.pricePerMillionInput, connection.pricePerMillionOutput), ('0.28', '0.42'));
+    expect(stored, <String, String>{'deepseek': 'sk-deepseek-test'});
+    expect(find.byKey(const ValueKey<String>('connection-form')), findsNothing, reason: 'saved, the form closes');
+    expect(find.text('deepseek-chat at https://api.deepseek.example/v1'), findsOneWidget);
+    expect(find.text('Key deepseek · saved'), findsOneWidget);
+    expect(find.text(r'$0.28 in, $0.42 out, per million tokens'), findsOneWidget);
+    expect(asked.last, contains('deepseek'), reason: "the connection's key is listed under its name");
+    expect(find.text('deepseek · The deepseek connection'), findsOneWidget);
+    expect(find.text('sk-deepseek-test'), findsNothing, reason: 'a key is never shown again');
+
+    final choose = find.byKey(const ValueKey<String>('choose-language_model'));
+    await tester.ensureVisible(choose);
+    await tester.tap(choose);
+    await tester.pumpAndSettle();
+    final option = find.text('deepseek · deepseek-chat').last;
+    await tester.ensureVisible(option);
+    await tester.pumpAndSettle();
+    await tester.tap(option);
+    await tester.pumpAndSettle();
+    expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.languageModel: 'connection:deepseek'});
+
+    // Changed under a new name: the engine is told which one it replaces.
+    final change = find.byKey(const ValueKey<String>('connection-edit-deepseek'));
+    await tester.ensureVisible(change);
+    await tester.tap(change);
+    await tester.pumpAndSettle();
+    expect(find.text('Change deepseek'), findsOneWidget);
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-name')), 'deepseek_v4');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect((put.last.$1.name, put.last.$1.key, put.last.$2), ('deepseek_v4', 'deepseek', 'deepseek'));
+    expect(stored.length, 1, reason: 'no new key typed, none stored');
 
     await tester.tap(find.byKey(const ValueKey<String>('choose-image')));
     await tester.pumpAndSettle();
@@ -264,5 +338,55 @@ void main() {
     await tester.pumpAndSettle();
     expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.image: 'agy'});
     expect(find.text('agy runs your own hooks with each request.'), findsOneWidget);
+  });
+
+  testWidgets('a connection is removed, and one a newer version added is shown but not changed', (tester) async {
+    final removed = <String>[];
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadSettings: () async => const KinetoProviderSettings(
+          connections: <KinetoConnection>[
+            KinetoConnection(
+              name: 'claude',
+              protocolName: 'anthropic-messages',
+              url: 'https://api.anthropic.com',
+              model: 'claude-sonnet-5-5',
+              key: 'claude',
+            ),
+            KinetoConnection(name: 'ollama', protocolName: 'openai-chat', url: 'http://localhost:11434/v1', model: 'qwen3'),
+            KinetoConnection(name: 'later', protocolName: 'telepathy', url: 'https://later.example', model: 'm'),
+          ],
+        ),
+        removeConnection: (name) async => removed.add(name),
+        loadKeys: (names) async => KinetoKeys(
+          unavailable: null,
+          states: <String, KinetoKeyState>{
+            for (final name in names) name: const KinetoKeyState(stored: false, inEnvironment: false),
+          },
+        ),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('claude · Anthropic messages'), findsOneWidget);
+    expect(find.text('Key claude · not saved'), findsOneWidget);
+    expect(find.text('Takes no key'), findsNWidgets(2));
+    expect(find.text('No price given: costs show as unknown'), findsNWidgets(3));
+    expect(find.text('A newer version of Kineto added it; this one cannot use it.'), findsOneWidget);
+    expect(
+      tester.widget<KinetoButton>(find.byKey(const ValueKey<String>('connection-edit-later'))).onPressed,
+      isNull,
+    );
+    final remove = find.byKey(const ValueKey<String>('connection-remove-ollama'));
+    await tester.ensureVisible(remove);
+    await tester.tap(remove);
+    await tester.pumpAndSettle();
+    expect(removed, <String>['ollama']);
+    expect(
+      find.text('The ollama connection is removed. Its key stays under Keys until you remove it.'),
+      findsOneWidget,
+    );
   });
 }

@@ -33,8 +33,12 @@ String formatDollars(int micros) {
 /// What asking [model] for a document costs, in words.
 String documentCostLabel(KinetoLanguageModel model, int? micros) {
   if (!model.ready) return 'no model configured';
-  if (model.isAgent) return 'cost unknown: covered by your ${model.kind.label} sign-in';
-  if (micros == null) return 'cost unknown';
+  if (model.isAgent) return 'cost unknown: covered by your ${model.writer} sign-in';
+  if (micros == null) {
+    return model.kind == KinetoLanguageModelKind.connection
+        ? 'cost unknown: no price is given for this connection'
+        : 'cost unknown';
+  }
   if (micros == 0) return 'free';
   return 'at most ${formatDollars(micros)}';
 }
@@ -50,7 +54,9 @@ String? languageModelProblem(KinetoLanguageModel model) {
     KinetoLanguageModelKind.local =>
       'An OpenAI-compatible server is chosen, but its address or model is missing, or the key it '
           'names is not saved; complete it under Settings.',
-    _ => '${model.kind.label} is chosen but was not found on this computer. Install it and sign in '
+    KinetoLanguageModelKind.connection =>
+      'The connection chosen has no key saved; save it under Settings, Connections.',
+    _ => '${model.writer} is chosen but was not found on this computer. Install it and sign in '
         'with it once, or choose another under Settings, Providers.',
   };
 }
@@ -140,7 +146,7 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final asking = 'with ${_model.kind.label}';
+    final asking = 'with ${_model.writer}';
     return ScreenplayWorkspaceView(
       documents: _documents,
       model: _model,
@@ -345,7 +351,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
                 onPressed: _idle && model.ready ? onAnalyze : null,
                 child: Text(analysis == null ? 'Analyse story' : 'Analyse again'),
               ),
-              Text('${model.kind.label} · ${documentCostLabel(model, analysisCostMicros)}'),
+              Text('${model.writer} · ${documentCostLabel(model, analysisCostMicros)}'),
             ],
           ),
         ],
@@ -395,7 +401,7 @@ class ScreenplayWorkspaceView extends StatelessWidget {
                 onPressed: canWrite ? onWrite : null,
                 child: Text(screenplay == null ? 'Write screenplay' : 'Write a new draft'),
               ),
-              Text('${model.kind.label} · ${documentCostLabel(model, screenplayCostMicros)}'),
+              Text('${model.writer} · ${documentCostLabel(model, screenplayCostMicros)}'),
               if (screenplay != null && !documents.screenplayLocked)
                 KinetoButton(
                   key: const ValueKey<String>('lock'),
