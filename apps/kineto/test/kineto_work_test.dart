@@ -87,6 +87,47 @@ void main() {
     expect(work.problemOn('production'), isNull);
   });
 
+  testWidgets("requests for two shots of one page each keep how they ended", (tester) async {
+    final work = KinetoWork();
+    addTearDown(work.dispose);
+    var retried = 0;
+    for (final failsFirst in <bool>[true, false]) {
+      work.dismiss('shots');
+      final failing = Completer<void>();
+      final passing = Completer<void>();
+      final ran = <Future<bool>>[
+        work.run('shots', 'Generating shot one', () => failing.future, target: 'shot:0', retry: () async => retried++),
+        work.run('shots', 'Generating shot two', () => passing.future, target: 'shot:1'),
+      ];
+      const charged = KinetoProjectException(KinetoProjectException.paidCallUnresolved, 'may have been charged');
+      if (failsFirst) {
+        failing.completeError(charged);
+        await tester.pump();
+        passing.complete();
+      } else {
+        passing.complete();
+        await tester.pump();
+        failing.completeError(charged);
+      }
+      expect(await Future.wait(ran), <bool>[false, true]);
+
+      expect(work.problemOn('shots', target: 'shot:0'), 'may have been charged', reason: 'failsFirst: $failsFirst');
+      expect(work.retryOn('shots', target: 'shot:0'), isNotNull);
+      expect(work.problemOn('shots', target: 'shot:1'), isNull, reason: "shot two shows no one else's failure");
+      expect(work.retryOn('shots', target: 'shot:1'), isNull);
+      expect(work.problemOn('shots'), 'may have been charged', reason: 'the page still shows the failure');
+      expect(work.last!.task.target, failsFirst ? 'shot:1' : 'shot:0', reason: 'the status bar shows what ended last');
+    }
+
+    // Asking shot two again leaves shot one's failure and its retry.
+    await work.run('shots', 'Generating shot two', () async {}, target: 'shot:1');
+    expect(work.problemOn('shots', target: 'shot:0'), 'may have been charged');
+    work.retryOn('shots')!();
+    await tester.pump();
+    expect(retried, 1);
+    expect(work.problemOn('shots'), isNull);
+  });
+
   testWidgets('requests for different things run at once, and one that waits says so', (tester) async {
     final work = KinetoWork();
     addTearDown(work.dispose);

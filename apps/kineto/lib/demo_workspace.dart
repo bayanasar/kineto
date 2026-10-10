@@ -170,7 +170,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
   int _finished = 0;
 
   // The project's requests outlive this page: what is under way, and how
-  // the last one asked for here ended, come from them.
+  // the last one about the open shot ended, come from them.
   // A shot's requests run one after another, and other shots' at once.
   String get _target => 'shot:$_activeShotIndex';
   bool get _working => widget.work.busyWith(_target);
@@ -180,8 +180,8 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
     }
     return 'Working';
   }
-  String? get _error => widget.work.problemOn(_page);
-  VoidCallback? get _identityDriftConsent => widget.work.retryOn(_page);
+  String? get _error => widget.work.problemOn(_page, target: _target);
+  VoidCallback? get _identityDriftConsent => widget.work.retryOn(_page, target: _target);
 
   late List<String> _recoveryNotes;
   StreamSubscription<KinetoVideoEvent>? _videoEvents;
@@ -243,10 +243,7 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       ];
 
   void _switchShot(int index) {
-    setState(() {
-      _activeShotIndex = index;
-      widget.work.dismiss(_page);
-    });
+    setState(() => _activeShotIndex = index);
   }
 
   // Native work runs off this isolate, which only waits for the answer. A

@@ -53,7 +53,10 @@ class KinetoOutcome {
 class KinetoWork extends ChangeNotifier {
   final List<KinetoTask> _running = <KinetoTask>[];
   final Set<KinetoTask> _waiting = <KinetoTask>{};
-  final Map<String, KinetoOutcome> _outcomes = <String, KinetoOutcome>{};
+  /// How requests ended, by page and then by target, each page's in the
+  /// order they ended: requests for different targets of one page end in any
+  /// order, and one never hides another's failure.
+  final Map<String, Map<String?, KinetoOutcome>> _outcomes = <String, Map<String?, KinetoOutcome>>{};
   KinetoOutcome? _last;
   int _finished = 0;
   Key? _armed;
@@ -120,8 +123,8 @@ class KinetoWork extends ChangeNotifier {
     final task = KinetoTask(page: page, label: label, started: DateTime.now(), button: _armed, target: target);
     _armed = null;
     _running.add(task);
-    _outcomes.remove(page);
-    if (_last?.task.page == page) _last = null;
+    _outcomes[page]?.remove(target);
+    if (_last?.task.page == page && _last?.task.target == target) _last = null;
     notifyListeners();
     String? problem;
     Future<void> Function()? offer;
@@ -140,28 +143,51 @@ class KinetoWork extends ChangeNotifier {
     _running.remove(task);
     _waiting.remove(task);
     final outcome = KinetoOutcome(task: task, problem: problem, retry: offer);
-    _outcomes[page] = outcome;
+    final outcomes = _outcomes.putIfAbsent(page, () => <String?, KinetoOutcome>{});
+    outcomes.remove(target);
+    outcomes[target] = outcome;
     _last = outcome;
     _finished++;
     notifyListeners();
     return problem == null;
   }
 
-  /// Why the last request asked for in [page] failed, if it did.
-  String? problemOn(String page) => _outcomes[page]?.problem;
+  /// How the last request asked for in [page] about [target] ended; with no
+  /// [target], the newest of the page's that failed.
+  KinetoOutcome? _outcomeOn(String page, String? target) {
+    final outcomes = _outcomes[page];
+    if (outcomes == null) return null;
+    if (target != null) return outcomes[target];
+    for (final outcome in outcomes.values.toList().reversed) {
+      if (outcome.problem != null) return outcome;
+    }
+    return null;
+  }
 
-  /// Asks again for the last request in [page], when that is offered.
-  VoidCallback? retryOn(String page) {
-    final last = _outcomes[page];
+  /// Why the last request asked for in [page] about [target] failed, if it
+  /// did; with no [target], why the newest failed request there did.
+  String? problemOn(String page, {String? target}) => _outcomeOn(page, target)?.problem;
+
+  /// Asks again for the request whose failure [problemOn] gives, when that
+  /// is offered.
+  VoidCallback? retryOn(String page, {String? target}) {
+    final last = _outcomeOn(page, target);
     if (last == null || last.retry == null) return null;
     return () => run(page, last.task.label, last.retry!, target: last.task.target, retry: last.retry);
   }
 
-  /// Forget how the requests asked for in [page] ended, or how the most
-  /// recent one did.
-  void dismiss([String? page]) {
-    final changed = page == null ? _last != null : _outcomes.remove(page) != null;
-    if (page == null || _last?.task.page == page) _last = null;
+  /// Forget how the requests asked for in [page] ended, only the one about
+  /// [target] when given; with no [page], how the most recent one did.
+  void dismiss([String? page, String? target]) {
+    var changed = false;
+    if (page != null) {
+      changed = target == null ? _outcomes.remove(page)?.isNotEmpty ?? false : _outcomes[page]?.remove(target) != null;
+    }
+    final last = _last;
+    if (last != null && (page == null || (last.task.page == page && (target == null || last.task.target == target)))) {
+      _last = null;
+      changed = true;
+    }
     if (changed) notifyListeners();
   }
 }

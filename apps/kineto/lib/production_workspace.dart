@@ -86,8 +86,9 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
   static const String _page = 'production';
   int _finished = 0;
 
-  // The project's requests outlive this page: what is under way, and how
-  // the last one asked for here ended, come from them.
+  // The project's requests outlive this page: what is under way, and the
+  // newest one asked for here that failed, come from them; a request that
+  // succeeds for one thing leaves another's failure shown.
   // The bible, the style, each character's casting and the references are
   // each changed one request at a time; different ones at once.
   String? get _error => widget.work.problemOn(_page);
@@ -249,7 +250,7 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       ),
       onEditEntry: (key) => setState(() {
         _editingEntry = key;
-        widget.work.dismiss(_page);
+        widget.work.dismiss(_page, 'bible');
       }),
       onSaveEntry: (edit) => _run(
         () => project.saveBibleEntry(_production.bible!.revision, edit),

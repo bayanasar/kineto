@@ -48,8 +48,9 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
   static const String _page = 'voices';
   int _finished = 0;
 
-  // The project's requests outlive this page: what is under way, and how
-  // the last one asked for here ended, come from them.
+  // The project's requests outlive this page: what is under way, and the
+  // newest one asked for here that failed, come from them; a request that
+  // succeeds for one thing leaves another's failure shown.
   // Each character's voice and each line is changed one request at a time;
   // different ones at once.
   String? get _error => widget.work.problemOn(_page);
