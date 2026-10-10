@@ -170,14 +170,15 @@ class KinetoSound extends ChangeNotifier {
   Future<void> toggle(String path) async {
     final again = _playing == path;
     await stop();
-    if (again) return;
+    // Closed while the last sound was stopping: nothing new starts.
+    if (again || _disposed) return;
     _playing = path;
     _problem = null;
     _failed = null;
     notifyListeners();
     try {
       final playback = await engine.playSound(path);
-      if (_playing != path) {
+      if (_disposed || _playing != path) {
         await playback.dispose();
         return;
       }

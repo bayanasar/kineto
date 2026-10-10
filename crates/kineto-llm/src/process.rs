@@ -37,7 +37,10 @@ pub(crate) struct Workspace(pub(crate) PathBuf);
 impl Workspace {
     /// Create the directory under `root` with a random name that must not
     /// exist yet, readable only by this user: mode 0700 on Unix; on Windows
-    /// it inherits the ACL of the user's own temporary directory.
+    /// it inherits the ACL of the user's own temporary directory. Sound when
+    /// `root` is the system's temporary directory or belongs to this user
+    /// alone: the owner of a shared `root` could move the directory away
+    /// and put its own in its place.
     pub(crate) fn create(root: &Path) -> Result<Self, AgentError> {
         fs::create_dir_all(root).map_err(|error| AgentError::Setup(error.kind()))?;
         let mut builder = tempfile::Builder::new();

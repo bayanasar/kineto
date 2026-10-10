@@ -9,9 +9,13 @@ final class FakeMedia implements KinetoMediaEngine {
   final List<String> played = <String>[];
   final List<FakeSound> sounds = <FakeSound>[];
 
+  /// While set, a sound starts only once it completes.
+  Completer<void>? opening;
+
   @override
   Future<KinetoSoundPlayback> playSound(String path) async {
     played.add(path);
+    await opening?.future;
     final sound = FakeSound();
     sounds.add(sound);
     return sound;
@@ -26,6 +30,7 @@ final class FakeSound implements KinetoSoundPlayback {
   final StreamController<Duration> durations = StreamController<Duration>.broadcast();
   final StreamController<bool> ends = StreamController<bool>.broadcast();
   bool stopped = false;
+  bool disposed = false;
 
   @override
   Stream<Duration> get position => positions.stream;
@@ -40,7 +45,7 @@ final class FakeSound implements KinetoSoundPlayback {
   Future<void> stop() async => stopped = true;
 
   @override
-  Future<void> dispose() async {}
+  Future<void> dispose() async => disposed = true;
 }
 
 /// [child] with a sound that plays through [media].

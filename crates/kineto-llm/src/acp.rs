@@ -163,7 +163,9 @@ impl AcpAgent {
         self
     }
 
-    /// Where each call's empty working directory is created.
+    /// Where each call's empty working directory is created: the system's
+    /// temporary directory by default. Another root must belong to this
+    /// user alone, since whoever owns it can swap a call's directory.
     #[must_use]
     pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
         self.workspace_root = root;
