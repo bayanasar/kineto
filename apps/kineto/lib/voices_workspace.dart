@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'media_player.dart';
 import 'native/kineto_engine.dart';
@@ -27,18 +28,11 @@ class VoicesWorkspaceScreen extends StatefulWidget {
   const VoicesWorkspaceScreen({
     required this.work,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
   final KinetoProjectSession project;
 
-  /// Switches to the other workspaces, shown above the voices.
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -114,9 +108,6 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
       busy: widget.work.targets,
       error: _error,
       onResubmit: _resubmit,
-      navigation: widget.navigation,
-      isDarkMode: widget.isDarkMode,
-      onThemeToggle: widget.onThemeToggle,
       onLoadVoices: () => _run(project.loadVoices, 'Listing voices', target: 'catalog'),
       onRecommend: () => _run(
         project.recommendVoices,
@@ -198,9 +189,6 @@ class VoicesWorkspaceView extends StatelessWidget {
     this.workingLabel = 'Working',
     this.error,
     this.onResubmit,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -219,9 +207,6 @@ class VoicesWorkspaceView extends StatelessWidget {
   /// Asks again at the risk of paying twice; set only when [error] says the
   /// last paid request may have been charged without its result.
   final VoidCallback? onResubmit;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// Opens an audio file with the system's player.
   final VoidCallback onLoadVoices;
@@ -243,33 +228,14 @@ class VoicesWorkspaceView extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
-                  _providerPanel(),
-                  const SizedBox(height: 20),
-                  _castPanel(),
-                  const SizedBox(height: 20),
-                  _linesPanel(),
-                ],
-              ),
-            ),
-          ),
-        ),
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Voices & dialogue',
+        sideWidth: 520,
+        notices: <Widget>[if (error != null) _errorPanel()],
+        // Who speaks, and with which voice.
+        side: <Widget>[_providerPanel(), _castPanel()],
+        // What they say, line by line.
+        main: <Widget>[_linesPanel()],
       );
 
   Widget _errorPanel() => WabPanel(

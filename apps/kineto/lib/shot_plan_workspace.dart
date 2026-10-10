@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
@@ -53,16 +54,10 @@ class ShotPlanWorkspaceScreen extends StatefulWidget {
   const ShotPlanWorkspaceScreen({
     required this.work,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
   final KinetoProjectSession project;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -145,9 +140,6 @@ class _ShotPlanWorkspaceScreenState extends State<ShotPlanWorkspaceScreen> {
       error: _error,
       onResubmit: _resubmit,
       editingScene: _editingScene,
-      navigation: widget.navigation,
-      isDarkMode: widget.isDarkMode,
-      onThemeToggle: widget.onThemeToggle,
       onPlan: () => _run(
         project.planShots,
         'Planning the shots $asking',
@@ -188,9 +180,6 @@ class ShotPlanWorkspaceView extends StatelessWidget {
     this.error,
     this.onResubmit,
     this.editingScene,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -207,9 +196,6 @@ class ShotPlanWorkspaceView extends StatelessWidget {
 
   /// The scene whose shots are being edited, if any.
   final String? editingScene;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   final VoidCallback onPlan;
   final void Function(String scene, String? direction) onReplan;
@@ -220,52 +206,38 @@ class ShotPlanWorkspaceView extends StatelessWidget {
   bool get _idle => !working && editingScene == null;
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  RecipeStrip(steps: planning.steps, problem: planning.workflowProblem),
-                  const SizedBox(height: 20),
-                  if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
-                  _planPanel(context),
-                  for (final scene in planning.scenes) ...<Widget>[
-                    const SizedBox(height: 20),
-                    scene.sceneId == editingScene
-                        ? ScenePlanEditor(
-                            key: ValueKey<String>('plan-editor-${planning.revision}-${scene.sceneId}'),
-                            scene: scene,
-                            earlierShots: <String>[
-                              for (final earlier in planning.scenes.takeWhile((other) => other != scene))
-                                for (final shot in earlier.shots) shot.id,
-                            ],
-                            otherShots: <String>{
-                              for (final other in planning.scenes)
-                                if (other != scene)
-                                  for (final shot in other.shots) shot.id,
-                            },
-                            working: working,
-                            onCancel: () => onEdit(null),
-                            onSave: onSave,
-                          )
-                        : _scene(context, scene),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ),
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Shot plan',
+        notices: <Widget>[if (error != null) _errorPanel()],
+        // Where the film stands, and the plan as a whole.
+        side: <Widget>[
+          RecipeStrip(steps: planning.steps, problem: planning.workflowProblem),
+          _planPanel(context),
+        ],
+        // Each scene's shots.
+        main: <Widget>[
+          for (final scene in planning.scenes)
+            scene.sceneId == editingScene
+                ? ScenePlanEditor(
+                    key: ValueKey<String>('plan-editor-${planning.revision}-${scene.sceneId}'),
+                    scene: scene,
+                    earlierShots: <String>[
+                      for (final earlier in planning.scenes.takeWhile((other) => other != scene))
+                        for (final shot in earlier.shots) shot.id,
+                    ],
+                    otherShots: <String>{
+                      for (final other in planning.scenes)
+                        if (other != scene)
+                          for (final shot in other.shots) shot.id,
+                    },
+                    working: working,
+                    onCancel: () => onEdit(null),
+                    onSave: onSave,
+                  )
+                : _scene(context, scene),
+          if (planning.scenes.isEmpty)
+            const WabPanel(title: 'Scenes', child: Text('The plan has no scenes yet: plan the shots first.')),
+        ],
       );
 
   Widget _errorPanel() => WabPanel(

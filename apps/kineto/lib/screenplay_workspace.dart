@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 
@@ -58,18 +59,11 @@ class ScreenplayWorkspaceScreen extends StatefulWidget {
   const ScreenplayWorkspaceScreen({
     required this.work,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
   final KinetoProjectSession project;
 
-  /// Switches to the other workspaces, shown above the story.
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -157,9 +151,6 @@ class _ScreenplayWorkspaceScreenState extends State<ScreenplayWorkspaceScreen> {
       error: _error,
       onResubmit: _resubmit,
       editingSceneId: _editingScene,
-      navigation: widget.navigation,
-      isDarkMode: widget.isDarkMode,
-      onThemeToggle: widget.onThemeToggle,
       onImport: (text) => _run(() => widget.project.importSource(text), 'Importing'),
       onAnalyze: () => _run(
         widget.project.analyzeStory,
@@ -215,9 +206,6 @@ class ScreenplayWorkspaceView extends StatelessWidget {
     this.error,
     this.onResubmit,
     this.editingSceneId,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -237,9 +225,6 @@ class ScreenplayWorkspaceView extends StatelessWidget {
 
   /// The scene being edited, if any.
   final String? editingSceneId;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   final ValueChanged<String> onImport;
   final VoidCallback onAnalyze;
@@ -257,86 +242,65 @@ class ScreenplayWorkspaceView extends StatelessWidget {
   Widget build(BuildContext context) {
     final screenplay = documents.screenplay;
     final problem = languageModelProblem(model);
-    return WabScaffold(
-      appBar: WabAppBar(
-        title: const Text('Kineto'),
-        action: onThemeToggle == null
-            ? null
-            : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1040),
+    return KinetoWorkspace(
+      title: 'Story & screenplay',
+      notices: <Widget>[
+        if (error != null)
+          WabPanel(
+            title: 'That did not work',
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                if (error != null) ...<Widget>[
-                  WabPanel(
-                    title: 'That did not work',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(error!),
-                        if (onResubmit != null) ...<Widget>[
-                          const SizedBox(height: 12),
-                          const Text(
-                            'The model may have answered the last request, and charged for it, '
-                            'without the answer reaching Kineto. Check your account before asking '
-                            'again.',
-                          ),
-                          const SizedBox(height: 12),
-                          KinetoButton(
-                            key: const ValueKey<String>('resubmit-document'),
-                            onPressed: working ? null : onResubmit,
-                            child: const Text('Ask again · may pay twice'),
-                          ),
-                        ],
-                      ],
-                    ),
+                Text(error!),
+                if (onResubmit != null) ...<Widget>[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'The model may have answered the last request, and charged for it, '
+                    'without the answer reaching Kineto. Check your account before asking '
+                    'again.',
                   ),
-                  const SizedBox(height: 20),
-                ],
-                if (documents.damaged) ...<Widget>[
-                  const WabPanel(
-                    title: 'Documents cannot be read',
-                    child: Text(
-                      "A stored document no longer matches its record. Nothing was changed; restore "
-                      "the project's files from a backup or version control.",
-                    ),
+                  const SizedBox(height: 12),
+                  KinetoButton(
+                    key: const ValueKey<String>('resubmit-document'),
+                    onPressed: working ? null : onResubmit,
+                    child: const Text('Ask again · may pay twice'),
                   ),
-                  const SizedBox(height: 20),
-                ],
-                _story(context, problem),
-                const SizedBox(height: 20),
-                _screenplayPanel(context, screenplay),
-                if (screenplay != null)
-                  for (var index = 0; index < screenplay.scenes.length; index++) ...<Widget>[
-                    const SizedBox(height: 20),
-                    if (screenplay.scenes[index].id == editingSceneId)
-                      SceneEditor(
-                        key: ValueKey<String>('editor-${screenplay.revision}-${screenplay.scenes[index].id}'),
-                        number: index + 1,
-                        scene: screenplay.scenes[index],
-                        cast: screenplay.cast,
-                        working: working,
-                        onCancel: () => onEdit(null),
-                        onSave: onSave,
-                      )
-                    else
-                      _scene(context, screenplay, index),
-                  ],
-                if (documents.revisions.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 20),
-                  _history(),
                 ],
               ],
             ),
           ),
-        ),
-      ),
+        if (documents.damaged)
+          const WabPanel(
+            title: 'Documents cannot be read',
+            child: Text(
+              "A stored document no longer matches its record. Nothing was changed; restore "
+              "the project's files from a backup or version control.",
+            ),
+          ),
+      ],
+      // The story it starts from, and the revisions made of it.
+      side: <Widget>[
+        _story(context, problem),
+        if (documents.revisions.isNotEmpty) _history(),
+      ],
+      // The screenplay, scene by scene.
+      main: <Widget>[
+        _screenplayPanel(context, screenplay),
+        if (screenplay != null)
+          for (var index = 0; index < screenplay.scenes.length; index++)
+            if (screenplay.scenes[index].id == editingSceneId)
+              SceneEditor(
+                key: ValueKey<String>('editor-${screenplay.revision}-${screenplay.scenes[index].id}'),
+                number: index + 1,
+                scene: screenplay.scenes[index],
+                cast: screenplay.cast,
+                working: working,
+                onCancel: () => onEdit(null),
+                onSave: onSave,
+              )
+            else
+              _scene(context, screenplay, index),
+      ],
     );
   }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/demo_workspace.dart';
 import 'package:kineto/kineto_controls.dart';
+import 'package:kineto/kineto_layout.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:wabisabi/wabisabi.dart';
 
@@ -13,7 +14,7 @@ void main() {
     expect(find.byIcon(Icons.light_mode_outlined), findsOneWidget, reason: 'the sun leads out of the dark');
     expect(find.byIcon(Icons.dark_mode_outlined), findsNothing);
     final size = tester.getSize(find.byKey(const ValueKey<String>('theme-toggle')));
-    expect(size.width, lessThan(40), reason: 'an app bar stretches its actions; the key keeps its size');
+    expect(size.width, lessThan(40), reason: 'the key keeps its size wherever it sits');
     expect(size.height, lessThan(40));
 
     await tester.tap(find.byKey(const ValueKey<String>('theme-toggle')));
@@ -61,19 +62,30 @@ class _ThemeHarnessState extends State<_ThemeHarness> {
   Widget build(BuildContext context) {
     return MaterialApp(
       theme: WabTheme.materialTheme(lightTheme: !darkMode),
-      home: DemoWorkspaceView(
-        engineSnapshot: const KinetoEngineSnapshot(abiVersion: 9),
-        shotSnapshot: shot,
-        shotSnapshots: const <KinetoShotSnapshot>[shot, shot],
-        activeShotIndex: 0,
-        isDarkMode: darkMode,
-        onThemeToggle: () => setState(() => darkMode = !darkMode),
-        onShotChanged: (_) {},
-        onDirectionChanged: (_) {},
-        onGenerate: () {},
-        onSelect: (_) {},
-        onLock: () {},
-        onReset: () {},
+      home: Row(
+        children: <Widget>[
+          KinetoSidebar(
+            places: const <KinetoPlace>[KinetoPlace(page: 'shots', label: 'Shots', icon: Icons.movie_outlined)],
+            current: 'shots',
+            onShow: (_) {},
+            isDarkMode: darkMode,
+            onThemeToggle: () => setState(() => darkMode = !darkMode),
+          ),
+          Expanded(
+            child: DemoWorkspaceView(
+              engineSnapshot: const KinetoEngineSnapshot(abiVersion: 9),
+              shotSnapshot: shot,
+              shotSnapshots: const <KinetoShotSnapshot>[shot, shot],
+              activeShotIndex: 0,
+              onShotChanged: (_) {},
+              onDirectionChanged: (_) {},
+              onGenerate: () {},
+              onSelect: (_) {},
+              onLock: () {},
+              onReset: () {},
+            ),
+          ),
+        ],
       ),
     );
   }

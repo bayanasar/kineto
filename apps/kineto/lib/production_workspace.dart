@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'media_frame.dart';
 import 'native/kineto_engine.dart';
@@ -55,9 +56,6 @@ class ProductionWorkspaceScreen extends StatefulWidget {
   const ProductionWorkspaceScreen({
     required this.work,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     this.pickImage = pickImageFile,
     this.loadServers = loadKinetoMcpServersInBackground,
     super.key,
@@ -71,10 +69,6 @@ class ProductionWorkspaceScreen extends StatefulWidget {
   /// Reads the registered MCP servers and their tools, off the UI thread.
   final Future<List<KinetoMcpServer>> Function() loadServers;
 
-  /// Switches to the other workspaces, shown above the bible.
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -247,9 +241,6 @@ class _ProductionWorkspaceScreenState extends State<ProductionWorkspaceScreen> {
       error: _error,
       onResubmit: _resubmit,
       editingEntry: _editingEntry,
-      navigation: widget.navigation,
-      isDarkMode: widget.isDarkMode,
-      onThemeToggle: widget.onThemeToggle,
       onWriteBible: () => _run(
         project.writeBible,
         'Writing the bible with ${_model.kind.label}',
@@ -330,9 +321,6 @@ class ProductionWorkspaceView extends StatelessWidget {
     this.error,
     this.onResubmit,
     this.editingEntry,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -356,9 +344,6 @@ class ProductionWorkspaceView extends StatelessWidget {
 
   /// The bible entry being edited, as `<kind>-<id>`, if any.
   final String? editingEntry;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   final VoidCallback onWriteBible;
 
@@ -402,59 +387,43 @@ class ProductionWorkspaceView extends StatelessWidget {
   bool _free(String target) => !busy.contains(target) && editingEntry == null;
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (error != null) ...<Widget>[_errorPanel(), const SizedBox(height: 20)],
-                  if (production.damaged) ...<Widget>[
-                    const WabPanel(
-                      title: 'The bible, style or cast cannot be read',
-                      child: Text(
-                        "A stored record no longer matches its files. Nothing was changed; restore the "
-                        "project's files from a backup or version control.",
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                  _biblePanel(context),
-                  const SizedBox(height: 20),
-                  if (onAskReference != null) ...<Widget>[
-                    ReferencesPanel(
-                      references: references,
-                      targets: referenceTargets(production.bible),
-                      enabled: _free('references'),
-                      servers: servers,
-                      serversProblem: serversProblem,
-                      loadingTools: loadingTools,
-                      onLoadTools: onLoadTools ?? () {},
-                      onAsk: onAskReference!,
-                      onEdit: onEditReference ?? (_, _) {},
-                      onAttach: onAttachReference ?? (_, _, _) {},
-                      onRemove: onRemoveReference ?? (_) {},
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                  _stylePanel(context),
-                  const SizedBox(height: 20),
-                  _castPanel(context),
-                ],
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Bible, style & cast',
+        sideWidth: 460,
+        notices: <Widget>[
+          if (error != null) _errorPanel(),
+          if (production.damaged)
+            const WabPanel(
+              title: 'The bible, style or cast cannot be read',
+              child: Text(
+                "A stored record no longer matches its files. Nothing was changed; restore the "
+                "project's files from a backup or version control.",
               ),
             ),
-          ),
-        ),
+        ],
+        // What the film is made of, in words.
+        side: <Widget>[
+          _biblePanel(context),
+          if (onAskReference != null)
+            ReferencesPanel(
+              references: references,
+              targets: referenceTargets(production.bible),
+              enabled: _free('references'),
+              servers: servers,
+              serversProblem: serversProblem,
+              loadingTools: loadingTools,
+              onLoadTools: onLoadTools ?? () {},
+              onAsk: onAskReference!,
+              onEdit: onEditReference ?? (_, _) {},
+              onAttach: onAttachReference ?? (_, _, _) {},
+              onRemove: onRemoveReference ?? (_) {},
+            ),
+        ],
+        // How it looks: the style and who plays whom.
+        main: <Widget>[
+          _stylePanel(context),
+          _castPanel(context),
+        ],
       );
 
   Widget _errorPanel() => WabPanel(

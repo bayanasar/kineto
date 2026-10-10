@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'media_frame.dart';
 import 'media_player.dart';
@@ -29,9 +30,13 @@ final class DemoShotContent {
     required this.setting,
     required this.description,
     required this.candidates,
+    this.scene,
   });
 
   final String label;
+
+  /// The scene it belongs to, which the list of shots groups it under.
+  final String? scene;
   final String setting;
   final String description;
   final List<DemoCandidateContent> candidates;
@@ -112,6 +117,7 @@ DemoShotContent shotContent(String sceneId, String shotId, [KinetoPlannedShot? p
   if (planned != null) {
     return DemoShotContent(
       label: shotId,
+      scene: sceneId,
       setting: '${sceneId.replaceAll('_', ' ')} · ${planned.framing.label} · ${planned.lens} · '
           '${planned.cameraMotion.label}',
       description: '${planned.purpose} ${planned.action}',
@@ -140,19 +146,12 @@ class DemoWorkspaceScreen extends StatefulWidget {
     required this.work,
     required this.engine,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
   final KinetoEngine engine;
   final KinetoProjectSession project;
 
-  /// Switches to the other workspaces, shown above the scene.
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -316,14 +315,11 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       shotSnapshot: snapshot,
       shotSnapshots: _shotSnapshots,
       activeShotIndex: _activeShotIndex,
-      isDarkMode: widget.isDarkMode,
-      navigation: widget.navigation,
       working: _working,
       workingLabel: _workingLabel,
       recoveryNotes: _recoveryNotes,
       onDismissRecovery: () => setState(() => _recoveryNotes = const <String>[]),
       error: _error,
-      onThemeToggle: widget.onThemeToggle,
       onShotChanged: _switchShot,
       onDirectionChanged: (direction) => _run(
         () => widget.project.setShotDirection(_activeShotIndex, direction),
@@ -439,21 +435,14 @@ class DemoWorkspaceView extends StatelessWidget {
     this.workingLabel = 'Working',
     this.recoveryNotes = const <String>[],
     this.onDismissRecovery,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     this.error,
-    this.navigation,
     super.key,
   });
 
-  /// Switches to the other workspaces, shown above the scene.
-  final Widget? navigation;
   final KinetoEngineSnapshot engineSnapshot;
   final KinetoShotSnapshot shotSnapshot;
   final List<KinetoShotSnapshot> shotSnapshots;
   final int activeShotIndex;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
   final ValueChanged<int> onShotChanged;
   final ValueChanged<KinetoShotDirection> onDirectionChanged;
 
@@ -556,393 +545,381 @@ class DemoWorkspaceView extends StatelessWidget {
         !shotSnapshot.locked &&
         !selectedStale;
     final shot = shots[activeShotIndex];
-    final sceneReady = shotSnapshots.every((snapshot) => snapshot.locked);
+    final work = KinetoWorkScope.maybeOf(context);
+    final locked = shotSnapshots.where((snapshot) => snapshot.locked).length;
 
-    return WabScaffold(
-      appBar: WabAppBar(
-        title: const Text('Kineto'),
-        action: onThemeToggle == null
-            ? null
-            : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1040),
+    return KinetoWorkspace(
+      title: 'Shots',
+      sideWidth: 380,
+      notices: <Widget>[
+        if (error != null)
+          WabPanel(
+            title: 'Native operation failed',
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                WabPanel(
-                  title: 'Canonical demo project',
-                  trailing: Text('Native ABI ${engineSnapshot.abiVersion}'),
-                  child: Text(
-                    imageProvider.isPaid
-                        ? 'Keyframe candidates come from ${imageProvider.kind.label}, compiled from each '
-                            "shot's written intent. Every generation is a paid call; choose, lock, then "
-                            'reopen Kineto to verify canonical project state.'
-                        : 'A deterministic local vertical slice. Work through two independent shots, choose direction, '
-                            'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
+                Text(error!),
+                if (onGenerateDespiteIdentityDrift != null) ...<Widget>[
+                  const SizedBox(height: 12),
+                  const Text(
+                    "This project keeps every character's identity from their locked cast. "
+                    'Generate anyway only if a different-looking person is acceptable for '
+                    'these keyframes.',
                   ),
-                ),
-                if (recoveryNotes.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 20),
-                  WabPanel(
-                    title: 'Recovered interrupted work',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        for (final note in recoveryNotes) ...<Widget>[
-                          Text(note),
-                          const SizedBox(height: 8),
-                        ],
-                        const SizedBox(height: 4),
-                        KinetoButton(
-                          onPressed: onDismissRecovery,
-                          child: const Text('Dismiss'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 20),
-                WabPanel(
-                  title: 'Scene 001',
-                  trailing: working
-                      ? WabStatusBadge(workingLabel, kind: WabBadgeKind.progress)
-                      : WabStatusBadge(
-                          sceneReady ? 'Ready' : 'In progress',
-                          kind: sceneReady ? WabBadgeKind.done : WabBadgeKind.progress,
-                        ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      const Text(
-                        'Two production beats share the scene but keep independent approval state.',
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 16,
-                        runSpacing: 12,
-                        children: <Widget>[
-                          for (var index = 0; index < shots.length; index++)
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: <Widget>[
-                                KinetoButton(
-                                  primary: index == activeShotIndex,
-                                  onPressed: () => onShotChanged(index),
-                                  child: Text(shots[index].label),
-                                ),
-                                const SizedBox(width: 8),
-                                WabStatusBadge(
-                                  _shotStatusLabel(shotSnapshots[index]),
-                                  kind: _shotStatusKind(shotSnapshots[index]),
-                                ),
-                              ],
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                if (shotSnapshot.hasInvalidHashes) ...<Widget>[
-                  WabPanel(
-                    title: 'Unrecognised stored hashes',
-                    child: Text(
-                      'This shot contains hashes this build cannot verify. It stays readable; changes are '
-                      'refused until the records are repaired.'
-                      '${shotSnapshot.migrationPending ? ' Legacy hash migration is refused until then too.' : ''}',
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                ] else if (shotSnapshot.canMigrate) ...<Widget>[
-                  WabPanel(
-                    title: 'Legacy hashes need migration',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        const Text(
-                          'This shot was saved by an older Kineto build. It stays readable, but changes are '
-                          'refused until its hashes are rewritten to the current form. The original records '
-                          'are kept in artifacts.pre-sha256-migration.json.',
-                        ),
-                        const SizedBox(height: 12),
-                        KinetoButton(
-                          primary: true,
-                          onPressed: working ? null : onMigrate,
-                          child: const Text('Migrate with backup'),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                ],
-                WabPanel(
-                  title: 'Shot direction',
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        shotSnapshot.locked
-                            ? "Direction is frozen with this shot's locked selection."
-                            : directionPlanned
-                                ? "This shot's direction comes from the locked shot plan. To change it, plan "
-                                    'the scene again in Shot plan and say which direction you want.'
-                                : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: <Widget>[
-                          for (final direction in KinetoShotDirection.values)
-                            KinetoButton(
-                              key: ValueKey<String>('direction-${direction.wireName}'),
-                              primary: direction == shotSnapshot.direction,
-                              onPressed: shotSnapshot.locked || directionPlanned || blocked
-                                  ? null
-                                  : () => onDirectionChanged(direction),
-                              child: Text(direction.label),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                WabPanel(
-                  title: 'Scene 001 · ${shot.label}',
-                  trailing: Text(shotSnapshot.direction.label),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        shot.setting,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(shot.description),
-                      const SizedBox(height: 16),
-                      if (!imageProvider.ready) ...<Widget>[
-                        Text(
-                          '${imageProvider.kind.label} is chosen but has no key; save one under Settings, '
-                          'Keys.',
-                        ),
-                        const SizedBox(height: 12),
-                      ],
-                      if (keyframesUnresolved) ...<Widget>[
-                        const Text(
-                          'The last generation did not finish cleanly, and the image provider may already '
-                          'have charged for keyframes Kineto never received. Check your account with it; '
-                          'generate again only if you accept paying twice.',
-                        ),
-                        const SizedBox(height: 12),
-                        KinetoButton(
-                          onPressed: blocked || !imageProvider.ready ? null : onResubmitKeyframes,
-                          child: Text(
-                            'Generate again · may pay twice · ≈ ${imageProvider.generationCostLabel}',
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                      ],
-                      if (!shotSnapshot.generated)
-                        KinetoButton(
-                          key: const ValueKey<String>('generate'),
-                          primary: true,
-                          expand: true,
-                          onPressed: canGenerate ? onGenerate : null,
-                          child: Text(_generateLabel(imageProvider)),
-                        )
-                      else
-                        Row(
-                          children: <Widget>[
-                            Expanded(child: Text(_generationStatus(shotSnapshot))),
-                            const SizedBox(width: 16),
-                            KinetoButton(
-                              onPressed:
-                                  shotSnapshot.locked || !canGenerate ? null : onGenerate,
-                              child: Text(
-                                imageProvider.isPaid
-                                    ? 'Regenerate · ≈ ${imageProvider.generationCostLabel}'
-                                    : 'Regenerate',
-                              ),
-                            ),
-                            if (onRefine != null) ...<Widget>[
-                              const SizedBox(width: 12),
-                              KinetoButton(
-                                key: const ValueKey<String>('refine-shot'),
-                                onPressed: shotSnapshot.locked || !canGenerate
-                                    ? null
-                                    : () => _refineDialog(context),
-                                child: const Text('Refine with a note'),
-                              ),
-                            ],
-                          ],
-                        ),
-                    ],
-                  ),
-                ),
-                if (shotSnapshot.generated) ...<Widget>[
-                  const SizedBox(height: 20),
-                  WabPanel(
-                    title: 'Generation ${shotSnapshot.generation} · Candidates',
-                    child: Wrap(
-                      spacing: 16,
-                      runSpacing: 16,
-                      children: List<Widget>.generate(
-                        shotSnapshot.candidateCount,
-                        (index) {
-                          final selected = selectedIndex == index;
-                          final media =
-                              index < candidateMedia.length ? candidateMedia[index] : null;
-                          final origin =
-                              index < candidateOrigins.length ? candidateOrigins[index].label : null;
-                          final buttonLabel = shotSnapshot.locked
-                              ? (selected ? 'Locked' : 'Candidate')
-                              : (selected ? 'Selected' : 'Select');
-                          final onPressed =
-                              shotSnapshot.locked || blocked ? null : () => onSelect(index);
-                          if (media == null) {
-                            final content = shot.candidates[index];
-                            return SizedBox(
-                              width: 300,
-                              child: WabCollectionCard(
-                                icon: Icon(content.icon, size: 34),
-                                title: content.title,
-                                description: content.description,
-                                buttonLabel: buttonLabel,
-                                highlighted: selected,
-                                onPressed: onPressed,
-                              ),
-                            );
-                          }
-                          return SizedBox(
-                            width: 300,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: <Widget>[
-                                MediaFrame(
-                                  path: media,
-                                  aspectRatio: 16 / 9,
-                                  gallery: candidateMedia.whereType<String>().toList(),
-                                  unavailable: 'Keyframe unavailable',
-                                ),
-                                const SizedBox(height: 8),
-                                WabCollectionCard(
-                                  icon: const Icon(Icons.photo_camera_back_outlined, size: 30),
-                                  title: 'Take ${String.fromCharCode(0x41 + index)}',
-                                  description: origin == null
-                                      ? 'Keyframe · ${_fileName(media)}'
-                                      : '$origin keyframe · ${_fileName(media)}',
-                                  buttonLabel: buttonLabel,
-                                  highlighted: selected,
-                                  onPressed: onPressed,
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                  for (var index = 0; index < staleReasons.length; index++)
-                    if (staleReasons[index].isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          'Take ${String.fromCharCode(0x41 + index)} no longer follows: '
-                          '${staleReasons[index].join(', ')}',
-                        ),
-                      ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: KinetoButton(
-                          key: const ValueKey<String>('lock-selection'),
-                          primary: true,
-                          onPressed: canLock ? onLock : null,
-                          expand: true,
-                          child: Text(
-                            shotSnapshot.locked
-                                ? 'Selection locked'
-                                : selectedStale
-                                    ? 'Regenerate before locking'
-                                    : 'Lock selection',
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: KinetoButton(
-                          onPressed: blocked ? null : onReset,
-                          expand: true,
-                          child: const Text('Reset shot'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (takes.any((take) => take.status == KinetoTakeStatus.superseded)) ...<Widget>[
-                    const SizedBox(height: 20),
-                    _EarlierTakes(takes: takes),
-                  ],
-                ],
-                if (shotSnapshot.locked) ...<Widget>[
-                  const SizedBox(height: 20),
-                  _VideoPanel(
-                    // A shot's choices are its own: the take count starts
-                    // over on every shot.
-                    key: ValueKey<String>('video-panel-${shots[activeShotIndex].label}'),
-                    snapshot: shotSnapshot,
-                    provider: videoProvider,
-                    estimate: videoEstimate,
-                    failures: videoFailures,
-                    poster: selectedIndex != null && selectedIndex < candidateMedia.length
-                        ? candidateMedia[selectedIndex]
-                        : null,
-                    takes: videoTakes,
-                    blocked: blocked,
-                    onGenerate: onGenerateVideos ??
-                        (onGenerateVideo == null ? null : (count, note, branch) => onGenerateVideo!()),
-                    onResubmit: onResubmitVideo,
-                    onSelect: onSelectVideo,
-                    onLock: onLockVideo,
-                  ),
-                ],
-                if (error != null) ...<Widget>[
-                  const SizedBox(height: 20),
-                  WabPanel(
-                    title: 'Native operation failed',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(error!),
-                        if (onGenerateDespiteIdentityDrift != null) ...<Widget>[
-                          const SizedBox(height: 12),
-                          const Text(
-                            "This project keeps every character's identity from their locked cast. "
-                            'Generate anyway only if a different-looking person is acceptable for '
-                            'these keyframes.',
-                          ),
-                          const SizedBox(height: 12),
-                          KinetoButton(
-                            key: const ValueKey<String>('generate-despite-drift'),
-                            onPressed: blocked ? null : onGenerateDespiteIdentityDrift,
-                            child: const Text('Generate anyway'),
-                          ),
-                        ],
-                      ],
-                    ),
+                  const SizedBox(height: 12),
+                  KinetoButton(
+                    key: const ValueKey<String>('generate-despite-drift'),
+                    onPressed: blocked ? null : onGenerateDespiteIdentityDrift,
+                    child: const Text('Generate anyway'),
                   ),
                 ],
               ],
             ),
           ),
+      ],
+      // Every shot in play, the one open marked. Each shot's work runs on its
+      // own, so several shots can be generating at once.
+      side: <Widget>[
+        WabPanel(
+          title: 'Shots',
+          trailing: WabStatusBadge(
+            locked == shotSnapshots.length ? 'All locked' : '$locked of ${shotSnapshots.length} locked',
+            kind: locked == shotSnapshots.length ? WabBadgeKind.done : WabBadgeKind.progress,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              for (var index = 0; index < shots.length; index++) ...<Widget>[
+                if (shots[index].scene != null && (index == 0 || shots[index - 1].scene != shots[index].scene))
+                  Padding(
+                    padding: EdgeInsets.only(top: index == 0 ? 0 : 14, bottom: 6),
+                    child: Text(
+                      shots[index].scene!.replaceAll('_', ' '),
+                      style: TextStyle(color: WabTheme.mutedColor, fontWeight: FontWeight.w600),
+                    ),
+                  )
+                else if (index > 0)
+                  const SizedBox(height: 6),
+                KinetoButton(
+                  key: ValueKey<String>('shot-$index'),
+                  primary: index == activeShotIndex,
+                  expand: true,
+                  onPressed: () => onShotChanged(index),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(shots[index].label, textAlign: TextAlign.start, overflow: TextOverflow.ellipsis),
+                      ),
+                      if (work?.busyWith('shot:$index') ?? false) ...<Widget>[
+                        const KinetoWorkingText(''),
+                        const SizedBox(width: 8),
+                      ],
+                      WabStatusBadge(
+                        _shotStatusLabel(shotSnapshots[index]),
+                        kind: _shotStatusKind(shotSnapshots[index]),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
-      ),
+        if (recoveryNotes.isNotEmpty)
+          WabPanel(
+            title: 'Recovered interrupted work',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                for (final note in recoveryNotes) ...<Widget>[
+                  Text(note),
+                  const SizedBox(height: 8),
+                ],
+                const SizedBox(height: 4),
+                KinetoButton(
+                  onPressed: onDismissRecovery,
+                  child: const Text('Dismiss'),
+                ),
+              ],
+            ),
+          ),
+        WabPanel(
+          title: 'How shots are made',
+          trailing: Text('Native ABI ${engineSnapshot.abiVersion}'),
+          child: Text(
+            imageProvider.isPaid
+                ? 'Keyframe candidates come from ${imageProvider.kind.label}, compiled from each '
+                    "shot's written intent. Every generation is a paid call; choose, lock, then "
+                    'reopen Kineto to verify canonical project state.'
+                : 'A deterministic local vertical slice. Work through the shots, choose direction, '
+                    'generate candidates, select and lock, then reopen Kineto to verify canonical project state.',
+          ),
+        ),
+      ],
+      // The open shot: its keyframes, then its video.
+      main: <Widget>[
+        if (shotSnapshot.hasInvalidHashes)
+          WabPanel(
+            title: 'Unrecognised stored hashes',
+            child: Text(
+              'This shot contains hashes this build cannot verify. It stays readable; changes are '
+              'refused until the records are repaired.'
+              '${shotSnapshot.migrationPending ? ' Legacy hash migration is refused until then too.' : ''}',
+            ),
+          )
+        else if (shotSnapshot.canMigrate)
+          WabPanel(
+            title: 'Legacy hashes need migration',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'This shot was saved by an older Kineto build. It stays readable, but changes are '
+                  'refused until its hashes are rewritten to the current form. The original records '
+                  'are kept in artifacts.pre-sha256-migration.json.',
+                ),
+                const SizedBox(height: 12),
+                KinetoButton(
+                  primary: true,
+                  onPressed: working ? null : onMigrate,
+                  child: const Text('Migrate with backup'),
+                ),
+              ],
+            ),
+          ),
+        WabPanel(
+          title: shot.label,
+          trailing: working
+              ? WabStatusBadge(workingLabel, kind: WabBadgeKind.progress)
+              : Text(shotSnapshot.direction.label),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                shot.setting,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(shot.description),
+              const SizedBox(height: 16),
+              if (!imageProvider.ready) ...<Widget>[
+                Text(
+                  '${imageProvider.kind.label} is chosen but has no key; save one under Settings, '
+                  'Keys.',
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (keyframesUnresolved) ...<Widget>[
+                const Text(
+                  'The last generation did not finish cleanly, and the image provider may already '
+                  'have charged for keyframes Kineto never received. Check your account with it; '
+                  'generate again only if you accept paying twice.',
+                ),
+                const SizedBox(height: 12),
+                KinetoButton(
+                  onPressed: blocked || !imageProvider.ready ? null : onResubmitKeyframes,
+                  child: Text(
+                    'Generate again · may pay twice · ≈ ${imageProvider.generationCostLabel}',
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (!shotSnapshot.generated)
+                KinetoButton(
+                  key: const ValueKey<String>('generate'),
+                  primary: true,
+                  expand: true,
+                  onPressed: canGenerate ? onGenerate : null,
+                  child: Text(_generateLabel(imageProvider)),
+                )
+              else
+                Row(
+                  children: <Widget>[
+                    Expanded(child: Text(_generationStatus(shotSnapshot))),
+                    const SizedBox(width: 16),
+                    KinetoButton(
+                      onPressed:
+                          shotSnapshot.locked || !canGenerate ? null : onGenerate,
+                      child: Text(
+                        imageProvider.isPaid
+                            ? 'Regenerate · ≈ ${imageProvider.generationCostLabel}'
+                            : 'Regenerate',
+                      ),
+                    ),
+                    if (onRefine != null) ...<Widget>[
+                      const SizedBox(width: 12),
+                      KinetoButton(
+                        key: const ValueKey<String>('refine-shot'),
+                        onPressed: shotSnapshot.locked || !canGenerate
+                            ? null
+                            : () => _refineDialog(context),
+                        child: const Text('Refine with a note'),
+                      ),
+                    ],
+                  ],
+                ),
+            ],
+          ),
+        ),
+        WabPanel(
+          title: 'Shot direction',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                shotSnapshot.locked
+                    ? "Direction is frozen with this shot's locked selection."
+                    : directionPlanned
+                        ? "This shot's direction comes from the locked shot plan. To change it, plan "
+                            'the scene again in Shot plan and say which direction you want.'
+                        : 'Changing direction preserves generated artifacts for provenance and marks them stale until you regenerate.',
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: <Widget>[
+                  for (final direction in KinetoShotDirection.values)
+                    KinetoButton(
+                      key: ValueKey<String>('direction-${direction.wireName}'),
+                      primary: direction == shotSnapshot.direction,
+                      onPressed: shotSnapshot.locked || directionPlanned || blocked
+                          ? null
+                          : () => onDirectionChanged(direction),
+                      child: Text(direction.label),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        if (shotSnapshot.generated)
+          WabPanel(
+            title: 'Generation ${shotSnapshot.generation} · Candidates',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
+                  children: List<Widget>.generate(
+                    shotSnapshot.candidateCount,
+                    (index) {
+                      final selected = selectedIndex == index;
+                      final media =
+                          index < candidateMedia.length ? candidateMedia[index] : null;
+                      final origin =
+                          index < candidateOrigins.length ? candidateOrigins[index].label : null;
+                      final buttonLabel = shotSnapshot.locked
+                          ? (selected ? 'Locked' : 'Candidate')
+                          : (selected ? 'Selected' : 'Select');
+                      final onPressed =
+                          shotSnapshot.locked || blocked ? null : () => onSelect(index);
+                      if (media == null) {
+                        final content = shot.candidates[index];
+                        return SizedBox(
+                          width: 300,
+                          child: WabCollectionCard(
+                            icon: Icon(content.icon, size: 34),
+                            title: content.title,
+                            description: content.description,
+                            buttonLabel: buttonLabel,
+                            highlighted: selected,
+                            onPressed: onPressed,
+                          ),
+                        );
+                      }
+                      return SizedBox(
+                        width: 300,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            MediaFrame(
+                              path: media,
+                              aspectRatio: 16 / 9,
+                              gallery: candidateMedia.whereType<String>().toList(),
+                              unavailable: 'Keyframe unavailable',
+                            ),
+                            const SizedBox(height: 8),
+                            WabCollectionCard(
+                              icon: const Icon(Icons.photo_camera_back_outlined, size: 30),
+                              title: 'Take ${String.fromCharCode(0x41 + index)}',
+                              description: origin == null
+                                  ? 'Keyframe · ${_fileName(media)}'
+                                  : '$origin keyframe · ${_fileName(media)}',
+                              buttonLabel: buttonLabel,
+                              highlighted: selected,
+                              onPressed: onPressed,
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                for (var index = 0; index < staleReasons.length; index++)
+                  if (staleReasons[index].isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Take ${String.fromCharCode(0x41 + index)} no longer follows: '
+                        '${staleReasons[index].join(', ')}',
+                      ),
+                    ),
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: KinetoButton(
+                        key: const ValueKey<String>('lock-selection'),
+                        primary: true,
+                        onPressed: canLock ? onLock : null,
+                        expand: true,
+                        child: Text(
+                          shotSnapshot.locked
+                              ? 'Selection locked'
+                              : selectedStale
+                                  ? 'Regenerate before locking'
+                                  : 'Lock selection',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: KinetoButton(
+                        onPressed: blocked ? null : onReset,
+                        expand: true,
+                        child: const Text('Reset shot'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        if (shotSnapshot.generated && takes.any((take) => take.status == KinetoTakeStatus.superseded))
+          _EarlierTakes(takes: takes),
+        if (shotSnapshot.locked)
+          _VideoPanel(
+            // A shot's choices are its own: the take count starts
+            // over on every shot.
+            key: ValueKey<String>('video-panel-${shots[activeShotIndex].label}'),
+            snapshot: shotSnapshot,
+            provider: videoProvider,
+            estimate: videoEstimate,
+            failures: videoFailures,
+            poster: selectedIndex != null && selectedIndex < candidateMedia.length
+                ? candidateMedia[selectedIndex]
+                : null,
+            takes: videoTakes,
+            blocked: blocked,
+            onGenerate: onGenerateVideos ??
+                (onGenerateVideo == null ? null : (count, note, branch) => onGenerateVideo!()),
+            onResubmit: onResubmitVideo,
+            onSelect: onSelectVideo,
+            onLock: onLockVideo,
+          ),
+      ],
     );
   }
 

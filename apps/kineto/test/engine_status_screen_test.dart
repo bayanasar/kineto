@@ -54,14 +54,14 @@ void main() {
       ),
     );
 
-    expect(find.text('Canonical demo project'), findsOneWidget);
-    expect(find.text('Scene 001'), findsOneWidget);
-    expect(find.text('In progress'), findsOneWidget);
+    expect(find.text('How shots are made'), findsOneWidget);
+    // The shots down the left, the open one's work on the right.
+    expect(find.text('Shots'), findsWidgets);
+    expect(find.text('0 of 2 locked'), findsOneWidget);
     expect(find.text('Selected'), findsNWidgets(2));
     expect(find.text('Empty'), findsOneWidget);
-    expect(find.text('Shot 001'), findsOneWidget);
+    expect(find.text('Shot 001'), findsNWidgets(2), reason: 'in the list and over its work');
     expect(find.text('Shot 002'), findsOneWidget);
-    expect(find.text('Scene 001 · Shot 001'), findsOneWidget);
     expect(find.text('Wide master'), findsOneWidget);
     expect(find.text('Profile medium'), findsOneWidget);
     expect(find.text('Close-up'), findsOneWidget);
@@ -73,11 +73,11 @@ void main() {
     // translucent app bar, where it cannot be tapped (as on macOS hosts,
     // whose text layout makes this page tall enough to scroll that far).
     await Scrollable.ensureVisible(
-      tester.element(find.text('Shot 002')),
+      tester.element(find.byKey(const ValueKey<String>('shot-1'))),
       alignment: 0.5,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Shot 002'));
+    await tester.tap(find.byKey(const ValueKey<String>('shot-1')));
     expect(requestedShot, 1);
   });
 
@@ -123,9 +123,9 @@ void main() {
         ),
       );
 
-      expect(find.text('Ready'), findsOneWidget);
+      expect(find.text('All locked'), findsOneWidget);
       expect(find.text('Locked'), findsNWidgets(3));
-      expect(find.text('Scene 001 · Shot 002'), findsOneWidget);
+      expect(find.text('Shot 002'), findsNWidgets(2));
       expect(find.text('Doorway two-shot'), findsOneWidget);
       expect(find.text('Over shoulder'), findsOneWidget);
       expect(find.text('Exit detail'), findsOneWidget);

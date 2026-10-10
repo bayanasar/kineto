@@ -7,7 +7,7 @@ import 'package:wabisabi/wabisabi.dart';
 
 import 'demo_workspace.dart';
 import 'handoff_workspace.dart';
-import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'media_player.dart';
 import 'native/kineto_engine.dart';
@@ -288,19 +288,37 @@ class _KinetoAppState extends State<KinetoApp> {
     KinetoWorkspace.settings: 'Settings',
   };
 
-  Widget _navigation() => Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: <Widget>[
-          for (final MapEntry(key: workspace, value: label) in _labels.entries)
-            KinetoButton(
-              key: ValueKey<String>('workspace-${workspace.name}'),
-              primary: workspace == _workspace,
-              onPressed: () => _show(workspace),
-              child: Text(label),
-            ),
-        ],
-      );
+  static const Map<KinetoWorkspace, IconData> _icons = <KinetoWorkspace, IconData>{
+    KinetoWorkspace.screenplay: Icons.article_outlined,
+    KinetoWorkspace.production: Icons.face_retouching_natural_outlined,
+    KinetoWorkspace.voices: Icons.record_voice_over_outlined,
+    KinetoWorkspace.shotPlan: Icons.view_timeline_outlined,
+    KinetoWorkspace.shots: Icons.movie_outlined,
+    KinetoWorkspace.handoff: Icons.inventory_2_outlined,
+    KinetoWorkspace.preferences: Icons.tune_outlined,
+    KinetoWorkspace.settings: Icons.settings_outlined,
+  };
+
+  /// The workspaces down the left side of the window.
+  Widget _sidebar() {
+    String? title;
+    try {
+      title = _project?.title;
+    } on Object {
+      title = null;
+    }
+    return KinetoSidebar(
+      places: <KinetoPlace>[
+        for (final MapEntry(key: workspace, value: label) in _labels.entries)
+          KinetoPlace(page: workspace.name, label: label, icon: _icons[workspace]!),
+      ],
+      current: _workspace.name,
+      onShow: (page) => _show(KinetoWorkspace.values.byName(page)),
+      projectTitle: title,
+      isDarkMode: _darkMode,
+      onThemeToggle: _toggleTheme,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -313,7 +331,15 @@ class _KinetoAppState extends State<KinetoApp> {
       home: SelectionArea(
         child: Column(
           children: <Widget>[
-            Expanded(child: _home()),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  _sidebar(),
+                  Expanded(child: _home()),
+                ],
+              ),
+            ),
             KinetoStatusBar(
               work: _work,
               pageLabel: (page) => _labels[KinetoWorkspace.values.byName(page)] ?? page,
@@ -333,9 +359,6 @@ class _KinetoAppState extends State<KinetoApp> {
   Widget _home() {
     if (_workspace == KinetoWorkspace.settings) {
       return SettingsWorkspaceScreen(
-        navigation: _navigation(),
-        isDarkMode: _darkMode,
-        onThemeToggle: _toggleTheme,
         onChanged: () => _choicesChanged = true,
       );
     }
@@ -345,9 +368,6 @@ class _KinetoAppState extends State<KinetoApp> {
       return ProjectUnavailableScreen(
         opening: _reopening,
         problem: _openProblem,
-        navigation: _navigation(),
-        isDarkMode: _darkMode,
-        onThemeToggle: _toggleTheme,
       );
     }
     // A project opened again is a new session: every workspace starts over
@@ -358,55 +378,34 @@ class _KinetoAppState extends State<KinetoApp> {
         KinetoWorkspace.screenplay => ScreenplayWorkspaceScreen(
             project: project,
             work: work,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.production => ProductionWorkspaceScreen(
             project: project,
             work: work,
             pickImage: widget.pickImage,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.voices => VoicesWorkspaceScreen(
             project: project,
             work: work,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.preferences => PreferencesWorkspaceScreen(
             project: project,
             work: work,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.shotPlan => ShotPlanWorkspaceScreen(
             project: project,
             work: work,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.shots => DemoWorkspaceScreen(
             engine: widget.engine,
             project: project,
             work: work,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
         KinetoWorkspace.settings => throw StateError('settings are built above'),
         KinetoWorkspace.handoff => HandoffWorkspaceScreen(
             project: project,
             work: work,
             exportFolder: widget.exportFolder,
-            navigation: _navigation(),
-            isDarkMode: _darkMode,
-            onThemeToggle: _toggleTheme,
           ),
       },
     );

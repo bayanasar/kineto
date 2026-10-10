@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -19,9 +20,6 @@ class SettingsWorkspaceScreen extends StatefulWidget {
     this.deleteKey = deleteKinetoKeyInBackground,
     this.loadPlugins = loadKinetoPluginsInBackground,
     this.loadServers = loadKinetoMcpServersInBackground,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     this.onChanged,
     super.key,
   });
@@ -43,9 +41,6 @@ class SettingsWorkspaceScreen extends StatefulWidget {
 
   /// Reads the MCP servers and their tools, likewise.
   final Future<List<KinetoMcpServer>> Function() loadServers;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// Told when a choice, a key or the configuration changed, so the open
   /// project takes it up when the director goes back to it.
@@ -228,9 +223,6 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
           widget.onChanged?.call();
           _load();
         },
-        navigation: widget.navigation,
-        isDarkMode: widget.isDarkMode,
-        onThemeToggle: widget.onThemeToggle,
       );
 }
 
@@ -253,9 +245,6 @@ class SettingsWorkspaceView extends StatelessWidget {
     this.servers,
     this.serversProblem,
     this.onReload,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -291,64 +280,44 @@ class SettingsWorkspaceView extends StatelessWidget {
   final List<KinetoMcpServer>? servers;
   final String? serversProblem;
   final VoidCallback? onReload;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  const Text(
-                    'Plugins and MCP servers are programs you install yourself and register in Kineto\'s '
-                    'configuration folder (KINETO_CONFIG_HOME, or kineto under your configuration '
-                    'directory): plugins.toml and mcp.toml. Kineto never asks for a program here, and '
-                    'a project can never name one. Each is started only to answer one request, with '
-                    'only the secrets its entry names.',
-                  ),
-                  const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: KinetoButton(
-                      key: const ValueKey<String>('settings-reload'),
-                      onPressed: plugins == null && pluginsProblem == null ? null : onReload,
-                      child: const Text('Read the configuration again'),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  _ProvidersPanel(
-                    key: const ValueKey<String>('providers'),
-                    settings: settings,
-                    problem: settingsProblem,
-                    working: settingWorking,
-                    note: settingNote,
-                    plugins: plugins ?? const <KinetoPlugin>[],
-                    onChoose: onChoose,
-                  ),
-                  const SizedBox(height: 20),
-                  _keysPanel(context),
-                  const SizedBox(height: 20),
-                  _pluginsPanel(context),
-                  const SizedBox(height: 20),
-                  _serversPanel(context),
-                ],
-              ),
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Settings',
+        sideWidth: 560,
+        // Who makes what: the providers, and the keys they need.
+        side: <Widget>[
+          _ProvidersPanel(
+            key: const ValueKey<String>('providers'),
+            settings: settings,
+            problem: settingsProblem,
+            working: settingWorking,
+            note: settingNote,
+            plugins: plugins ?? const <KinetoPlugin>[],
+            onChoose: onChoose,
+          ),
+          _keysPanel(context),
+        ],
+        // The programs the director registered.
+        main: <Widget>[
+          const Text(
+            'Plugins and MCP servers are programs you install yourself and register in Kineto\'s '
+            'configuration folder (KINETO_CONFIG_HOME, or kineto under your configuration '
+            'directory): plugins.toml and mcp.toml. Kineto never asks for a program here, and '
+            'a project can never name one. Each is started only to answer one request, with '
+            'only the secrets its entry names.',
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: KinetoButton(
+              key: const ValueKey<String>('settings-reload'),
+              onPressed: plugins == null && pluginsProblem == null ? null : onReload,
+              child: const Text('Read the configuration again'),
             ),
           ),
-        ),
+          _pluginsPanel(context),
+          _serversPanel(context),
+        ],
       );
 
   Widget _keysPanel(BuildContext context) {

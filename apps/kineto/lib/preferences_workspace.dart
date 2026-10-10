@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
@@ -14,18 +15,11 @@ class PreferencesWorkspaceScreen extends StatefulWidget {
   const PreferencesWorkspaceScreen({
     required this.work,
     required this.project,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
   final KinetoProjectSession project;
 
-  /// Switches to the other workspaces, shown above the preferences.
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -95,9 +89,6 @@ class _PreferencesWorkspaceScreenState extends State<PreferencesWorkspaceScreen>
       workingLabel: _workingLabel,
       error: _error,
       onResubmit: _resubmit,
-      navigation: widget.navigation,
-      isDarkMode: widget.isDarkMode,
-      onThemeToggle: widget.onThemeToggle,
       onSave: (entries) => _run(() => project.savePreferences(_voices.preferencesRevision, entries), 'Saving'),
       onSuggest: () => _run(
         project.suggestPreferences,
@@ -123,9 +114,6 @@ class PreferencesWorkspaceView extends StatelessWidget {
     this.workingLabel = 'Working',
     this.error,
     this.onResubmit,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -136,9 +124,6 @@ class PreferencesWorkspaceView extends StatelessWidget {
   final String workingLabel;
   final String? error;
   final VoidCallback? onResubmit;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// Save the whole profile as the next revision.
   final ValueChanged<List<KinetoPreference>> onSave;
@@ -149,59 +134,44 @@ class PreferencesWorkspaceView extends StatelessWidget {
   final ValueChanged<KinetoSuggestion> onReject;
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: isDarkMode, onToggle: onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Preferences',
+        sideWidth: 560,
+        notices: <Widget>[
+          if (error != null)
+            WabPanel(
+              title: 'That did not work',
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  if (navigation != null) ...<Widget>[navigation!, const SizedBox(height: 20)],
-                  if (error != null) ...<Widget>[
-                    WabPanel(
-                      title: 'That did not work',
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(error!),
-                          if (onResubmit != null) ...<Widget>[
-                            const SizedBox(height: 12),
-                            KinetoButton(
-                              key: const ValueKey<String>('resubmit-paid'),
-                              onPressed: onResubmit,
-                              child: const Text('Ask again'),
-                            ),
-                          ],
-                        ],
-                      ),
+                  Text(error!),
+                  if (onResubmit != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    KinetoButton(
+                      key: const ValueKey<String>('resubmit-paid'),
+                      onPressed: onResubmit,
+                      child: const Text('Ask again'),
                     ),
-                    const SizedBox(height: 20),
                   ],
-                  // Keyed by revision: a saved profile replaces the editor.
-                  PreferenceEditor(
-                    key: ValueKey<int?>(voices.preferencesRevision),
-                    preferences: voices.preferences,
-                    revision: voices.preferencesRevision,
-                    revisions: voices.preferenceRevisions,
-                    planChanged: voices.planPreferencesChanged,
-                    enabled: !working,
-                    onSave: onSave,
-                  ),
-                  const SizedBox(height: 20),
-                  _suggestionsPanel(),
                 ],
               ),
             ),
+        ],
+        // The director's profile, as written.
+        side: <Widget>[
+          // Keyed by revision: a saved profile replaces the editor.
+          PreferenceEditor(
+            key: ValueKey<int?>(voices.preferencesRevision),
+            preferences: voices.preferences,
+            revision: voices.preferencesRevision,
+            revisions: voices.preferenceRevisions,
+            planChanged: voices.planPreferencesChanged,
+            enabled: !working,
+            onSave: onSave,
           ),
-        ),
+        ],
+        // What the director's choices suggest.
+        main: <Widget>[_suggestionsPanel()],
       );
 
   Widget _suggestionsPanel() => WabPanel(

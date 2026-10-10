@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
+import 'kineto_layout.dart';
 import 'kineto_work.dart';
 import 'native/kineto_engine.dart';
 
@@ -40,9 +41,6 @@ class HandoffWorkspaceScreen extends StatefulWidget {
     required this.work,
     required this.project,
     required this.exportFolder,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -50,9 +48,6 @@ class HandoffWorkspaceScreen extends StatefulWidget {
 
   /// Where packages are made unless the director names another folder.
   final String exportFolder;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
 
   /// The project's requests, which outlive this page.
   final KinetoWork work;
@@ -119,9 +114,6 @@ class _HandoffWorkspaceScreenState extends State<HandoffWorkspaceScreen> {
         working: _working,
         workingLabel: _workingLabel,
         error: _error,
-        navigation: widget.navigation,
-        isDarkMode: widget.isDarkMode,
-        onThemeToggle: widget.onThemeToggle,
         onPlanCollection: () => _run(widget.project.planCollection, 'Working out what can be let go'),
         onCollect: () => _run(widget.project.collectMedia, 'Letting go'),
         onVerify: () => _run(widget.project.verifyMedia, 'Reading every file'),
@@ -156,9 +148,6 @@ class HandoffWorkspaceView extends StatefulWidget {
     this.working = false,
     this.workingLabel = 'Working',
     this.error,
-    this.navigation,
-    this.isDarkMode = true,
-    this.onThemeToggle,
     super.key,
   });
 
@@ -169,9 +158,6 @@ class HandoffWorkspaceView extends StatefulWidget {
   final bool working;
   final String workingLabel;
   final String? error;
-  final Widget? navigation;
-  final bool isDarkMode;
-  final VoidCallback? onThemeToggle;
   final VoidCallback onPlanCollection;
   final VoidCallback onCollect;
   final VoidCallback onVerify;
@@ -210,36 +196,16 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
   bool get _idle => !widget.working;
 
   @override
-  Widget build(BuildContext context) => WabScaffold(
-        appBar: WabAppBar(
-          title: const Text('Kineto'),
-          action: widget.onThemeToggle == null
-              ? null
-              : KinetoThemeToggle(isDarkMode: widget.isDarkMode, onToggle: widget.onThemeToggle),
-        ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (widget.navigation != null) ...<Widget>[widget.navigation!, const SizedBox(height: 20)],
-                  if (widget.error != null) ...<Widget>[
-                    WabPanel(title: 'Not done', child: Text(widget.error!)),
-                    const SizedBox(height: 20),
-                  ],
-                  _scenesPanel(context),
-                  const SizedBox(height: 20),
-                  _exportPanel(context),
-                  const SizedBox(height: 20),
-                  _storagePanel(context),
-                ],
-              ),
-            ),
-          ),
-        ),
+  Widget build(BuildContext context) => KinetoWorkspace(
+        title: 'Handoff',
+        sideWidth: 480,
+        notices: <Widget>[
+          if (widget.error != null) WabPanel(title: 'Not done', child: Text(widget.error!)),
+        ],
+        // Where each scene and shot stands.
+        side: <Widget>[_scenesPanel(context)],
+        // What leaves Kineto, and what it keeps on disk.
+        main: <Widget>[_exportPanel(context), _storagePanel(context)],
       );
 
   // ---------------------------------------------------------------- scenes
