@@ -19,9 +19,8 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -150,19 +149,20 @@ impl std::error::Error for HostError {}
 pub(crate) struct Scratch(pub(crate) PathBuf);
 
 impl Scratch {
+    /// Create the directory in the system's temporary directory with a
+    /// random name that must not exist yet, readable only by this user, since
+    /// the request's files are copied into it: mode 0700 on Unix; on Windows
+    /// it inherits the ACL of the user's own temporary directory.
     pub(crate) fn new() -> std::io::Result<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "kineto-plugin-{}-{nanos}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("kineto-plugin-");
+        #[cfg(unix)]
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let path = builder.tempdir()?.keep();
+        let scratch = Self(path.clone());
         fs::create_dir_all(path.join("inputs"))?;
         fs::create_dir_all(path.join("outputs"))?;
-        Ok(Self(path))
+        Ok(scratch)
     }
 }
 
@@ -391,6 +391,23 @@ fn read_output(scratch: &Path, declared: &DeclaredFile, max: u64) -> Result<Outp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scratch_directory_is_new_private_and_removed() {
+        let first = Scratch::new().unwrap();
+        let second = Scratch::new().unwrap();
+        assert_ne!(first.0, second.0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&first.0).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        assert!(first.0.join("inputs").is_dir() && first.0.join("outputs").is_dir());
+        let path = first.0.clone();
+        drop(first);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn only_plain_names_and_files_under_outputs_are_taken() {

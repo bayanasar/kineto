@@ -9,7 +9,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
@@ -30,23 +30,24 @@ pub(crate) fn is_cancelled(cancel: Option<&Arc<AtomicBool>>) -> bool {
     cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst))
 }
 
-static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
-
-/// An empty directory for one call, removed when dropped.
+/// An empty directory for one call, removed when dropped. Agents copy the
+/// director's references into it, so only its owner may enter it.
 pub(crate) struct Workspace(pub(crate) PathBuf);
 
 impl Workspace {
+    /// Create the directory under `root` with a random name that must not
+    /// exist yet, readable only by this user: mode 0700 on Unix; on Windows
+    /// it inherits the ACL of the user's own temporary directory.
     pub(crate) fn create(root: &Path) -> Result<Self, AgentError> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        let path = root.join(format!(
-            "kineto-agent-{}-{nanos}-{}",
-            std::process::id(),
-            NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).map_err(|error| AgentError::Setup(error.kind()))?;
-        Ok(Self(path))
+        fs::create_dir_all(root).map_err(|error| AgentError::Setup(error.kind()))?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("kineto-agent-");
+        #[cfg(unix)]
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let directory = builder
+            .tempdir_in(root)
+            .map_err(|error| AgentError::Setup(error.kind()))?;
+        Ok(Self(directory.keep()))
     }
 
     /// Write `contents` at `relative` inside the workspace.
@@ -201,4 +202,27 @@ pub(crate) fn run_to_end(
         stderr,
         status,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_workspace_is_new_private_and_removed() {
+        let first = Workspace::create(&std::env::temp_dir()).unwrap();
+        let second = Workspace::create(&std::env::temp_dir()).unwrap();
+        assert_ne!(first.0, second.0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&first.0).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        let reference = first.write("references/portrait.png", b"png").unwrap();
+        assert!(reference.starts_with(&first.0));
+        let path = first.0.clone();
+        drop(first);
+        assert!(!path.exists());
+    }
 }
