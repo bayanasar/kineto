@@ -221,8 +221,18 @@ class KinetoSound extends ChangeNotifier {
     if (wasPlaying) notifyListeners();
   }
 
+  bool _disposed = false;
+
+  // A sound may still be stopping, or starting, when the app closes; what
+  // it finishes after that is not announced.
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     unawaited(stop());
     super.dispose();
   }
