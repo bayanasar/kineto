@@ -103,14 +103,20 @@ class _MediaFrameState extends State<MediaFrame> {
 
 String fileName(String path) => path.split(RegExp(r'[/\\]')).last;
 
-/// Open a file in the platform's own application for it.
-Future<void> openOutsideKineto(String path) async {
+/// Open a file in the platform's own application for it. Returns why it
+/// could not be, such as no program to hand it to, or `null`.
+Future<String?> openOutsideKineto(String path) async {
   final (executable, arguments) = Platform.isMacOS
       ? ('open', <String>[path])
       : Platform.isWindows
           ? ('cmd', <String>['/c', 'start', '', path])
           : ('xdg-open', <String>[path]);
-  await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+  try {
+    await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+    return null;
+  } on ProcessException catch (failure) {
+    return 'No program here opens it ($executable: ${failure.message}). It is at $path';
+  }
 }
 
 /// Shows [paths] over the whole window from [initial]: the wheel or a pinch
@@ -249,6 +255,20 @@ class _MediaViewerState extends State<MediaViewer> {
         ),
       );
 
+  /// Hand the image to the system's own program, and say so when there is
+  /// none.
+  Future<void> _openOutside() async {
+    final problem = await openOutsideKineto(_path);
+    if (problem == null || !mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        content: SelectableText(problem),
+        actions: <Widget>[TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     const light = Colors.white;
@@ -304,7 +324,7 @@ class _MediaViewerState extends State<MediaViewer> {
                     _control('Actual pixels (1)', '1:1', _oneToOne, 'actual'),
                     _control('Zoom in (+)', Icons.zoom_in, _zoomIn, 'zoom-in'),
                     const SizedBox(width: 10),
-                    _control('Open outside Kineto', Icons.open_in_new, () => openOutsideKineto(_path), 'open'),
+                    _control('Open outside Kineto', Icons.open_in_new, _openOutside, 'open'),
                     _control('Close (Esc)', Icons.close, () => Navigator.of(context).pop(), 'close'),
                   ],
                 ),

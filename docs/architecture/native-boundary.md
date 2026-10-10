@@ -55,6 +55,8 @@ Dart resolves `@Native` symbols against that Code Asset. No platform-specific `D
 
 The Rust shim declares both `staticlib` and `cdylib` outputs so the build hook can choose the appropriate artifact for the target platform.
 
+Sound and video play inside Kineto with libmpv, through media_kit (`lib/media_player.dart`): an audition or a take plays in place on its button, and a video take opens over the window with play, pause, seeking and volume. Nothing is handed to the system's own player, which a desktop may not have (WSL has no `xdg-open`). On Windows and macOS media_kit bundles libmpv; on Linux it links the system's (`libmpv-dev` to build, `libmpv2` to run on Debian and Ubuntu). Without libmpv the rest of Kineto works and every play says what is missing. media_kit's mimalloc download is turned off (`MIMALLOC_USE_STATIC_LIBS`), since the runner does not link it.
+
 ## Ownership
 
 Opaque Rust state crosses the ABI only as pointer-sized handles.

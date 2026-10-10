@@ -1,10 +1,13 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/demo_workspace.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:wabisabi/wabisabi.dart';
+
+import 'fake_media.dart';
 
 // A 1x1 PNG, so poster and keyframes point at a real image file.
 const List<int> _png = <int>[
@@ -66,6 +69,8 @@ void main() {
 
   tearDown(() => sandbox.deleteSync(recursive: true));
 
+  final player = FakeMedia();
+
   Future<void> pump(
     WidgetTester tester, {
     required KinetoVideoState state,
@@ -79,12 +84,12 @@ void main() {
     VoidCallback? onResubmitVideo,
     ValueChanged<int>? onSelectVideo,
     VoidCallback? onLockVideo,
-    ValueChanged<String>? onOpenVideo,
   }) async {
     final shot = _locked(state);
     await tester.pumpWidget(
       MaterialApp(
         theme: WabTheme.materialTheme(lightTheme: false),
+        builder: (context, child) => withMedia(player, child!),
         home: DemoWorkspaceView(
           engineSnapshot: const KinetoEngineSnapshot(abiVersion: 20),
           imageProvider: _minimax,
@@ -106,7 +111,6 @@ void main() {
           onResubmitVideo: onResubmitVideo,
           onSelectVideo: onSelectVideo,
           onLockVideo: onLockVideo,
-          onOpenVideo: onOpenVideo,
         ),
       ),
     );
@@ -228,7 +232,6 @@ void main() {
   ) async {
     final asked = <(int, String?, String?)>[];
     final chosen = <int>[];
-    final opened = <String>[];
     var locked = 0;
     Future<void> show(List<KinetoVideoTake> videos) => pump(
           tester,
@@ -237,7 +240,6 @@ void main() {
           onGenerateVideos: (count, note, branch) => asked.add((count, note, branch)),
           onSelectVideo: chosen.add,
           onLockVideo: () => locked++,
-          onOpenVideo: opened.add,
         );
     final earlier = take(1, 0, KinetoTakeStatus.superseded, notes: <String>['Slower.']);
     await show(<KinetoVideoTake>[
@@ -251,8 +253,13 @@ void main() {
     expect(find.byKey(const ValueKey<String>('lock-video')), findsNothing);
     await tap(tester, find.byKey(const ValueKey<String>('choose-shot_001_v0002_candidate_b')));
     expect(chosen, <int>[1]);
+    // A take plays inside Kineto, over the window; Esc closes it.
     await tap(tester, find.byKey(const ValueKey<String>('open-shot_001_v0002_candidate_a')));
-    expect(opened, <String>['/project/videos/g20.mp4']);
+    await tester.pumpAndSettle();
+    expect(find.text('playing /project/videos/g20.mp4'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('fake-video')), findsNothing);
 
     await show(<KinetoVideoTake>[
       earlier,

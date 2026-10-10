@@ -44,6 +44,7 @@ Future<_Calls> _pump(
   WidgetTester tester, {
   KinetoExportState export = _partly,
   KinetoStorage storage = _storage,
+  String? opening,
 }) async {
   tester.view.physicalSize = const Size(1280, 3200);
   tester.view.devicePixelRatio = 1.0;
@@ -63,7 +64,10 @@ Future<_Calls> _pump(
         onVerify: () => calls.log.add('verify'),
         onExport: (folder, name, {required partial, required replace, required timeline}) =>
             calls.log.add('export $folder $name partial=$partial replace=$replace timeline=$timeline'),
-        onOpenFolder: (path) => calls.log.add('open $path'),
+        onOpenFolder: (path) async {
+          calls.log.add('open $path');
+          return opening;
+        },
       ),
     ),
   );
@@ -120,6 +124,20 @@ void main() {
       'export /films/exports dailies partial=false replace=true timeline=false',
       'open /films/exports/dailies',
     ]);
+  });
+
+  testWidgets('a folder that cannot be opened here says why and where it is', (tester) async {
+    await _pump(
+      tester,
+      export: const KinetoExportState(
+        ready: 3,
+        last: KinetoExported(path: '/films/exports/dailies', shots: 3, complete: true, bytes: 3100000, lines: 2),
+      ),
+      opening: 'No program here opens folders. The package is at /films/exports/dailies',
+    );
+    await _tap(tester, find.byKey(_key('open-package')));
+    await tester.pump();
+    expect(find.text('No program here opens folders. The package is at /films/exports/dailies'), findsOneWidget);
   });
 
   testWidgets('the disk is shown, and media is let go only after a dry run and a confirmation', (tester) async {

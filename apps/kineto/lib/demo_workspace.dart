@@ -7,6 +7,7 @@ import 'package:wabisabi/wabisabi.dart';
 import 'kineto_controls.dart';
 import 'kineto_work.dart';
 import 'media_frame.dart';
+import 'media_player.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart' show TextPromptDialog;
 
@@ -386,7 +387,6 @@ class _DemoWorkspaceScreenState extends State<DemoWorkspaceScreen> {
       onLockVideo: () => _run(
         () => widget.project.lockShotVideo(_activeShotIndex),
       ),
-      onOpenVideo: openOutsideKineto,
       ),
     );
   }
@@ -434,7 +434,6 @@ class DemoWorkspaceView extends StatelessWidget {
     this.onGenerateVideo,
     this.onResubmitVideo,
     this.onLockVideo,
-    this.onOpenVideo,
     this.candidateOrigins = const <KinetoCandidateOrigin>[],
     this.working = false,
     this.workingLabel = 'Working',
@@ -524,7 +523,6 @@ class DemoWorkspaceView extends StatelessWidget {
   /// charge.
   final VoidCallback? onResubmitVideo;
   final VoidCallback? onLockVideo;
-  final ValueChanged<String>? onOpenVideo;
   /// Who made each candidate of the active shot, as its artifact records it.
   /// Candidate cards name this, never [imageProvider]: a project reopened
   /// with another provider still shows who made its existing candidates.
@@ -912,7 +910,6 @@ class DemoWorkspaceView extends StatelessWidget {
                     onResubmit: onResubmitVideo,
                     onSelect: onSelectVideo,
                     onLock: onLockVideo,
-                    onOpen: onOpenVideo,
                   ),
                 ],
                 if (error != null) ...<Widget>[
@@ -1058,7 +1055,6 @@ class _VideoPanel extends StatefulWidget {
     this.onResubmit,
     this.onSelect,
     this.onLock,
-    this.onOpen,
   });
 
   final KinetoShotSnapshot snapshot;
@@ -1074,7 +1070,6 @@ class _VideoPanel extends StatefulWidget {
   final VoidCallback? onResubmit;
   final ValueChanged<int>? onSelect;
   final VoidCallback? onLock;
-  final ValueChanged<String>? onOpen;
 
   @override
   State<_VideoPanel> createState() => _VideoPanelState();
@@ -1206,12 +1201,13 @@ class _VideoPanelState extends State<_VideoPanel> {
                   children: <Widget>[
                     Text(_title(take)),
                     if (take.notes.isNotEmpty) Text('Notes: ${take.notes.join('; ')}'),
-                    if (take.mediaPath != null && widget.onOpen != null)
+                    if (take.mediaPath != null)
                       KinetoButton(
-                        onPressed: () => widget.onOpen!(take.mediaPath!),
-                        child: const Text('Open'),
+                        key: ValueKey<String>('open-${take.id}'),
+                        onPressed: () => showVideoPlayer(context, take.mediaPath!, title: _title(take)),
+                        child: const Text('Play'),
                       )
-                    else if (take.mediaPath == null)
+                    else
                       const Text('Its clip was let go.'),
                     KinetoButton(
                       key: ValueKey<String>('branch-${take.id}'),
@@ -1234,7 +1230,16 @@ class _VideoPanelState extends State<_VideoPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          if (widget.poster != null)
+          // The clip plays inside Kineto at a click; until it arrives, the
+          // keyframe it starts from stands in.
+          if (take.mediaPath != null)
+            KinetoVideoTile(
+              key: ValueKey<String>('open-${take.id}'),
+              path: take.mediaPath!,
+              poster: widget.poster,
+              label: _title(take),
+            )
+          else if (widget.poster != null)
             MediaFrame(path: widget.poster!, aspectRatio: 16 / 9, unavailable: 'Keyframe unavailable')
           else
             const AspectRatio(aspectRatio: 16 / 9, child: ColoredBox(color: Colors.black26)),
@@ -1251,13 +1256,6 @@ class _VideoPanelState extends State<_VideoPanel> {
             spacing: 8,
             runSpacing: 8,
             children: <Widget>[
-              if (take.mediaPath != null && widget.onOpen != null)
-                KinetoButton(
-                  key: ValueKey<String>('open-${take.id}'),
-                  primary: true,
-                  onPressed: () => widget.onOpen!(take.mediaPath!),
-                  child: const Text('Open video'),
-                ),
               if (!locked && !chosen && takes > 1)
                 KinetoButton(
                   key: ValueKey<String>('choose-${take.id}'),
@@ -1325,7 +1323,7 @@ class _VideoPanelState extends State<_VideoPanel> {
       KinetoVideoState.generating =>
         '${_provider.kind.label} is generating the video. It can take a few minutes; you can keep '
             'working, and closing Kineto does not lose it.',
-      KinetoVideoState.ready => 'Open the takes, choose one and lock it, refine them with a note, or '
+      KinetoVideoState.ready => 'Play the takes, choose one and lock it, refine them with a note, or '
           'branch from an earlier take.',
       KinetoVideoState.locked => 'The video is locked as production truth.',
       KinetoVideoState.stale =>

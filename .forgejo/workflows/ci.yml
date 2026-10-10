@@ -53,6 +53,7 @@ jobs:
             libblkid-dev \
             libgtk-3-dev \
             liblzma-dev \
+            libmpv-dev \
             ninja-build \
             pkg-config \
             python3 \

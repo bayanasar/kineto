@@ -9,6 +9,7 @@ import 'demo_workspace.dart';
 import 'handoff_workspace.dart';
 import 'kineto_controls.dart';
 import 'kineto_work.dart';
+import 'media_player.dart';
 import 'native/kineto_engine.dart';
 import 'preferences_workspace.dart';
 import 'production_workspace.dart';
@@ -24,6 +25,10 @@ Future<void> main() => run();
 /// an image to import; the system's open dialog unless a test gives one.
 Future<void> run({Future<String?> Function()? pickImage}) async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Clips and takes play inside Kineto, with libmpv; without it the rest of
+  // Kineto still works, and every play says what is missing.
+  final mediaProblem = MediaKitEngine.initialize();
+  final media = mediaProblem == null ? const MediaKitEngine() : UnavailableMedia(mediaProblem);
   final engine = KinetoEngine.open();
   try {
     final project = await _openDemoProject();
@@ -33,6 +38,7 @@ Future<void> run({Future<String?> Function()? pickImage}) async {
         project: project,
         exportFolder: [Directory(_demoProjectPath()).parent.path, 'exports'].join(Platform.pathSeparator),
         pickImage: pickImage ?? pickImageFile,
+        media: media,
       ),
     );
   } on KinetoProjectException catch (error) {
@@ -55,6 +61,7 @@ Future<void> run({Future<String?> Function()? pickImage}) async {
             openProblem: error.message,
             exportFolder: [Directory(_demoProjectPath()).parent.path, 'exports'].join(Platform.pathSeparator),
             pickImage: pickImage ?? pickImageFile,
+            media: media,
           ),
         );
     }
@@ -134,10 +141,14 @@ class KinetoApp extends StatefulWidget {
     this.openProject = _openDemoProject,
     this.exportFolder = '',
     this.pickImage = pickImageFile,
+    this.media = const MediaKitEngine(),
     super.key,
   });
 
   final KinetoEngine engine;
+
+  /// What plays sounds and clips inside Kineto.
+  final KinetoMediaEngine media;
 
   /// The open project; `null` when it could not be opened, and then
   /// [openProblem] says why.
@@ -177,6 +188,9 @@ class _KinetoAppState extends State<KinetoApp> {
   /// The open project's requests, shown on their buttons and in the status
   /// bar whatever workspace is open.
   KinetoWork? _work;
+
+  /// The sound playing, whatever workspace is open.
+  late final KinetoSound _sound = KinetoSound(widget.media);
 
   @override
   void initState() {
@@ -258,6 +272,7 @@ class _KinetoAppState extends State<KinetoApp> {
     _waitForIdle?.cancel();
     _project?.close();
     _work?.dispose();
+    _sound.dispose();
     widget.engine.close();
     super.dispose();
   }
@@ -308,7 +323,10 @@ class _KinetoAppState extends State<KinetoApp> {
         ),
       ),
       // Above every route, so a button in a dialog shows its work too.
-      builder: (context, navigator) => KinetoWorkScope(work: _work, child: navigator ?? const SizedBox.shrink()),
+      builder: (context, navigator) => KinetoMedia(
+        sound: _sound,
+        child: KinetoWorkScope(work: _work, child: navigator ?? const SizedBox.shrink()),
+      ),
     );
   }
 

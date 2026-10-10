@@ -19,14 +19,20 @@ String formatBytes(int bytes) {
   return unit == 0 ? '$bytes bytes' : '${value.toStringAsFixed(1)} ${units[unit]}';
 }
 
-/// Open [path], a folder or file, with the platform's default application.
-Future<void> openInSystem(String path) async {
+/// Open [path], a folder, with the platform's file manager. Returns why it
+/// could not be, such as no program to hand it to, or `null`.
+Future<String?> openInSystem(String path) async {
   final (executable, arguments) = Platform.isMacOS
       ? ('open', <String>[path])
       : Platform.isWindows
           ? ('explorer', <String>[path])
           : ('xdg-open', <String>[path]);
-  await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+  try {
+    await Process.start(executable, arguments, mode: ProcessStartMode.detached);
+    return null;
+  } on ProcessException catch (failure) {
+    return 'No program here opens folders ($executable: ${failure.message}). The package is at $path';
+  }
 }
 
 class HandoffWorkspaceScreen extends StatefulWidget {
@@ -176,13 +182,18 @@ class HandoffWorkspaceView extends StatefulWidget {
     required bool replace,
     required bool timeline,
   }) onExport;
-  final ValueChanged<String>? onOpenFolder;
+  /// Opens the package's folder in the system's file manager; answers why
+  /// it could not, or `null`.
+  final Future<String?> Function(String path)? onOpenFolder;
 
   @override
   State<HandoffWorkspaceView> createState() => _HandoffWorkspaceViewState();
 }
 
 class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
+  /// Why the package's folder could not be opened.
+  String? _folderProblem;
+
   late final TextEditingController _folder = TextEditingController(text: widget.exportFolder);
   final TextEditingController _name = TextEditingController(text: 'dailies');
   bool _partial = false;
@@ -394,9 +405,13 @@ class _HandoffWorkspaceViewState extends State<HandoffWorkspaceView> {
                 if (widget.onOpenFolder != null)
                   KinetoButton(
                     key: const ValueKey<String>('open-package'),
-                    onPressed: () => widget.onOpenFolder!(last.path),
+                    onPressed: () async {
+                      final problem = await widget.onOpenFolder!(last.path);
+                      if (mounted) setState(() => _folderProblem = problem);
+                    },
                     child: const Text('Open folder'),
                   ),
+                if (_folderProblem != null) SelectableText(_folderProblem!, key: const ValueKey<String>('folder-problem')),
               ],
             ],
           ),

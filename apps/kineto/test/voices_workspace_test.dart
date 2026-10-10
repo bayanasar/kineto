@@ -5,6 +5,8 @@ import 'package:kineto/native/kineto_engine.dart';
 import 'package:kineto/voices_workspace.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'fake_media.dart';
+
 const KinetoLanguageModel _kimiCode =
     KinetoLanguageModel(kind: KinetoLanguageModelKind.kimiCode, ready: true, model: 'agent-default');
 
@@ -73,6 +75,7 @@ const KinetoVoices _voices = KinetoVoices(
 
 final class _Calls {
   final List<String> log = <String>[];
+  final FakeMedia media = FakeMedia();
   List<KinetoVoiceChoice>? auditioned;
   DubRequest? dubbed;
 }
@@ -85,12 +88,12 @@ Future<_Calls> _pump(WidgetTester tester, {KinetoVoices voices = _voices}) async
   await tester.pumpWidget(
     MaterialApp(
       theme: WabTheme.materialTheme(),
+      builder: (context, child) => withMedia(calls.media, child!),
       home: VoicesWorkspaceView(
         voices: voices,
         model: _kimiCode,
         // $0.0001 a character.
         speechCost: (text, count) => text.length * 100 * count,
-        onPlay: (path) => calls.log.add('play $path'),
         onLoadVoices: () => calls.log.add('load'),
         onRecommend: () => calls.log.add('recommend'),
         onAudition: (character, choices, line) {
@@ -142,13 +145,23 @@ void main() {
     await _tap(tester, find.byKey(_key('audition-filmmaker')));
     expect(calls.auditioned!.map((choice) => choice.voiceId), <String>['bright_woman', 'calm_woman']);
 
+    // An audition plays inside Kineto, and says how far it has played.
     await _tap(tester, find.byKey(_key('play-voice.filmmaker.0001')));
+    await tester.pump();
+    expect(calls.media.played, <String>['/film/characters/filmmaker/voices/voice.filmmaker.0001.mp3']);
+    calls.media.sounds.single.positions.add(const Duration(seconds: 1));
+    calls.media.sounds.single.durations.add(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('Stop · 0:01 / 0:03'), findsOneWidget);
+    await _tap(tester, find.byKey(_key('play-voice.filmmaker.0001')));
+    await tester.pump();
+    expect(calls.media.sounds.single.stopped, isTrue);
+    expect(find.text('Stop · 0:01 / 0:03'), findsNothing);
     await _tap(tester, find.byKey(_key('lock-voice-filmmaker')));
     await _tap(tester, find.byKey(_key('load-voices')));
     await _tap(tester, find.byKey(_key('recommend-voices')));
     expect(calls.log, <String>[
       'audition filmmaker Cut.',
-      'play /film/characters/filmmaker/voices/voice.filmmaker.0001.mp3',
       'lock filmmaker',
       'load',
       'recommend',

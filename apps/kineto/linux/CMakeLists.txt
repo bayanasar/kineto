@@ -65,6 +65,10 @@ set_target_properties(${BINARY_NAME}
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+# media_kit would download and build mimalloc for the runner to link in
+# place of malloc. Kineto does not link it, so nothing is fetched at build
+# time.
+set(MIMALLOC_USE_STATIC_LIBS OFF)
 include(flutter/generated_plugins.cmake)
 
 # === Installation ===

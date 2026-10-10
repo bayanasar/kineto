@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
-import 'handoff_workspace.dart';
 import 'kineto_controls.dart';
 import 'kineto_work.dart';
+import 'media_player.dart';
 import 'native/kineto_engine.dart';
 import 'screenplay_workspace.dart';
 
@@ -117,7 +117,6 @@ class _VoicesWorkspaceScreenState extends State<VoicesWorkspaceScreen> {
       navigation: widget.navigation,
       isDarkMode: widget.isDarkMode,
       onThemeToggle: widget.onThemeToggle,
-      onPlay: openInSystem,
       onLoadVoices: () => _run(project.loadVoices, 'Listing voices', target: 'catalog'),
       onRecommend: () => _run(
         project.recommendVoices,
@@ -184,7 +183,6 @@ class VoicesWorkspaceView extends StatelessWidget {
     required this.voices,
     required this.model,
     required this.speechCost,
-    required this.onPlay,
     required this.onLoadVoices,
     required this.onRecommend,
     required this.onAudition,
@@ -226,7 +224,6 @@ class VoicesWorkspaceView extends StatelessWidget {
   final VoidCallback? onThemeToggle;
 
   /// Opens an audio file with the system's player.
-  final ValueChanged<String> onPlay;
   final VoidCallback onLoadVoices;
   final VoidCallback onRecommend;
   final void Function(String character, List<KinetoVoiceChoice> choices, String? line) onAudition;
@@ -362,7 +359,6 @@ class VoicesWorkspaceView extends StatelessWidget {
                 catalog: voices.voices,
                 speechCost: speechCost,
                 enabled: _free('voice:${character.characterId}') && voices.speechReady,
-                onPlay: onPlay,
                 onAudition: (choices, line) => onAudition(character.characterId, choices, line),
                 onSelect: (audition) => onSelectVoice(character.characterId, audition),
                 onReject: (audition) => onRejectVoice(character.characterId, audition),
@@ -396,7 +392,6 @@ class VoicesWorkspaceView extends StatelessWidget {
                 voiceLocked: line.characterId != null && (voices.character(line.characterId!)?.locked ?? false),
                 speechCost: speechCost,
                 enabled: _free(lineTarget(line)) && voices.speechReady,
-                onPlay: onPlay,
                 onDub: (request) => onDub(line, request),
                 onSelect: (take) => onSelectTake(line, take),
                 onReject: (take) => onRejectTake(line, take),
@@ -417,7 +412,6 @@ class VoiceCastingCard extends StatefulWidget {
     required this.catalog,
     required this.speechCost,
     required this.enabled,
-    required this.onPlay,
     required this.onAudition,
     required this.onSelect,
     required this.onReject,
@@ -429,7 +423,6 @@ class VoiceCastingCard extends StatefulWidget {
   final List<KinetoVoice> catalog;
   final SpeechCost speechCost;
   final bool enabled;
-  final ValueChanged<String> onPlay;
   final void Function(List<KinetoVoiceChoice> choices, String? line) onAudition;
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onReject;
@@ -513,11 +506,7 @@ class _VoiceCastingCardState extends State<VoiceCastingCard> {
                     audition.id == character.lockedAudition ? 'Locked' : audition.status.wireName,
                     kind: audition.status == KinetoChoiceStatus.selected ? WabBadgeKind.done : WabBadgeKind.neutral,
                   ),
-                  TextButton(
-                    key: ValueKey<String>('play-${audition.id}'),
-                    onPressed: () => widget.onPlay(audition.mediaPath),
-                    child: const Text('Play'),
-                  ),
+                  KinetoSoundButton(key: ValueKey<String>('play-${audition.id}'), path: audition.mediaPath),
                   if (!character.locked) ...<Widget>[
                     TextButton(
                       key: ValueKey<String>('select-${audition.id}'),
@@ -627,7 +616,6 @@ class LineDubbingCard extends StatefulWidget {
     required this.voiceLocked,
     required this.speechCost,
     required this.enabled,
-    required this.onPlay,
     required this.onDub,
     required this.onSelect,
     required this.onReject,
@@ -642,7 +630,6 @@ class LineDubbingCard extends StatefulWidget {
   final bool voiceLocked;
   final SpeechCost speechCost;
   final bool enabled;
-  final ValueChanged<String> onPlay;
   final ValueChanged<DubRequest> onDub;
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onReject;
@@ -713,11 +700,7 @@ class _LineDubbingCardState extends State<LineDubbingCard> {
                     take.id == line.lockedTake ? 'Locked' : take.status.wireName,
                     kind: take.status == KinetoChoiceStatus.selected ? WabBadgeKind.done : WabBadgeKind.neutral,
                   ),
-                  TextButton(
-                    key: ValueKey<String>('play-${take.id}'),
-                    onPressed: () => widget.onPlay(take.mediaPath),
-                    child: const Text('Play'),
-                  ),
+                  KinetoSoundButton(key: ValueKey<String>('play-${take.id}'), path: take.mediaPath),
                   if (!line.locked) ...<Widget>[
                     TextButton(
                       key: ValueKey<String>('select-${take.id}'),
