@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kineto/demo_workspace.dart';
+import 'package:kineto/kineto_controls.dart';
 import 'package:kineto/native/kineto_engine.dart';
 import 'package:wabisabi/wabisabi.dart';
 
@@ -125,6 +126,41 @@ void main() {
     expect(find.text('Wide master'), findsNothing);
     expect(find.text(r'Regenerate · ≈ $0.0105'), findsOneWidget);
     expect(find.text('Selected'), findsWidgets);
+  });
+
+  testWidgets('a take is chosen with the plain button, not the card\'s seal-red one', (tester) async {
+    final sandbox = Directory.systemTemp.createTempSync('kineto-keyframes-');
+    addTearDown(() => sandbox.deleteSync(recursive: true));
+    var chosen = -1;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: WabTheme.materialTheme(lightTheme: false),
+        home: DemoWorkspaceView(
+          engineSnapshot: const KinetoEngineSnapshot(abiVersion: 19),
+          imageProvider: _minimax,
+          candidateMedia: _keyframes(sandbox),
+          shotSnapshot: _threeTakes,
+          shotSnapshots: const <KinetoShotSnapshot>[_threeTakes, _empty],
+          activeShotIndex: 0,
+          onShotChanged: (_) {},
+          onDirectionChanged: (_) {},
+          onGenerate: () {},
+          onSelect: (index) => chosen = index,
+          onLock: () {},
+          onReset: () {},
+        ),
+      ),
+    );
+
+    expect(find.byType(WabButton), findsNothing, reason: 'no textured material on the takes');
+    for (final index in <int>[0, 1, 2]) {
+      final button = tester.widget<KinetoButton>(find.byKey(ValueKey<String>('select-take-$index')));
+      expect(button.primary, index == 1, reason: 'only the chosen take is gold');
+    }
+    await tester.ensureVisible(find.byKey(const ValueKey<String>('select-take-2')));
+    await tester.tap(find.byKey(const ValueKey<String>('select-take-2')));
+    expect(chosen, 2);
   });
 
   testWidgets('keyframes name who made them, not the session provider', (tester) async {

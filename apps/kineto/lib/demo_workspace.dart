@@ -810,19 +810,34 @@ class DemoWorkspaceView extends StatelessWidget {
                       final buttonLabel = shotSnapshot.locked
                           ? (selected ? 'Locked' : 'Candidate')
                           : (selected ? 'Selected' : 'Select');
-                      final onPressed =
-                          shotSnapshot.locked || blocked ? null : () => onSelect(index);
+                      // The card draws no button of its own: its seal-red
+                      // one shouted over the takes. The plain button sits
+                      // under it, gold once the take is chosen.
+                      final choose = Center(
+                        child: KinetoButton(
+                          key: ValueKey<String>('select-take-$index'),
+                          primary: selected,
+                          onPressed:
+                              shotSnapshot.locked || blocked ? null : () => onSelect(index),
+                          child: Text(buttonLabel),
+                        ),
+                      );
                       if (media == null) {
                         final content = shot.candidates[index];
                         return SizedBox(
                           width: 300,
-                          child: WabCollectionCard(
-                            icon: Icon(content.icon, size: 34),
-                            title: content.title,
-                            description: content.description,
-                            buttonLabel: buttonLabel,
-                            highlighted: selected,
-                            onPressed: onPressed,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: <Widget>[
+                              WabCollectionCard(
+                                icon: Icon(content.icon, size: 34),
+                                title: content.title,
+                                description: content.description,
+                                highlighted: selected,
+                              ),
+                              const SizedBox(height: 8),
+                              choose,
+                            ],
                           ),
                         );
                       }
@@ -844,10 +859,10 @@ class DemoWorkspaceView extends StatelessWidget {
                               description: origin == null
                                   ? 'Keyframe · ${_fileName(media)}'
                                   : '$origin keyframe · ${_fileName(media)}',
-                              buttonLabel: buttonLabel,
                               highlighted: selected,
-                              onPressed: onPressed,
                             ),
+                            const SizedBox(height: 8),
+                            choose,
                           ],
                         ),
                       );
