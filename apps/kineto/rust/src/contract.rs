@@ -196,6 +196,7 @@ pub(crate) const IMAGE_PROVIDER_LOCAL_DEMO: u32 = 1;
 pub(crate) const IMAGE_PROVIDER_MINIMAX: u32 = 2;
 pub(crate) const IMAGE_PROVIDER_PLUGIN: u32 = 3;
 pub(crate) const IMAGE_PROVIDER_AGENT: u32 = 4;
+pub(crate) const IMAGE_PROVIDER_CONNECTION: u32 = 5;
 
 /// Video state codes in the snapshot's `video_state` field.
 const VIDEO_STATES: [(&str, u8); 6] = [
@@ -208,11 +209,12 @@ const VIDEO_STATES: [(&str, u8); 6] = [
 ];
 
 /// Image provider codes returned by `kineto_project_image_provider`.
-const IMAGE_PROVIDERS: [(&str, u32); 4] = [
+const IMAGE_PROVIDERS: [(&str, u32); 5] = [
     ("local_demo", IMAGE_PROVIDER_LOCAL_DEMO),
     ("minimax", IMAGE_PROVIDER_MINIMAX),
     ("plugin", IMAGE_PROVIDER_PLUGIN),
     ("agent", IMAGE_PROVIDER_AGENT),
+    ("connection", IMAGE_PROVIDER_CONNECTION),
 ];
 
 pub(crate) const VIDEO_PROVIDER_LOCAL_DEMO: u32 = 1;
@@ -244,7 +246,7 @@ pub(crate) const PROVIDER_SETTINGS: [(&str, u32); 4] = [
 
 /// The fields of a connection `kineto_settings_connection_*` read and put,
 /// each as text.
-pub(crate) const CONNECTION_FIELDS: [(&str, u32); 9] = [
+pub(crate) const CONNECTION_FIELDS: [(&str, u32); 10] = [
     ("name", 1),
     ("protocol", 2),
     ("url", 3),
@@ -254,6 +256,9 @@ pub(crate) const CONNECTION_FIELDS: [(&str, u32); 9] = [
     ("price_per_million_output", 7),
     ("price_per_image", 8),
     ("references", 9),
+    // The names of the fields the settings file adds to each request, read
+    // only: settings show them and never change them.
+    ("request_fields", 10),
 ];
 
 /// The protocols a connection may speak, by their names in the settings

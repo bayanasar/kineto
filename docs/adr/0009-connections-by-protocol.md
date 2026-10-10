@@ -48,7 +48,9 @@ A connection without prices is metered at an unknown price: every cost shown say
 
 ### Images: a connection plays a plugin's part
 
-As agy does under ADR-0008, an image connection is a built-in plugin: the same invoke contract, records written before and after the call, the same refusal evidence and recovery. A call that certainly never reached the service (refused before sending, a connection never made, a 4xx answer) is recorded as refused; any other failure leaves the call unresolved until the director consents to send it again.
+As agy does under ADR-0008, an image connection is a built-in plugin: the same invoke contract, records written before and after the call, the same refusal evidence and recovery. A call that certainly made nothing (refused before sending, a connection never made, a 4xx answer, an answer without an image) is recorded as refused; any other failure leaves the call unresolved until the director consents to send it again.
+
+Fields a service needs beyond the protocol's common part (Seedream's watermark switch, a size of its own) are written by the director under `[connection.request]` in the settings file, sent with every request, and win over kineto's. Settings show their names and never change them.
 
 ### Video stays with adapters and plugins
 
@@ -63,4 +65,5 @@ The single server ADR-0008 kept (`[openai_compatible]`, chosen as `openai-compat
 - A service that speaks a known protocol is usable without a new build: GPT, Grok, Muse, GLM, Qwen, DeepSeek, Kimi, Doubao, MiniMax, Gemini, Claude, OpenRouter, local servers.
 - Kineto cannot know a connection's price or limits. It shows what the director entered and says when it does not know.
 - A vendor's own extras (structured-output modes, image sizes, safety settings) are not reached; the protocol's common part is. A service that needs more is better served by a plugin.
-- The native ABI gains connection calls and retires the server's three settings (v50).
+- The native ABI gains connection calls and retires the server's three settings (v50), then image connections and whether an image price is known (v51).
+- An image of another shape than the shot's frame is cut to it, which keeps the frame and loses the edges; a service that draws the frame asked for loses nothing.

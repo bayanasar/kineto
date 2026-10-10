@@ -716,7 +716,7 @@ class DemoWorkspaceView extends StatelessWidget {
                 KinetoButton(
                   onPressed: blocked || !imageProvider.ready ? null : onResubmitKeyframes,
                   child: Text(
-                    'Generate again · may pay twice · ≈ ${imageProvider.generationCostLabel}',
+                    'Generate again · may pay twice · ${imageProvider.generationCost}',
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -739,7 +739,7 @@ class DemoWorkspaceView extends StatelessWidget {
                           shotSnapshot.locked || !canGenerate ? null : onGenerate,
                       child: Text(
                         imageProvider.isPaid
-                            ? 'Regenerate · ≈ ${imageProvider.generationCostLabel}'
+                            ? 'Regenerate · ${imageProvider.generationCost}'
                             : 'Regenerate',
                       ),
                     ),
@@ -947,7 +947,7 @@ class DemoWorkspaceView extends StatelessWidget {
         hint: 'What should change, such as "warmer light, tighter on his hands"',
         confirmKey: 'refine-shot-confirm',
         confirmLabel: imageProvider.isPaid
-            ? 'Generate · ≈ ${imageProvider.generationCostLabel}'
+            ? 'Generate · ${imageProvider.generationCost}'
             : 'Generate',
       ),
     );
@@ -956,7 +956,7 @@ class DemoWorkspaceView extends StatelessWidget {
   }
 
   static String _generateLabel(KinetoImageProvider provider) => provider.isPaid
-      ? 'Generate 3 keyframes · ${provider.kind.label} · ≈ ${provider.generationCostLabel}'
+      ? 'Generate 3 keyframes · ${provider.kind.label} · ${provider.generationCost}'
       : 'Generate 3 deterministic candidates';
 
   static String _fileName(String path) => path.split(Platform.pathSeparator).last;

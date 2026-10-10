@@ -343,6 +343,12 @@ fn field_text(connection: &Connection, field: &str) -> String {
         "price_per_million_output" => price(connection.price_per_million_output),
         "price_per_image" => price(connection.price_per_image),
         "references" if connection.references > 0 => connection.references.to_string(),
+        "request_fields" => connection
+            .request
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => String::new(),
     }
 }
@@ -384,6 +390,8 @@ fn connection_from(fields: &[(&str, String)]) -> Option<Connection> {
             "price_per_million_input" => connection.price_per_million_input = price(value)?,
             "price_per_million_output" => connection.price_per_million_output = price(value)?,
             "price_per_image" => connection.price_per_image = price(value)?,
+            // Read only: the settings file holds them.
+            "request_fields" => {}
             "references" => {
                 connection.references = if value.is_empty() {
                     0

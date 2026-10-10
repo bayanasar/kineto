@@ -128,6 +128,14 @@ void main() {
     expect(find.text('Selected'), findsWidgets);
   });
 
+  test('a connection\'s keyframe is named after the connection', () {
+    expect(
+      const KinetoCandidateOrigin(provider: 'connection.nano', model: 'gemini-3.1-flash-image').label,
+      'nano · gemini-3.1-flash-image',
+    );
+    expect(const KinetoCandidateOrigin(provider: 'minimax', model: 'image-01').label, 'MiniMax image-01');
+  });
+
   testWidgets('a take is chosen with the plain button, not the card\'s seal-red one', (tester) async {
     final sandbox = Directory.systemTemp.createTempSync('kineto-keyframes-');
     addTearDown(() => sandbox.deleteSync(recursive: true));

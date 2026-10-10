@@ -277,7 +277,7 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
 }
 
 /// What a connection can be added for.
-const List<KinetoModality> _connectable = <KinetoModality>[KinetoModality.text];
+const List<KinetoModality> _connectable = KinetoModality.values;
 
 class SettingsWorkspaceView extends StatelessWidget {
   const SettingsWorkspaceView({
@@ -747,6 +747,7 @@ class _ProvidersPanel extends StatelessWidget {
         KinetoProviderSetting.image => <_Option>[
             (value: '', label: 'Local demo · free', enabled: true),
             (value: 'minimax', label: 'MiniMax image-01 · key', enabled: true),
+            for (final connection in connections(KinetoModality.image)) _connectionOption(connection),
             for (final agent in KinetoAgent.values)
               if (agent.makesImages)
                 (
@@ -1094,7 +1095,12 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
           SelectableText('${connection.model} at ${connection.url}'),
           Text(_keyLabel(connection)),
           Text(_priceLabel(connection)),
-          if (connection.references > 0) Text('Takes ${connection.references} reference images'),
+          if (connection.protocol?.modality == KinetoModality.image)
+            Text(connection.references > 0
+                ? 'Takes ${connection.references} reference images'
+                : 'Takes no reference images, so it cannot lock a cast'),
+          if (connection.requestFields.isNotEmpty)
+            Text('Also sends ${connection.requestFields}, as the settings file says'),
           if (protocol == null) Text('A newer version of Kineto added it; this one cannot use it.'),
           const SizedBox(height: 8),
           Wrap(
@@ -1136,7 +1142,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
     final canKeep = widget.keys?.available ?? false;
     return WabPanel(
       key: const ValueKey<String>('connection-form'),
-      title: _editing!.isEmpty ? 'New ${widget.modality.label.toLowerCase()} connection' : 'Change $_editing',
+      title: _editing!.isEmpty ? 'New ${widget.modality.noun} connection' : 'Change $_editing',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
@@ -1230,7 +1236,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
         : const <KinetoConnection>[];
     final ready = settings != null && settings.problem == null && !widget.working && widget.onPut != null;
     return WabPanel(
-      title: '${widget.modality.label} connections',
+      title: '${widget.modality.noun[0].toUpperCase()}${widget.modality.noun.substring(1)} connections',
       trailing: WabStatusBadge('${connections.length}', kind: WabBadgeKind.neutral),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1252,7 +1258,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
               child: KinetoButton(
                 key: ValueKey<String>('connection-add-${widget.modality.name}'),
                 onPressed: ready ? () => _open(null) : null,
-                child: Text('Add a ${widget.modality.label.toLowerCase()} connection'),
+                child: Text('Add ${widget.modality.withArticle} connection'),
               ),
             ),
         ],

@@ -328,7 +328,9 @@ fn without_reasoning(text: &str) -> &str {
     let trimmed = text.trim_start();
     for (open, close) in [("<think>", "</think>"), ("<thinking>", "</thinking>")] {
         if let Some(rest) = trimmed.strip_prefix(open) {
-            return rest.split_once(close).map_or("", |(_, answer)| answer.trim_start());
+            return rest
+                .split_once(close)
+                .map_or("", |(_, answer)| answer.trim_start());
         }
     }
     text
@@ -599,7 +601,10 @@ mod tests {
         ));
         assert_eq!(backend.complete(&request()).unwrap().text, r#"{"ok":true}"#);
         assert_eq!(without_reasoning("<thinking>a</thinking>b"), "b");
-        assert_eq!(without_reasoning("  plain <think> text"), "  plain <think> text");
+        assert_eq!(
+            without_reasoning("  plain <think> text"),
+            "  plain <think> text"
+        );
         let open = backend_answering_open_reasoning();
         assert!(matches!(
             open.complete(&request()),

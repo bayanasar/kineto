@@ -380,7 +380,15 @@ fn chosen_providers(secrets: &impl SecretSource) -> Result<Providers, SessionErr
     let lookup = |name: &str| choices.lookup(name);
     Ok(Providers {
         image: selected(Setting::Image)
-            .and_then(|selection| ImageProvider::select_with(selection.as_deref(), secrets, lookup))
+            .and_then(|selection| {
+                match choices
+                    .connection(selection.as_deref())
+                    .map_err(ProviderSelectionError::Plugin)?
+                {
+                    Some(connection) => ImageProvider::connection(connection, secrets),
+                    None => ImageProvider::select_with(selection.as_deref(), secrets, lookup),
+                }
+            })
             .map_err(provider)?,
         video: selected(Setting::Video)
             .and_then(|selection| VideoProvider::select(selection.as_deref(), secrets))
@@ -673,6 +681,29 @@ pub unsafe extern "C" fn kineto_project_generation_cost_micros(
     })
 }
 
+/// 1 when the session's image provider says what an image costs, so
+/// [`kineto_project_generation_cost_micros`] is its price; 0 when it does
+/// not (an agent on a subscription, a plugin or connection without a
+/// price), or for a null handle.
+///
+/// # Safety
+/// `session` must be a live project-session handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kineto_project_generation_cost_known(
+    session: *const KinetoProjectSession,
+) -> u8 {
+    guarded(0, || {
+        // SAFETY: the caller guarantees a live handle or null.
+        let Some(session) = (unsafe { session.as_ref() }) else {
+            return 0;
+        };
+        session
+            .session
+            .image_provider()
+            .map_or(0, |provider| u8::from(provider.cost_known))
+    })
+}
+
 /// Estimated cost of one shot video, of the shortest clip the session's
 /// video provider makes, in USD micros; 0 for a free provider or a null
 /// handle.
@@ -770,6 +801,7 @@ fn image_provider_code(kind: ImageProviderKind) -> u32 {
         ImageProviderKind::Minimax => IMAGE_PROVIDER_MINIMAX,
         ImageProviderKind::Plugin => IMAGE_PROVIDER_PLUGIN,
         ImageProviderKind::Agent => IMAGE_PROVIDER_AGENT,
+        ImageProviderKind::Connection => IMAGE_PROVIDER_CONNECTION,
     }
 }
 

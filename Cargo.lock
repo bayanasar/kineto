@@ -755,6 +755,7 @@ dependencies = [
  "kineto-prompts",
  "kineto-provider-gemini",
  "kineto-provider-minimax",
+ "kineto-provider-openai",
  "kineto-providers",
  "libc",
  "serde",
@@ -867,6 +868,18 @@ dependencies = [
 
 [[package]]
 name = "kineto-provider-minimax"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "kineto-jobs",
+ "kineto-providers",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "kineto-provider-openai"
 version = "0.1.0"
 dependencies = [
  "base64",

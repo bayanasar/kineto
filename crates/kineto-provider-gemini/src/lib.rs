@@ -1,10 +1,12 @@
 //! Google's video models over the Gemini API: Gemini Omni Flash
 //! ([`omni`]), and Veo 3.1 ([`veo`]), whose preview models Google shuts
-//! down on 2026-10-22.
+//! down on 2026-10-22; and Gemini's image models for a connection the
+//! director adds ([`image`]).
 //!
 //! The key goes in an `x-goog-api-key` header, and only to the API's own
 //! host. A download that is redirected elsewhere is fetched without it.
 
+pub mod image;
 pub mod omni;
 pub mod veo;
 
@@ -18,8 +20,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_MESSAGE_CHARS: usize = 200;
-/// Largest answer to a POST read.
-const MAX_POST_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
+/// Largest answer to a POST read: an image answers inline, base64 encoded.
+const MAX_POST_ANSWER_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What a transport failed at. Library error text is deliberately not kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

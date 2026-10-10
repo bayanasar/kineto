@@ -610,15 +610,7 @@ fn api_error(base: &WireBaseResp) -> MinimaxError {
 /// The image format from its leading bytes.
 #[must_use]
 pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
-    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some(ImageFormat::Jpeg)
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some(ImageFormat::Png)
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some(ImageFormat::Webp)
-    } else {
-        None
-    }
+    ImageFormat::sniff(bytes)
 }
 
 #[cfg(test)]

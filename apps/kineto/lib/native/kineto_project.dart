@@ -261,6 +261,12 @@ external int _kinetoProjectImageProviderReady(Pointer<Void> session);
 )
 external int _kinetoProjectGenerationCostMicros(Pointer<Void> session);
 
+@Native<Uint8 Function(Pointer<Void>)>(
+  symbol: 'kineto_project_generation_cost_known',
+  isLeaf: true,
+)
+external int _kinetoProjectGenerationCostKnown(Pointer<Void> session);
+
 @Native<Uint64 Function(Pointer<Void>)>(
   symbol: 'kineto_project_video_cost_micros',
   isLeaf: true,
@@ -345,7 +351,8 @@ enum KinetoImageProviderKind {
   localDemo(1, 'local_demo', 'Local demo'),
   minimax(2, 'minimax', 'MiniMax image-01'),
   plugin(3, 'plugin', 'Plugin'),
-  agent(4, 'agent', 'Local agent');
+  agent(4, 'agent', 'Local agent'),
+  connection(5, 'connection', 'Connection');
 
   const KinetoImageProviderKind(this.wireValue, this.wireName, this.label);
 
@@ -432,9 +439,14 @@ final class KinetoCandidateOrigin {
     'minimax': 'MiniMax',
   };
 
-  /// For example `MiniMax image-01`; null when no provider is recorded.
+  /// For example `MiniMax image-01`, or `nano · gemini-3.1-flash-image` for
+  /// a connection the director named; null when no provider is recorded.
   String? get label {
     if (provider.isEmpty) return null;
+    if (provider.startsWith('connection.')) {
+      final name = provider.substring('connection.'.length);
+      return model.isEmpty ? name : '$name · $model';
+    }
     final name = _providerNames[provider] ?? provider;
     return model.isEmpty ? name : '$name $model';
   }
@@ -447,6 +459,7 @@ final class KinetoImageProvider {
     required this.kind,
     required this.ready,
     required this.generationCostMicros,
+    this.costKnown = true,
   });
 
   final KinetoImageProviderKind kind;
@@ -457,10 +470,17 @@ final class KinetoImageProvider {
   /// Estimated cost of one generation (every candidate), in USD micros.
   final int generationCostMicros;
 
+  /// Whether that estimate is a price: an agent on a subscription, or a
+  /// plugin or connection that gives none, costs what it costs.
+  final bool costKnown;
+
   bool get isPaid => kind != KinetoImageProviderKind.localDemo;
 
   /// The generation estimate in US dollars, for example `$0.0105`.
   String get generationCostLabel => _dollars(generationCostMicros);
+
+  /// What a generation costs, in words: `≈ $0.0105`, or `cost unknown`.
+  String get generationCost => costKnown ? '≈ $generationCostLabel' : 'cost unknown';
 
 }
 
@@ -929,6 +949,7 @@ final class KinetoProjectSession implements Finalizable {
       ),
       ready: _kinetoProjectImageProviderReady(_handle) != 0,
       generationCostMicros: _kinetoProjectGenerationCostMicros(_handle),
+      costKnown: _kinetoProjectGenerationCostKnown(_handle) != 0,
     );
   }
 

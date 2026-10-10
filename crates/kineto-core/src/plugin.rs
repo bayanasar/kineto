@@ -28,7 +28,9 @@
 //! plugin built in: kineto plays the plugin's part itself, in this process,
 //! by asking the agent for one image, so its candidates are kept, recovered
 //! and refused exactly as a plugin's are. Its jobs and records are kept
-//! under `agent.<name>`.
+//! under `agent.<name>`. An image connection the director added (ADR-0009)
+//! is another, asked over the protocol it speaks; its jobs and records are
+//! kept under `connection.<name>`.
 //!
 //! Speech runs through the same speech jobs and receipts as every speech
 //! provider; the plugin only speaks. Video runs through the same video jobs
@@ -77,7 +79,12 @@ use kineto_providers::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use kineto_llm::openai::connection_provider;
+use kineto_plugins::settings::{Connection, Modality, micros};
+use kineto_providers::secret::SecretSource;
+
 use crate::{
+    connection::ImageConnection,
     generation::{
         CandidateGenerator, CandidateOwner, CandidateRequest, GeneratedCandidate,
         parse_candidate_key, provenance,
@@ -263,6 +270,9 @@ enum Runner {
     /// An agent CLI the director signed in to, asked in this process;
     /// `images` is where it keeps what it makes.
     Agent { cli: AgentCli, images: PathBuf },
+    /// A connection the director added, asked in this process; `None`
+    /// when the key it names is not kept, so it makes nothing new.
+    Connection(Option<Arc<ImageConnection>>),
 }
 
 /// A registered plugin, as it described itself, or an agent CLI that makes
@@ -374,13 +384,105 @@ impl PluginProvider {
         })
     }
 
+    /// The connection `connection` as an image provider, with the key it
+    /// names from `secrets`. A connection that makes no images, or that this
+    /// build cannot use, is refused; one whose key is not kept is described,
+    /// with its price, and makes nothing new.
+    pub fn connection(
+        connection: &Connection,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, PluginError> {
+        let protocol = connection
+            .check()
+            .map_err(|error| PluginError::Described(error.to_string()))?;
+        if protocol.modality() != Modality::Image {
+            return Err(PluginError::Described(format!(
+                "{} makes no images",
+                connection.name
+            )));
+        }
+        let key = match connection.key_name() {
+            Some(name) => match secrets.api_key(name) {
+                Ok(Some(key)) => Some(Some(key)),
+                Ok(None) => None,
+                Err(error) => return Err(PluginError::Described(error.to_string())),
+            },
+            None => Some(None),
+        };
+        let client = key
+            .and_then(|key| ImageConnection::new(connection, protocol, key))
+            .map(Arc::new);
+        let references = connection.references;
+        let image = ImageCapabilities {
+            aspect_ratios: connection_frames(),
+            max_reference_images: references,
+            reference_roles: if references > 0 {
+                [
+                    ReferenceRole::Identity,
+                    ReferenceRole::Composition,
+                    ReferenceRole::Style,
+                ]
+                .into_iter()
+                .collect()
+            } else {
+                BTreeSet::new()
+            },
+            reference_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+                .into_iter()
+                .collect(),
+            max_reference_bytes: Some(20 * 1024 * 1024),
+            output_formats: [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+                .into_iter()
+                .collect(),
+            async_jobs: false,
+            // Unknown unless the director said.
+            price_per_image: connection
+                .price_per_image
+                .map(|usd| Price::usd(micros(usd))),
+            ..ImageCapabilities::default()
+        };
+        Ok(Self {
+            key: connection_provider(&connection.name),
+            entry: PluginEntry {
+                id: connection.name.clone(),
+                executable: PathBuf::new(),
+                args: Vec::new(),
+                secrets: Vec::new(),
+                enabled: true,
+            },
+            runner: Runner::Connection(client),
+            name: connection.name.clone(),
+            version: protocol.name().to_owned(),
+            image: Some((image, connection.model.clone())),
+            speech: None,
+            video: None,
+            invoke: Limits {
+                deadline: Duration::from_secs(10 * 60),
+                ..Limits::INVOKE
+            },
+        })
+    }
+
     /// The agent it asks, when it is an agent CLI rather than a plugin.
     #[must_use]
     pub fn agent_kind(&self) -> Option<AgentKind> {
         match &self.runner {
-            Runner::Process => None,
             Runner::Agent { cli, .. } => Some(cli.kind()),
+            Runner::Process | Runner::Connection(_) => None,
         }
+    }
+
+    /// Whether it is a connection the director added.
+    #[must_use]
+    pub const fn is_connection(&self) -> bool {
+        matches!(self.runner, Runner::Connection(_))
+    }
+
+    /// Whether new calls can be made: a connection without its key makes
+    /// none.
+    #[must_use]
+    pub const fn callable(&self) -> bool {
+        !matches!(self.runner, Runner::Connection(None))
     }
 
     /// Start `entry` once to read what it declares.
@@ -513,8 +615,87 @@ impl PluginProvider {
             )
             .map_err(PluginError::Host),
             Runner::Agent { cli, images } => agent_call(cli, images, operation, &fields, inputs),
+            Runner::Connection(Some(connection)) => {
+                connection_call(connection, operation, &fields, inputs)
+            }
+            Runner::Connection(None) => Err(PluginError::Unsupported(
+                "the key this connection names is not kept",
+            )),
         }
     }
+}
+
+/// The frames a connection is asked for: any common one, which it draws
+/// or is cut to.
+fn connection_frames() -> BTreeSet<AspectRatio> {
+    [
+        (16, 9),
+        (9, 16),
+        (1, 1),
+        (4, 3),
+        (3, 4),
+        (3, 2),
+        (2, 3),
+        (21, 9),
+    ]
+    .into_iter()
+    .filter_map(|(width, height)| AspectRatio::new(width, height))
+    .collect()
+}
+
+/// Play the plugin's part for a connection: an image for `invoke`, and no
+/// record of any call for `reconcile`, since the protocols keep none kineto
+/// can ask about.
+fn connection_call(
+    connection: &ImageConnection,
+    operation: &str,
+    fields: &Value,
+    inputs: &[Input],
+) -> Result<Done, PluginError> {
+    match operation {
+        "reconcile" => {
+            return Ok(Done {
+                answer: Answer::Unknown,
+                files: Vec::new(),
+            });
+        }
+        "invoke" if fields["capability"] == "image.generate" => {}
+        _ => {
+            return Err(PluginError::Unsupported("a connection only makes images"));
+        }
+    }
+    let request = &fields["request"];
+    let frame = request["aspect_ratio"]
+        .as_str()
+        .and_then(|frame| ratio(frame).ok())
+        .map_or((16, 9), |frame| (frame.width, frame.height));
+    let references: Vec<&[u8]> = inputs.iter().map(|input| input.bytes.as_slice()).collect();
+    let bytes = connection
+        .generate(
+            request["prompt"].as_str().unwrap_or_default(),
+            frame,
+            &references,
+        )
+        .map_err(|failure| PluginError::Failed {
+            class: match failure.class {
+                ErrorClass::Retryable => FailureClass::Retryable,
+                ErrorClass::Terminal => FailureClass::Terminal,
+            },
+            accepted: failure.refused.then_some(false),
+            message: failure.message,
+        })?;
+    let declared = DeclaredFile {
+        path: "outputs/image".to_owned(),
+        size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sha256: ContentHash::of(&bytes).as_str().to_owned(),
+    };
+    Ok(Done {
+        answer: Answer::Completed {
+            outputs: vec![declared.clone()],
+            metadata: Value::Null,
+        },
+        files: vec![OutputFile { declared, bytes }],
+    })
 }
 
 /// Play the plugin's part for an agent: an image for `invoke`, and no
@@ -1338,7 +1519,7 @@ impl CandidateGenerator for PluginImages<'_> {
     }
 
     fn can_invoke(&self) -> bool {
-        self.plugin.image.is_some()
+        self.plugin.image.is_some() && self.plugin.callable()
     }
 
     fn recover(&mut self, request: &CandidateRequest) -> Result<GeneratedCandidate, PluginError> {

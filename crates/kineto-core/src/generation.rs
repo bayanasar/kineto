@@ -216,6 +216,8 @@ pub enum ImageProviderKind {
     Plugin,
     /// An agent CLI the director signed in to.
     Agent,
+    /// A connection the director added.
+    Connection,
 }
 
 /// What the director needs to know about the session's image provider before
@@ -227,6 +229,9 @@ pub struct ImageProviderInfo {
     pub ready: bool,
     /// Estimated cost of one generation (every candidate), in USD micros.
     pub generation_cost_micros: u64,
+    /// Whether that cost is known: an agent on a subscription, or a plugin
+    /// or connection that gives no price, costs what it costs.
+    pub cost_known: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +311,17 @@ impl ImageProvider {
         }
     }
 
+    /// The connection `connection` the director added, with the key it
+    /// names from `secrets`.
+    pub fn connection(
+        connection: &kineto_plugins::settings::Connection,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, ProviderSelectionError> {
+        PluginProvider::connection(connection, secrets)
+            .map(|provider| Self::Plugin(Arc::new(provider)))
+            .map_err(|error| ProviderSelectionError::Plugin(error.to_string()))
+    }
+
     /// How the provider is given a character's identity, as a cast lock
     /// records it: the provider and the request field the reference travels
     /// in. `None` when it takes no identity reference.
@@ -338,29 +354,33 @@ impl ImageProvider {
     pub fn info(&self) -> ImageProviderInfo {
         let candidates =
             u64::try_from(GENERATED_CANDIDATE_COUNT).expect("candidate count fits in u64");
-        let generation_cost_micros = self
-            .capabilities()
-            .price_per_image
-            .map_or(0, |price| price.amount_micros * candidates);
+        let price = self.capabilities().price_per_image;
+        let generation_cost_micros = price.map_or(0, |price| price.amount_micros * candidates);
+        let cost_known = price.is_some();
         match self {
             Self::LocalDemo => ImageProviderInfo {
                 kind: ImageProviderKind::LocalDemo,
                 ready: true,
                 generation_cost_micros,
+                cost_known,
             },
             Self::Minimax(client) => ImageProviderInfo {
                 kind: ImageProviderKind::Minimax,
                 ready: client.is_some(),
                 generation_cost_micros,
+                cost_known,
             },
             Self::Plugin(plugin) => ImageProviderInfo {
                 kind: if plugin.agent_kind().is_some() {
                     ImageProviderKind::Agent
+                } else if plugin.is_connection() {
+                    ImageProviderKind::Connection
                 } else {
                     ImageProviderKind::Plugin
                 },
-                ready: plugin.image_capabilities().is_some(),
+                ready: plugin.image_capabilities().is_some() && plugin.callable(),
                 generation_cost_micros,
+                cost_known,
             },
         }
     }

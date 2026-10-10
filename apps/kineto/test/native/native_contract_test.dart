@@ -94,6 +94,7 @@ void main() {
       'price_per_million_output',
       'price_per_image',
       'references',
+      'request_fields',
     });
   });
 

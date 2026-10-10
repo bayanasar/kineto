@@ -158,6 +158,12 @@ pub struct Connection {
     /// the director says.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub references: u16,
+    /// Fields an image connection sends with every request besides the
+    /// protocol's own, written here by the director, which win over
+    /// kineto's (`size = "2K"`, `watermark = false`). Settings show them
+    /// and never change them.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub request: toml::Table,
     #[serde(flatten)]
     extra: toml::Table,
 }
@@ -255,6 +261,9 @@ impl Connection {
         match protocol.modality() {
             Modality::Text if self.price_per_image.is_some() || self.references > 0 => {
                 refuse("a text connection has no price per image and takes no reference images")
+            }
+            Modality::Text if !self.request.is_empty() => {
+                refuse("a text connection sends no request fields of its own")
             }
             Modality::Image
                 if self.price_per_million_input.is_some()
@@ -543,7 +552,11 @@ impl ProviderSettings {
                 if connection.name != previous && self.connection(&connection.name).is_some() {
                     return clash(&connection.name);
                 }
+                // What settings never change is kept as the file had it.
                 connection.extra = std::mem::take(&mut self.connections[index].extra);
+                if connection.request.is_empty() {
+                    connection.request = std::mem::take(&mut self.connections[index].request);
+                }
                 let old = format!("{CONNECTION_PREFIX}{previous}");
                 let new = connection.selection();
                 self.connections[index] = connection;
@@ -667,6 +680,10 @@ model = "seedream-4-0"
 price_per_image = 0.03
 references = 4
 
+[connection.request]
+watermark = false
+size = "2K"
+
 [[connection]]
 name = "later"
 protocol = "a-protocol-from-a-newer-build"
@@ -687,6 +704,14 @@ claude-code = "/opt/claude/bin/claude"
         let seedream = settings.connection("seedream").unwrap();
         assert_eq!(seedream.check(), Ok(Protocol::OpenAiImages));
         assert_eq!((seedream.references, seedream.key_name()), (4, None));
+        assert_eq!(
+            seedream.request.get("watermark"),
+            Some(&toml::Value::Boolean(false))
+        );
+        assert_eq!(
+            seedream.request.get("size").and_then(toml::Value::as_str),
+            Some("2K")
+        );
         assert_eq!(settings.connection("later").unwrap().protocol(), None);
         assert_eq!(
             settings.agent_executable("claude-code"),
@@ -832,6 +857,10 @@ model = "other"
         let mut bad = good.clone();
         bad.references = 2;
         refused.push(bad);
+        let mut bad = good.clone();
+        bad.request
+            .insert("temperature".to_owned(), toml::Value::Float(0.2));
+        refused.push(bad);
 
         let image = connection(
             "gemini",
@@ -913,8 +942,25 @@ model = "other"
             "cogview-4",
         );
         changed.references = 1;
+        changed
+            .request
+            .insert("quality".to_owned(), toml::Value::String("hd".to_owned()));
         settings.put_connection(Some("zhipu"), changed).unwrap();
         assert_eq!(settings.get(Setting::LanguageModel), None);
+        // Settings change it without the fields only the file holds.
+        let mut again = connection(
+            "zhipu",
+            Protocol::OpenAiImages,
+            "https://glm.example/v4",
+            "cogview-4.5",
+        );
+        again.references = 1;
+        settings.put_connection(Some("zhipu"), again).unwrap();
+        let kept = settings.connection("zhipu").unwrap();
+        assert_eq!(
+            (kept.model.as_str(), kept.request.len()),
+            ("cogview-4.5", 1)
+        );
 
         settings.remove_connection("grok").unwrap();
         assert_eq!(settings.get(Setting::Image), None);

@@ -340,6 +340,76 @@ void main() {
     expect(find.text('agy runs your own hooks with each request.'), findsOneWidget);
   });
 
+  testWidgets('an image connection is priced per image, says what references it takes, and makes images',
+      (tester) async {
+    var settings = const KinetoProviderSettings();
+    final put = <KinetoConnection>[];
+    final chosen = <Map<KinetoProviderSetting, String>>[];
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadSettings: () async => settings,
+        setSetting: (setting, value) async {
+          chosen.add(<KinetoProviderSetting, String>{setting: value});
+        },
+        putConnection: (connection, {previous = ''}) async {
+          put.add(connection);
+          settings = KinetoProviderSettings(connections: <KinetoConnection>[...settings.connections, connection]);
+        },
+        loadKeys: (names) async => KinetoKeys(
+          unavailable: null,
+          states: <String, KinetoKeyState>{
+            for (final name in names) name: const KinetoKeyState(stored: true, inEnvironment: false),
+          },
+        ),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final add = find.byKey(const ValueKey<String>('connection-add-image'));
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('connection-price-input')), findsNothing, reason: 'priced per image');
+    final protocol = find.byKey(const ValueKey<String>('connection-protocol'));
+    await tester.ensureVisible(protocol);
+    await tester.tap(protocol);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gemini image generation').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-name')), 'nano');
+    await tester.enterText(
+        find.byKey(const ValueKey<String>('connection-url')), 'https://generativelanguage.googleapis.com/v1beta');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-model')), 'gemini-3.1-flash-image');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-price-image')), '0.039');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-references')), '17');
+    final save = find.byKey(const ValueKey<String>('connection-save'));
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(find.text('A connection takes at most 16 reference images.'), findsOneWidget);
+    expect(put, isEmpty);
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-references')), '3');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(
+      (put.single.protocol, put.single.pricePerImage, put.single.references, put.single.pricePerMillionInput),
+      (KinetoProtocol.geminiImages, '0.039', 3, ''),
+    );
+    expect(find.text(r'$0.039 an image'), findsOneWidget);
+    expect(find.text('Takes 3 reference images'), findsOneWidget);
+
+    final choose = find.byKey(const ValueKey<String>('choose-image'));
+    await tester.ensureVisible(choose);
+    await tester.tap(choose);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('nano · gemini-3.1-flash-image').last);
+    await tester.pumpAndSettle();
+    expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.image: 'connection:nano'});
+  });
+
   testWidgets('a connection is removed, and one a newer version added is shown but not changed', (tester) async {
     final removed = <String>[];
     await _pump(

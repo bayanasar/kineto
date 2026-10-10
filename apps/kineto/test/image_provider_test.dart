@@ -14,4 +14,20 @@ void main() {
     expect(label(1250000), r'$1.25');
     expect(label(3000000), r'$3');
   });
+
+  test('a provider that gives no price says its cost is unknown, not free', () {
+    const priced = KinetoImageProvider(
+      kind: KinetoImageProviderKind.connection,
+      ready: true,
+      generationCostMicros: 120000,
+    );
+    const unpriced = KinetoImageProvider(
+      kind: KinetoImageProviderKind.connection,
+      ready: true,
+      generationCostMicros: 0,
+      costKnown: false,
+    );
+    expect(priced.generationCost, r'≈ $0.12');
+    expect(unpriced.generationCost, 'cost unknown');
+  });
 }

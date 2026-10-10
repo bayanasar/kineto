@@ -97,13 +97,17 @@ enum KinetoProviderSetting {
 
 /// What a connection makes.
 enum KinetoModality {
-  text('Text', 'documents'),
-  image('Images', 'keyframes, style samples and portraits');
+  text('text', 'documents'),
+  image('image', 'keyframes, style samples and portraits');
 
-  const KinetoModality(this.label, this.usedFor);
+  const KinetoModality(this.noun, this.usedFor);
 
-  final String label;
+  /// What it makes, as a word before "connection".
+  final String noun;
   final String usedFor;
+
+  /// `a text`, `an image`.
+  String get withArticle => '${RegExp('^[aeiou]').hasMatch(noun) ? 'an' : 'a'} $noun';
 }
 
 /// A protocol a connection may speak: how its requests and answers are
@@ -168,6 +172,7 @@ final class KinetoConnection {
     this.pricePerMillionOutput = '',
     this.pricePerImage = '',
     this.references = 0,
+    this.requestFields = '',
   });
 
   /// How it is chosen, and the key's name unless it names another.
@@ -188,6 +193,10 @@ final class KinetoConnection {
 
   /// How many reference images an image connection takes.
   final int references;
+
+  /// The names of the fields the settings file adds to each request, as
+  /// the file has them; settings never change them.
+  final String requestFields;
 
   KinetoProtocol? get protocol => KinetoProtocol.byWireName(protocolName);
 
@@ -336,6 +345,7 @@ KinetoProviderSettings loadKinetoProviderSettings() {
           pricePerMillionOutput: field('price_per_million_output'),
           pricePerImage: field('price_per_image'),
           references: int.tryParse(field('references')) ?? 0,
+          requestFields: field('request_fields'),
         ));
       }
       final problem = _copyProjectUtf8(handle, _kinetoSettingsProblemCopy, 'settings problem');
