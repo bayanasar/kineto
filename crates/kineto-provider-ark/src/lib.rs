@@ -10,13 +10,19 @@
 //! Fields the director adds in the settings file are sent too, and win.
 //!
 //! HTTPS everywhere, or plain HTTP to this computer; no redirects on the
-//! API, so a key never follows one.
+//! API, so a key never follows one. A clip's file is followed through at
+//! most three redirects, each checked before it is followed, and is never
+//! fetched from this computer at a service elsewhere's word.
 
 use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kineto_jobs::ErrorClass;
-use kineto_providers::{AspectRatio, ImageFormat, net::is_permitted, secret::SecretString};
+use kineto_providers::{
+    AspectRatio, ImageFormat,
+    net::{self, is_permitted},
+    secret::SecretString,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -126,8 +132,8 @@ impl HttpTransport {
         Self {
             // A redirect would carry the key to wherever it points.
             api: agent(REQUEST_TIMEOUT, 0),
-            // A clip is fetched without the key, wherever it was moved.
-            files: agent(FETCH_TIMEOUT, 3),
+            // A clip's redirects are checked before they are followed.
+            files: agent(FETCH_TIMEOUT, 0),
         }
     }
 }
@@ -181,10 +187,21 @@ impl Transport for HttpTransport {
         if !is_permitted(url) {
             return Err(TransportFailure::Insecure);
         }
-        read(
-            self.files.get(url).call().map_err(failure)?,
-            MAX_VIDEO_BYTES,
-        )
+        let mut url = url.to_owned();
+        for _ in 0..=net::MAX_REDIRECTS {
+            let response = self.files.get(&url).call().map_err(failure)?;
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|location| location.to_str().ok());
+            match location {
+                Some(location) if response.status().is_redirection() => {
+                    url = net::redirect(&url, location).ok_or(TransportFailure::Insecure)?;
+                }
+                _ => return read(response, MAX_VIDEO_BYTES),
+            }
+        }
+        Err(TransportFailure::Protocol)
     }
 }
 
@@ -559,6 +576,9 @@ impl<T: Transport> ArkVideos<T> {
 
     /// The finished clip at `url`, fetched without the key: free.
     pub fn download(&self, url: &str) -> Result<Vec<u8>, ArkError> {
+        if !net::may_lead_to(&self.base_url, url) {
+            return Err(ArkError::Transport(TransportFailure::Insecure));
+        }
         let response = self.transport.fetch(url).map_err(ArkError::Transport)?;
         if !(200..300).contains(&response.status) {
             return Err(ArkError::Download {
@@ -907,5 +927,96 @@ mod tests {
             page.download("https://files.example.test/t1.mp4"),
             Err(ArkError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn a_service_elsewhere_never_points_kineto_at_this_computer() {
+        let client = client(vec![json(200, "")], Map::new());
+        for url in [
+            "http://127.0.0.1:3100/api/v1/admin",
+            "https://localhost/clip.mp4",
+            "http://10.0.0.2/clip.mp4",
+        ] {
+            let error = client.download(url).unwrap_err();
+            assert_eq!(error, ArkError::Transport(TransportFailure::Insecure));
+            assert_eq!(error.class(), ErrorClass::Terminal);
+        }
+        assert!(client.transport.sent.lock().unwrap().is_empty());
+    }
+
+    /// A file server on this computer answering each path as `answer` says,
+    /// and how many requests it was sent.
+    fn file_server(answer: fn(&str) -> String) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    line.clear();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(answer(&path).as_bytes());
+            }
+        });
+        (address, served)
+    }
+
+    #[test]
+    fn every_redirect_is_checked_before_it_is_followed() {
+        use std::sync::atomic::Ordering;
+        let (address, served) = file_server(|path| {
+            let moved = |to: &str| {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            };
+            match path {
+                "/clip.mp4" => moved("/moved/clip.mp4"),
+                "/moved/clip.mp4" => "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n\0\0\0\x0cftypmp42".to_owned(),
+                "/away.mp4" => moved("http://10.255.255.1/admin"),
+                "/scheme.mp4" => moved("file:///etc/passwd"),
+                _ => moved("/round.mp4"),
+            }
+        });
+        let transport = HttpTransport::new();
+
+        let clip = transport.fetch(&format!("{address}/clip.mp4")).unwrap();
+        assert_eq!((clip.status, &clip.body[4..8]), (200, &b"ftyp"[..]));
+        assert_eq!(
+            served.swap(0, Ordering::SeqCst),
+            2,
+            "moved once, on this computer"
+        );
+
+        for refused in ["/away.mp4", "/scheme.mp4"] {
+            assert_eq!(
+                transport.fetch(&format!("{address}{refused}")),
+                Err(TransportFailure::Insecure),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            served.swap(0, Ordering::SeqCst),
+            2,
+            "nothing past the refusals"
+        );
+
+        assert_eq!(
+            transport.fetch(&format!("{address}/round.mp4")),
+            Err(TransportFailure::Protocol)
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1 + net::MAX_REDIRECTS);
     }
 }

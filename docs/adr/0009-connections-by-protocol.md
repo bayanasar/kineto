@@ -36,7 +36,7 @@ price_per_million_output = 0.42
 
 An image connection gives `price_per_image` and `references` (how many reference images it takes, 0 to 16) instead of token prices, and a video connection gives `price_per_second`. The director adds, changes and removes connections in Settings, typing the key in the same form; the key goes to the system's secure storage under its name (ADR-0008), never into the file. A choice (`language_model`, `image`, `video`) names one as `connection:<name>`. Renaming a connection carries the choice with it; removing it clears the choice and leaves the key.
 
-The address is HTTPS, or HTTP to this computer, as for every network call. A connection's calls are recorded under `connection.<name>`.
+The address is HTTPS, or HTTP to this computer, as for every network call. A file an answer points at, and every redirect on the way to it, is checked against the same rule before it is fetched, and may be on this computer only when the connection is: a service elsewhere never sends kineto to one on this computer. A connection's calls are recorded under `connection.<name>`.
 
 ### What the director did not say is unknown
 

@@ -10,13 +10,19 @@
 //! and win.
 //!
 //! HTTPS everywhere, or plain HTTP to this computer; no redirects on the
-//! API, so a key never follows one.
+//! API, so a key never follows one. An image's file is followed through at
+//! most three redirects, each checked before it is followed, and is never
+//! fetched from this computer at a service elsewhere's word.
 
 use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kineto_jobs::ErrorClass;
-use kineto_providers::{ImageFormat, net::is_permitted, secret::SecretString};
+use kineto_providers::{
+    ImageFormat,
+    net::{self, is_permitted},
+    secret::SecretString,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -110,8 +116,8 @@ impl HttpTransport {
         Self {
             // A redirect would carry the key to wherever it points.
             api: agent(REQUEST_TIMEOUT, 0),
-            // A file is fetched without the key, wherever it was moved.
-            files: agent(FETCH_TIMEOUT, 3),
+            // A file's redirects are checked before they are followed.
+            files: agent(FETCH_TIMEOUT, 0),
         }
     }
 }
@@ -150,7 +156,21 @@ impl Transport for HttpTransport {
         if !is_permitted(url) {
             return Err(TransportFailure::Insecure);
         }
-        read(self.files.get(url).call().map_err(failure)?)
+        let mut url = url.to_owned();
+        for _ in 0..=net::MAX_REDIRECTS {
+            let response = self.files.get(&url).call().map_err(failure)?;
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|location| location.to_str().ok());
+            match location {
+                Some(location) if response.status().is_redirection() => {
+                    url = net::redirect(&url, location).ok_or(TransportFailure::Insecure)?;
+                }
+                _ => return read(response),
+            }
+        }
+        Err(TransportFailure::Protocol)
     }
 }
 
@@ -465,11 +485,17 @@ impl<T: Transport> ImagesClient<T> {
     /// The image at `url`, asked for again when fetching it fails: it was
     /// made and paid for, and the address may not last.
     fn fetch(&self, url: &str) -> Result<Vec<u8>, ImagesError> {
+        let insecure = || ImagesError::Fetch(format!("{:?}", TransportFailure::Insecure));
+        if !net::may_lead_to(&self.base_url, url) {
+            return Err(insecure());
+        }
         let mut why = String::new();
         for _ in 0..FETCH_ATTEMPTS {
             match self.transport.fetch(url) {
                 Ok(response) if (200..300).contains(&response.status) => return Ok(response.body),
                 Ok(response) => why = format!("HTTP {}", response.status),
+                // Asking again is refused again.
+                Err(TransportFailure::Insecure) => return Err(insecure()),
                 Err(failure) => why = format!("{failure:?}"),
             }
         }
@@ -678,6 +704,31 @@ mod tests {
         let error = gone.generate("a red door", (1, 1), &[]).unwrap_err();
         assert_eq!(error, ImagesError::Fetch("HTTP 404".to_owned()));
         assert!(!error.certainly_not_accepted(), "it was made, and paid for");
+
+        // A service elsewhere never points kineto at this computer, nor is
+        // a refused redirect asked again.
+        let inward = client(
+            vec![json(
+                200,
+                r#"{"data":[{"url":"http://127.0.0.1:3100/api/v1/admin"}]}"#,
+            )],
+            vec![],
+            Map::new(),
+        );
+        let error = inward.generate("a red door", (1, 1), &[]).unwrap_err();
+        assert_eq!(error, ImagesError::Fetch("Insecure".to_owned()));
+        assert!(inward.transport.fetched.lock().unwrap().is_empty());
+        let redirected = client(
+            vec![json(
+                200,
+                r#"{"data":[{"url":"https://cdn.example.test/a.jpeg"}]}"#,
+            )],
+            vec![Err(TransportFailure::Insecure)],
+            Map::new(),
+        );
+        let error = redirected.generate("a red door", (1, 1), &[]).unwrap_err();
+        assert_eq!(error, ImagesError::Fetch("Insecure".to_owned()));
+        assert_eq!(redirected.transport.fetched.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -811,5 +862,37 @@ mod tests {
             transport.fetch("http://cdn.example.test/a.png"),
             Err(TransportFailure::Insecure)
         );
+    }
+
+    #[test]
+    fn a_redirect_elsewhere_in_plain_http_is_not_followed() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    line.clear();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://10.255.255.1/a.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        assert_eq!(
+            HttpTransport::new().fetch(&format!("{address}/a.png")),
+            Err(TransportFailure::Insecure)
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
     }
 }
