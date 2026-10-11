@@ -14,6 +14,7 @@ kineto-project = { path = "../kineto-project" }
 kineto-prompts = { path = "../kineto-prompts" }
 kineto-provider-minimax = { path = "../kineto-provider-minimax" }
 kineto-provider-gemini = { path = "../kineto-provider-gemini" }
+kineto-provider-ark = { path = "../kineto-provider-ark" }
 kineto-provider-openai = { path = "../kineto-provider-openai" }
 kineto-providers = { path = "../kineto-providers" }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,7 @@ testing = ["kineto-llm/testing"]
 
 [dev-dependencies]
 base64 = "0.23"
+toml = "1.0.0"
 kineto-json-schema = { path = "../kineto-json-schema" }
 kineto-llm = { path = "../kineto-llm", features = ["testing"] }
 

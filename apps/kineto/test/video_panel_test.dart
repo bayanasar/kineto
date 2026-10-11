@@ -52,6 +52,24 @@ KinetoShotSnapshot _locked(KinetoVideoState video) => KinetoShotSnapshot(
     );
 
 void main() {
+  test('a connection without a price says its clips cost is unknown, not \$0', () {
+    const unpriced = KinetoVideoProvider(
+      kind: KinetoVideoProviderKind.connection,
+      ready: true,
+      clipCostMicros: 0,
+      clipSeconds: 4,
+    );
+    expect(unpriced.costFor(2), 'cost unknown');
+    const priced = KinetoVideoProvider(
+      kind: KinetoVideoProviderKind.connection,
+      ready: true,
+      clipCostMicros: 400000,
+      clipSeconds: 4,
+    );
+    expect(priced.costFor(2), r'≈ $0.8');
+    expect(_demo.costFor(2), 'free');
+  });
+
   late Directory sandbox;
   late List<String?> media;
 

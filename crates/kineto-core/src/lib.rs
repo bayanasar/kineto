@@ -1,7 +1,7 @@
 pub mod bible;
 pub mod bootstrap;
 pub mod cast;
-mod connection;
+pub mod connection;
 pub mod dialogue;
 pub mod documents;
 pub mod dubbing;

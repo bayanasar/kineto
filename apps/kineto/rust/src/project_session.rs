@@ -391,7 +391,15 @@ fn chosen_providers(secrets: &impl SecretSource) -> Result<Providers, SessionErr
             })
             .map_err(provider)?,
         video: selected(Setting::Video)
-            .and_then(|selection| VideoProvider::select(selection.as_deref(), secrets))
+            .and_then(|selection| {
+                match choices
+                    .connection(selection.as_deref())
+                    .map_err(ProviderSelectionError::Plugin)?
+                {
+                    Some(connection) => VideoProvider::connection(connection, secrets).map(Some),
+                    None => VideoProvider::select(selection.as_deref(), secrets),
+                }
+            })
             .map_err(provider)?,
         speech: selected(Setting::Speech)
             .and_then(|selection| SpeechProvider::select(selection.as_deref(), secrets))
@@ -749,6 +757,7 @@ pub unsafe extern "C" fn kineto_project_video_provider(
             VideoProviderKind::Veo => VIDEO_PROVIDER_VEO,
             VideoProviderKind::Omni => VIDEO_PROVIDER_OMNI,
             VideoProviderKind::Plugin => VIDEO_PROVIDER_PLUGIN,
+            VideoProviderKind::Connection => VIDEO_PROVIDER_CONNECTION,
         }
     })
 }

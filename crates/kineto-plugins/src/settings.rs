@@ -3,7 +3,7 @@
 //!
 //! ```toml
 //! image = "connection:seedream"
-//! video = "veo:fast"
+//! video = "connection:seedance"
 //! speech = "minimax"
 //! language_model = "connection:deepseek"
 //!
@@ -23,6 +23,14 @@
 //! model = "seedream-4-0-250828"
 //! key = "seedream"
 //! price_per_image = 0.03
+//!
+//! [[connection]]
+//! name = "seedance"
+//! protocol = "ark-video"
+//! url = "https://ark.ap-southeast.bytepluses.com/api/v3"
+//! model = "dreamina-seedance-2-0-260128"
+//! key = "ark"
+//! price_per_second = 0.1
 //!
 //! [agents]
 //! claude-code = "/opt/claude/bin/claude"
@@ -77,6 +85,8 @@ pub enum Modality {
     /// Documents: the language model.
     Text,
     Image,
+    /// A shot's clips.
+    Video,
 }
 
 /// The protocol a connection speaks: how requests and answers are shaped,
@@ -92,14 +102,19 @@ pub enum Protocol {
     OpenAiImages,
     /// Gemini's `generateContent` answering with an image.
     GeminiImages,
+    /// The video tasks of Volcengine's Ark and BytePlus's ModelArk, which
+    /// serve Seedance (`POST <url>/contents/generations/tasks`, then `GET`
+    /// the task), as gateways that resell it do too.
+    ArkVideo,
 }
 
 impl Protocol {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::OpenAiChat,
         Self::AnthropicMessages,
         Self::OpenAiImages,
         Self::GeminiImages,
+        Self::ArkVideo,
     ];
 
     /// Its name in the settings file.
@@ -110,6 +125,7 @@ impl Protocol {
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenAiImages => "openai-images",
             Self::GeminiImages => "gemini-images",
+            Self::ArkVideo => "ark-video",
         }
     }
 
@@ -125,6 +141,7 @@ impl Protocol {
         match self {
             Self::OpenAiChat | Self::AnthropicMessages => Modality::Text,
             Self::OpenAiImages | Self::GeminiImages => Modality::Image,
+            Self::ArkVideo => Modality::Video,
         }
     }
 }
@@ -154,14 +171,18 @@ pub struct Connection {
     /// given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_per_image: Option<f64>,
+    /// What a video connection costs, in USD per second of clip; unknown
+    /// when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_per_second: Option<f64>,
     /// How many reference images an image connection takes; none, unless
     /// the director says.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub references: u16,
-    /// Fields an image connection sends with every request besides the
-    /// protocol's own, written here by the director, which win over
-    /// kineto's (`size = "2K"`, `watermark = false`). Settings show them
-    /// and never change them.
+    /// Fields an image or video connection sends with every request
+    /// besides the protocol's own, written here by the director, which win
+    /// over kineto's (`size = "2K"`, `generate_audio = false`). Settings
+    /// show them and never change them.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub request: toml::Table,
     #[serde(flatten)]
@@ -250,6 +271,7 @@ impl Connection {
             self.price_per_million_input,
             self.price_per_million_output,
             self.price_per_image,
+            self.price_per_second,
         ];
         if prices
             .into_iter()
@@ -258,19 +280,28 @@ impl Connection {
         {
             return refuse("a price is a number of US dollars, 0 or more");
         }
+        let per_token =
+            self.price_per_million_input.is_some() || self.price_per_million_output.is_some();
         match protocol.modality() {
-            Modality::Text if self.price_per_image.is_some() || self.references > 0 => {
-                refuse("a text connection has no price per image and takes no reference images")
+            Modality::Text
+                if self.price_per_image.is_some()
+                    || self.price_per_second.is_some()
+                    || self.references > 0 =>
+            {
+                refuse("a text connection is priced per token and takes no reference images")
             }
             Modality::Text if !self.request.is_empty() => {
                 refuse("a text connection sends no request fields of its own")
             }
-            Modality::Image
-                if self.price_per_million_input.is_some()
-                    || self.price_per_million_output.is_some() =>
-            {
-                refuse("an image connection is priced per image, not per token")
+            Modality::Image if per_token || self.price_per_second.is_some() => {
+                refuse("an image connection is priced per image")
             }
+            Modality::Video if per_token || self.price_per_image.is_some() => {
+                refuse("a video connection is priced per second of clip")
+            }
+            Modality::Video if self.references > 0 => refuse(
+                "a video connection starts from the shot's keyframe and takes no reference images",
+            ),
             Modality::Image if self.references > MAX_REFERENCES => Err(InvalidSetting(format!(
                 "a connection takes at most {MAX_REFERENCES} reference images"
             ))),
@@ -335,14 +366,18 @@ pub enum Setting {
 }
 
 impl Setting {
+    /// The settings a connection can be chosen for.
+    pub const CONNECTABLE: [Self; 3] = [Self::Image, Self::Video, Self::LanguageModel];
+
     /// What a connection chosen here must make; `None` where no connection
     /// can be chosen.
     #[must_use]
     pub const fn modality(self) -> Option<Modality> {
         match self {
             Self::Image => Some(Modality::Image),
+            Self::Video => Some(Modality::Video),
             Self::LanguageModel => Some(Modality::Text),
-            Self::Video | Self::Speech => None,
+            Self::Speech => None,
         }
     }
 }
@@ -560,7 +595,7 @@ impl ProviderSettings {
                 let old = format!("{CONNECTION_PREFIX}{previous}");
                 let new = connection.selection();
                 self.connections[index] = connection;
-                for setting in [Setting::Image, Setting::LanguageModel] {
+                for setting in Setting::CONNECTABLE {
                     let slot = self.slot_mut(setting);
                     if slot.as_deref() == Some(old.as_str()) {
                         *slot =
@@ -595,7 +630,7 @@ impl ProviderSettings {
             )));
         }
         let chosen = format!("{CONNECTION_PREFIX}{name}");
-        for setting in [Setting::Image, Setting::LanguageModel] {
+        for setting in Setting::CONNECTABLE {
             let slot = self.slot_mut(setting);
             if slot.as_deref() == Some(chosen.as_str()) {
                 *slot = None;
@@ -875,8 +910,35 @@ model = "other"
         let mut bad = image.clone();
         bad.references = MAX_REFERENCES + 1;
         refused.push(bad);
-        let mut bad = image;
+        let mut bad = image.clone();
         bad.price_per_million_input = Some(1.0);
+        refused.push(bad);
+        let mut bad = image;
+        bad.price_per_second = Some(0.1);
+        refused.push(bad);
+
+        let mut video = connection(
+            "seedance",
+            Protocol::ArkVideo,
+            "https://ark.example/api/v3",
+            "dreamina-seedance-2-0-260128",
+        );
+        video.price_per_second = Some(0.1);
+        video
+            .request
+            .insert("generate_audio".to_owned(), toml::Value::Boolean(false));
+        assert_eq!(video.check(), Ok(Protocol::ArkVideo));
+        let mut bad = video.clone();
+        bad.price_per_image = Some(0.5);
+        refused.push(bad);
+        let mut bad = video.clone();
+        bad.price_per_million_output = Some(1.0);
+        refused.push(bad);
+        let mut bad = video;
+        bad.references = 1;
+        refused.push(bad);
+        let mut bad = good.clone();
+        bad.price_per_second = Some(0.1);
         refused.push(bad);
 
         for bad in refused {
@@ -966,6 +1028,22 @@ model = "other"
         assert_eq!(settings.get(Setting::Image), None);
         assert!(settings.remove_connection("grok").is_err());
         assert_eq!(settings.connections().len(), 1);
+
+        let video = connection(
+            "seedance",
+            Protocol::ArkVideo,
+            "https://ark.example/api/v3",
+            "dreamina-seedance-2-0-260128",
+        );
+        settings.put_connection(None, video).unwrap();
+        assert!(settings.set(Setting::Image, "connection:seedance").is_err());
+        settings.set(Setting::Video, "connection:seedance").unwrap();
+        assert!(
+            settings.set(Setting::Video, "connection:zhipu").is_err(),
+            "it makes no clips"
+        );
+        settings.remove_connection("seedance").unwrap();
+        assert_eq!(settings.get(Setting::Video), None);
     }
 
     #[test]

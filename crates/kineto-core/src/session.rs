@@ -1754,7 +1754,11 @@ impl Videos {
                     let videos = PluginVideos::new(Arc::clone(plugin));
                     self.spawn_watcher(videos, job, root);
                 }
-                VideoProvider::LocalDemo
+                VideoProvider::Connection(connection) if connection.callable() => {
+                    self.spawn_watcher(Arc::clone(connection), job, root);
+                }
+                VideoProvider::Connection(_)
+                | VideoProvider::LocalDemo
                 | VideoProvider::Minimax(None)
                 | VideoProvider::Veo { client: None, .. }
                 | VideoProvider::Omni(None) => {}
@@ -2071,7 +2075,8 @@ impl Worker {
                 }
                 | VideoProvider::Omni(Some(_))
                 | VideoProvider::Plugin(_)
-        ) {
+        ) || matches!(&self.videos.provider, VideoProvider::Connection(connection) if connection.callable())
+        {
             providers.push(self.videos.provider.key());
         }
         let mut needs_attention = 0;
@@ -3432,6 +3437,15 @@ fn video_work(
             &mut NoHooks,
             risk_paying_twice,
         ),
+        VideoProvider::Connection(connection) if connection.callable() => video::start_videos(
+            project,
+            shot,
+            connection,
+            ask,
+            &mut NoHooks,
+            risk_paying_twice,
+        ),
+        VideoProvider::Connection(_) => Err(GenerationError::NotConfigured),
     }
 }
 

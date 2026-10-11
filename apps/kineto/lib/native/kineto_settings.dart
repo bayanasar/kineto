@@ -98,7 +98,8 @@ enum KinetoProviderSetting {
 /// What a connection makes.
 enum KinetoModality {
   text('text', 'documents'),
-  image('image', 'keyframes, style samples and portraits');
+  image('image', 'keyframes, style samples and portraits'),
+  video('video', "shots' clips");
 
   const KinetoModality(this.noun, this.usedFor);
 
@@ -140,6 +141,13 @@ enum KinetoProtocol {
     'Gemini image generation',
     "Gemini's image models, by generateContent",
     'https://generativelanguage.googleapis.com/v1beta',
+  ),
+  arkVideo(
+    'ark-video',
+    KinetoModality.video,
+    'Ark video tasks (Seedance)',
+    'Seedance, on Volcengine Ark, BytePlus ModelArk and the gateways that resell it',
+    'https://ark.ap-southeast.bytepluses.com/api/v3',
   );
 
   const KinetoProtocol(this.wireName, this.modality, this.label, this.spokenBy, this.exampleUrl);
@@ -171,6 +179,7 @@ final class KinetoConnection {
     this.pricePerMillionInput = '',
     this.pricePerMillionOutput = '',
     this.pricePerImage = '',
+    this.pricePerSecond = '',
     this.references = 0,
     this.requestFields = '',
   });
@@ -190,6 +199,7 @@ final class KinetoConnection {
   final String pricePerMillionInput;
   final String pricePerMillionOutput;
   final String pricePerImage;
+  final String pricePerSecond;
 
   /// How many reference images an image connection takes.
   final int references;
@@ -212,6 +222,7 @@ final class KinetoConnection {
         'price_per_million_input': pricePerMillionInput,
         'price_per_million_output': pricePerMillionOutput,
         'price_per_image': pricePerImage,
+        'price_per_second': pricePerSecond,
         'references': references == 0 ? '' : '$references',
       };
 }
@@ -344,6 +355,7 @@ KinetoProviderSettings loadKinetoProviderSettings() {
           pricePerMillionInput: field('price_per_million_input'),
           pricePerMillionOutput: field('price_per_million_output'),
           pricePerImage: field('price_per_image'),
+          pricePerSecond: field('price_per_second'),
           references: int.tryParse(field('references')) ?? 0,
           requestFields: field('request_fields'),
         ));

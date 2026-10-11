@@ -329,7 +329,9 @@ void main() {
     expect((put.last.$1.name, put.last.$1.key, put.last.$2), ('deepseek_v4', 'deepseek', 'deepseek'));
     expect(stored.length, 1, reason: 'no new key typed, none stored');
 
-    await tester.tap(find.byKey(const ValueKey<String>('choose-image')));
+    final images = find.byKey(const ValueKey<String>('choose-image'));
+    await tester.ensureVisible(images);
+    await tester.tap(images);
     await tester.pumpAndSettle();
     final agy = find.text('Antigravity (agy) · installed').last;
     await tester.ensureVisible(agy);
@@ -408,6 +410,69 @@ void main() {
     await tester.tap(find.text('nano · gemini-3.1-flash-image').last);
     await tester.pumpAndSettle();
     expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.image: 'connection:nano'});
+  });
+
+  testWidgets('a video connection speaks Ark video tasks, is priced by the second, and makes clips', (tester) async {
+    var settings = const KinetoProviderSettings();
+    final put = <KinetoConnection>[];
+    final chosen = <Map<KinetoProviderSetting, String>>[];
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadSettings: () async => settings,
+        setSetting: (setting, value) async {
+          chosen.add(<KinetoProviderSetting, String>{setting: value});
+        },
+        putConnection: (connection, {previous = ''}) async {
+          put.add(connection);
+          settings = KinetoProviderSettings(connections: <KinetoConnection>[...settings.connections, connection]);
+        },
+        loadKeys: (names) async => KinetoKeys(
+          unavailable: null,
+          states: <String, KinetoKeyState>{
+            for (final name in names) name: const KinetoKeyState(stored: true, inEnvironment: false),
+          },
+        ),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final add = find.byKey(const ValueKey<String>('connection-add-video'));
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    expect(find.text('Ark video tasks (Seedance)'), findsOneWidget, reason: 'the one video protocol');
+    expect(find.byKey(const ValueKey<String>('connection-price-image')), findsNothing);
+    expect(find.byKey(const ValueKey<String>('connection-references')), findsNothing);
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-name')), 'seedance');
+    await tester.enterText(
+        find.byKey(const ValueKey<String>('connection-url')), 'https://ark.ap-southeast.bytepluses.com/api/v3');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-model')), 'dreamina-seedance-2-0-260128');
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-price-second')), 'cheap');
+    final save = find.byKey(const ValueKey<String>('connection-save'));
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(find.text('A price is a number of US dollars, such as 0.28.'), findsOneWidget);
+    expect(put, isEmpty);
+    await tester.enterText(find.byKey(const ValueKey<String>('connection-price-second')), '0.1');
+    await tester.ensureVisible(save);
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(
+      (put.single.protocol, put.single.pricePerSecond, put.single.key, put.single.pricePerImage),
+      (KinetoProtocol.arkVideo, '0.1', 'seedance', ''),
+    );
+    expect(find.text(r'$0.1 a second of clip'), findsOneWidget);
+
+    final choose = find.byKey(const ValueKey<String>('choose-video'));
+    await tester.ensureVisible(choose);
+    await tester.tap(choose);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('seedance · dreamina-seedance-2-0-260128').last);
+    await tester.pumpAndSettle();
+    expect(chosen.last, <KinetoProviderSetting, String>{KinetoProviderSetting.video: 'connection:seedance'});
   });
 
   testWidgets('a connection is removed, and one a newer version added is shown but not changed', (tester) async {

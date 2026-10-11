@@ -10,6 +10,7 @@ members = [
     "crates/kineto-plugins",
     "crates/kineto-project",
     "crates/kineto-prompts",
+    "crates/kineto-provider-ark",
     "crates/kineto-provider-minimax",
     "crates/kineto-provider-openai",
     "crates/kineto-provider-gemini",

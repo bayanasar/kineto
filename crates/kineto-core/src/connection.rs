@@ -1,18 +1,32 @@
 //! The services the director added by the protocol they speak (ADR-0009),
-//! as kineto asks them for images. A text connection writes documents
-//! ([`crate::llm::DocumentModel::connection`]); an image connection plays a
-//! plugin's part ([`crate::plugin::PluginProvider::connection`]), so its
-//! candidates are recorded, recovered and refused as a plugin's are.
+//! as kineto asks them for images and clips. A text connection writes
+//! documents ([`crate::llm::DocumentModel::connection`]); an image
+//! connection plays a plugin's part
+//! ([`crate::plugin::PluginProvider::connection`]), so its candidates are
+//! recorded, recovered and refused as a plugin's are; a video connection is
+//! a [`VideoGenerator`], whose clips are submitted, followed and recovered
+//! as every video provider's are.
 
-use std::fmt;
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use image::{ImageFormat as Encoding, imageops};
-use kineto_jobs::ErrorClass;
-use kineto_plugins::settings::{Connection, Protocol};
+use kineto_jobs::{ErrorClass, ProviderJobId};
+use kineto_llm::openai::connection_provider;
+use kineto_plugins::settings::{Connection, Modality, Protocol, micros};
+use kineto_project::ContentHash;
+use kineto_provider_ark::{ArkError, ArkVideos, ClipRequest};
 use kineto_provider_gemini::image::GeminiImages;
 use kineto_provider_openai::ImagesClient;
-use kineto_providers::secret::SecretString;
+use kineto_providers::{
+    AspectRatio, CameraControl, ImageFormat, Price, VideoCapabilities, VideoContainer, VideoMode,
+    secret::{SecretSource, SecretString},
+};
 use serde_json::{Map, Value};
+
+use crate::{
+    generation::ProviderSelectionError,
+    video::{TaskState, VideoGenerator, VideoSubmission},
+};
 
 /// How far an image's shape may be from the frame asked for before it is
 /// cut to it: 2 %.
@@ -67,7 +81,7 @@ impl ImageConnection {
                     request,
                 ))
             }),
-            Protocol::OpenAiChat | Protocol::AnthropicMessages => None,
+            Protocol::OpenAiChat | Protocol::AnthropicMessages | Protocol::ArkVideo => None,
         }
     }
 
@@ -99,6 +113,241 @@ impl ImageConnection {
             }
         }?;
         Ok(cut_to_frame(image, frame))
+    }
+}
+
+/// The height a video connection's clips are asked for in, unless the
+/// director's request fields name another.
+const VIDEO_LINES: u16 = 720;
+/// The frame rate Seedance renders at.
+const VIDEO_FPS: u16 = 24;
+/// Largest frame sent, before it is written as a data URL.
+const MAX_VIDEO_FRAME_BYTES: u64 = 10 * 1024 * 1024;
+
+/// A video connection: the service the director added that makes a shot's
+/// clips. Without its key it is described, with its price, and makes
+/// nothing new; clips asked of it earlier wait for a session with the key.
+pub struct VideoConnection {
+    /// `connection.<name>`, which its jobs are recorded under.
+    provider: String,
+    model: String,
+    capabilities: VideoCapabilities,
+    /// The fields the director sends with every request, as they enter a
+    /// clip's input hash.
+    request_hash: String,
+    client: Option<ArkVideos>,
+}
+
+impl fmt::Debug for VideoConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VideoConnection")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("client", &self.client)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VideoConnection {
+    /// `connection` as a video provider, with the key it names from
+    /// `secrets`. One that makes no clips, or that this build cannot use,
+    /// is refused.
+    pub fn new(
+        connection: &Connection,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, ProviderSelectionError> {
+        let protocol = connection
+            .check()
+            .map_err(|error| ProviderSelectionError::Settings(error.to_string()))?;
+        if protocol.modality() != Modality::Video {
+            return Err(ProviderSelectionError::Settings(format!(
+                "{} makes no clips",
+                connection.name
+            )));
+        }
+        let key = match connection.key_name() {
+            Some(name) => secrets
+                .api_key(name)
+                .map_err(ProviderSelectionError::Secret)?,
+            None => None,
+        };
+        let request = request_fields(connection);
+        let request_hash = ContentHash::of(
+            serde_json::to_string(&request)
+                .unwrap_or_default()
+                .as_bytes(),
+        )
+        .as_str()
+        .to_owned();
+        let capabilities = video_capabilities(connection, &request);
+        // Ark's video tasks are the one video protocol.
+        let client =
+            key.map(|key| ArkVideos::new(&connection.url, &connection.model, key, request));
+        Ok(Self {
+            provider: connection_provider(&connection.name),
+            model: connection.model.clone(),
+            capabilities,
+            request_hash,
+            client,
+        })
+    }
+
+    /// The key its clips are recorded under.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.provider
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> &VideoCapabilities {
+        &self.capabilities
+    }
+
+    /// Whether it can be asked for a clip: its key is at hand.
+    #[must_use]
+    pub fn callable(&self) -> bool {
+        self.client.is_some()
+    }
+
+    fn client(&self) -> Result<&ArkVideos, ArkError> {
+        self.client.as_ref().ok_or(ArkError::InvalidRequest(
+            "no key is kept for this connection",
+        ))
+    }
+}
+
+/// What a video connection renders: a shot's clip from its keyframe, and
+/// the next shot's to close on, 4 to 15 seconds long, in one of the
+/// protocol's frame shapes, at the height its request fields name, priced
+/// by the second when the director gave a price.
+fn video_capabilities(connection: &Connection, request: &Map<String, Value>) -> VideoCapabilities {
+    let lines = request
+        .get("resolution")
+        .and_then(Value::as_str)
+        .and_then(|resolution| resolution.strip_suffix('p'))
+        .and_then(|lines| lines.parse::<u16>().ok())
+        .unwrap_or(VIDEO_LINES);
+    let audio = request.get("generate_audio") != Some(&Value::Bool(false));
+    let seconds: BTreeSet<u8> = kineto_provider_ark::CLIP_SECONDS.collect();
+    let clip_prices = connection
+        .price_per_second
+        .map(|usd| {
+            seconds
+                .iter()
+                .map(|&seconds| {
+                    (
+                        kineto_providers::VideoClip { seconds, lines },
+                        Price::usd(micros(usd) * u64::from(seconds)),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let frames: BTreeSet<ImageFormat> = [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp]
+        .into_iter()
+        .collect();
+    VideoCapabilities {
+        modes: [VideoMode::ImageToVideo].into_iter().collect(),
+        min_duration_ms: Some(u64::from(*kineto_provider_ark::CLIP_SECONDS.start()) * 1000),
+        max_duration_ms: Some(u64::from(*kineto_provider_ark::CLIP_SECONDS.end()) * 1000),
+        fps_options: [VIDEO_FPS].into_iter().collect(),
+        start_frame: true,
+        end_frame: true,
+        camera_control: CameraControl::Textual,
+        async_jobs: true,
+        resumable_remote_handle: true,
+        output_containers: [VideoContainer::Mp4].into_iter().collect(),
+        aspect_ratios: kineto_provider_ark::ASPECT_RATIOS
+            .into_iter()
+            .filter_map(|(width, height)| AspectRatio::new(width, height))
+            .collect(),
+        clip_seconds: seconds,
+        start_frame_formats: frames.clone(),
+        max_start_frame_bytes: Some(MAX_VIDEO_FRAME_BYTES),
+        end_frame_formats: frames,
+        max_end_frame_bytes: Some(MAX_VIDEO_FRAME_BYTES),
+        audio,
+        resolutions: [lines].into_iter().collect(),
+        clip_prices,
+        ..VideoCapabilities::default()
+    }
+}
+
+impl VideoGenerator for Arc<VideoConnection> {
+    type Error = ArkError;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn capabilities(&self) -> VideoCapabilities {
+        self.capabilities.clone()
+    }
+
+    /// Its length, height and frame shape, and the fields the director
+    /// sends with every request.
+    fn canonical_params(&self, request: &VideoSubmission) -> String {
+        format!(
+            "duration={};resolution={}p;aspect={}:{};request={}",
+            request.clip_seconds,
+            request.lines.unwrap_or(VIDEO_LINES),
+            request.aspect_ratio.width,
+            request.aspect_ratio.height,
+            self.request_hash
+        )
+    }
+
+    fn submit(&self, request: &VideoSubmission) -> Result<String, ArkError> {
+        let client = self.client()?;
+        let Some((frame, format)) = &request.first_frame else {
+            return Err(ArkError::InvalidRequest("a clip starts from its keyframe"));
+        };
+        if !request.references.is_empty() {
+            return Err(ArkError::InvalidRequest(
+                "a video connection takes no reference images",
+            ));
+        }
+        client.submit(&ClipRequest {
+            prompt: &request.prompt,
+            first_frame: (frame, *format),
+            last_frame: request
+                .last_frame
+                .as_ref()
+                .map(|(bytes, format)| (bytes.as_slice(), *format)),
+            seconds: request.clip_seconds,
+            aspect_ratio: request.aspect_ratio,
+            lines: request.lines.unwrap_or(VIDEO_LINES),
+        })
+    }
+
+    fn query(&self, task: &ProviderJobId) -> Result<TaskState, ArkError> {
+        Ok(match self.client()?.task(task.as_str())? {
+            kineto_provider_ark::TaskState::Running => TaskState::Pending,
+            kineto_provider_ark::TaskState::Succeeded { video_url } => {
+                TaskState::Succeeded { file: video_url }
+            }
+        })
+    }
+
+    fn fetch(&self, file: &str) -> Result<Vec<u8>, ArkError> {
+        self.client()?.download(file)
+    }
+
+    fn class(&self, error: &ArkError) -> ErrorClass {
+        error.class()
+    }
+
+    fn ended_class(&self, error: &ArkError) -> ErrorClass {
+        error.ended_class()
+    }
+
+    fn certainly_not_accepted(&self, error: &ArkError) -> bool {
+        error.certainly_not_accepted()
     }
 }
 

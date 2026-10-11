@@ -342,6 +342,7 @@ fn field_text(connection: &Connection, field: &str) -> String {
         "price_per_million_input" => price(connection.price_per_million_input),
         "price_per_million_output" => price(connection.price_per_million_output),
         "price_per_image" => price(connection.price_per_image),
+        "price_per_second" => price(connection.price_per_second),
         "references" if connection.references > 0 => connection.references.to_string(),
         "request_fields" => connection
             .request
@@ -390,6 +391,7 @@ fn connection_from(fields: &[(&str, String)]) -> Option<Connection> {
             "price_per_million_input" => connection.price_per_million_input = price(value)?,
             "price_per_million_output" => connection.price_per_million_output = price(value)?,
             "price_per_image" => connection.price_per_image = price(value)?,
+            "price_per_second" => connection.price_per_second = price(value)?,
             // Read only: the settings file holds them.
             "request_fields" => {}
             "references" => {
@@ -650,6 +652,18 @@ mod tests {
         assert_eq!(field_text(&connection, "references"), "4");
         assert_eq!(field_text(&connection, "price_per_million_input"), "");
         assert_eq!(field_text(&connection, "protocol"), "openai-images");
+
+        let video = connection_from(&fields(&[
+            ("name", "seedance"),
+            ("protocol", "ark-video"),
+            ("url", "https://ark.example/api/v3"),
+            ("model", "dreamina-seedance-2-0-260128"),
+            ("key", "ark"),
+            ("price_per_second", "0.1"),
+        ]))
+        .unwrap();
+        assert_eq!(video.check(), Ok(Protocol::ArkVideo));
+        assert_eq!(field_text(&video, "price_per_second"), "0.1");
 
         for bad in [
             fields(&[("name", "a"), ("name", "b")]),

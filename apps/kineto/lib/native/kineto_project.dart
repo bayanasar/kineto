@@ -373,7 +373,8 @@ enum KinetoVideoProviderKind {
   minimax(2, 'minimax', 'MiniMax Hailuo-02'),
   plugin(3, 'plugin', 'Plugin'),
   veo(4, 'veo', 'Google Veo 3.1 (Google retires it on 2026-10-22)'),
-  omni(5, 'omni', 'Gemini Omni Flash');
+  omni(5, 'omni', 'Gemini Omni Flash'),
+  connection(6, 'connection', 'Connection');
 
   const KinetoVideoProviderKind(this.wireValue, this.wireName, this.label);
 
@@ -419,8 +420,13 @@ final class KinetoVideoProvider {
   /// What one clip costs, for example `≈ $0.28`, or `free`.
   String get costLabel => costFor(1);
 
-  /// What [count] clips cost, for example `≈ $0.56`, or `free`.
-  String costFor(int count) => isPaid ? '≈ ${_dollars(clipCostMicros * count)}' : 'free';
+  /// What [count] clips cost, for example `≈ $0.56`, `free`, or `cost
+  /// unknown` for a connection the director gave no price.
+  String costFor(int count) => !isPaid
+      ? 'free'
+      : kind == KinetoVideoProviderKind.connection && clipCostMicros == 0
+          ? 'cost unknown'
+          : '≈ ${_dollars(clipCostMicros * count)}';
 }
 
 /// Who made a candidate: the provider and model recorded on its artifact.

@@ -95,6 +95,7 @@ void main() {
       'price_per_image',
       'references',
       'request_fields',
+      'price_per_second',
     });
   });
 

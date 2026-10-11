@@ -767,6 +767,7 @@ class _ProvidersPanel extends StatelessWidget {
             (value: 'veo:fast', label: 'Veo 3.1 Fast · key', enabled: true),
             (value: 'veo:standard', label: 'Veo 3.1 · key', enabled: true),
             (value: 'omni', label: 'Gemini Omni Flash · key', enabled: true),
+            for (final connection in connections(KinetoModality.video)) _connectionOption(connection),
             for (final plugin in described)
               if (plugin.description!.makesVideos)
                 (value: plugin.selection, label: '${plugin.id} plugin', enabled: true),
@@ -893,6 +894,11 @@ String _priceLabel(KinetoConnection connection) {
         ? 'No price given: costs show as unknown'
         : '\$${connection.pricePerImage} an image';
   }
+  if (modality == KinetoModality.video) {
+    return connection.pricePerSecond.isEmpty
+        ? 'No price given: costs show as unknown'
+        : '\$${connection.pricePerSecond} a second of clip';
+  }
   if (connection.pricePerMillionInput.isEmpty || connection.pricePerMillionOutput.isEmpty) {
     return 'No price given: costs show as unknown';
   }
@@ -922,6 +928,7 @@ String? _connectionProblem(KinetoConnection connection) {
     connection.pricePerMillionInput,
     connection.pricePerMillionOutput,
     connection.pricePerImage,
+    connection.pricePerSecond,
   ]) {
     final dollars = double.tryParse(price);
     if (price.isNotEmpty && (dollars == null || dollars < 0 || dollars > 10000)) {
@@ -982,6 +989,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
   final TextEditingController _input = TextEditingController();
   final TextEditingController _output = TextEditingController();
   final TextEditingController _image = TextEditingController();
+  final TextEditingController _second = TextEditingController();
   final TextEditingController _references = TextEditingController();
 
   List<KinetoProtocol> get _protocols =>
@@ -1021,6 +1029,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
       _input,
       _output,
       _image,
+      _second,
       _references,
     ]) {
       controller.dispose();
@@ -1041,6 +1050,7 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
       _input.text = connection?.pricePerMillionInput ?? '';
       _output.text = connection?.pricePerMillionOutput ?? '';
       _image.text = connection?.pricePerImage ?? '';
+      _second.text = connection?.pricePerSecond ?? '';
       final references = connection?.references ?? 0;
       _references.text = references == 0 ? '' : '$references';
       _problem = null;
@@ -1048,7 +1058,9 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
   }
 
   void _save() {
-    final text = widget.modality == KinetoModality.text;
+    final modality = widget.modality;
+    final text = modality == KinetoModality.text;
+    final image = modality == KinetoModality.image;
     final references = _references.text.trim();
     final connection = KinetoConnection(
       name: _name.text.trim(),
@@ -1058,8 +1070,9 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
       key: _keyName.text.trim(),
       pricePerMillionInput: text ? _input.text.trim() : '',
       pricePerMillionOutput: text ? _output.text.trim() : '',
-      pricePerImage: text ? '' : _image.text.trim(),
-      references: text || references.isEmpty ? 0 : int.tryParse(references) ?? -1,
+      pricePerImage: image ? _image.text.trim() : '',
+      pricePerSecond: modality == KinetoModality.video ? _second.text.trim() : '',
+      references: !image || references.isEmpty ? 0 : int.tryParse(references) ?? -1,
     );
     final problem = _connectionProblem(connection);
     setState(() {
@@ -1138,7 +1151,6 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
       );
 
   Widget _form(bool ready) {
-    final text = widget.modality == KinetoModality.text;
     final canKeep = widget.keys?.available ?? false;
     return WabPanel(
       key: const ValueKey<String>('connection-form'),
@@ -1187,16 +1199,26 @@ class _ConnectionsPanelState extends State<_ConnectionsPanel> {
               enabled: ready,
               secret: true,
             ),
-          if (text) ...<Widget>[
-            _field('price-input', _input, 'US dollars per million tokens read; empty if you do not know',
-                enabled: ready),
-            _field('price-output', _output, 'US dollars per million tokens written; empty if you do not know',
-                enabled: ready),
-          ] else ...<Widget>[
-            _field('price-image', _image, 'US dollars an image; empty if you do not know', enabled: ready),
-            _field('references', _references, 'Reference images it takes, 0 to 16; empty for none',
-                enabled: ready),
-          ],
+          ...switch (widget.modality) {
+            KinetoModality.text => <Widget>[
+                _field('price-input', _input, 'US dollars per million tokens read; empty if you do not know',
+                    enabled: ready),
+                _field('price-output', _output, 'US dollars per million tokens written; empty if you do not know',
+                    enabled: ready),
+              ],
+            KinetoModality.image => <Widget>[
+                _field('price-image', _image, 'US dollars an image; empty if you do not know', enabled: ready),
+                _field('references', _references, 'Reference images it takes, 0 to 16; empty for none',
+                    enabled: ready),
+              ],
+            KinetoModality.video => <Widget>[
+                _field('price-second', _second, 'US dollars a second of 720p clip; empty if you do not know',
+                    enabled: ready),
+                const Text('A clip starts from the shot\'s locked keyframe, and closes on the next shot\'s '
+                    'when it continues into it. Fields such as generate_audio or resolution go under '
+                    '[connection.request] in the settings file.'),
+              ],
+          },
           if (_problem != null) ...<Widget>[
             const SizedBox(height: 8),
             Text(_problem!, key: const ValueKey<String>('connection-problem')),

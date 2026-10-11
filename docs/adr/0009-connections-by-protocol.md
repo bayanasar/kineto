@@ -11,7 +11,7 @@ Services share far fewer request formats than they have vendors:
 
 - **Text.** OpenAI's chat completions are spoken by OpenAI, xAI (Grok), Meta's Model API (Muse), Zhipu (GLM), Alibaba (Qwen), DeepSeek, Moonshot (Kimi), ByteDance (Doubao), MiniMax, Google's Gemini API through its compatibility address, OpenRouter, and local servers (Ollama, LM Studio, vLLM). Anthropic's messages are spoken by Claude's API and by the Anthropic-compatible addresses several of those vendors also serve.
 - **Images.** OpenAI's images (`/images/generations`, `/images/edits`) are spoken by OpenAI, xAI and several others; Gemini's image models answer `generateContent`. Other services (Alibaba's DashScope, for one) use their own task formats.
-- **Video.** Every service has its own task format: create a task, ask about it, fetch a file. No two of Seedance, Veo, Hailuo, Kling, Sora and Grok Imagine agree.
+- **Video.** Most services have their own task format: create a task, ask about it, fetch a file. Veo, Hailuo, Kling, Sora and Grok Imagine each differ. Seedance is the exception that matters: Volcengine's Ark (in China) and BytePlus's ModelArk (elsewhere) serve it through one task API (`/contents/generations/tasks`), and the gateways that resell it speak that API too.
 
 A vendor list in the app (one entry per company) would be closed the day it shipped. A protocol list stays open: a new service that speaks a known protocol needs no change to Kineto.
 
@@ -26,7 +26,7 @@ Signing in with a consumer account was asked about too. Meta's Model API and the
 ```toml
 [[connection]]
 name = "deepseek"              # how it is chosen: connection:deepseek
-protocol = "openai-chat"       # openai-chat, anthropic-messages, openai-images, gemini-images
+protocol = "openai-chat"       # openai-chat, anthropic-messages, openai-images, gemini-images, ark-video
 url = "https://api.deepseek.com/v1"
 model = "deepseek-chat"
 key = "deepseek"               # the name its key is kept under; none for a keyless local server
@@ -34,7 +34,7 @@ price_per_million_input = 0.28 # USD, optional
 price_per_million_output = 0.42
 ```
 
-An image connection gives `price_per_image` and `references` (how many reference images it takes, 0 to 16) instead of token prices. The director adds, changes and removes connections in Settings, typing the key in the same form; the key goes to the system's secure storage under its name (ADR-0008), never into the file. A choice (`language_model`, `image`) names one as `connection:<name>`. Renaming a connection carries the choice with it; removing it clears the choice and leaves the key.
+An image connection gives `price_per_image` and `references` (how many reference images it takes, 0 to 16) instead of token prices, and a video connection gives `price_per_second`. The director adds, changes and removes connections in Settings, typing the key in the same form; the key goes to the system's secure storage under its name (ADR-0008), never into the file. A choice (`language_model`, `image`, `video`) names one as `connection:<name>`. Renaming a connection carries the choice with it; removing it clears the choice and leaves the key.
 
 The address is HTTPS, or HTTP to this computer, as for every network call. A connection's calls are recorded under `connection.<name>`.
 
@@ -52,9 +52,16 @@ As agy does under ADR-0008, an image connection is a built-in plugin: the same i
 
 Fields a service needs beyond the protocol's common part (Seedream's watermark switch, a size of its own) are written by the director under `[connection.request]` in the settings file, sent with every request, and win over kineto's. Settings show their names and never change them.
 
-### Video stays with adapters and plugins
+### Video: Ark's video tasks
 
-No shared protocol exists, so no generic video connection is offered. Video services keep their own adapters (MiniMax, Veo, Gemini Omni) and plugins (ADR-0006). A service the director needs is added as an adapter of its own, by request.
+A video connection speaks `ark-video`: `POST <url>/contents/generations/tasks`, then `GET` the task until it has succeeded and gives `content.video_url`, a file fetched without the key within 24 hours. It is a video provider like MiniMax or Veo, under the same write-ahead jobs: the task is recorded the moment it is accepted, a restart follows it again and never submits, and a submission whose outcome is unknown waits for the director's consent to pay twice. A 4xx answer or a connection never made proves nothing was started.
+
+- **Request.** The prompt, the shot's locked keyframe as `first_frame` and, when the next shot continues from it, that shot's keyframe as `last_frame`, both as data URLs; the clip's length (4 to 15 seconds), its frame shape as `ratio` (16:9, 9:16, 4:3, 3:4, 1:1 or 21:9, else `adaptive`) and `resolution` (720p).
+- **The director's fields.** `[connection.request]` is sent with every task and wins, as for images: `generate_audio = false` for a silent clip (the clip then declares no sound track), `resolution = "1080p"` for taller clips (the clip then declares that height).
+- **Price.** `price_per_second` times the clip's length, for the height the connection renders; unknown when not given. Ark bills tokens that grow with a clip's pixels, so a price per second holds for one height only.
+- **No references.** A shot's clip starts from its keyframe, which already carries who is in it; a video connection takes no reference images.
+
+Other video services keep their own adapters (MiniMax, Veo, Gemini Omni) and plugins (ADR-0006).
 
 ### The old server becomes a connection
 
@@ -65,5 +72,5 @@ The single server ADR-0008 kept (`[openai_compatible]`, chosen as `openai-compat
 - A service that speaks a known protocol is usable without a new build: GPT, Grok, Muse, GLM, Qwen, DeepSeek, Kimi, Doubao, MiniMax, Gemini, Claude, OpenRouter, local servers.
 - Kineto cannot know a connection's price or limits. It shows what the director entered and says when it does not know.
 - A vendor's own extras (structured-output modes, image sizes, safety settings) are not reached; the protocol's common part is. A service that needs more is better served by a plugin.
-- The native ABI gains connection calls and retires the server's three settings (v50), then image connections and whether an image price is known (v51).
+- The native ABI gains connection calls and retires the server's three settings (v50), then image connections and whether an image price is known (v51), then video connections (v52).
 - An image of another shape than the shot's frame is cut to it, which keeps the frame and loses the edges; a service that draws the frame asked for loses nothing.

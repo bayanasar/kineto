@@ -753,6 +753,7 @@ dependencies = [
  "kineto-plugins",
  "kineto-project",
  "kineto-prompts",
+ "kineto-provider-ark",
  "kineto-provider-gemini",
  "kineto-provider-minimax",
  "kineto-provider-openai",
@@ -761,6 +762,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "toml",
 ]
 
 [[package]]
@@ -852,6 +854,18 @@ name = "kineto-prompts"
 version = "0.1.0"
 dependencies = [
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "kineto-provider-ark"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "kineto-jobs",
+ "kineto-providers",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

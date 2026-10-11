@@ -30,8 +30,9 @@
 //! [`resubmit`], accepting that the video may be paid for twice.
 //!
 //! Providers are [`VideoGenerator`]s, chosen by what they declare they can
-//! do, never by name: MiniMax Hailuo and Google Veo, paid, and the local
-//! demo, free, which runs through the same jobs and receipts and returns a
+//! do, never by name: MiniMax Hailuo, Google Veo, and any service the
+//! director added that speaks Ark's video tasks (Seedance), paid, and the
+//! local demo, free, which runs through the same jobs and receipts and returns a
 //! clip bundled with the build. Each records its jobs under its own
 //! provider key.
 
@@ -85,6 +86,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    connection::VideoConnection,
     generation::{
         GenerationError, KEYFRAME_ASPECT, NoHooks, ProviderSelectionError, invoke_when_permitted,
         parse_job_key, provenance_of, selected_plugin,
@@ -590,6 +592,9 @@ pub enum VideoProvider {
     /// A plugin the user registered (ADR-0006), as it described itself.
     /// One that declares no video makes none.
     Plugin(Arc<PluginProvider>),
+    /// A service the director added that makes clips (ADR-0009). Paid.
+    /// Without its key, as for MiniMax.
+    Connection(Arc<VideoConnection>),
 }
 
 /// Which video provider a session generates with.
@@ -600,6 +605,7 @@ pub enum VideoProviderKind {
     Veo,
     Omni,
     Plugin,
+    Connection,
 }
 
 /// What the director needs to know about the session's video provider
@@ -662,6 +668,16 @@ impl VideoProvider {
         }
     }
 
+    /// The connection `connection` the director added, with the key it
+    /// names from `secrets`.
+    pub fn connection(
+        connection: &kineto_plugins::settings::Connection,
+        secrets: &impl SecretSource,
+    ) -> Result<Self, ProviderSelectionError> {
+        VideoConnection::new(connection, secrets)
+            .map(|connection| Self::Connection(Arc::new(connection)))
+    }
+
     #[must_use]
     pub fn kind(&self) -> VideoProviderKind {
         match self {
@@ -670,6 +686,7 @@ impl VideoProvider {
             Self::Veo { .. } => VideoProviderKind::Veo,
             Self::Omni(_) => VideoProviderKind::Omni,
             Self::Plugin(_) => VideoProviderKind::Plugin,
+            Self::Connection(_) => VideoProviderKind::Connection,
         }
     }
 
@@ -682,6 +699,7 @@ impl VideoProvider {
             Self::Veo { .. } => VEO_VIDEO_PROVIDER.to_owned(),
             Self::Omni(_) => OMNI_VIDEO_PROVIDER.to_owned(),
             Self::Plugin(plugin) => plugin::video_key(plugin.key()),
+            Self::Connection(connection) => connection.key().to_owned(),
         }
     }
 
@@ -693,6 +711,7 @@ impl VideoProvider {
             Self::Veo { model, .. } => model.capabilities(),
             Self::Omni(_) => omni::capabilities(),
             Self::Plugin(plugin) => plugin.video_capabilities().cloned().unwrap_or_default(),
+            Self::Connection(connection) => connection.capabilities().clone(),
         }
     }
 
@@ -711,6 +730,7 @@ impl VideoProvider {
                 Self::Veo { client, .. } => client.is_some(),
                 Self::Omni(client) => client.is_some(),
                 Self::Plugin(plugin) => plugin.video_capabilities().is_some(),
+                Self::Connection(connection) => connection.callable(),
             },
             clip_cost_micros: price,
             clip_seconds,

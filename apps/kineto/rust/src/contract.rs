@@ -222,6 +222,7 @@ pub(crate) const VIDEO_PROVIDER_MINIMAX: u32 = 2;
 pub(crate) const VIDEO_PROVIDER_PLUGIN: u32 = 3;
 pub(crate) const VIDEO_PROVIDER_VEO: u32 = 4;
 pub(crate) const VIDEO_PROVIDER_OMNI: u32 = 5;
+pub(crate) const VIDEO_PROVIDER_CONNECTION: u32 = 6;
 
 /// The built-in providers whose keys settings list, by the name each key is
 /// stored under. Any other key is stored by its own name: one a plugin's
@@ -246,7 +247,7 @@ pub(crate) const PROVIDER_SETTINGS: [(&str, u32); 4] = [
 
 /// The fields of a connection `kineto_settings_connection_*` read and put,
 /// each as text.
-pub(crate) const CONNECTION_FIELDS: [(&str, u32); 10] = [
+pub(crate) const CONNECTION_FIELDS: [(&str, u32); 11] = [
     ("name", 1),
     ("protocol", 2),
     ("url", 3),
@@ -259,15 +260,17 @@ pub(crate) const CONNECTION_FIELDS: [(&str, u32); 10] = [
     // The names of the fields the settings file adds to each request, read
     // only: settings show them and never change them.
     ("request_fields", 10),
+    ("price_per_second", 11),
 ];
 
 /// The protocols a connection may speak, by their names in the settings
 /// file with `_` for `-`.
-pub(crate) const CONNECTION_PROTOCOLS: [(&str, u32); 4] = [
+pub(crate) const CONNECTION_PROTOCOLS: [(&str, u32); 5] = [
     ("openai_chat", 1),
     ("anthropic_messages", 2),
     ("openai_images", 3),
     ("gemini_images", 4),
+    ("ark_video", 5),
 ];
 
 /// The agent CLIs settings look for.
@@ -280,12 +283,13 @@ pub(crate) const AGENTS: [(&str, u32); 5] = [
 ];
 
 /// Video provider codes returned by `kineto_project_video_provider`.
-const VIDEO_PROVIDERS: [(&str, u32); 5] = [
+const VIDEO_PROVIDERS: [(&str, u32); 6] = [
     ("local_demo", VIDEO_PROVIDER_LOCAL_DEMO),
     ("minimax", VIDEO_PROVIDER_MINIMAX),
     ("plugin", VIDEO_PROVIDER_PLUGIN),
     ("veo", VIDEO_PROVIDER_VEO),
     ("omni", VIDEO_PROVIDER_OMNI),
+    ("connection", VIDEO_PROVIDER_CONNECTION),
 ];
 
 /// What `kineto_project_video_take_count` counts.
@@ -1461,8 +1465,8 @@ mod tests {
             PROJECT_OK
         );
         assert_eq!(kind, ENTRY_CONNECTION_PROTOCOL);
-        assert_eq!(&name[..len as usize], b"gemini_images");
-        assert_eq!((value, extra), (4, 0));
+        assert_eq!(&name[..len as usize], b"ark_video");
+        assert_eq!((value, extra), (5, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(
