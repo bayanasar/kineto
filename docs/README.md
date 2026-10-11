@@ -50,5 +50,6 @@ This directory contains the product and technical design baseline for Kineto. It
 - [ADR-0008: The Director's Own Agent CLIs, and Provider Choice in Settings](adr/0008-directors-own-agents-and-provider-choice.md)
 - [ADR-0009: Connections: Any Service, by the Protocol It Speaks](adr/0009-connections-by-protocol.md)
 - [ADR-0010: Kineto as an MCP Server for Outside Agents](adr/0010-mcp-server-for-outside-agents.md)
+- [ADR-0011: Outside Agents Change the Project, and Connect from the Internet](adr/0011-outside-agents-change-the-project-and-connect-from-the-internet.md)
 
 Accepted ADRs remain immutable records. A changed decision is documented by a superseding ADR rather than rewriting history.

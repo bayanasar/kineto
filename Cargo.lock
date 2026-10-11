@@ -818,12 +818,15 @@ dependencies = [
 name = "kineto-mcp-server"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "getrandom 0.2.17",
+ "image",
  "kineto-core",
  "kineto-plugins",
  "kineto-project",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "toml",
 ]
 
@@ -839,6 +842,7 @@ dependencies = [
  "kineto-plugins",
  "kineto-project",
  "kineto-providers",
+ "libc",
  "serde_json",
 ]
 

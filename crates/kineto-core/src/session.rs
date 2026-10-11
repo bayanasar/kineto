@@ -20,10 +20,11 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
+    time::Duration,
 };
 
 use std::collections::VecDeque;
@@ -535,6 +536,12 @@ pub trait SessionSink: Send + 'static {
     /// place among the requests under way; or it waited, and starts now
     /// (`false`). A command that never waits is not reported.
     fn waiting(&self, _token: u64, _waiting: bool) {}
+
+    /// An agent outside Kineto asked for command `token`, which `label`
+    /// describes, such as "Codex: lock the screenplay" (ADR-0011). It ends
+    /// as any command does. Called on the agent's thread, before the
+    /// command is queued.
+    fn agent_started(&self, _token: u64, _label: &str) {}
 }
 
 /// The analysis the director's documents build on.
@@ -851,6 +858,10 @@ struct Gate {
     /// Set when the session closes; agent calls in progress watch it too.
     closed: Arc<AtomicBool>,
     sink: Mutex<Option<Box<dyn SessionSink>>>,
+    /// Where agents' commands wait for how they ended.
+    replies: Replies,
+    /// Counts agents' commands, for their tokens.
+    agent_commands: AtomicU64,
 }
 
 impl Gate {
@@ -865,6 +876,8 @@ impl Gate {
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         lock(&self.sink).take();
+        // An agent's command that will not end is told the session closed.
+        lock(&self.replies).clear();
     }
 
     fn is_closed(&self) -> bool {
@@ -981,9 +994,15 @@ impl ProjectSession {
         // worker's own inbox.
         let back = commands.clone();
         let view = Arc::new(View::default());
+        let replies = Replies::default();
         let gate = Arc::new(Gate {
             closed: Arc::new(AtomicBool::new(false)),
-            sink: Mutex::new(Some(sink)),
+            sink: Mutex::new(Some(Box::new(Replying {
+                sink,
+                replies: Arc::clone(&replies),
+            }))),
+            replies,
+            agent_commands: AtomicU64::new(0),
         });
         let worker = thread::Builder::new()
             .name("kineto-project-session".to_owned())
@@ -1115,6 +1134,17 @@ impl ProjectSession {
             .ok_or(SubmitError::Closed)?
             .send(envelope)
             .map_err(|_| SubmitError::Closed)
+    }
+
+    /// What agents outside Kineto hold of this session: they ask for
+    /// commands on its worker and read what it publishes (ADR-0011).
+    #[must_use]
+    pub fn remote(&self) -> Option<SessionRemote> {
+        Some(SessionRemote {
+            commands: self.commands.clone()?,
+            view: Arc::clone(&self.view),
+            gate: Arc::clone(&self.gate),
+        })
     }
 
     /// The project's documents as last published. Never does I/O.
@@ -1322,6 +1352,248 @@ impl ProjectSession {
     #[must_use]
     pub fn metadata(&self) -> Option<&ProjectMetadata> {
         self.view.metadata.get()
+    }
+}
+
+/// The bit the token of every command an agent outside Kineto asks for
+/// carries. The director's requests are counted from 1 and never reach it.
+pub const AGENT_TOKEN: u64 = 1 << 62;
+
+/// Where agents' commands wait for how they ended, by token.
+type Replies = Arc<Mutex<BTreeMap<u64, mpsc::Sender<Result<(), String>>>>>;
+
+/// The session's sink, telling an agent's command how it ended first.
+struct Replying {
+    sink: Box<dyn SessionSink>,
+    replies: Replies,
+}
+
+impl Replying {
+    fn reply(&self, token: u64, result: &Result<(), SessionError>) {
+        if token & AGENT_TOKEN == 0 {
+            return;
+        }
+        if let Some(reply) = lock(&self.replies).remove(&token) {
+            let _ = reply.send(match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            });
+        }
+    }
+}
+
+impl SessionSink for Replying {
+    fn recovered(&self, recovery: &Recovery) {
+        self.sink.recovered(recovery);
+    }
+
+    fn opened(&self, result: &Result<(), SessionError>) {
+        self.sink.opened(result);
+    }
+
+    fn completed(&self, token: u64, shot_index: u32, result: &Result<(), SessionError>) {
+        self.reply(token, result);
+        self.sink.completed(token, shot_index, result);
+    }
+
+    fn video_finished(&self, shot_index: u32, revision: u16, result: &Result<(), SessionError>) {
+        self.sink.video_finished(shot_index, revision, result);
+    }
+
+    fn document_completed(&self, token: u64, result: &Result<(), SessionError>) {
+        self.reply(token, result);
+        self.sink.document_completed(token, result);
+    }
+
+    fn waiting(&self, token: u64, waiting: bool) {
+        self.sink.waiting(token, waiting);
+    }
+
+    fn agent_started(&self, token: u64, label: &str) {
+        self.sink.agent_started(token, label);
+    }
+}
+
+/// A command an agent outside Kineto asks of the open session.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentCommand {
+    Shot {
+        shot_index: u32,
+        command: ShotCommand,
+    },
+    Document(DocumentCommand),
+    Production(ProductionCommand),
+}
+
+/// What agents outside Kineto hold of an open session (ADR-0011). They ask
+/// for commands as the director's buttons do, on the same worker and under
+/// the same writer lock, and read what it publishes. Holding one does not
+/// keep the session open: once its owner closes it, every command is
+/// refused.
+#[derive(Clone)]
+pub struct SessionRemote {
+    commands: mpsc::Sender<Envelope>,
+    view: Arc<View>,
+    gate: Arc<Gate>,
+}
+
+impl fmt::Debug for SessionRemote {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionRemote")
+    }
+}
+
+/// An agent's command on its way.
+#[derive(Debug)]
+pub struct AgentTicket {
+    token: u64,
+    outcome: mpsc::Receiver<Result<(), String>>,
+    ended: Option<Result<(), String>>,
+}
+
+impl AgentTicket {
+    /// The token the session knows it by.
+    #[must_use]
+    pub const fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// How it ended, waiting at most `timeout` for it; `None` while it
+    /// runs. What a refusal or failure said, as text.
+    pub fn outcome(&mut self, timeout: Duration) -> Option<Result<(), String>> {
+        if self.ended.is_none() {
+            self.ended = match self.outcome.recv_timeout(timeout) {
+                Ok(result) => Some(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Some(Err(
+                    "Kineto closed the project before the command ended".to_owned(),
+                )),
+            };
+        }
+        self.ended.clone()
+    }
+}
+
+impl SessionRemote {
+    /// Queue `command` for an agent, as `label` describes it to the
+    /// director. Returns without waiting for it to run.
+    pub fn submit(&self, command: AgentCommand, label: &str) -> Result<AgentTicket, SubmitError> {
+        if self.gate.is_closed() {
+            return Err(SubmitError::Closed);
+        }
+        let work = match command {
+            AgentCommand::Shot {
+                shot_index,
+                command,
+            } => {
+                if self.shot_key(shot_index).is_none() {
+                    return Err(SubmitError::InvalidShot);
+                }
+                Work::Shot {
+                    shot_index,
+                    command,
+                }
+            }
+            AgentCommand::Document(command) => Work::Document {
+                command,
+                resubmit: false,
+            },
+            AgentCommand::Production(command) => Work::Production {
+                command,
+                submission: Submission::Once,
+            },
+        };
+        let count = self.gate.agent_commands.fetch_add(1, Ordering::SeqCst);
+        let token = AGENT_TOKEN | (count & (AGENT_TOKEN - 1));
+        let (reply, outcome) = mpsc::channel();
+        lock(&self.gate.replies).insert(token, reply);
+        self.gate.deliver(|sink| sink.agent_started(token, label));
+        if self.commands.send(Envelope { token, work }).is_err() {
+            lock(&self.gate.replies).remove(&token);
+            return Err(SubmitError::Closed);
+        }
+        Ok(AgentTicket {
+            token,
+            outcome,
+            ended: None,
+        })
+    }
+
+    /// Whether the session's owner closed it.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.gate.is_closed()
+    }
+
+    /// The project's documents as last published. Never does I/O.
+    pub fn documents(&self) -> Result<Arc<PublishedDocuments>, SnapshotError> {
+        lock(&self.view.documents)
+            .clone()
+            .ok_or(SnapshotError::NotOpen)
+    }
+
+    /// The style, cast and voices as last published. Never does I/O.
+    pub fn production(&self) -> Result<Arc<PublishedProduction>, SnapshotError> {
+        lock(&self.view.production)
+            .clone()
+            .ok_or(SnapshotError::NotOpen)
+    }
+
+    #[must_use]
+    pub fn shot_key(&self, shot_index: u32) -> Option<ShotKey> {
+        let index = usize::try_from(shot_index).ok()?;
+        lock(&self.view.shots)
+            .as_ref()?
+            .get(index)
+            .map(|(key, _)| key.clone())
+    }
+
+    /// Where `key` stands among the shots in play.
+    #[must_use]
+    pub fn shot_index(&self, key: &ShotKey) -> Option<u32> {
+        lock(&self.view.shots)
+            .as_ref()?
+            .iter()
+            .position(|(shot, _)| shot == key)
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// What the next video of shot `shot_index` would cost, as far as known.
+    pub fn video_estimate(&self, shot_index: u32) -> Result<Option<VideoEstimate>, SnapshotError> {
+        let shots = lock(&self.view.shots);
+        let shots = shots.as_ref().ok_or(SnapshotError::NotOpen)?;
+        let (_, slot) = usize::try_from(shot_index)
+            .ok()
+            .and_then(|index| shots.get(index))
+            .ok_or(SnapshotError::InvalidShot)?;
+        match slot {
+            None => Err(SnapshotError::NotOpen),
+            Some(Ok(published)) => Ok(published.video_estimate),
+            Some(Err(error)) => Err(SnapshotError::Failed(Arc::clone(error))),
+        }
+    }
+
+    #[must_use]
+    pub fn image_provider(&self) -> Option<ImageProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.image)
+    }
+
+    #[must_use]
+    pub fn video_provider(&self) -> Option<VideoProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.video)
+    }
+
+    #[must_use]
+    pub fn speech_provider(&self) -> Option<SpeechProviderInfo> {
+        self.view.providers.get().map(|chosen| chosen.speech)
+    }
+
+    #[must_use]
+    pub fn document_model(&self) -> Option<DocumentModelInfo> {
+        self.view
+            .providers
+            .get()
+            .map(|chosen| chosen.document_model.clone())
     }
 }
 
@@ -3993,6 +4265,10 @@ mod tests {
             token: u64,
             waiting: bool,
         },
+        AgentStarted {
+            token: u64,
+            label: String,
+        },
     }
 
     struct ChannelSink(Mutex<mpsc::Sender<Event>>);
@@ -4044,6 +4320,13 @@ mod tests {
 
         fn waiting(&self, token: u64, waiting: bool) {
             let _ = lock(&self.0).send(Event::Waiting { token, waiting });
+        }
+
+        fn agent_started(&self, token: u64, label: &str) {
+            let _ = lock(&self.0).send(Event::AgentStarted {
+                token,
+                label: label.to_owned(),
+            });
         }
     }
 
@@ -4111,6 +4394,72 @@ mod tests {
                 other => panic!("expected completion {token}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn an_agent_asks_on_the_worker_and_is_told_how_it_ended() {
+        let directory = TempDir::new();
+        let (session, events) = create(&directory.0.join("project"));
+        let remote = session.remote().unwrap();
+
+        let mut imported = remote
+            .submit(
+                AgentCommand::Document(DocumentCommand::ImportSource {
+                    text: "The door opens.\n".to_owned(),
+                    format: SourceFormat::Text,
+                    original_name: None,
+                }),
+                "Codex: import a story",
+            )
+            .unwrap();
+        assert_ne!(imported.token() & AGENT_TOKEN, 0);
+        assert_eq!(imported.outcome(WAIT), Some(Ok(())));
+        assert_eq!(
+            events.recv_timeout(WAIT).unwrap(),
+            Event::AgentStarted {
+                token: imported.token(),
+                label: "Codex: import a story".to_owned(),
+            },
+            "the director is told before it runs"
+        );
+        assert_eq!(
+            events.recv_timeout(WAIT).unwrap(),
+            Event::DocumentCompleted {
+                token: imported.token(),
+                result: Ok(()),
+            }
+        );
+        assert_eq!(remote.documents().unwrap().source_revision, Some(2));
+
+        // A refusal reaches the agent in words.
+        let mut locked = remote
+            .submit(
+                AgentCommand::Document(DocumentCommand::LockScreenplay { revision: 1 }),
+                "Codex: lock the screenplay",
+            )
+            .unwrap();
+        assert_ne!(locked.token(), imported.token());
+        assert!(matches!(locked.outcome(WAIT), Some(Err(why)) if !why.is_empty()));
+        assert!(matches!(
+            remote.submit(
+                AgentCommand::Shot {
+                    shot_index: 99,
+                    command: ShotCommand::Lock,
+                },
+                "Codex: lock a shot",
+            ),
+            Err(SubmitError::InvalidShot)
+        ));
+
+        drop(session);
+        assert!(remote.is_closed());
+        assert!(matches!(
+            remote.submit(
+                AgentCommand::Document(DocumentCommand::AnalyzeStory),
+                "Codex: analyse the story",
+            ),
+            Err(SubmitError::Closed)
+        ));
     }
 
     #[test]

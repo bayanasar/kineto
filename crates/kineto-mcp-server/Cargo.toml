@@ -5,12 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.23"
 getrandom = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 kineto-core = { path = "../kineto-core" }
 kineto-plugins = { path = "../kineto-plugins" }
 kineto-project = { path = "../kineto-project" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 toml = "1.0.0"
 
 [lib]

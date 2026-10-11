@@ -1,61 +1,58 @@
-//! Kineto as an MCP server (ADR-0010): agents outside Kineto (Claude Code,
-//! Codex, Claude Desktop, any MCP client) read the project open in Kineto
-//! through tools, over MCP's Streamable HTTP transport.
+//! Kineto as an MCP server (ADR-0010, ADR-0011): agents outside Kineto
+//! (Claude Code, Codex, Claude Desktop, ChatGPT, claude.ai, any MCP client)
+//! read and change the project open in Kineto through tools, over MCP's
+//! Streamable HTTP transport.
 //!
-//! It serves this computer only. It listens on `127.0.0.1`, at an address
-//! whose path holds a random 256-bit token (`/mcp/<64 hex digits>`), and
-//! answers anything else with 404. A request whose `Host` is not this
-//! computer, or whose `Origin` is a web page elsewhere, is refused, so a
-//! page in a browser cannot reach it by rebinding a name to `127.0.0.1`.
+//! Agents on this computer connect to `127.0.0.1`, at an address whose
+//! path holds a random 256-bit token (`/mcp/<64 hex digits>`); anything
+//! else is answered 404. A request whose `Host` is not this computer, or
+//! whose `Origin` is a web page elsewhere, is refused, so a page in a
+//! browser cannot reach it by rebinding a name to `127.0.0.1`.
 //!
-//! The tools only read. Each opens the project read-only, beside the
-//! session that writes it, and reads files that session replaces whole.
+//! Agents in the cloud connect through a tunnel the director runs, to a
+//! second listener that takes OAuth access tokens only ([`oauth`]): the
+//! director allows each agent in Kineto's window.
+//!
+//! Reading tools open the project read-only, beside the session that
+//! writes it. Changing tools go through that session, as the director's
+//! buttons do, and a paid one waits for the director ([`Desk`]).
 //!
 //! The director turns it on and off in Settings. Whether it is on, its
-//! port and its token are kept in `mcp-server.toml` beside the provider
-//! settings, readable by its owner alone, so the address stays the same
-//! across restarts until the director asks for a new one.
+//! ports, its token and the public address are kept in `mcp-server.toml`
+//! beside the provider settings, readable by its owner alone, so the
+//! address stays the same across restarts until the director asks for a
+//! new one.
+
+mod desk;
+mod http;
+pub mod oauth;
+mod tools;
 
 use std::{
-    fmt, fs,
-    io::{self, BufRead, BufReader, Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::Duration,
+    sync::Arc,
 };
 
-use kineto_core::workflow::{self, Stage, StepState};
-use kineto_project::{
-    fs::ProjectRelativePath,
-    manifest::CanonicalProject,
-    revisions::{self, DocumentKind, RevisionStatus},
-    shot::{ShotKey, ShotWorkflow, VideoState},
-    shot_plan::shots_in_play,
-    source,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// The file that keeps whether the server is on, its port and its token.
+pub use desk::{ANSWER_WAIT, Charge, Desk, Verdict, Waiting, Work};
+pub use oauth::{AGENTS_FILE, Agents, ConnectedAgent};
+pub use tools::Tools;
+
+use http::{Answer, Listener, Request, Response};
+
+/// The file that keeps whether the server is on, its ports and its token.
 pub const SERVER_FILE: &str = "mcp-server.toml";
 /// The MCP versions this server speaks, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
-const MAX_HEAD_BYTES: usize = 16 * 1024;
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-/// The most source text one answer carries, in characters.
-const MAX_SOURCE_CHARS: usize = 200_000;
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const ACCEPT_INTERVAL: Duration = Duration::from_millis(100);
+/// How long a tunnel command may be, in words.
+const MAX_TUNNEL_WORDS: usize = 32;
+const MAX_URL_CHARS: usize = 256;
 
-/// The project the tools read: the one open in Kineto, if any.
-pub type ProjectSlot = Arc<Mutex<Option<PathBuf>>>;
-
-/// Whether the server is on, and the address it keeps.
+/// Whether the server is on, and the addresses it keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerSettings {
     #[serde(default)]
@@ -66,6 +63,21 @@ pub struct ServerSettings {
     /// 64 hex digits; empty until it is first turned on.
     #[serde(default)]
     pub token: String,
+    /// Whether agents in the cloud may connect, through `public_url`.
+    #[serde(default)]
+    pub public: bool,
+    /// The HTTPS origin the director's tunnel answers at, such as
+    /// `https://example.ts.net:10000`; empty until the director gives one.
+    #[serde(default)]
+    pub public_url: String,
+    /// The port the tunnel forwards to; 0 until it first listens.
+    #[serde(default)]
+    pub public_port: u16,
+    /// The command that opens the tunnel while the public address is on,
+    /// word by word; `{port}` stands for `public_port`. Empty when the
+    /// director runs the tunnel some other way.
+    #[serde(default)]
+    pub tunnel: Vec<String>,
 }
 
 impl ServerSettings {
@@ -112,7 +124,8 @@ impl ServerSettings {
         Ok(())
     }
 
-    /// The address an agent connects to; empty until it has listened.
+    /// The address an agent on this computer connects to; empty until it
+    /// has listened.
     #[must_use]
     pub fn address(&self) -> String {
         if self.port == 0 || self.token.is_empty() {
@@ -121,169 +134,58 @@ impl ServerSettings {
             format!("http://127.0.0.1:{}/mcp/{}", self.port, self.token)
         }
     }
-}
 
-/// The server, listening until it is dropped.
-pub struct Server {
-    port: u16,
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl fmt::Debug for Server {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Server")
-            .field("port", &self.port)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Server {
-    /// Listen on `127.0.0.1:port` (any free port for 0) at the path that
-    /// holds `token`, reading the project in `project`.
-    pub fn start(port: u16, token: &str, project: ProjectSlot) -> io::Result<Self> {
-        if token.len() < 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the token is not one this server made",
-            ));
-        }
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
-        let stop = Arc::new(AtomicBool::new(false));
-        let handler = Arc::new(Handler {
-            port,
-            path: format!("/mcp/{token}"),
-            tools: Tools { project },
-        });
-        let stopping = Arc::clone(&stop);
-        let thread = thread::Builder::new()
-            .name("kineto-mcp-server".to_owned())
-            .spawn(move || {
-                while !stopping.load(Ordering::SeqCst) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let handler = Arc::clone(&handler);
-                            let _ = thread::Builder::new()
-                                .name("kineto-mcp-request".to_owned())
-                                .spawn(move || handler.serve(stream));
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(ACCEPT_INTERVAL);
-                        }
-                        Err(_) => thread::sleep(ACCEPT_INTERVAL),
-                    }
-                }
-            })?;
-        Ok(Self {
-            port,
-            stop,
-            thread: Some(thread),
-        })
-    }
-
-    /// The port it listens on.
+    /// The address an agent in the cloud connects to; empty without a
+    /// public origin.
     #[must_use]
-    pub const fn port(&self) -> u16 {
-        self.port
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-struct Handler {
-    port: u16,
-    /// `/mcp/<token>`.
-    path: String,
-    tools: Tools,
-}
-
-/// One HTTP request, as far as this server reads one.
-struct Request {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header == name)
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// Why a request was not read.
-enum Unread {
-    TooLarge,
-    LengthRequired,
-    Malformed,
-}
-
-fn read_request(stream: &TcpStream) -> Result<Request, Unread> {
-    let mut reader = BufReader::new(stream.take((MAX_HEAD_BYTES + MAX_BODY_BYTES) as u64));
-    let mut head = 0;
-    let mut line = String::new();
-    let mut next_line = |line: &mut String| -> Result<(), Unread> {
-        line.clear();
-        let read = reader.read_line(line).map_err(|_| Unread::Malformed)?;
-        head += read;
-        if read == 0 {
-            Err(Unread::Malformed)
-        } else if head > MAX_HEAD_BYTES {
-            Err(Unread::TooLarge)
+    pub fn public_address(&self) -> String {
+        if self.public_url.is_empty() {
+            String::new()
         } else {
-            Ok(())
+            format!("{}/mcp", self.public_url)
         }
-    };
-    next_line(&mut line)?;
-    let mut words = line.split_whitespace();
-    let (Some(method), Some(path), Some(_)) = (words.next(), words.next(), words.next()) else {
-        return Err(Unread::Malformed);
-    };
-    let (method, path) = (method.to_owned(), path.to_owned());
-    let mut headers = Vec::new();
-    loop {
-        next_line(&mut line)?;
-        let header = line.trim_end_matches(['\r', '\n']);
-        if header.is_empty() {
-            break;
-        }
-        let (name, value) = header.split_once(':').ok_or(Unread::Malformed)?;
-        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
     }
-    let mut request = Request {
-        method,
-        path,
-        headers,
-        body: Vec::new(),
-    };
-    if request.header("transfer-encoding").is_some() {
-        return Err(Unread::LengthRequired);
+
+    /// The tunnel command with the public port in it.
+    #[must_use]
+    pub fn tunnel_command(&self) -> Vec<String> {
+        self.tunnel
+            .iter()
+            .map(|word| word.replace("{port}", &self.public_port.to_string()))
+            .collect()
     }
-    let length = match request.header("content-length") {
-        Some(length) => length.parse::<usize>().map_err(|_| Unread::Malformed)?,
-        None => 0,
+}
+
+/// `url` as a public origin: HTTPS, a host and maybe a port, nothing more.
+/// A trailing slash is dropped; anything else is refused.
+pub fn public_origin(url: &str) -> Result<String, &'static str> {
+    let url = url.trim().trim_end_matches('/');
+    let Some(authority) = url.strip_prefix("https://") else {
+        return Err("the public address must start with https://");
     };
-    if length > MAX_BODY_BYTES {
-        return Err(Unread::TooLarge);
+    if url.len() > MAX_URL_CHARS
+        || authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '\\'])
+        || authority
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("the public address must be a host, and a port if any, with no path");
     }
-    request.body = vec![0; length];
-    reader
-        .read_exact(&mut request.body)
-        .map_err(|_| Unread::Malformed)?;
-    Ok(request)
+    Ok(url.to_owned())
+}
+
+/// `words` as a tunnel command: a program and its arguments, each one
+/// line of text.
+pub fn tunnel_words(words: &[String]) -> Result<Vec<String>, &'static str> {
+    if words.len() > MAX_TUNNEL_WORDS
+        || words.iter().any(|word| {
+            word.is_empty() || word.len() > MAX_URL_CHARS || word.chars().any(char::is_control)
+        })
+    {
+        return Err("the tunnel command is a program and its arguments, one per line");
+    }
+    Ok(words.to_vec())
 }
 
 /// Whether `a` and `b` are equal, in time that does not depend on where
@@ -296,43 +198,111 @@ fn same(a: &str, b: &str) -> bool {
             == 0
 }
 
-impl Handler {
-    fn serve(&self, mut stream: TcpStream) {
-        let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-        let (status, body) = match read_request(&stream) {
-            Ok(request) => self.answer(&request),
-            Err(Unread::TooLarge) => (413, None),
-            Err(Unread::LengthRequired) => (411, None),
-            Err(Unread::Malformed) => (400, None),
-        };
-        let reason = match status {
-            200 => "OK",
-            202 => "Accepted",
-            400 => "Bad Request",
-            403 => "Forbidden",
-            404 => "Not Found",
-            405 => "Method Not Allowed",
-            411 => "Length Required",
-            413 => "Content Too Large",
-            415 => "Unsupported Media Type",
-            _ => "Error",
-        };
-        let body = body.map(|body| body.to_string()).unwrap_or_default();
-        let mut head = format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n");
-        if status == 405 {
-            head.push_str("Allow: POST\r\n");
+fn rpc_error(code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": null, "error": {"code": code, "message": message}})
+}
+
+/// One JSON-RPC message posted to an MCP endpoint, from `agent`.
+fn mcp(tools: &Tools, request: &Request, agent: &str) -> Response {
+    if request.method != "POST" {
+        return Response::empty(405).with("Allow", "POST".to_owned());
+    }
+    if !request
+        .header("content-type")
+        .is_some_and(|kind| kind.starts_with("application/json"))
+    {
+        return Response::empty(415);
+    }
+    if request
+        .header("mcp-protocol-version")
+        .is_some_and(|version| !PROTOCOL_VERSIONS.contains(&version))
+    {
+        return Response::json(400, &rpc_error(-32600, "unsupported MCP protocol version"));
+    }
+    let Ok(message) = serde_json::from_slice::<Value>(&request.body) else {
+        return Response::json(400, &rpc_error(-32700, "the body is not JSON"));
+    };
+    match tools.respond(&message, agent) {
+        Some(answer) => Response::json(200, &answer),
+        None => Response::empty(202),
+    }
+}
+
+/// The server for agents on this computer, listening until it is dropped.
+#[derive(Debug)]
+pub struct Server {
+    listener: Listener,
+}
+
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Listener")
+            .field("port", &self.port())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Server {
+    /// Listen on `127.0.0.1:port` (any free port for 0) at the path that
+    /// holds `token`, reaching the project through `desk`.
+    pub fn start(port: u16, token: &str, desk: Arc<Desk>) -> io::Result<Self> {
+        if token.len() < 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the token is not one this server made",
+            ));
         }
-        if !body.is_empty() {
-            head.push_str("Content-Type: application/json\r\n");
-        }
-        head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
-        let _ = stream.write_all(head.as_bytes());
-        let _ = stream.write_all(body.as_bytes());
-        let _ = stream.flush();
+        let path = format!("/mcp/{token}");
+        // The port is known once bound; the handler learns it then.
+        let local = Arc::new(LocalSlot::default());
+        let listener = Listener::start(
+            port,
+            "kineto-mcp-server",
+            Arc::clone(&local) as Arc<dyn Answer>,
+        )?;
+        local.set(Local {
+            port: listener.port(),
+            path,
+            tools: Tools::new(desk),
+        });
+        Ok(Self { listener })
     }
 
+    /// The port it listens on.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.listener.port()
+    }
+}
+
+/// The local handler, set once its listener knows its port.
+#[derive(Default)]
+struct LocalSlot(std::sync::OnceLock<Local>);
+
+impl LocalSlot {
+    fn set(&self, local: Local) {
+        let _ = self.0.set(local);
+    }
+}
+
+impl Answer for LocalSlot {
+    fn answer(&self, request: &Request) -> Response {
+        match self.0.get() {
+            Some(local) => local.answer(request),
+            None => Response::empty(503),
+        }
+    }
+}
+
+struct Local {
+    port: u16,
+    /// `/mcp/<token>`.
+    path: String,
+    tools: Tools,
+}
+
+impl Local {
     /// Whether `host` names this computer at this server's port.
     fn local_host(&self, host: &str) -> bool {
         ["127.0.0.1", "localhost", "[::1]"]
@@ -340,390 +310,147 @@ impl Handler {
             .any(|name| host == format!("{name}:{}", self.port))
     }
 
-    fn answer(&self, request: &Request) -> (u16, Option<Value>) {
+    fn answer(&self, request: &Request) -> Response {
         if !request
             .header("host")
             .is_some_and(|host| self.local_host(host))
         {
-            return (403, None);
+            return Response::empty(403);
         }
         if let Some(origin) = request.header("origin") {
             let local = origin.strip_prefix("http://").is_some_and(|host| {
                 self.local_host(host) || matches!(host, "127.0.0.1" | "localhost" | "[::1]")
             });
             if !local {
-                return (403, None);
+                return Response::empty(403);
             }
         }
         if !same(&request.path, &self.path) {
-            return (404, None);
+            return Response::empty(404);
         }
-        if request.method != "POST" {
-            return (405, None);
-        }
-        if !request
-            .header("content-type")
-            .is_some_and(|kind| kind.starts_with("application/json"))
-        {
-            return (415, None);
-        }
-        if request
-            .header("mcp-protocol-version")
-            .is_some_and(|version| !PROTOCOL_VERSIONS.contains(&version))
-        {
-            return (
-                400,
-                Some(error(
-                    &Value::Null,
-                    -32600,
-                    "unsupported MCP protocol version",
-                )),
-            );
-        }
-        let Ok(message) = serde_json::from_slice::<Value>(&request.body) else {
-            return (
-                400,
-                Some(error(&Value::Null, -32700, "the body is not JSON")),
-            );
-        };
-        match self.tools.respond(&message) {
-            Some(answer) => (200, Some(answer)),
-            None => (202, None),
-        }
+        mcp(&self.tools, request, &local_agent(request))
     }
 }
 
-fn error(id: &Value, code: i64, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-}
-
-fn result(id: &Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-/// The tools, and the project they read.
-pub struct Tools {
-    project: ProjectSlot,
-}
-
-impl Tools {
-    #[must_use]
-    pub const fn new(project: ProjectSlot) -> Self {
-        Self { project }
+/// What an agent on this computer is called: the program its user agent
+/// names, as in `claude-code (on this computer)`.
+fn local_agent(request: &Request) -> String {
+    let program: String = request
+        .header("user-agent")
+        .and_then(|agent| agent.split(['/', ' ']).next())
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .take(40)
+        .collect();
+    if program.is_empty() {
+        "An agent on this computer".to_owned()
+    } else {
+        format!("{program} (on this computer)")
     }
+}
 
-    /// The answer to one JSON-RPC message; `None` for a notification, or a
-    /// response to a request this server never makes.
-    #[must_use]
-    pub fn respond(&self, message: &Value) -> Option<Value> {
-        let Some(message) = message.as_object() else {
-            return Some(error(
-                &Value::Null,
-                -32600,
-                "one JSON-RPC message, not a batch",
-            ));
-        };
-        let id = message.get("id").cloned();
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
-            // A response: this server sends no requests to answer.
-            return id.map(|id| error(&id, -32600, "not a request"));
-        };
-        let id = id?;
-        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-            return Some(error(&id, -32600, "not JSON-RPC 2.0"));
-        }
-        let params = message.get("params").cloned().unwrap_or(Value::Null);
-        Some(match method {
-            "initialize" => {
-                let asked = params
-                    .get("protocolVersion")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let version = PROTOCOL_VERSIONS
-                    .iter()
-                    .find(|version| **version == asked)
-                    .unwrap_or(&PROTOCOL_VERSIONS[0]);
-                result(
-                    &id,
-                    json!({
-                        "protocolVersion": version,
-                        "capabilities": {"tools": {"listChanged": false}},
-                        "serverInfo": {
-                            "name": "kineto",
-                            "title": "Kineto",
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
-                        "instructions": "Kineto turns a story into a film, step by step. These tools read the project open in Kineto: where each step stands, the story, its documents and its shots. They change nothing.",
-                    }),
-                )
-            }
-            "ping" => result(&id, json!({})),
-            "tools/list" => result(&id, json!({"tools": tool_list()})),
-            "tools/call" => {
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-                if !tool_list()
-                    .iter()
-                    .any(|tool| tool["name"].as_str() == Some(name))
-                {
-                    return Some(error(&id, -32602, &format!("no tool named {name:?}")));
-                }
-                let (text, is_error) = match self.call(name, &arguments) {
-                    Ok(value) => (
-                        serde_json::to_string_pretty(&value).unwrap_or_default(),
-                        false,
-                    ),
-                    Err(why) => (why, true),
-                };
-                result(
-                    &id,
-                    json!({"content": [{"type": "text", "text": text}], "isError": is_error}),
-                )
-            }
-            _ => error(&id, -32601, &format!("no method {method:?}")),
+/// The server for agents in the cloud, behind the director's tunnel,
+/// listening until it is dropped.
+#[derive(Debug)]
+pub struct PublicServer {
+    listener: Listener,
+}
+
+impl PublicServer {
+    /// Listen on `127.0.0.1:port` (any free port for 0) for the tunnel to
+    /// `issuer`, the public origin, taking OAuth access tokens that
+    /// `agents` issued.
+    pub fn start(
+        port: u16,
+        issuer: &str,
+        desk: Arc<Desk>,
+        agents: Arc<Agents>,
+    ) -> io::Result<Self> {
+        let issuer = public_origin(issuer)
+            .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
+        let public = Arc::new(Public {
+            tools: Tools::new(Arc::clone(&desk)),
+            issuer,
+            desk,
+            agents,
+        });
+        Ok(Self {
+            listener: Listener::start(port, "kineto-mcp-public", public)?,
         })
     }
 
-    fn open(&self) -> Result<CanonicalProject, String> {
-        let path = self
-            .project
-            .lock()
-            .map_err(|_| "Kineto's project is not at hand".to_owned())?
-            .clone()
-            .ok_or_else(|| "No project is open in Kineto.".to_owned())?;
-        CanonicalProject::open_read_only(&path)
-            .map_err(|error| format!("The project cannot be read: {error}"))
+    /// The port it listens on.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.listener.port()
     }
+}
 
-    fn call(&self, name: &str, arguments: &Value) -> Result<Value, String> {
-        let project = self.open()?;
-        match name {
-            "get_project" => project_overview(&project),
-            "get_story" => story(&project),
-            "get_document" => {
-                let kind = arguments
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                document(&project, kind)
+struct Public {
+    issuer: String,
+    desk: Arc<Desk>,
+    agents: Arc<Agents>,
+    tools: Tools,
+}
+
+impl Answer for Public {
+    fn answer(&self, request: &Request) -> Response {
+        // Agents in the cloud call from servers; a web page elsewhere may
+        // not call at all.
+        if request
+            .header("origin")
+            .is_some_and(|origin| origin != self.issuer)
+        {
+            return Response::empty(403);
+        }
+        let get = request.method == "GET";
+        let post = request.method == "POST";
+        match request.path.as_str() {
+            "/.well-known/oauth-protected-resource"
+            | "/.well-known/oauth-protected-resource/mcp"
+                if get =>
+            {
+                Response::json(200, &oauth::resource_metadata(&self.issuer))
             }
-            "get_shot" => {
-                let text = |field: &str| {
-                    arguments
-                        .get(field)
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned()
+            "/.well-known/oauth-authorization-server"
+            | "/.well-known/oauth-authorization-server/mcp"
+            | "/.well-known/openid-configuration"
+                if get =>
+            {
+                Response::json(200, &oauth::server_metadata(&self.issuer))
+            }
+            "/register" if post => self.agents.register(request),
+            "/authorize" if get => self.agents.authorize(&self.desk, &self.issuer, request),
+            "/token" if post => self.agents.token(&self.issuer, request),
+            "/mcp" => {
+                let challenge = |error: Option<&str>| {
+                    let mut value = format!(
+                        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"{}\"",
+                        self.issuer,
+                        oauth::SCOPE
+                    );
+                    if let Some(error) = error {
+                        value.push_str(&format!(", error=\"{error}\""));
+                    }
+                    Response::empty(401).with("WWW-Authenticate", value)
                 };
-                shot(&project, &text("scene"), &text("shot"))
+                let Some(token) = request
+                    .header("authorization")
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                else {
+                    return challenge(None);
+                };
+                match self.agents.bearer(token.trim()) {
+                    Some(agent) => mcp(&self.tools, request, &agent),
+                    None => challenge(Some("invalid_token")),
+                }
             }
-            _ => Err(format!("no tool named {name:?}")),
+            _ => Response::empty(404),
         }
     }
-}
-
-/// The tools, as `tools/list` gives them.
-fn tool_list() -> Vec<Value> {
-    let read_only = json!({"readOnlyHint": true, "openWorldHint": false});
-    vec![
-        json!({
-            "name": "get_project",
-            "title": "Where the project stands",
-            "description": "The project open in Kineto: its title, each step of making the film and where it stands (waiting, ready, awaiting_approval, done, skipped), and each scene's shots with their keyframe and video stage (missing, made, locked, stale).",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
-            "annotations": read_only,
-        }),
-        json!({
-            "name": "get_story",
-            "title": "The story",
-            "description": "The story's source text as the director gave it, and Kineto's analysis of it (characters, locations, events, candidate scenes) when there is one.",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
-            "annotations": read_only,
-        }),
-        json!({
-            "name": "get_document",
-            "title": "A document",
-            "description": "The current revision of one of the project's documents: the locked one, or the latest candidate. screenplay: the scenes, action and dialogue. bible: characters, locations and props as they must look. shot_plan: each scene's shots. preferences: the director's standing preferences.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": ["screenplay", "bible", "shot_plan", "preferences"]},
-                },
-                "required": ["kind"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        }),
-        json!({
-            "name": "get_shot",
-            "title": "A shot",
-            "description": "One shot: what it is meant to show, its keyframe candidates and which is chosen or locked, and its video, with the image and clip files as paths on this computer. Scene and shot IDs are those get_project lists.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "scene": {"type": "string"},
-                    "shot": {"type": "string"},
-                },
-                "required": ["scene", "shot"],
-                "additionalProperties": false,
-            },
-            "annotations": read_only,
-        }),
-    ]
-}
-
-const fn step_state(state: StepState) -> &'static str {
-    match state {
-        StepState::Waiting => "waiting",
-        StepState::Ready => "ready",
-        StepState::AwaitingApproval => "awaiting_approval",
-        StepState::Done => "done",
-        StepState::Skipped => "skipped",
-    }
-}
-
-const fn stage(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Missing => "missing",
-        Stage::Made => "made",
-        Stage::Locked => "locked",
-        Stage::Stale => "stale",
-    }
-}
-
-const fn revision_status(status: RevisionStatus) -> &'static str {
-    match status {
-        RevisionStatus::Candidate => "candidate",
-        RevisionStatus::Locked => "locked",
-        RevisionStatus::Superseded => "superseded",
-    }
-}
-
-fn project_overview(project: &CanonicalProject) -> Result<Value, String> {
-    let steps = workflow::status(project).map_err(|error| error.to_string())?;
-    let scenes = workflow::scenes(project).map_err(|error| error.to_string())?;
-    Ok(json!({
-        "title": project.manifest().title,
-        "steps": steps.iter().map(|step| json!({
-            "id": step.id,
-            "description": step.description,
-            "state": step_state(step.state),
-            "needs_approval": step.approval,
-            "waiting_on": step.waiting_on,
-            "changed_since": step.stale,
-        })).collect::<Vec<_>>(),
-        "scenes": scenes.iter().map(|scene| json!({
-            "scene": scene.scene_id,
-            "complete": scene.complete(),
-            "shots": scene.shots.iter().map(|shot| json!({
-                "shot": shot.shot_id,
-                "keyframe": stage(shot.keyframe),
-                "video": stage(shot.video),
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-    }))
-}
-
-/// The current revision of `kind`, as stored.
-fn current(project: &CanonicalProject, kind: DocumentKind) -> Result<Value, String> {
-    let Some(record) = revisions::current(project, kind).map_err(|error| error.to_string())? else {
-        return Ok(Value::Null);
-    };
-    let path = ProjectRelativePath::new(&record.path).map_err(|error| error.to_string())?;
-    let bytes = project
-        .root()
-        .read(&path)
-        .map_err(|error| error.to_string())?;
-    let document: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "a document is not JSON".to_owned())?;
-    Ok(json!({
-        "revision": record.revision,
-        "status": revision_status(record.status),
-        "document": document,
-    }))
-}
-
-fn story(project: &CanonicalProject) -> Result<Value, String> {
-    let revision = source::current(project).map_err(|error| error.to_string())?;
-    let text = source::read(project, &revision).map_err(|error| error.to_string())?;
-    let truncated = text.chars().count() > MAX_SOURCE_CHARS;
-    Ok(json!({
-        "source": {
-            "revision": revision.revision,
-            "text": text.chars().take(MAX_SOURCE_CHARS).collect::<String>(),
-            "truncated": truncated,
-        },
-        "analysis": current(project, DocumentKind::StoryAnalysis)?,
-    }))
-}
-
-fn document(project: &CanonicalProject, kind: &str) -> Result<Value, String> {
-    let document = match kind {
-        "screenplay" => DocumentKind::Screenplay,
-        "bible" => DocumentKind::Bible,
-        "shot_plan" => DocumentKind::ShotPlan,
-        "preferences" => DocumentKind::Preferences,
-        other => {
-            return Err(format!(
-                "{other:?} is not a document: screenplay, bible, shot_plan or preferences"
-            ));
-        }
-    };
-    let current = current(project, document)?;
-    Ok(if current.is_null() {
-        json!({"kind": kind, "revision": null, "note": "There is none yet."})
-    } else {
-        let mut current = current;
-        current["kind"] = json!(kind);
-        current
-    })
-}
-
-fn shot(project: &CanonicalProject, scene: &str, shot: &str) -> Result<Value, String> {
-    let missing =
-        || format!("There is no shot {shot:?} in scene {scene:?}: get_project lists them.");
-    let key = ShotKey::new(scene, shot).map_err(|_| missing())?;
-    if !shots_in_play(project)
-        .map_err(|error| error.to_string())?
-        .contains(&key)
-    {
-        return Err(missing());
-    }
-    let workflow = ShotWorkflow::load(project, &key).map_err(|error| error.to_string())?;
-    let snapshot = workflow.snapshot().map_err(|error| error.to_string())?;
-    let absolute =
-        |path: &ProjectRelativePath| project.root().resolve(path).to_string_lossy().into_owned();
-    let candidates = workflow
-        .candidate_media()
-        .map_err(|error| error.to_string())?
-        .iter()
-        .map(|path| path.as_ref().map(absolute))
-        .collect::<Vec<_>>();
-    let video = workflow.video_media().map_err(|error| error.to_string())?;
-    Ok(json!({
-        "scene": scene,
-        "shot": shot,
-        "intent": workflow.intent_record().map_err(|error| error.to_string())?,
-        "keyframes": {
-            "generated": snapshot.generated,
-            "chosen": snapshot.selected_index,
-            "locked": snapshot.locked,
-            "stale": snapshot.stale,
-            "candidates": candidates,
-        },
-        "video": {
-            "state": match snapshot.video {
-                VideoState::None => "none",
-                VideoState::Ready => "made",
-                VideoState::Locked => "locked",
-                VideoState::Stale => "stale",
-            },
-            "file": video.as_ref().map(absolute),
-        },
-    }))
 }
 
 #[cfg(test)]

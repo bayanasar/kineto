@@ -94,6 +94,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         setServing: (on) async {
           asked.add(on);
           if (failing) throw const KinetoProjectException(175, 'Kineto could not serve outside agents at its address');
@@ -110,7 +111,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Off'), findsOneWidget);
+    final servingPanel = find.byKey(const ValueKey<String>('serving'));
+    expect(find.descendant(of: servingPanel, matching: find.text('Off')), findsOneWidget);
     expect(find.byKey(const ValueKey<String>('serving-address')), findsNothing);
     expect(find.byKey(const ValueKey<String>('serving-renew')), findsNothing);
 
@@ -122,7 +124,7 @@ void main() {
     expect(find.text(first), findsOneWidget);
     expect(find.text('claude mcp add --transport http kineto $first'), findsOneWidget);
     expect(find.text('[mcp_servers.kineto]\nurl = "$first"'), findsOneWidget);
-    expect(find.text('Turn off'), findsOneWidget);
+    expect(find.descendant(of: servingPanel, matching: find.text('Turn off')), findsOneWidget);
 
     final renew = find.byKey(const ValueKey<String>('serving-renew'));
     await tester.ensureVisible(renew);
@@ -144,6 +146,90 @@ void main() {
     expect(find.text('Kineto could not serve outside agents at its address'), findsOneWidget);
   });
 
+  testWidgets('agents in the cloud connect through the tunnel given, and are disconnected', (tester) async {
+    const url = 'https://anton.example.ts.net:10000';
+    final asked = <Object>[];
+    var public = const KinetoPublicServing();
+    KinetoPublicServing listening({List<KinetoConnectedAgent> agents = const <KinetoConnectedAgent>[]}) =>
+        KinetoPublicServing(
+          public: true,
+          url: url,
+          address: '$url/mcp',
+          tunnel: const <String>['tailscale', 'funnel', '--https=10000', 'http://127.0.0.1:{port}'],
+          port: 41234,
+          listening: true,
+          tunnelRunning: true,
+          agents: agents,
+        );
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadServing: () async => KinetoServing(address: 'http://127.0.0.1:47615/mcp/${'a' * 64}'),
+        loadPublicServing: () async => public,
+        setPublicServing: ({required on, required url, required tunnel}) async {
+          asked.add(<Object>[on, url, tunnel]);
+          if (url.startsWith('http://')) {
+            throw const KinetoProjectException(176, 'A public address is https:// and a host');
+          }
+          public = on ? listening(agents: public.agents) : const KinetoPublicServing();
+          return public;
+        },
+        disconnectAgent: (id) async {
+          asked.add('disconnect $id');
+          public = listening();
+          return public;
+        },
+        loadSettings: () async => const KinetoProviderSettings(),
+        loadKeys: (_) async => const KinetoKeys(unavailable: null, states: <String, KinetoKeyState>{}),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final panel = find.byKey(const ValueKey<String>('public-serving'));
+    expect(find.descendant(of: panel, matching: find.text('Off')), findsOneWidget);
+
+    Future<void> tap(String key) async {
+      final button = find.byKey(ValueKey<String>(key));
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+    }
+
+    await tester.enterText(find.byKey(const ValueKey<String>('public-url')), 'http://anton.example.ts.net');
+    await tap('public-toggle');
+    expect(find.byKey(const ValueKey<String>('public-problem')), findsOneWidget);
+
+    await tester.enterText(find.byKey(const ValueKey<String>('public-url')), url);
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('public-tunnel')),
+      'tailscale\nfunnel\n --https=10000 \n\nhttp://127.0.0.1:{port}',
+    );
+    await tap('public-toggle');
+    expect(asked.last, <Object>[
+      true,
+      url,
+      <String>['tailscale', 'funnel', '--https=10000', 'http://127.0.0.1:{port}'],
+    ]);
+    expect(find.descendant(of: panel, matching: find.text('Listening')), findsOneWidget);
+    expect(find.text('$url/mcp'), findsOneWidget);
+    expect(find.text('The tunnel runs, to port 41234.'), findsOneWidget);
+
+    // An agent the director allowed is listed, and let go.
+    public = listening(agents: <KinetoConnectedAgent>[
+      KinetoConnectedAgent(id: 'c1', name: 'ChatGPT', site: 'chatgpt.com', since: DateTime.utc(2026, 10, 11, 9)),
+    ]);
+    await tap('public-save');
+    expect(find.textContaining('ChatGPT (chatgpt.com), since'), findsOneWidget);
+    await tap('agent-c1-disconnect');
+    expect(asked.last, 'disconnect c1');
+    expect(find.textContaining('ChatGPT (chatgpt.com)'), findsNothing);
+
+    await tap('public-toggle');
+    expect((asked.last as List<Object>).first, false);
+    expect(find.descendant(of: panel, matching: find.text('Off')), findsOneWidget);
+  });
+
   testWidgets('the configuration is read off the screen and again on request', (tester) async {
     var reads = 0;
     final plugins = Completer<List<KinetoPlugin>>();
@@ -151,6 +237,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (_) async => const KinetoKeys(unavailable: null, states: <String, KinetoKeyState>{}),
         loadPlugins: () {
@@ -164,8 +251,9 @@ void main() {
     );
     expect(
       find.text('Reading'),
-      findsNWidgets(5),
-      reason: 'providers, keys, plugins, servers and outside agents are read off the screen',
+      findsNWidgets(6),
+      reason: 'providers, keys, plugins, servers, outside agents and agents in the cloud are read off the '
+          'screen',
     );
     plugins.complete(_plugins);
     await tester.pumpAndSettle();
@@ -197,6 +285,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (names) async => keys(names),
         storeKey: (name, key) async => stored[name] = key,
@@ -236,6 +325,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (_) async => const KinetoKeys(
           unavailable: 'no secure storage is available: the platform failed (no Secret Service)',
@@ -272,6 +362,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -414,6 +505,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -484,6 +576,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -546,6 +639,7 @@ void main() {
       tester,
       SettingsWorkspaceScreen(
         loadServing: () async => const KinetoServing(),
+        loadPublicServing: () async => const KinetoPublicServing(),
         loadSettings: () async => const KinetoProviderSettings(
           connections: <KinetoConnection>[
             KinetoConnection(

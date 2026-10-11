@@ -146,6 +146,10 @@ final class KinetoNativeContract {
   static const int _agentKind = 70;
   static const int _connectionFieldKind = 71;
   static const int _connectionProtocolKind = 72;
+  static const int _agentAskValueKind = 73;
+  static const int _agentAskTextKind = 74;
+  static const int _publicValueKind = 75;
+  static const int _publicTextKind = 76;
 
   Map<String, int> _table(int kind) => _codes[kind] ?? const <String, int>{};
 
@@ -262,6 +266,14 @@ final class KinetoNativeContract {
 
   /// The protocols a connection may speak, by name with `_` for `-`.
   Map<String, int> get connectionProtocols => _table(_connectionProtocolKind);
+
+  /// Number and text fields of what waits for the director, by name.
+  Map<String, int> get agentAskValues => _table(_agentAskValueKind);
+  Map<String, int> get agentAskTexts => _table(_agentAskTextKind);
+
+  /// Number and text fields of where agents in the cloud stand, by name.
+  Map<String, int> get publicValues => _table(_publicValueKind);
+  Map<String, int> get publicTexts => _table(_publicTextKind);
 
   /// Names of the packed plan state's fields.
   Iterable<String> get planFields => _planFields.keys;

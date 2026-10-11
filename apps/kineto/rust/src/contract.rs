@@ -89,10 +89,13 @@ pub(crate) const PROJECT_ERR_STYLE_REFERENCE_UNUSABLE: i32 = 172;
 pub(crate) const PROJECT_ERR_SETTING_INVALID: i32 = 173;
 pub(crate) const PROJECT_ERR_SETTINGS_UNWRITABLE: i32 = 174;
 pub(crate) const PROJECT_ERR_MCP_SERVER_UNAVAILABLE: i32 = 175;
+/// The public address is not an HTTPS origin, or the tunnel command is not
+/// a program and its arguments.
+pub(crate) const PROJECT_ERR_MCP_PUBLIC_INVALID: i32 = 176;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 77] = [
+const STATUSES: [(&str, i32); 78] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -184,6 +187,7 @@ const STATUSES: [(&str, i32); 77] = [
     ("setting_invalid", PROJECT_ERR_SETTING_INVALID),
     ("settings_unwritable", PROJECT_ERR_SETTINGS_UNWRITABLE),
     ("mcp_server_unavailable", PROJECT_ERR_MCP_SERVER_UNAVAILABLE),
+    ("mcp_public_invalid", PROJECT_ERR_MCP_PUBLIC_INVALID),
     ("panic", PROJECT_ERR_PANIC),
 ];
 
@@ -1077,6 +1081,38 @@ pub(crate) const PLUGIN_TEXTS: [(&str, u32); 12] = [
     ("clip_seconds", 12),
 ];
 
+/// Number fields `kineto_mcp_server_asks_value` reads of what waits for
+/// the director.
+pub(crate) const AGENT_ASK_VALUES: [(&str, u32); 2] = [("id", 1), ("connect", 2)];
+
+/// Text fields `kineto_mcp_server_asks_text_copy` copies of what waits for
+/// the director.
+pub(crate) const AGENT_ASK_TEXTS: [(&str, u32); 3] = [("agent", 1), ("what", 2), ("cost", 3)];
+
+/// Number fields `kineto_mcp_server_public_value` reads of where agents in
+/// the cloud stand; `agent_since` is an allowed agent's.
+pub(crate) const PUBLIC_VALUES: [(&str, u32); 6] = [
+    ("public", 1),
+    ("listening", 2),
+    ("tunnel_running", 3),
+    ("port", 4),
+    ("agents", 5),
+    ("agent_since", 6),
+];
+
+/// Text fields `kineto_mcp_server_public_text_copy` copies of where agents
+/// in the cloud stand; the `agent_` ones are an allowed agent's.
+pub(crate) const PUBLIC_TEXTS: [(&str, u32); 8] = [
+    ("url", 1),
+    ("address", 2),
+    ("tunnel", 3),
+    ("tunnel_said", 4),
+    ("problem", 5),
+    ("agent_id", 6),
+    ("agent_name", 7),
+    ("agent_site", 8),
+];
+
 /// What the director decides about a suggestion.
 pub(crate) const SUGGESTION_DECISIONS: [(&str, u32); 2] = [("accept", 1), ("reject", 2)];
 
@@ -1152,6 +1188,10 @@ const ENTRY_PROVIDER_SETTING: u32 = 69;
 const ENTRY_AGENT: u32 = 70;
 const ENTRY_CONNECTION_FIELD: u32 = 71;
 const ENTRY_CONNECTION_PROTOCOL: u32 = 72;
+const ENTRY_AGENT_ASK_VALUE: u32 = 73;
+const ENTRY_AGENT_ASK_TEXT: u32 = 74;
+const ENTRY_PUBLIC_VALUE: u32 = 75;
+const ENTRY_PUBLIC_TEXT: u32 = 76;
 
 type Entry = (u32, &'static str, i64, u32);
 
@@ -1267,6 +1307,10 @@ fn entries() -> &'static [Entry] {
             ENTRY_CONNECTION_PROTOCOL,
             &CONNECTION_PROTOCOLS,
         );
+        codes(&mut entries, ENTRY_AGENT_ASK_VALUE, &AGENT_ASK_VALUES);
+        codes(&mut entries, ENTRY_AGENT_ASK_TEXT, &AGENT_ASK_TEXTS);
+        codes(&mut entries, ENTRY_PUBLIC_VALUE, &PUBLIC_VALUES);
+        codes(&mut entries, ENTRY_PUBLIC_TEXT, &PUBLIC_TEXTS);
         entries
     })
 }
@@ -1466,9 +1510,9 @@ mod tests {
             },
             PROJECT_OK
         );
-        assert_eq!(kind, ENTRY_CONNECTION_PROTOCOL);
-        assert_eq!(&name[..len as usize], b"ark_video");
-        assert_eq!((value, extra), (5, 0));
+        assert_eq!(kind, ENTRY_PUBLIC_TEXT);
+        assert_eq!(&name[..len as usize], b"agent_site");
+        assert_eq!((value, extra), (8, 0));
         assert_eq!(
             unsafe {
                 kineto_contract_entry(

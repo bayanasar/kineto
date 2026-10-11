@@ -25,8 +25,8 @@ use kineto_core::{
     llm::{DocumentModel, ModelSelectionError},
     references::ReferenceCallError,
     session::{
-        DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession, Providers,
-        Recovery, SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError,
+        AGENT_TOKEN, DocumentError, ImageWork, OpenRequest, ProductionError, ProjectSession,
+        Providers, Recovery, SessionError, SessionOptions, SessionSink, ShotCommand, SnapshotError,
         SubmitError,
     },
     speech::SpeechProvider,
@@ -65,6 +65,12 @@ const MESSAGE_VIDEO: i64 = 4;
 /// be free, or for a place among the requests under way (1); or it waited
 /// and starts now (0). A command that never waits is not reported.
 const MESSAGE_WAITING: i64 = 5;
+/// `[AGENT_STARTED, token, 0, -1, label]`: an agent outside Kineto asked
+/// for command `token`, which `label` describes (ADR-0011).
+const MESSAGE_AGENT_STARTED: i64 = 6;
+/// `[AGENT_FINISHED, token, status, shot or -1, reason]`: an agent's
+/// command ended, as a `COMPLETED` message says of the director's.
+const MESSAGE_AGENT_FINISHED: i64 = 7;
 /// The `shot` of a `RECOVERED` message for unplaced job records, and of a
 /// `COMPLETED` message for a document command.
 const NO_SHOT: i64 = -1;
@@ -134,11 +140,16 @@ struct DartPort {
 
 impl DartPort {
     fn post(&self, message: [i64; 4], reason: Option<&SessionError>) {
+        self.send(message, reason.and_then(provider_reason));
+    }
+
+    /// Post `message` with `text`, or null, in its last place.
+    fn send(&self, message: [i64; 4], text: Option<CString>) {
         let mut numbers = message.map(|number| DartCObject {
             kind: DART_COBJECT_INT64,
             value: DartCObjectValue { as_int64: number },
         });
-        let reason = reason.and_then(provider_reason);
+        let reason = text;
         let mut reason = match &reason {
             Some(text) => DartCObject {
                 kind: DART_COBJECT_STRING,
@@ -284,7 +295,7 @@ impl SessionSink for DartPort {
     fn completed(&self, token: u64, shot_index: u32, result: &Result<(), SessionError>) {
         self.post(
             [
-                MESSAGE_COMPLETED,
+                completed_kind(token),
                 i64::from_ne_bytes(token.to_ne_bytes()),
                 i64::from(session_status(result)),
                 i64::from(shot_index),
@@ -308,7 +319,7 @@ impl SessionSink for DartPort {
     fn document_completed(&self, token: u64, result: &Result<(), SessionError>) {
         self.post(
             [
-                MESSAGE_COMPLETED,
+                completed_kind(token),
                 i64::from_ne_bytes(token.to_ne_bytes()),
                 i64::from(session_status(result)),
                 NO_SHOT,
@@ -327,6 +338,28 @@ impl SessionSink for DartPort {
             ],
             None,
         );
+    }
+
+    fn agent_started(&self, token: u64, label: &str) {
+        self.send(
+            [
+                MESSAGE_AGENT_STARTED,
+                i64::from_ne_bytes(token.to_ne_bytes()),
+                i64::from(PROJECT_OK),
+                NO_SHOT,
+            ],
+            CString::new(label.replace('\0', "")).ok(),
+        );
+    }
+}
+
+/// The kind of message that says command `token` ended: an agent's, or the
+/// director's.
+const fn completed_kind(token: u64) -> i64 {
+    if token & AGENT_TOKEN == 0 {
+        MESSAGE_COMPLETED
+    } else {
+        MESSAGE_AGENT_FINISHED
     }
 }
 
@@ -350,6 +383,9 @@ unsafe fn spawn<K: SecretSource + 'static>(
     let Some(post) = post else {
         return PROJECT_ERR_INVALID_ARGUMENT;
     };
+    let path = match &request {
+        OpenRequest::Open { path } | OpenRequest::CreateText { path, .. } => path.clone(),
+    };
     match ProjectSession::spawn_choosing(
         request,
         Box::new(move || chosen_providers(&keys())),
@@ -358,6 +394,8 @@ unsafe fn spawn<K: SecretSource + 'static>(
     ) {
         Ok(session) => {
             let session = Box::into_raw(Box::new(KinetoProjectSession { session }));
+            // SAFETY: just allocated above, and not yet handed to Dart.
+            crate::mcp_server::opened(&path, unsafe { &(*session).session }, session as usize);
             // SAFETY: callers validated `out_session` as writable pointer storage.
             unsafe { ptr::write(out_session, session) };
             PROJECT_OK
@@ -467,7 +505,6 @@ pub unsafe extern "C" fn kineto_project_open(
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
-        crate::mcp_server::set_project(&path);
         // SAFETY: `out_session` was checked above.
         unsafe {
             spawn(
@@ -521,7 +558,6 @@ pub unsafe extern "C" fn kineto_project_create_text(
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
-        crate::mcp_server::set_project(&path);
         let project_id = match unsafe { utf8_owned(project_id_ptr, project_id_len) } {
             Ok(value) => value,
             Err(code) => return code,
@@ -587,6 +623,7 @@ pub unsafe extern "C" fn kineto_project_destroy(session: *mut KinetoProjectSessi
         return;
     }
     guarded((), || {
+        crate::mcp_server::closing(session as usize);
         // SAFETY: the caller contract requires ownership of this allocation.
         unsafe { drop(Box::from_raw(session)) };
     });
