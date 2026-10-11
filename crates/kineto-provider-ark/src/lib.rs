@@ -29,6 +29,12 @@ const MAX_ANSWER_BYTES: u64 = 8 * 1024 * 1024;
 pub const ASPECT_RATIOS: [(u16, u16); 6] = [(16, 9), (9, 16), (4, 3), (3, 4), (1, 1), (21, 9)];
 /// The clip lengths Seedance 2 renders, in seconds.
 pub const CLIP_SECONDS: std::ops::RangeInclusive<u8> = 4..=15;
+/// The longest prompt asked for, in characters. The service takes at most
+/// 500 Chinese characters or 1,000 English words; kineto writes its own
+/// words in English, and 2,000 characters stay well under 1,000 words. A
+/// prompt with more than 500 Chinese characters is refused by the service,
+/// which charges nothing for it.
+pub const MAX_PROMPT_CHARS: usize = 2_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);

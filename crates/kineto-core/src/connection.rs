@@ -263,6 +263,7 @@ fn video_capabilities(connection: &Connection, request: &Map<String, Value>) -> 
             .filter_map(|(width, height)| AspectRatio::new(width, height))
             .collect(),
         clip_seconds: seconds,
+        max_prompt_chars: Some(kineto_provider_ark::MAX_PROMPT_CHARS),
         start_frame_formats: frames.clone(),
         max_start_frame_bytes: Some(MAX_VIDEO_FRAME_BYTES),
         end_frame_formats: frames,

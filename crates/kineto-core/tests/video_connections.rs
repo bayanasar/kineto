@@ -470,6 +470,7 @@ fn the_price_is_the_directors_or_unknown_and_no_key_makes_nothing() {
         !priced.capabilities().audio,
         "the director turned sound off"
     );
+    assert_eq!(priced.capabilities().max_prompt_chars, Some(2_000));
 
     let unpriced = VideoProvider::connection(&connection(&service, None), &keys()).unwrap();
     assert_eq!(
