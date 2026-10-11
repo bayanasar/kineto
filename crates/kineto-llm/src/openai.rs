@@ -3,15 +3,23 @@
 //! director names with its key, or a local model server on a loopback
 //! address.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use kineto_jobs::ErrorClass;
 use kineto_providers::{LlmCapabilities, secret::SecretString};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     Billing, LlmBackend, LlmBackendInfo, LlmRequest, LlmResponse, TokenUsage,
-    http::{Auth, HttpTransport, SharedTransport, Transport, TransportFailure},
+    http::{Auth, HttpResponse, HttpTransport, SharedTransport, Transport, TransportFailure},
 };
 
 /// The provider key Kimi API jobs are recorded under, and the name its key
@@ -133,19 +141,27 @@ struct WireMessage<'a> {
 }
 
 #[derive(Serialize)]
-struct WireResponseFormat {
+struct WireResponseFormat<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<WireJsonSchema<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireJsonSchema<'a> {
+    name: &'a str,
+    schema: &'a Value,
 }
 
 #[derive(Serialize)]
 struct WireRequest<'a> {
     model: &'a str,
-    messages: Vec<WireMessage<'a>>,
+    messages: &'a [WireMessage<'a>],
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<WireResponseFormat>,
+    response_format: Option<WireResponseFormat<'a>>,
     stream: bool,
 }
 
@@ -222,6 +238,9 @@ pub struct OpenAiCompatible<T = SharedTransport> {
     api_key: Option<SecretString>,
     provider: String,
     billing: Billing,
+    /// The server refused a schema given as `json_schema`, and answered
+    /// once it was asked for `json_object` with the schema in words alone.
+    schema_refused: AtomicBool,
 }
 
 impl OpenAiCompatible {
@@ -306,7 +325,38 @@ impl<T: Transport> OpenAiCompatible<T> {
             api_key,
             provider: provider.to_owned(),
             billing,
+            schema_refused: AtomicBool::new(false),
         }
+    }
+
+    /// One request for `messages`, asking for JSON that satisfies `schema`:
+    /// as `json_schema` when `strict`, else as `json_object`.
+    fn post(
+        &self,
+        messages: &[WireMessage<'_>],
+        max_tokens: Option<u32>,
+        schema: Option<(&str, &Value)>,
+        strict: bool,
+    ) -> Result<HttpResponse, ApiError> {
+        let body = serde_json::to_vec(&WireRequest {
+            model: &self.model,
+            messages,
+            max_tokens,
+            response_format: schema.map(|(name, schema)| WireResponseFormat {
+                kind: if strict { "json_schema" } else { "json_object" },
+                json_schema: strict.then_some(WireJsonSchema { name, schema }),
+            }),
+            stream: false,
+        })
+        .map_err(|_| ApiError::Malformed("request did not encode"))?;
+        self.transport
+            .post_json(
+                &format!("{}/chat/completions", self.base_url),
+                self.api_key.as_ref().map(Auth::Bearer),
+                &[],
+                &body,
+            )
+            .map_err(ApiError::Transport)
     }
 }
 
@@ -375,26 +425,26 @@ impl<T: Transport> LlmBackend for OpenAiCompatible<T> {
                 role: message.role.as_str(),
                 content: &message.content,
             }))
-            .collect();
-        let body = serde_json::to_vec(&WireRequest {
-            model: &self.model,
-            messages,
-            max_tokens: request.max_output_tokens,
-            response_format: request.schema.as_ref().map(|_| WireResponseFormat {
-                kind: "json_object",
-            }),
-            stream: false,
-        })
-        .map_err(|_| ApiError::Malformed("request did not encode"))?;
-        let response = self
-            .transport
-            .post_json(
-                &format!("{}/chat/completions", self.base_url),
-                self.api_key.as_ref().map(Auth::Bearer),
-                &[],
-                &body,
-            )
-            .map_err(ApiError::Transport)?;
+            .collect::<Vec<_>>();
+        let parsed = request.schema.as_ref().and_then(|schema| {
+            serde_json::from_str::<Value>(&schema.schema_json)
+                .ok()
+                .map(|value| (schema.name.as_str(), value))
+        });
+        let schema = parsed.as_ref().map(|(name, value)| (*name, value));
+        // Given as `json_schema`, the schema binds the answer; a model asked
+        // for any JSON object, with the schema in words alone, may leave
+        // fields out. A server that cannot read it refuses it, which costs
+        // nothing, and is asked once more for `json_object`; one that then
+        // answers is not given the schema again.
+        let strict = schema.is_some() && !self.schema_refused.load(Ordering::Relaxed);
+        let mut response = self.post(&messages, request.max_output_tokens, schema, strict)?;
+        if strict && matches!(response.status, 400 | 422) {
+            response = self.post(&messages, request.max_output_tokens, schema, false)?;
+            if (200..300).contains(&response.status) {
+                self.schema_refused.store(true, Ordering::Relaxed);
+            }
+        }
 
         if !(200..300).contains(&response.status) {
             let error = serde_json::from_slice::<WireErrorAnswer>(&response.body)
@@ -464,7 +514,8 @@ mod tests {
     type Sent = (String, Option<String>, Vec<u8>);
 
     struct Recorded {
-        answer: Result<HttpResponse, TransportFailure>,
+        /// Answers in turn; the last is given again to any further request.
+        answers: Mutex<Vec<Result<HttpResponse, TransportFailure>>>,
         sent: Mutex<Vec<Sent>>,
     }
 
@@ -485,14 +536,25 @@ mod tests {
                 auth.map(|auth| auth.key().expose().to_owned()),
                 body.to_vec(),
             ));
-            self.answer.clone()
+            let mut answers = self.answers.lock().unwrap();
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0].clone()
+            }
         }
     }
 
     fn backend(answer: Result<HttpResponse, TransportFailure>) -> OpenAiCompatible<Recorded> {
+        backend_answering(vec![answer])
+    }
+
+    fn backend_answering(
+        answers: Vec<Result<HttpResponse, TransportFailure>>,
+    ) -> OpenAiCompatible<Recorded> {
         OpenAiCompatible::with_transport(
             Recorded {
-                answer,
+                answers: Mutex::new(answers),
                 sent: Mutex::new(Vec::new()),
             },
             "https://api.example.test/v1/",
@@ -574,7 +636,12 @@ mod tests {
         assert_eq!(key.as_deref(), Some(KEY));
         let body: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["model"], "kimi-k3");
-        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "analysis");
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"],
+            serde_json::json!({"type": "object"})
+        );
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], false);
         let roles = body["messages"]
@@ -591,6 +658,71 @@ mod tests {
                 .contains("`analysis`")
         );
         assert!(!String::from_utf8_lossy(&sent[0].2).contains(KEY));
+    }
+
+    #[test]
+    fn a_server_that_refuses_the_schema_is_asked_for_json_with_it_in_words() {
+        let answered = || {
+            json(
+                200,
+                r#"{"choices":[{"message":{"content":"{\"ok\":true}"},"finish_reason":"stop"}]}"#,
+            )
+        };
+        let refused = || {
+            json(
+                400,
+                r#"{"type":"error","error":{"type":"bad_request_error","message":"invalid params, Mismatch type string with value array"}}"#,
+            )
+        };
+        let formats = |backend: &OpenAiCompatible<Recorded>| {
+            backend
+                .transport
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, _, body)| {
+                    let body: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    let format = body["response_format"].clone();
+                    assert_eq!(
+                        format.get("json_schema").is_some(),
+                        format["type"] == "json_schema"
+                    );
+                    format["type"].as_str().unwrap().to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let refusing = backend_answering(vec![refused(), answered()]);
+        assert_eq!(
+            refusing.complete(&request()).unwrap().text,
+            r#"{"ok":true}"#
+        );
+        assert_eq!(formats(&refusing), ["json_schema", "json_object"]);
+        // Once it answered without the schema, it is not given it again.
+        refusing.complete(&request()).unwrap();
+        assert_eq!(
+            formats(&refusing),
+            ["json_schema", "json_object", "json_object"]
+        );
+
+        // Refused either way, the schema was not what it refused.
+        let failing = backend_answering(vec![refused(), refused(), answered()]);
+        assert!(failing.complete(&request()).is_err());
+        failing.complete(&request()).unwrap();
+        assert_eq!(
+            formats(&failing),
+            ["json_schema", "json_object", "json_schema"]
+        );
+
+        // A request without a schema asks for no format at all.
+        let plain = backend(answered());
+        let mut request = request();
+        request.schema = None;
+        plain.complete(&request).unwrap();
+        let sent = plain.transport.sent.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&sent[0].2).unwrap();
+        assert!(body.get("response_format").is_none());
     }
 
     #[test]
