@@ -468,6 +468,7 @@ impl Desk {
             None => Charge::Free,
             Some(image) => match image.kind {
                 ImageProviderKind::LocalDemo | ImageProviderKind::Agent => Charge::Free,
+                _ if image.cost_known && image.generation_cost_micros == 0 => Charge::Free,
                 _ if image.cost_known => Charge::Paid(dollars(image.generation_cost_micros)),
                 _ => Charge::Paid("cost unknown".to_owned()),
             },
@@ -479,14 +480,16 @@ impl Desk {
         match session.video_provider() {
             None => Charge::Free,
             Some(video) if video.kind == VideoProviderKind::LocalDemo => Charge::Free,
-            Some(_) => Charge::Paid(
-                session
-                    .video_estimate(shot_index)
-                    .ok()
-                    .flatten()
-                    .and_then(|estimate| estimate.cost_micros)
-                    .map_or_else(|| "cost unknown".to_owned(), dollars),
-            ),
+            Some(_) => match session
+                .video_estimate(shot_index)
+                .ok()
+                .flatten()
+                .and_then(|estimate| estimate.cost_micros)
+            {
+                Some(0) => Charge::Free,
+                Some(micros) => Charge::Paid(dollars(micros)),
+                None => Charge::Paid("cost unknown".to_owned()),
+            },
         }
     }
 }
