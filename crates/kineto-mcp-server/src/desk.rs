@@ -432,6 +432,18 @@ impl Desk {
         id
     }
 
+    /// Take back request `id` while it waits: it lapses unanswered.
+    pub fn withdraw(&self, id: u64) {
+        let mut book = lock(&self.book);
+        if let Some(entry) = book.find(id)
+            && matches!(entry.state, State::Waiting)
+        {
+            entry.state = State::Lapsed;
+        }
+        drop(book);
+        self.decided.notify_all();
+    }
+
     /// The director's word on request `id` to connect, waiting at most
     /// `wait` for it.
     pub fn verdict(&self, id: u64, wait: Duration) -> Verdict {

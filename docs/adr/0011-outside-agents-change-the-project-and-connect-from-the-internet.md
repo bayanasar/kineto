@@ -45,7 +45,7 @@ That listener takes only OAuth access tokens; the local address's token is not a
 - `/.well-known/oauth-protected-resource` (and `/mcp` after it): the resource `<origin>/mcp`, its authorization server, scope `kineto`.
 - `/.well-known/oauth-authorization-server` (and `/.well-known/openid-configuration`): endpoints, `code` only, PKCE `S256` only, public clients (`none`), and `authorization_response_iss_parameter_supported`.
 - `/register`: dynamic client registration. Redirect URIs must be HTTPS, or HTTP to this computer, without a fragment.
-- `/authorize`: the authorization code flow. The agent's request waits in Kineto's window ("ChatGPT asks to connect from the internet, returning to chatgpt.com"), never on a web page anyone could open; the browser page reloads itself until the director answers, then returns to the agent with a code or `access_denied`, and with `iss`.
+- `/authorize`: the authorization code flow. The agent's request waits in Kineto's window ("ChatGPT asks to connect from the internet, returning to chatgpt.com"), never on a web page anyone could open; the browser page reloads itself until the director answers, then returns to the agent with a code or `access_denied`, and with `iss`. At most five wait at once, since anyone can ask through the public address; a sixth is told to try later, and one unanswered for ten minutes lapses and leaves the window.
 - `/token`: a code with its verifier (once, within 60 seconds), or a refresh token, for an access token of one hour and a refresh token, both turned over at each refresh. A `resource` other than this server's is refused.
 - `/mcp`: MCP as on the local address, with `Authorization: Bearer`. Without a valid token it answers 401 with `WWW-Authenticate` naming the resource metadata.
 

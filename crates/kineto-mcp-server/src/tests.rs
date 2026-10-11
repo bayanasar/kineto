@@ -872,6 +872,18 @@ fn an_agent_in_the_cloud_connects_once_the_director_allows_it() {
             .contains("error=access_denied")
     );
 
+    // Anyone can ask through the public address, so only a few wait at
+    // once, and the window never fills.
+    let mut statuses = Vec::new();
+    for _ in 0..6 {
+        statuses.push(exchange(port, &authorize(verifier), "").0);
+    }
+    assert_eq!(statuses, [200, 200, 200, 200, 200, 429]);
+    assert_eq!(desk.waiting().len(), 5);
+    for waiting in desk.waiting() {
+        assert!(desk.decide(waiting.id, false));
+    }
+
     // A page elsewhere, an unknown client, and a redirect it never
     // registered are refused.
     let (status, _, _) = exchange(

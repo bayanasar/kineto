@@ -192,6 +192,7 @@ const fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
+        429 => "Too Many Requests",
         _ => "Error",
     }
 }

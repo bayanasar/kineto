@@ -45,7 +45,9 @@ const PENDING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PAGE_WAIT: Duration = Duration::from_secs(2);
 const MAX_CLIENTS: usize = 64;
 const MAX_GRANTS: usize = 5;
-const MAX_PENDING: usize = 20;
+/// How many agents may wait for the director at once; anyone can ask
+/// through the public address, and each request reaches the window.
+const MAX_PENDING: usize = 5;
 const MAX_REDIRECTS: usize = 5;
 const MAX_URI_CHARS: usize = 512;
 const MAX_NAME_CHARS: usize = 60;
@@ -473,6 +475,18 @@ impl Agents {
         let Ok(id) = random(18) else {
             return Response::empty(500);
         };
+        let mut pending = lock(&self.pending);
+        Self::lapse(desk, &mut pending);
+        if pending.len() >= MAX_PENDING {
+            return Response::html(
+                429,
+                page(
+                    "Too many agents are waiting",
+                    "Kineto's director has not answered the agents already asking. Try again later.",
+                    None,
+                ),
+            );
+        }
         let ask = desk.ask_to_connect(
             &client.name,
             format!(
@@ -480,11 +494,6 @@ impl Agents {
                 site(&redirect_uri)
             ),
         );
-        let mut pending = lock(&self.pending);
-        pending.retain(|pending| pending.at.elapsed() < PENDING_LIFETIME);
-        if pending.len() >= MAX_PENDING {
-            pending.remove(0);
-        }
         pending.push(Pending {
             id: id.clone(),
             client: client.id,
@@ -496,6 +505,18 @@ impl Agents {
         });
         drop(pending);
         Self::waiting_page(&client.name, &id)
+    }
+
+    /// Forget authorizations that waited too long, and take their requests
+    /// out of the window.
+    fn lapse(desk: &Desk, pending: &mut Vec<Pending>) {
+        pending.retain(|pending| {
+            let waiting = pending.at.elapsed() < PENDING_LIFETIME;
+            if !waiting {
+                desk.withdraw(pending.ask);
+            }
+            waiting
+        });
     }
 
     fn waiting_page(name: &str, pending: &str) -> Response {
@@ -515,7 +536,7 @@ impl Agents {
     /// Where authorization `pending` stands, once the director answered.
     fn follow(&self, desk: &Desk, issuer: &str, pending: &str) -> Response {
         let mut all = lock(&self.pending);
-        all.retain(|pending| pending.at.elapsed() < PENDING_LIFETIME);
+        Self::lapse(desk, &mut all);
         let Some(index) = all.iter().position(|known| same(&known.id, pending)) else {
             return Response::html(
                 400,
