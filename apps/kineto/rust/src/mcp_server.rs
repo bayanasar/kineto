@@ -174,24 +174,13 @@ mod tests {
         net::TcpStream,
     };
 
-    fn copy_tree(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let target = to.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_tree(&entry.path(), &target);
-            } else {
-                std::fs::copy(entry.path(), target).unwrap();
-            }
-        }
-    }
-
-    /// Ask the server at `address` where the project stands.
-    fn get_project(address: &str) -> String {
+    /// Ask the server at `address` for its tools. Not for a project: every
+    /// test that opens one names it the project the server reads, so which
+    /// one that is here depends on the tests running beside this one.
+    fn list_tools(address: &str) -> String {
         let rest = address.strip_prefix("http://").unwrap();
         let (host, path) = rest.split_once('/').unwrap();
-        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_project","arguments":{}}}"#;
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let mut stream = TcpStream::connect(host).unwrap();
         write!(
             stream,
@@ -211,21 +200,14 @@ mod tests {
         let path = directory
             .join("kineto")
             .join(kineto_mcp_server::SERVER_FILE);
-        let film = directory.join("film");
-        copy_tree(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/projects/planned"),
-            &film,
-        );
-        set_project(&film);
-
         assert_eq!(resume(&path), PROJECT_OK, "off: nothing to resume");
         assert_eq!(address(), "");
         assert_eq!(set_enabled(&path, true), PROJECT_OK);
         let first = address();
         assert!(first.starts_with("http://127.0.0.1:"), "{first}");
-        let answer = get_project(&first);
+        let answer = list_tools(&first);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-        assert!(answer.contains(r#""isError":false"#), "{answer}");
+        assert!(answer.contains(r#""name":"get_shot""#), "{answer}");
 
         assert_eq!(set_enabled(&path, false), PROJECT_OK);
         assert_eq!(address(), "");
