@@ -85,12 +85,72 @@ void main() {
     expect(find.byType(TextField), findsNothing);
   });
 
+  testWidgets('outside agents are let in at an address, given a new one, and shut out', (tester) async {
+    final first = 'http://127.0.0.1:47615/mcp/${'a' * 64}';
+    final second = 'http://127.0.0.1:47616/mcp/${'b' * 64}';
+    final asked = <Object>[];
+    var failing = false;
+    await _pump(
+      tester,
+      SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
+        setServing: (on) async {
+          asked.add(on);
+          if (failing) throw const KinetoProjectException(175, 'Kineto could not serve outside agents at its address');
+          return KinetoServing(address: on ? first : '');
+        },
+        renewServing: () async {
+          asked.add('renew');
+          return KinetoServing(address: second);
+        },
+        loadSettings: () async => const KinetoProviderSettings(),
+        loadKeys: (_) async => const KinetoKeys(unavailable: null, states: <String, KinetoKeyState>{}),
+        loadPlugins: () async => const <KinetoPlugin>[],
+        loadServers: () async => const <KinetoMcpServer>[],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Off'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('serving-address')), findsNothing);
+    expect(find.byKey(const ValueKey<String>('serving-renew')), findsNothing);
+
+    final toggle = find.byKey(const ValueKey<String>('serving-toggle'));
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(asked, <Object>[true]);
+    expect(find.text(first), findsOneWidget);
+    expect(find.text('claude mcp add --transport http kineto $first'), findsOneWidget);
+    expect(find.text('[mcp_servers.kineto]\nurl = "$first"'), findsOneWidget);
+    expect(find.text('Turn off'), findsOneWidget);
+
+    final renew = find.byKey(const ValueKey<String>('serving-renew'));
+    await tester.ensureVisible(renew);
+    await tester.tap(renew);
+    await tester.pumpAndSettle();
+    expect(find.text(second), findsOneWidget);
+    expect(find.text(first), findsNothing);
+
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(asked, <Object>[true, 'renew', false]);
+    expect(find.byKey(const ValueKey<String>('serving-address')), findsNothing);
+
+    failing = true;
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(find.text('Kineto could not serve outside agents at its address'), findsOneWidget);
+  });
+
   testWidgets('the configuration is read off the screen and again on request', (tester) async {
     var reads = 0;
     final plugins = Completer<List<KinetoPlugin>>();
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (_) async => const KinetoKeys(unavailable: null, states: <String, KinetoKeyState>{}),
         loadPlugins: () {
@@ -104,8 +164,8 @@ void main() {
     );
     expect(
       find.text('Reading'),
-      findsNWidgets(4),
-      reason: 'providers, keys, plugins and servers are read off the screen',
+      findsNWidgets(5),
+      reason: 'providers, keys, plugins, servers and outside agents are read off the screen',
     );
     plugins.complete(_plugins);
     await tester.pumpAndSettle();
@@ -136,6 +196,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (names) async => keys(names),
         storeKey: (name, key) async => stored[name] = key,
@@ -174,6 +235,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => const KinetoProviderSettings(),
         loadKeys: (_) async => const KinetoKeys(
           unavailable: 'no secure storage is available: the platform failed (no Secret Service)',
@@ -209,6 +271,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -350,6 +413,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -419,6 +483,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => settings,
         setSetting: (setting, value) async {
           chosen.add(<KinetoProviderSetting, String>{setting: value});
@@ -480,6 +545,7 @@ void main() {
     await _pump(
       tester,
       SettingsWorkspaceScreen(
+        loadServing: () async => const KinetoServing(),
         loadSettings: () async => const KinetoProviderSettings(
           connections: <KinetoConnection>[
             KinetoConnection(

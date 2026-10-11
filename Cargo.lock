@@ -815,6 +815,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kineto-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "kineto-core",
+ "kineto-plugins",
+ "kineto-project",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "kineto-native"
 version = "0.1.0"
 dependencies = [
@@ -822,6 +835,7 @@ dependencies = [
  "kineto-jobs",
  "kineto-keychain",
  "kineto-llm",
+ "kineto-mcp-server",
  "kineto-plugins",
  "kineto-project",
  "kineto-providers",

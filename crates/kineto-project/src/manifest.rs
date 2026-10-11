@@ -258,10 +258,32 @@ impl CanonicalProject {
         Self::open_with(path.as_ref(), PROJECT_FORMAT_VERSION, fs::File::try_lock)
     }
 
+    /// Open the project only to read it, while a session may be writing it:
+    /// it takes no lock and never writes. Every file it reads is one a
+    /// writer replaced whole, so it reads one version or the next, never
+    /// half of one.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, ProjectStoreError> {
+        Self::open_with_access(
+            path.as_ref(),
+            PROJECT_FORMAT_VERSION,
+            fs::File::try_lock,
+            true,
+        )
+    }
+
     fn open_with(
         path: &Path,
         supported_version: u32,
         try_lock: TryLockFn,
+    ) -> Result<Self, ProjectStoreError> {
+        Self::open_with_access(path, supported_version, try_lock, false)
+    }
+
+    fn open_with_access(
+        path: &Path,
+        supported_version: u32,
+        try_lock: TryLockFn,
+        read_only: bool,
     ) -> Result<Self, ProjectStoreError> {
         let root = ProjectRoot::open(path).map_err(ProjectStoreError::Fs)?;
         let manifest_path = ProjectRelativePath::new(PROJECT_MANIFEST_PATH)
@@ -271,8 +293,12 @@ impl CanonicalProject {
             std::str::from_utf8(&manifest_bytes).map_err(ProjectStoreError::Utf8)?;
         let manifest =
             ProjectManifest::from_toml(manifest_text).map_err(ProjectStoreError::Manifest)?;
-        let access = format_access(manifest.format_version, supported_version)
-            .map_err(ProjectStoreError::Manifest)?;
+        let access = match format_access(manifest.format_version, supported_version)
+            .map_err(ProjectStoreError::Manifest)?
+        {
+            _ if read_only => ProjectAccess::ReadOnly,
+            access => access,
+        };
         let source_path = manifest
             .source_relative_path()
             .map_err(ProjectStoreError::Manifest)?;
@@ -847,6 +873,22 @@ future_workflow = "keep-me-too"
         drop(first);
         let reopened = CanonicalProject::open(&target).unwrap();
         assert_eq!(reopened.access(), ProjectAccess::ReadWrite);
+    }
+
+    #[test]
+    fn a_project_is_read_while_its_writer_holds_the_lock() {
+        let temp = TempDir::new();
+        let target = temp.path.join("film");
+        let writer = CanonicalProject::create(&target, manifest(), b"source\n").unwrap();
+        let reader = CanonicalProject::open_read_only(&target).unwrap();
+        assert!(reader.is_read_only() && !writer.is_read_only());
+        assert_eq!(reader.manifest().title, writer.manifest().title);
+        drop(writer);
+        // It held nothing: a writer opens after it as before.
+        assert_eq!(
+            CanonicalProject::open(&target).unwrap().access(),
+            ProjectAccess::ReadWrite
+        );
     }
 
     #[test]

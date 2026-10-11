@@ -1509,6 +1509,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'style_reference_unusable': 172,
   'setting_invalid': 173,
   'settings_unwritable': 174,
+  'mcp_server_unavailable': 175,
   'panic': 199,
 };
 
@@ -1591,6 +1592,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   172: 'This image cannot be a style: use a JPEG, PNG or WebP of at most 20 MB that the image provider takes as a style reference',
   173: 'That choice cannot be saved: a server address must be https:// or http:// to this computer, a key name lowercase letters, digits and _; or the provider settings (providers.toml) cannot be read',
   174: 'The provider settings could not be written to Kineto\'s configuration folder',
+  175: 'Kineto could not serve outside agents at its address: its port is taken, or nothing may listen; ask for a new address',
   199: 'Native project call failed unexpectedly',
 };
 

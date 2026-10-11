@@ -370,7 +370,7 @@ Architecture:
 
 The core workflow remains functional without MCP. MCP output is untrusted data and cannot authorize provider spend, arbitrary process execution, or unrestricted filesystem writes.
 
-Kineto is an MCP client only (ADR-0007). It connects to stdio servers the user registers in Kineto's configuration, calls only the tools each entry allows, and only when the director asks. It offers no sampling, roots or elicitation. A tool's text result becomes a reference: project state under `references/`, with its source, attached to the world or to bible entries, given to the bible's prompts as material, and recorded as a dependency so a changed reference makes the bible stale.
+Kineto is an MCP client (ADR-0007), and, when the director turns it on, an MCP server for agents outside it (ADR-0010): on `127.0.0.1`, at an address that holds a random token, over Streamable HTTP, with tools that only read the open project (`get_project`, `get_story`, `get_document`, `get_shot`). As a client, it connects to stdio servers the user registers in Kineto's configuration, calls only the tools each entry allows, and only when the director asks. It offers no sampling, roots or elicitation. A tool's text result becomes a reference: project state under `references/`, with its source, attached to the world or to bible entries, given to the bible's prompts as material, and recorded as a dependency so a changed reference makes the bible stale.
 
 ## Secrets
 

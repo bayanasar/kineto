@@ -30,6 +30,9 @@ Future<void> run({Future<String?> Function()? pickImage}) async {
   final mediaProblem = MediaKitEngine.initialize();
   final media = mediaProblem == null ? const MediaKitEngine() : UnavailableMedia(mediaProblem);
   final engine = KinetoEngine.open();
+  // Outside agents the director let in are served again, beside the
+  // project; Settings says why when they cannot be.
+  unawaited(resumeKinetoServingInBackground().then((_) {}, onError: (Object _) {}));
   try {
     final project = await _openDemoProject();
     runApp(

@@ -88,10 +88,11 @@ pub(crate) const PROJECT_ERR_KEYCHAIN_FAILED: i32 = 171;
 pub(crate) const PROJECT_ERR_STYLE_REFERENCE_UNUSABLE: i32 = 172;
 pub(crate) const PROJECT_ERR_SETTING_INVALID: i32 = 173;
 pub(crate) const PROJECT_ERR_SETTINGS_UNWRITABLE: i32 = 174;
+pub(crate) const PROJECT_ERR_MCP_SERVER_UNAVAILABLE: i32 = 175;
 pub(crate) const PROJECT_ERR_PANIC: i32 = 199;
 
 /// Every project status code, by the name Dart knows it by.
-const STATUSES: [(&str, i32); 76] = [
+const STATUSES: [(&str, i32); 77] = [
     ("ok", PROJECT_OK),
     ("invalid_argument", PROJECT_ERR_INVALID_ARGUMENT),
     ("invalid_utf8", PROJECT_ERR_INVALID_UTF8),
@@ -182,6 +183,7 @@ const STATUSES: [(&str, i32); 76] = [
     ),
     ("setting_invalid", PROJECT_ERR_SETTING_INVALID),
     ("settings_unwritable", PROJECT_ERR_SETTINGS_UNWRITABLE),
+    ("mcp_server_unavailable", PROJECT_ERR_MCP_SERVER_UNAVAILABLE),
     ("panic", PROJECT_ERR_PANIC),
 ];
 

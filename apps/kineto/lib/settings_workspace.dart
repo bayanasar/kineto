@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:wabisabi/wabisabi.dart';
 
 import 'kineto_controls.dart';
@@ -23,6 +24,9 @@ class SettingsWorkspaceScreen extends StatefulWidget {
     this.deleteKey = deleteKinetoKeyInBackground,
     this.loadPlugins = loadKinetoPluginsInBackground,
     this.loadServers = loadKinetoMcpServersInBackground,
+    this.loadServing = resumeKinetoServingInBackground,
+    this.setServing = setKinetoServingInBackground,
+    this.renewServing = renewKinetoServingAddressInBackground,
     this.onChanged,
     super.key,
   });
@@ -50,6 +54,13 @@ class SettingsWorkspaceScreen extends StatefulWidget {
   /// Reads the MCP servers and their tools, likewise.
   final Future<List<KinetoMcpServer>> Function() loadServers;
 
+  /// Whether outside agents can read the project, and where; starts or
+  /// stops serving them, or gives a new address. Starting writes a file
+  /// and binds a port, so these run off the UI thread.
+  final Future<KinetoServing> Function() loadServing;
+  final Future<KinetoServing> Function(bool on) setServing;
+  final Future<KinetoServing> Function() renewServing;
+
   /// Told when a choice, a key or the configuration changed, so the open
   /// project takes it up when the director goes back to it.
   final VoidCallback? onChanged;
@@ -71,6 +82,9 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
   List<KinetoMcpServer>? _servers;
   String? _pluginsProblem;
   String? _serversProblem;
+  KinetoServing? _serving;
+  bool _servingWorking = false;
+  String? _servingProblem;
 
   @override
   void initState() {
@@ -103,7 +117,16 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
       }
     }
 
-    await Future.wait(<Future<void>>[_readSettings(), plugins(), servers()]);
+    Future<void> serving() async {
+      try {
+        _serving = await widget.loadServing();
+        _servingProblem = null;
+      } on Object catch (error) {
+        _servingProblem = problem(error);
+      }
+    }
+
+    await Future.wait(<Future<void>>[_readSettings(), plugins(), servers(), serving()]);
     if (mounted) setState(() {});
     await _readKeys();
     if (mounted) setState(() {});
@@ -240,8 +263,28 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
     });
   }
 
+  /// Start or stop serving outside agents, or give them a new address.
+  Future<void> _changeServing(Future<KinetoServing> Function() change) async {
+    setState(() {
+      _servingWorking = true;
+      _servingProblem = null;
+    });
+    try {
+      _serving = await change();
+    } on Object catch (error) {
+      _servingProblem = _problem(error);
+    }
+    if (!mounted) return;
+    setState(() => _servingWorking = false);
+  }
+
   @override
   Widget build(BuildContext context) => SettingsWorkspaceView(
+        serving: _serving,
+        servingWorking: _servingWorking,
+        servingProblem: _servingProblem,
+        onServe: (on) => _changeServing(() => widget.setServing(on)),
+        onRenewServing: () => _changeServing(widget.renewServing),
         settings: _settings,
         settingsProblem: _settingsProblem,
         settingWorking: _settingWorking,
@@ -281,6 +324,11 @@ const List<KinetoModality> _connectable = KinetoModality.values;
 
 class SettingsWorkspaceView extends StatelessWidget {
   const SettingsWorkspaceView({
+    this.serving,
+    this.servingWorking = false,
+    this.servingProblem,
+    this.onServe,
+    this.onRenewServing,
     this.settings,
     this.settingsProblem,
     this.settingWorking = false,
@@ -302,6 +350,13 @@ class SettingsWorkspaceView extends StatelessWidget {
     this.onReload,
     super.key,
   });
+
+  /// Whether outside agents can read the project; null while it is read.
+  final KinetoServing? serving;
+  final bool servingWorking;
+  final String? servingProblem;
+  final void Function(bool on)? onServe;
+  final VoidCallback? onRenewServing;
 
   /// The provider choices; null while they are read.
   final KinetoProviderSettings? settings;
@@ -368,8 +423,16 @@ class SettingsWorkspaceView extends StatelessWidget {
             ),
           _keysPanel(context),
         ],
-        // The programs the director registered.
+        // Agents outside Kineto, and the programs the director registered.
         main: <Widget>[
+          _ServingPanel(
+            key: const ValueKey<String>('serving'),
+            serving: serving,
+            working: servingWorking,
+            problem: servingProblem,
+            onServe: onServe,
+            onRenew: onRenewServing,
+          ),
           const Text(
             'Plugins and MCP servers are programs you install yourself and register in Kineto\'s '
             'configuration folder (KINETO_CONFIG_HOME, or kineto under your configuration '
@@ -880,6 +943,103 @@ class _ProvidersPanel extends StatelessWidget {
             const SizedBox(height: 12),
             _choice(context, KinetoProviderSetting.speech, 'Speech'),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Whether agents outside Kineto can read the open project over MCP, and
+/// how to point one at it.
+class _ServingPanel extends StatelessWidget {
+  const _ServingPanel({
+    required this.serving,
+    required this.working,
+    required this.problem,
+    required this.onServe,
+    required this.onRenew,
+    super.key,
+  });
+
+  final KinetoServing? serving;
+  final bool working;
+  final String? problem;
+  final void Function(bool on)? onServe;
+  final VoidCallback? onRenew;
+
+  Widget _copyable(String key, String text) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Expanded(child: SelectableText(text, key: ValueKey<String>(key))),
+          const SizedBox(width: 8),
+          KinetoButton(
+            key: ValueKey<String>('$key-copy'),
+            onPressed: () => Clipboard.setData(ClipboardData(text: text)),
+            child: const Text('Copy'),
+          ),
+        ],
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final serving = this.serving;
+    final on = serving?.on ?? false;
+    final ready = serving != null && !working && onServe != null;
+    return WabPanel(
+      title: 'Outside agents (MCP)',
+      trailing: serving == null
+          ? WabStatusBadge(problem == null ? 'Reading' : 'Unreadable',
+              kind: problem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
+          : on
+              ? const WabStatusBadge('On', kind: WabBadgeKind.done)
+              : const WabStatusBadge('Off', kind: WabBadgeKind.neutral),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'Turned on, agents such as Claude Code, Codex or Claude Desktop can read the project open '
+            'in Kineto: where each step stands, the story, its documents and its shots. They can '
+            'change nothing. Only programs on this computer that have the address can connect, and '
+            'Kineto keeps serving them each time it starts until you turn it off.',
+          ),
+          if (problem != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Text(problem!, key: const ValueKey<String>('serving-problem')),
+          ],
+          if (on) ...<Widget>[
+            const SizedBox(height: 12),
+            _copyable('serving-address', serving!.address),
+            const SizedBox(height: 12),
+            const Text('Claude Code: run'),
+            _copyable('serving-claude-code', serving.claudeCode),
+            const SizedBox(height: 8),
+            const Text('Codex: add to ~/.codex/config.toml'),
+            _copyable('serving-codex', serving.codex),
+            const SizedBox(height: 8),
+            const Text(
+              'ChatGPT and claude.ai connect only to addresses on the internet, over https. Kineto '
+              'does not open this computer to the internet; a tunnel you run yourself can.',
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              KinetoButton(
+                key: const ValueKey<String>('serving-toggle'),
+                primary: !on,
+                onPressed: ready ? () => onServe!(!on) : null,
+                child: Text(on ? 'Turn off' : 'Turn on'),
+              ),
+              if (on)
+                KinetoButton(
+                  key: const ValueKey<String>('serving-renew'),
+                  onPressed: ready && onRenew != null ? onRenew : null,
+                  child: const Text('New address'),
+                ),
+            ],
+          ),
         ],
       ),
     );

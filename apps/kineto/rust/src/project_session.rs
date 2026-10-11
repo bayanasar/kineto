@@ -467,6 +467,7 @@ pub unsafe extern "C" fn kineto_project_open(
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
+        crate::mcp_server::set_project(&path);
         // SAFETY: `out_session` was checked above.
         unsafe {
             spawn(
@@ -520,6 +521,7 @@ pub unsafe extern "C" fn kineto_project_create_text(
             Ok(_) => return PROJECT_ERR_INVALID_ARGUMENT,
             Err(code) => return code,
         };
+        crate::mcp_server::set_project(&path);
         let project_id = match unsafe { utf8_owned(project_id_ptr, project_id_len) } {
             Ok(value) => value,
             Err(code) => return code,

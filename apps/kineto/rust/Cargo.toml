@@ -16,6 +16,7 @@ kineto-core = { path = "../../../crates/kineto-core" }
 kineto-jobs = { path = "../../../crates/kineto-jobs" }
 kineto-keychain = { path = "../../../crates/kineto-keychain" }
 kineto-llm = { path = "../../../crates/kineto-llm" }
+kineto-mcp-server = { path = "../../../crates/kineto-mcp-server" }
 kineto-plugins = { path = "../../../crates/kineto-plugins" }
 kineto-project = { path = "../../../crates/kineto-project" }
 kineto-providers = { path = "../../../crates/kineto-providers" }
