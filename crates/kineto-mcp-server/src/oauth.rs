@@ -381,18 +381,37 @@ impl Agents {
             registered,
             grants: Vec::new(),
         };
+        // Anyone can register through the public address, so a registration
+        // never pushes out an agent the director allowed, or one being
+        // allowed: the oldest of the rest goes first, and with none of them
+        // left it is refused.
+        let pending = lock(&self.pending);
+        let codes = lock(&self.codes);
         let mut stored = lock(&self.stored);
-        stored.clients.push(client);
-        // The oldest an agent registered but the director never allowed go
-        // first.
-        while stored.clients.len() > MAX_CLIENTS {
-            let index = stored
-                .clients
-                .iter()
-                .position(|client| client.grants.is_empty())
-                .unwrap_or(0);
+        while stored.clients.len() >= MAX_CLIENTS {
+            let idle = stored.clients.iter().position(|client| {
+                client.grants.is_empty()
+                    && !pending.iter().any(|pending| {
+                        pending.client == client.id && pending.at.elapsed() < PENDING_LIFETIME
+                    })
+                    && !codes
+                        .iter()
+                        .any(|code| code.client == client.id && code.at.elapsed() < CODE_LIFETIME)
+            });
+            let Some(index) = idle else {
+                return oauth_error(
+                    403,
+                    "access_denied",
+                    &format!(
+                        "Kineto keeps {MAX_CLIENTS} agents, each allowed by its director or \
+                         being allowed; one must be disconnected in Kineto's Settings first"
+                    ),
+                );
+            };
             stored.clients.remove(index);
         }
+        drop((pending, codes));
+        stored.clients.push(client);
         if self.save(&stored).is_err() {
             return Response::empty(500);
         }

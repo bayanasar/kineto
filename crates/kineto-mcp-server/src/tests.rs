@@ -926,6 +926,204 @@ fn an_agent_in_the_cloud_connects_once_the_director_allows_it() {
 }
 
 #[test]
+fn registering_never_shuts_out_an_agent_the_director_allowed() {
+    let desk = Arc::new(Desk::new());
+    let agents = Arc::new(Agents::in_memory());
+    let issuer = "https://kineto.example:10000";
+    let redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+    let verifier = "the-verifier-is-long-enough-for-pkce-0123456789abcdef";
+    // Many requests: they go to the agents directly, and a few through the
+    // listener.
+    let asked = |method: &str, target: &str, kind: &str, body: String| {
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        http::Request {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            query: query.to_owned(),
+            headers: vec![("content-type".to_owned(), kind.to_owned())],
+            body: body.into_bytes(),
+        }
+    };
+    let register = |name: &str| {
+        let response = agents.register(&asked(
+            "POST",
+            "/register",
+            "application/json",
+            json!({"client_name": name, "redirect_uris": [redirect]}).to_string(),
+        ));
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        (
+            response.status,
+            body["client_id"].as_str().map(str::to_owned),
+            body,
+        )
+    };
+    // The page that waits for the director.
+    let authorize = |client: &str| {
+        let response = agents.authorize(
+            &desk,
+            issuer,
+            &asked(
+                "GET",
+                &format!(
+                    "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
+                    http::encode(redirect),
+                    challenge(verifier),
+                ),
+                "",
+                String::new(),
+            ),
+        );
+        (response.status, String::from_utf8(response.body).unwrap())
+    };
+    // The code the page sends back to, once the director allowed it.
+    let allowed_code = |page: &str| {
+        let pending = page
+            .split("pending=")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert!(desk.decide(desk.waiting()[0].id, true));
+        let response = agents.authorize(
+            &desk,
+            issuer,
+            &asked(
+                "GET",
+                &format!("/authorize?pending={pending}"),
+                "",
+                String::new(),
+            ),
+        );
+        assert_eq!(response.status, 302);
+        let (_, location) = response
+            .headers
+            .iter()
+            .find(|(name, _)| *name == "Location")
+            .unwrap();
+        location
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let token = |fields: String| {
+        let response = agents.token(
+            issuer,
+            &asked(
+                "POST",
+                "/token",
+                "application/x-www-form-urlencoded",
+                fields,
+            ),
+        );
+        (
+            response.status,
+            serde_json::from_slice::<Value>(&response.body).unwrap(),
+        )
+    };
+    let exchange_code = |client: &str, code: &str| {
+        token(format!(
+            "grant_type=authorization_code&code={code}&client_id={client}&code_verifier={verifier}"
+        ))
+    };
+
+    // The director allows as many agents as Kineto keeps.
+    let mut connected = Vec::new();
+    for index in 0..64 {
+        let (status, client, body) = register(&format!("Agent {index}"));
+        assert_eq!(status, 201, "{body}");
+        let client = client.unwrap();
+        let (_, page) = authorize(&client);
+        let code = allowed_code(&page);
+        let (status, tokens) = exchange_code(&client, &code);
+        assert_eq!(status, 200, "{tokens}");
+        connected.push((client, tokens));
+    }
+
+    // Registering again and again through the public address disconnects
+    // none of them.
+    let server = PublicServer::start(0, issuer, Arc::clone(&desk), Arc::clone(&agents)).unwrap();
+    let port = server.port();
+    let host = "Host: kineto.example:10000";
+    let (status, _, body) = exchange(
+        port,
+        &format!("POST /register HTTP/1.1\r\n{host}\r\nContent-Type: application/json"),
+        &json!({"client_name": "Flood", "redirect_uris": [redirect]}).to_string(),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("access_denied"), "{body}");
+    for index in 0..100 {
+        let (status, client, body) = register(&format!("Flood {index}"));
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(client, None);
+    }
+    assert_eq!(agents.connected().len(), 64);
+    for (index, (_, tokens)) in connected.iter().enumerate() {
+        assert_eq!(
+            agents.bearer(tokens["access_token"].as_str().unwrap()),
+            Some(format!("Agent {index}"))
+        );
+    }
+    let (client, tokens) = &connected[63];
+    let call = request(
+        1,
+        "tools/call",
+        json!({"name": "get_project", "arguments": {}}),
+    );
+    let (status, _, body) = exchange(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n{host}\r\nContent-Type: application/json\r\nAuthorization: Bearer {}",
+            tokens["access_token"].as_str().unwrap()
+        ),
+        &call.to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, renewed) = token(format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={client}",
+        tokens["refresh_token"].as_str().unwrap()
+    ));
+    assert_eq!(status, 200, "{renewed}");
+
+    // Once the director disconnects one, an agent may register in its
+    // place, and is kept while the director is asked and while its code
+    // waits to be exchanged.
+    assert!(agents.disconnect(&connected[0].0).unwrap());
+    let (status, late, _) = register("Late");
+    assert_eq!(status, 201);
+    let late = late.unwrap();
+    let (status, page) = authorize(&late);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(register("Flood").0, 403, "Late is waiting for the director");
+    let code = allowed_code(&page);
+    assert_eq!(register("Flood").0, 403, "Late's code is not exchanged yet");
+    let (status, tokens) = exchange_code(&late, &code);
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(register("Flood").0, 403);
+    assert_eq!(agents.connected().len(), 64);
+
+    // An agent the director was never asked about makes way for the next.
+    assert!(agents.disconnect(&connected[1].0).unwrap());
+    let (status, idle, _) = register("Idle");
+    assert_eq!(status, 201);
+    let (status, next, _) = register("Next");
+    assert_eq!(status, 201);
+    assert_eq!(authorize(&idle.unwrap()).0, 400, "Idle made way");
+    assert_eq!(authorize(&next.unwrap()).0, 200);
+    assert_eq!(agents.connected().len(), 63);
+    assert!(
+        agents
+            .bearer(tokens["access_token"].as_str().unwrap())
+            .is_some()
+    );
+}
+
+#[test]
 fn a_public_address_is_an_https_origin() {
     assert_eq!(
         public_origin(" https://anton.example.ts.net:10000/ "),

@@ -44,7 +44,7 @@ That listener takes only OAuth access tokens; the local address's token is not a
 
 - `/.well-known/oauth-protected-resource` (and `/mcp` after it): the resource `<origin>/mcp`, its authorization server, scope `kineto`.
 - `/.well-known/oauth-authorization-server` (and `/.well-known/openid-configuration`): endpoints, `code` only, PKCE `S256` only, public clients (`none`), and `authorization_response_iss_parameter_supported`.
-- `/register`: dynamic client registration. Redirect URIs must be HTTPS, or HTTP to this computer, without a fragment.
+- `/register`: dynamic client registration. Redirect URIs must be HTTPS, or HTTP to this computer, without a fragment. Kineto keeps 64 agents. Since anyone can register, a registration never pushes out an agent the director allowed, or one waiting for the director or holding a code it has not exchanged: the oldest of the rest makes way, and with none of them left the registration is refused until the director disconnects an agent.
 - `/authorize`: the authorization code flow. The agent's request waits in Kineto's window ("ChatGPT asks to connect from the internet, returning to chatgpt.com"), never on a web page anyone could open; the browser page reloads itself until the director answers, then returns to the agent with a code or `access_denied`, and with `iss`. At most five wait at once, since anyone can ask through the public address; a sixth is told to try later, and one unanswered for ten minutes lapses and leaves the window.
 - `/token`: a code with its verifier (once, within 60 seconds), or a refresh token, for an access token of one hour and a refresh token, both turned over at each refresh. A `resource` other than this server's is refused.
 - `/mcp`: MCP as on the local address, with `Authorization: Bearer`. Without a valid token it answers 401 with `WWW-Authenticate` naming the resource metadata.
@@ -61,6 +61,6 @@ Tokens are 256 random bits; only their SHA-256 hashes are kept, in `mcp-agents.j
 ## Consequences
 
 - An agent can change the project as the director can, short of paying, risking paying twice or reading the director's files. Every change is a new revision or a recorded choice; nothing is deleted.
-- An agent in the cloud reaches the project only through a tunnel the director chose, after the director allowed that agent. Anyone can reach the authorization page through the tunnel, and each such request reaches the window; only the director's answer lets an agent in.
+- An agent in the cloud reaches the project only through a tunnel the director chose, after the director allowed that agent. Anyone can reach the authorization page through the tunnel, and each such request reaches the window; only the director's answer lets an agent in. Anyone can also register again and again, which can keep a new agent from connecting meanwhile, but never shuts out one the director allowed.
 - The address an agent in the cloud holds is not a secret; its tokens are. Disconnecting it, or turning the public address off, shuts it out.
 - `get_image` sends the project's images to wherever the agent runs.
