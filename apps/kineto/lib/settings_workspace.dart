@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wabisabi/wabisabi.dart';
@@ -27,6 +29,9 @@ class SettingsWorkspaceScreen extends StatefulWidget {
     this.loadServing = resumeKinetoServingInBackground,
     this.setServing = setKinetoServingInBackground,
     this.renewServing = renewKinetoServingAddressInBackground,
+    this.loadPublicServing = readKinetoPublicServingInBackground,
+    this.setPublicServing = setKinetoPublicServingInBackground,
+    this.disconnectAgent = disconnectKinetoAgentInBackground,
     this.onChanged,
     super.key,
   });
@@ -60,6 +65,14 @@ class SettingsWorkspaceScreen extends StatefulWidget {
   final Future<KinetoServing> Function() loadServing;
   final Future<KinetoServing> Function(bool on) setServing;
   final Future<KinetoServing> Function() renewServing;
+
+  /// Whether agents in the cloud can connect through the director's
+  /// tunnel; lets them or not; forgets one the director allowed. Each
+  /// touches files, and letting them starts the tunnel.
+  final Future<KinetoPublicServing> Function() loadPublicServing;
+  final Future<KinetoPublicServing> Function({required bool on, required String url, required List<String> tunnel})
+      setPublicServing;
+  final Future<KinetoPublicServing> Function(String id) disconnectAgent;
 
   /// Told when a choice, a key or the configuration changed, so the open
   /// project takes it up when the director goes back to it.
@@ -285,6 +298,9 @@ class _SettingsWorkspaceScreenState extends State<SettingsWorkspaceScreen> {
         servingProblem: _servingProblem,
         onServe: (on) => _changeServing(() => widget.setServing(on)),
         onRenewServing: () => _changeServing(widget.renewServing),
+        loadPublicServing: widget.loadPublicServing,
+        setPublicServing: widget.setPublicServing,
+        disconnectAgent: widget.disconnectAgent,
         settings: _settings,
         settingsProblem: _settingsProblem,
         settingWorking: _settingWorking,
@@ -329,6 +345,9 @@ class SettingsWorkspaceView extends StatelessWidget {
     this.servingProblem,
     this.onServe,
     this.onRenewServing,
+    this.loadPublicServing,
+    this.setPublicServing,
+    this.disconnectAgent,
     this.settings,
     this.settingsProblem,
     this.settingWorking = false,
@@ -357,6 +376,12 @@ class SettingsWorkspaceView extends StatelessWidget {
   final String? servingProblem;
   final void Function(bool on)? onServe;
   final VoidCallback? onRenewServing;
+
+  /// Agents in the cloud; no panel without them.
+  final Future<KinetoPublicServing> Function()? loadPublicServing;
+  final Future<KinetoPublicServing> Function({required bool on, required String url, required List<String> tunnel})?
+      setPublicServing;
+  final Future<KinetoPublicServing> Function(String id)? disconnectAgent;
 
   /// The provider choices; null while they are read.
   final KinetoProviderSettings? settings;
@@ -433,6 +458,14 @@ class SettingsWorkspaceView extends StatelessWidget {
             onServe: onServe,
             onRenew: onRenewServing,
           ),
+          if (loadPublicServing != null && setPublicServing != null && disconnectAgent != null)
+            _PublicServingPanel(
+              key: const ValueKey<String>('public-serving'),
+              serving: serving?.on ?? false,
+              load: loadPublicServing!,
+              set: setPublicServing!,
+              disconnect: disconnectAgent!,
+            ),
           const Text(
             'Plugins and MCP servers are programs you install yourself and register in Kineto\'s '
             'configuration folder (KINETO_CONFIG_HOME, or kineto under your configuration '
@@ -997,10 +1030,12 @@ class _ServingPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           const Text(
-            'Turned on, agents such as Claude Code, Codex or Claude Desktop can read the project open '
-            'in Kineto: where each step stands, the story, its documents and its shots. They can '
-            'change nothing. Only programs on this computer that have the address can connect, and '
-            'Kineto keeps serving them each time it starts until you turn it off.',
+            'Turned on, agents such as Claude Code, Codex or Claude Desktop can work on the project '
+            'open in Kineto: read where each step stands, the story, its documents and its shots, '
+            'and change them as your own buttons do. A request that pays a service per call waits '
+            'until you allow it at the bottom of the window. Only programs on this computer that '
+            'have the address can connect, and Kineto keeps serving them each time it starts until '
+            'you turn it off.',
           ),
           if (problem != null) ...<Widget>[
             const SizedBox(height: 12),
@@ -1015,11 +1050,6 @@ class _ServingPanel extends StatelessWidget {
             const SizedBox(height: 8),
             const Text('Codex: add to ~/.codex/config.toml'),
             _copyable('serving-codex', serving.codex),
-            const SizedBox(height: 8),
-            const Text(
-              'ChatGPT and claude.ai connect only to addresses on the internet, over https. Kineto '
-              'does not open this computer to the internet; a tunnel you run yourself can.',
-            ),
           ],
           const SizedBox(height: 12),
           Wrap(
@@ -1038,6 +1068,207 @@ class _ServingPanel extends StatelessWidget {
                   onPressed: ready && onRenew != null ? onRenew : null,
                   child: const Text('New address'),
                 ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Whether agents in the cloud, such as ChatGPT and claude.ai, can connect
+/// through a tunnel the director runs, and which did.
+class _PublicServingPanel extends StatefulWidget {
+  const _PublicServingPanel({
+    required this.serving,
+    required this.load,
+    required this.set,
+    required this.disconnect,
+    super.key,
+  });
+
+  /// Whether Kineto serves agents at all; it listens for those in the
+  /// cloud only then.
+  final bool serving;
+  final Future<KinetoPublicServing> Function() load;
+  final Future<KinetoPublicServing> Function({required bool on, required String url, required List<String> tunnel})
+      set;
+  final Future<KinetoPublicServing> Function(String id) disconnect;
+
+  @override
+  State<_PublicServingPanel> createState() => _PublicServingPanelState();
+}
+
+class _PublicServingPanelState extends State<_PublicServingPanel> {
+  KinetoPublicServing? _public;
+  String? _problem;
+  bool _working = false;
+  final TextEditingController _url = TextEditingController();
+  final TextEditingController _tunnel = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _working = true;
+    unawaited(_change(widget.load, fill: true));
+  }
+
+  @override
+  void didUpdateWidget(_PublicServingPanel old) {
+    super.didUpdateWidget(old);
+    // Serving turned on or off takes the public address with it.
+    if (old.serving != widget.serving) unawaited(_change(widget.load));
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _tunnel.dispose();
+    super.dispose();
+  }
+
+  Future<void> _change(Future<KinetoPublicServing> Function() change, {bool fill = false}) async {
+    if (!_working) {
+      setState(() {
+        _working = true;
+        _problem = null;
+      });
+    }
+    try {
+      final public = await change();
+      if (!mounted) return;
+      setState(() => _public = public);
+      if (fill) {
+        _url.text = public.url;
+        _tunnel.text = public.tunnel.join('\n');
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _problem = error is KinetoProjectException ? error.message : error.toString());
+    }
+    if (mounted) setState(() => _working = false);
+  }
+
+  List<String> get _words => _tunnel.text.split('\n').map((word) => word.trim()).where((word) => word.isNotEmpty).toList();
+
+  Widget _copyable(String key, String text) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Expanded(child: SelectableText(text, key: ValueKey<String>(key))),
+          const SizedBox(width: 8),
+          KinetoButton(
+            key: ValueKey<String>('$key-copy'),
+            onPressed: () => Clipboard.setData(ClipboardData(text: text)),
+            child: const Text('Copy'),
+          ),
+        ],
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final public = _public;
+    final on = public?.public ?? false;
+    final ready = public != null && !_working;
+    return WabPanel(
+      title: 'Agents in the cloud (ChatGPT, claude.ai)',
+      trailing: public == null
+          ? WabStatusBadge(_problem == null ? 'Reading' : 'Unreadable',
+              kind: _problem == null ? WabBadgeKind.progress : WabBadgeKind.warning)
+          : public.listening
+              ? const WabStatusBadge('Listening', kind: WabBadgeKind.done)
+              : on
+                  ? const WabStatusBadge('Waits for serving', kind: WabBadgeKind.neutral)
+                  : const WabStatusBadge('Off', kind: WabBadgeKind.neutral),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'ChatGPT and claude.ai connect from their own servers, so they need an https address on '
+            'the internet that leads to this computer: a tunnel you run, such as Tailscale Funnel, '
+            'Cloudflare Tunnel or ngrok. Give its address, and the command that opens it if Kineto '
+            'should run it while this is on; {port} stands for the port Kineto listens on. Each agent '
+            'connects only after you allow it at the bottom of the window, and you can disconnect it '
+            'here.',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey<String>('public-url'),
+            controller: _url,
+            decoration: const InputDecoration(
+              labelText: 'Public address',
+              hintText: 'https://your-computer.your-tailnet.ts.net:10000',
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            key: const ValueKey<String>('public-tunnel'),
+            controller: _tunnel,
+            minLines: 2,
+            maxLines: 6,
+            decoration: const InputDecoration(
+              labelText: 'Tunnel command, one word per line (optional)',
+              hintText: 'tailscale\nfunnel\n--https=10000\nhttp://127.0.0.1:{port}',
+            ),
+          ),
+          if (_problem != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Text(_problem!, key: const ValueKey<String>('public-problem')),
+          ],
+          if (public != null && on && !widget.serving) ...<Widget>[
+            const SizedBox(height: 12),
+            const Text('Turn serving on above for Kineto to listen.'),
+          ],
+          if (public != null && public.listening) ...<Widget>[
+            const SizedBox(height: 12),
+            const Text('In ChatGPT or claude.ai, add a connector at:'),
+            _copyable('public-address', public.address),
+            const SizedBox(height: 8),
+            Text(
+              public.tunnel.isEmpty
+                  ? 'Kineto listens on port ${public.port}; your tunnel must lead there.'
+                  : public.tunnelRunning
+                      ? 'The tunnel runs, to port ${public.port}.'
+                      : 'The tunnel is not running${public.tunnelSaid.isEmpty ? '' : ': ${public.tunnelSaid}'}',
+              key: const ValueKey<String>('public-tunnel-state'),
+            ),
+            if (public.problem != null) Text(public.problem!, key: const ValueKey<String>('public-tunnel-problem')),
+          ],
+          if (public != null && public.agents.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            const Text('Allowed agents:'),
+            for (final agent in public.agents)
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      '${agent.name} (${agent.site}), since ${agent.since.toLocal().toString().substring(0, 16)}',
+                      key: ValueKey<String>('agent-${agent.id}'),
+                    ),
+                  ),
+                  KinetoButton(
+                    key: ValueKey<String>('agent-${agent.id}-disconnect'),
+                    onPressed: ready ? () => _change(() => widget.disconnect(agent.id)) : null,
+                    child: const Text('Disconnect'),
+                  ),
+                ],
+              ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              KinetoButton(
+                key: const ValueKey<String>('public-toggle'),
+                primary: !on,
+                onPressed: ready ? () => _change(() => widget.set(on: !on, url: _url.text, tunnel: _words)) : null,
+                child: Text(on ? 'Turn off' : 'Turn on'),
+              ),
+              KinetoButton(
+                key: const ValueKey<String>('public-save'),
+                onPressed: ready ? () => _change(() => widget.set(on: on, url: _url.text, tunnel: _words)) : null,
+                child: const Text('Save'),
+              ),
             ],
           ),
         ],

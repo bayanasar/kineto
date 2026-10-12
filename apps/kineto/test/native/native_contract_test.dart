@@ -258,6 +258,13 @@ void main() {
     expect(contract.voiceTexts, isNotEmpty);
   });
 
+  test('every field of agents\' requests and of public serving the bindings read is in the native tables', () {
+    expect(contract.agentAskValues.keys.toSet(), kinetoAgentAskValueFields);
+    expect(contract.agentAskTexts.keys.toSet(), kinetoAgentAskTextFields);
+    expect(contract.publicValues.keys.toSet(), kinetoPublicValueFields);
+    expect(contract.publicTexts.keys.toSet(), kinetoPublicTextFields);
+  });
+
   test('every plugin field the bindings read is in the native tables', () {
     expect(contract.pluginValues.keys.toSet(), kinetoPluginValueFields);
     expect(contract.pluginTexts.keys.toSet(), kinetoPluginTextFields);

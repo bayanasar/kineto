@@ -1553,6 +1553,16 @@ impl ShotWorkflow {
         videos
     }
 
+    /// The latest generation's videos, by artifact ID, in the order
+    /// [`Self::select_video`] counts them.
+    #[must_use]
+    pub fn current_video_ids(&self) -> Vec<String> {
+        self.current_videos()
+            .iter()
+            .map(|video| video.artifact_id.clone())
+            .collect()
+    }
+
     /// The video that stands for the shot: the locked one, else the
     /// selected one, else the first of the latest generation.
     fn current_video(&self) -> Option<&StoredArtifactRecord> {

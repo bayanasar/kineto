@@ -2,6 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-10
+- Amended by: [ADR-0011](0011-outside-agents-change-the-project-and-connect-from-the-internet.md), which lets agents change the project and agents in the cloud connect
 
 ## Context
 

@@ -5,6 +5,7 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:wabisabi/wabisabi.dart';
 
+import 'agent_desk.dart';
 import 'demo_workspace.dart';
 import 'handoff_workspace.dart';
 import 'kineto_layout.dart';
@@ -20,6 +21,8 @@ import 'shot_plan_workspace.dart';
 import 'voices_workspace.dart';
 
 Future<void> main() => run();
+
+void _decideAgentAsk(int id, bool allow) => decideKinetoAgentAsk(id, allow: allow);
 
 /// Open the demo project and run the app. [pickImage] asks the director for
 /// an image to import; the system's open dialog unless a test gives one.
@@ -145,10 +148,17 @@ class KinetoApp extends StatefulWidget {
     this.exportFolder = '',
     this.pickImage = pickImageFile,
     this.media = const MediaKitEngine(),
+    this.agentAsks = kinetoAgentAsks,
+    this.decideAgentAsk = _decideAgentAsk,
     super.key,
   });
 
   final KinetoEngine engine;
+
+  /// What agents outside Kineto ask that waits for the director, and how
+  /// the director answers.
+  final List<KinetoAgentAsk> Function() agentAsks;
+  final void Function(int id, bool allow) decideAgentAsk;
 
   /// What plays sounds and clips inside Kineto.
   final KinetoMediaEngine media;
@@ -195,6 +205,22 @@ class _KinetoAppState extends State<KinetoApp> {
   /// The sound playing, whatever workspace is open.
   late final KinetoSound _sound = KinetoSound(widget.media);
 
+  /// Commands agents outside Kineto ask of the open project.
+  StreamSubscription<KinetoAgentCommand>? _agentCommands;
+
+  /// Show what agents outside Kineto do to [project] as the director's own
+  /// requests are shown: in the status bar, and in every page once done.
+  void _follow(KinetoProjectSession? project) {
+    unawaited(_agentCommands?.cancel());
+    _agentCommands = project?.agentCommands.listen((command) {
+      _work?.run(_agentsPage, command.label, () => command.done);
+    });
+  }
+
+  /// Where agents' commands show they were asked; Settings, where agents
+  /// are let in.
+  static const String _agentsPage = 'agents';
+
   @override
   void initState() {
     super.initState();
@@ -202,6 +228,7 @@ class _KinetoAppState extends State<KinetoApp> {
     _openProblem = widget.openProblem;
     if (_project != null) _work = KinetoWork();
     if (_project == null) _workspace = KinetoWorkspace.settings;
+    _follow(_project);
     // Close the session before the process exits so its worker stops
     // reporting and the project's writer lock is released cleanly.
     _lifecycle = AppLifecycleListener(onExitRequested: _closeNative);
@@ -241,6 +268,7 @@ class _KinetoAppState extends State<KinetoApp> {
     });
     // The pages and the status bar let go of it as this frame rebuilds them.
     WidgetsBinding.instance.addPostFrameCallback((_) => finished?.dispose());
+    _follow(null);
     current?.close();
     KinetoProjectSession? opened;
     String? problem;
@@ -261,6 +289,7 @@ class _KinetoAppState extends State<KinetoApp> {
       if (opened != null) _work = KinetoWork();
       _openProblem = problem;
     });
+    _follow(opened);
   }
 
   void _toggleTheme() {
@@ -273,6 +302,7 @@ class _KinetoAppState extends State<KinetoApp> {
   void dispose() {
     _lifecycle.dispose();
     _waitForIdle?.cancel();
+    unawaited(_agentCommands?.cancel());
     _project?.close();
     _work?.dispose();
     _sound.dispose();
@@ -343,10 +373,11 @@ class _KinetoAppState extends State<KinetoApp> {
                 ],
               ),
             ),
+            KinetoAgentDesk(asks: widget.agentAsks, decide: widget.decideAgentAsk),
             KinetoStatusBar(
               work: _work,
-              pageLabel: (page) => _labels[KinetoWorkspace.values.byName(page)] ?? page,
-              onShow: (page) => _show(KinetoWorkspace.values.byName(page)),
+              pageLabel: (page) => _labels[KinetoWorkspace.values.asNameMap()[page]] ?? 'Outside agents',
+              onShow: (page) => _show(KinetoWorkspace.values.asNameMap()[page] ?? KinetoWorkspace.settings),
             ),
           ],
         ),

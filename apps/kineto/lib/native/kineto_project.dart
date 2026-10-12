@@ -886,6 +886,9 @@ final class KinetoProjectSession implements Finalizable {
   /// and ready to be asked for again.
   Stream<KinetoVideoEvent> get videoEvents => _port.videoEvents;
 
+  /// Commands agents outside Kineto ask for, as they start.
+  Stream<KinetoAgentCommand> get agentCommands => _port.agentCommands;
+
   /// Submit a video from the shot's locked keyframe. Completes once MiniMax
   /// has accepted the task; the video arrives on [videoEvents].
   Future<void> generateShotVideo(int shotIndex) => _submit(
@@ -1166,11 +1169,21 @@ final class _SessionPort {
   static const int _recovered = 3;
   static const int _video = 4;
   static const int _waiting = 5;
+  static const int _agentStarted = 6;
+  static const int _agentFinished = 7;
 
   final StreamController<KinetoVideoEvent> _videoEvents =
       StreamController<KinetoVideoEvent>.broadcast(sync: false);
 
   Stream<KinetoVideoEvent> get videoEvents => _videoEvents.stream;
+
+  final StreamController<KinetoAgentCommand> _agentCommands =
+      StreamController<KinetoAgentCommand>.broadcast(sync: false);
+
+  Stream<KinetoAgentCommand> get agentCommands => _agentCommands.stream;
+
+  /// Agents' commands under way, by token.
+  final Map<int, Completer<void>> _agentPending = <int, Completer<void>>{};
 
   late final RawReceivePort _raw;
   final Completer<void> _openCompleter = Completer<void>();
@@ -1218,12 +1231,14 @@ final class _SessionPort {
     _owner = null;
     _raw.close();
     unawaited(_videoEvents.close());
+    unawaited(_agentCommands.close());
     const error = KinetoProjectSessionClosedException();
     if (!_openCompleter.isCompleted) _openCompleter.completeError(error);
-    for (final completer in _pending.values) {
+    for (final completer in <Completer<void>>[..._pending.values, ..._agentPending.values]) {
       completer.completeError(error);
     }
     _pending.clear();
+    _agentPending.clear();
     _waitListeners.clear();
   }
 
@@ -1277,6 +1292,20 @@ final class _SessionPort {
         );
       case _waiting:
         _waitListeners[values[1]]?.call(status != 0);
+      case _agentStarted:
+        final done = Completer<void>();
+        // Nothing may be listening; its failure is shown where it is.
+        done.future.ignore();
+        _agentPending[values[1]] = done;
+        _agentCommands.add(KinetoAgentCommand(label: reason ?? 'An agent', done: done.future));
+      case _agentFinished:
+        final done = _agentPending.remove(values[1]);
+        if (done == null) break;
+        if (status == 0) {
+          done.complete();
+        } else {
+          done.completeError(_projectException(status, reason));
+        }
       case _completed:
         _waitListeners.remove(values[1]);
         final completer = _pending.remove(values[1]);
@@ -1297,6 +1326,18 @@ final class _SessionPort {
     _raw.keepIsolateAlive = !_openCompleter.isCompleted || _pending.isNotEmpty;
     if (_pending.isEmpty) _owner = null;
   }
+}
+
+/// A command an agent outside Kineto asked for (ADR-0011), as the status
+/// bar shows it while it runs.
+final class KinetoAgentCommand {
+  const KinetoAgentCommand({required this.label, required this.done});
+
+  /// Who asked and what, such as “Codex: lock the screenplay”.
+  final String label;
+
+  /// Completes when it ended; fails as the director's own request would.
+  final Future<void> done;
 }
 
 /// A video generated in the background finished.
@@ -1510,6 +1551,7 @@ const Map<String, int> kinetoProjectStatusCodes = <String, int>{
   'setting_invalid': 173,
   'settings_unwritable': 174,
   'mcp_server_unavailable': 175,
+  'mcp_public_invalid': 176,
   'panic': 199,
 };
 
@@ -1593,6 +1635,7 @@ const Map<int, String> kinetoProjectStatusMessages = <int, String>{
   173: 'That choice cannot be saved: a server address must be https:// or http:// to this computer, a key name lowercase letters, digits and _; or the provider settings (providers.toml) cannot be read',
   174: 'The provider settings could not be written to Kineto\'s configuration folder',
   175: 'Kineto could not serve outside agents at its address: its port is taken, or nothing may listen; ask for a new address',
+  176: 'A public address is https:// and a host, with a port if any and no path; a tunnel command is a program and its arguments, one per line',
   199: 'Native project call failed unexpectedly',
 };
 
