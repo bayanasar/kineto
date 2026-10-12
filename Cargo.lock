@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "image",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-job-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-jobs",
  "kineto-project",
@@ -777,21 +777,21 @@ dependencies = [
 
 [[package]]
 name = "kineto-jobs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-project",
 ]
 
 [[package]]
 name = "kineto-json-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "kineto-keychain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apple-native-keyring-store",
  "keyring-core",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-jobs",
  "kineto-json-schema",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "getrandom 0.2.17",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-core",
  "kineto-jobs",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-project"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -869,14 +869,14 @@ dependencies = [
 
 [[package]]
 name = "kineto-prompts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2 0.10.9",
 ]
 
 [[package]]
 name = "kineto-provider-ark"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "kineto-jobs",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-provider-gemini"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "kineto-jobs",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-provider-minimax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "kineto-jobs",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-provider-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "kineto-jobs",
@@ -924,11 +924,11 @@ dependencies = [
 
 [[package]]
 name = "kineto-providers"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "kineto-schema-contracts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-core",
  "kineto-job-runtime",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "kineto-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kineto-job-runtime",
  "kineto-jobs",
